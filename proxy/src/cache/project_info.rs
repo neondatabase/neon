@@ -11,7 +11,7 @@ use smol_str::SmolStr;
 use tokio::time::Instant;
 use tracing::info;
 
-use crate::{config::ProjectInfoCacheOptions, console::AuthSecret};
+use crate::{auth::IpPattern, config::ProjectInfoCacheOptions, console::AuthSecret};
 
 use super::{Cache, Cached};
 
@@ -57,7 +57,7 @@ fn check_ignore_cache(ignore_cache_since: Option<Instant>, created_at: Instant) 
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
 pub struct ProjectInfoCacheImpl {
-    ip_cache: Mutex<LruCache<SmolStr, Entry<Arc<Vec<SmolStr>>>>>,
+    ip_cache: Mutex<LruCache<SmolStr, Entry<Arc<Vec<IpPattern>>>>>,
     role_cache: Mutex<LruCache<(SmolStr, SmolStr), Entry<AuthSecret>>>,
 
     project2ep: DashMap<SmolStr, HashSet<SmolStr>>,
@@ -152,7 +152,7 @@ impl ProjectInfoCacheImpl {
     pub fn get_allowed_ips(
         &self,
         endpoint_id: &SmolStr,
-    ) -> Option<Cached<&Self, Arc<Vec<SmolStr>>>> {
+    ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let (value, ignore_cache) = {
             let mut cache = self.ip_cache.lock();
@@ -192,7 +192,7 @@ impl ProjectInfoCacheImpl {
         &self,
         project_id: &SmolStr,
         endpoint_id: &SmolStr,
-        allowed_ips: Arc<Vec<SmolStr>>,
+        allowed_ips: Arc<Vec<IpPattern>>,
     ) {
         self.insert_project2endpoint(project_id, endpoint_id);
         self.ip_cache
@@ -295,7 +295,10 @@ mod tests {
         let user2: SmolStr = "user2".into();
         let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
         let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
-        let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
+        let allowed_ips = Arc::new(vec![
+            "allowed_ip1".parse().unwrap(),
+            "allowed_ip2".parse().unwrap(),
+        ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
         cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
@@ -343,7 +346,10 @@ mod tests {
         let user2: SmolStr = "user2".into();
         let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
         let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
-        let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
+        let allowed_ips = Arc::new(vec![
+            "allowed_ip1".parse().unwrap(),
+            "allowed_ip2".parse().unwrap(),
+        ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
         cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
@@ -388,7 +394,10 @@ mod tests {
         let user2: SmolStr = "user2".into();
         let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
         let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
-        let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
+        let allowed_ips = Arc::new(vec![
+            "allowed_ip1".parse().unwrap(),
+            "allowed_ip2".parse().unwrap(),
+        ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.clone().disable_ttl();
         tokio::time::advance(Duration::from_millis(100)).await;
