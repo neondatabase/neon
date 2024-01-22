@@ -184,7 +184,7 @@ impl Persistence {
     pub(crate) async fn increment_generation(
         &self,
         tenant_shard_id: TenantShardId,
-        node_id: Option<NodeId>,
+        node_id: NodeId,
     ) -> anyhow::Result<Generation> {
         let (write, gen) = {
             let mut locked = self.state.lock().unwrap();
@@ -192,20 +192,28 @@ impl Persistence {
                 anyhow::bail!("Tried to increment generation of unknown shard");
             };
 
-            // If we're called with a None pageserver, we need only update the generation
-            // record to disassociate it with this pageserver, not actually increment the number, as
-            // the increment is guaranteed to happen the next time this tenant is attached.
-            if node_id.is_some() {
-                shard.generation += 1;
-            }
+            shard.generation += 1;
+            shard.generation_pageserver = Some(node_id);
 
-            shard.generation_pageserver = node_id;
             let gen = Generation::new(shard.generation);
             (locked.save(), gen)
         };
 
         write.commit().await?;
         Ok(gen)
+    }
+
+    pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
+        let write = {
+            let mut locked = self.state.lock().unwrap();
+            let Some(shard) = locked.tenants.get_mut(&tenant_shard_id) else {
+                anyhow::bail!("Tried to increment generation of unknown shard");
+            };
+            shard.generation_pageserver = None;
+            locked.save()
+        };
+        write.commit().await?;
+        Ok(())
     }
 
     pub(crate) async fn re_attach(
