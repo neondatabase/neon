@@ -18,13 +18,16 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use nix::unistd::Pid;
 use pageserver_api::models;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use tokio::signal::unix::Signal;
 use std::fmt;
+use std::os::unix::process::CommandExt;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
 use tokio::runtime::Handle;
@@ -449,7 +452,6 @@ pub enum CreateTimelineError {
 #[derive(thiserror::Error, Debug)]
 enum InitdbError {
     Other(anyhow::Error),
-    #[allow(unused)]
     Cancelled,
     Spawn(std::io::Result<()>),
     Failed(std::process::ExitStatus, Vec<u8>),
@@ -3733,7 +3735,7 @@ async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
     pg_version: u32,
-    _cancel: &CancellationToken,
+    cancel: &CancellationToken,
 ) -> Result<(), InitdbError> {
     let initdb_bin_path = conf
         .pg_bin_dir(pg_version)
@@ -3747,7 +3749,17 @@ async fn run_initdb(
 
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
-    let mut initdb_command = tokio::process::Command::new(&initdb_bin_path)
+    let mut initdb_command_std = std::process::Command::new(&initdb_bin_path);
+    // The process_group function is unstable as tokio's MSRV is 1.63,
+    // and process_group was stabilized in 1.64. This is the officially
+    // recommended workaround.
+    // Setting pgroup to 0 makes the pgroupid be that of the child, as explained in
+    // https://github.com/microsoft/WSL/issues/2997 (unrelated bug, but explains it)
+    // We use need the pgid to be set for pkill to work during cancellation, to also
+    // get the child processes of initdb.
+    initdb_command_std.process_group(0);
+
+    let mut initdb_command = tokio::process::Command::from(initdb_command_std)
         .args(["-D", initdb_target_dir.as_ref()])
         .args(["-U", &conf.superuser])
         .args(["-E", "utf8"])
@@ -3777,10 +3789,18 @@ async fn run_initdb(
                 return Err(InitdbError::Failed(exit_status, stderr_vec));
             }
         }
-        /*_ = cancel.cancelled() => {
-            initdb_command.kill().await?;
+        _ = cancel.cancelled() => {
+            if let Some(pid) = initdb_command.id() {
+                warn!("Doing killpg...");
+                nix::sys::signal::killpg(Pid::from_raw(pid as i32), Signal::SIGKILL)
+                    .map_err(|e| InitdbError::Other(anyhow::anyhow!(e)))?;
+                initdb_command.wait().await?;
+            } else {
+                warn!("Couldn't obtain initdb pid, killing initdb process only.");
+                initdb_command.kill().await?;
+            }
             return Err(InitdbError::Cancelled);
-        }*/
+        }
     }
 
     Ok(())
