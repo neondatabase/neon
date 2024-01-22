@@ -42,12 +42,18 @@ fn main() -> anyhow::Result<()> {
             .context("failed to execute `gcc -print-file-name=libasan.so`")?;
 
         if !libasan_path.status.success() {
-            println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
-            println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
+            println!(
+                "stdout: {}",
+                String::from_utf8_lossy(&libasan_path.stdout)
+            );
+            println!(
+                "stderr: {}",
+                String::from_utf8_lossy(&libasan_path.stderr)
+            );
             panic!("`gcc -print-file-name=libasan.so` failed")
         }
 
-        let output_str = String::from_utf8_lossy(&libasan_path.stdout).into_string();
+        let output_str = String::from_utf8(libasan_path.stdout).unwrap();
         let mut result_string = String::from("LD_PRELOAD=");
         result_string.push_str(&*output_str);
 
