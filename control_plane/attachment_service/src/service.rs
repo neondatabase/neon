@@ -362,13 +362,14 @@ impl Service {
             );
         }
 
-        let new_generation = if attach_req.node_id.is_some() {
+        let new_generation = if let Some(req_node_id) = attach_req.node_id {
             Some(
                 self.persistence
-                    .increment_generation(attach_req.tenant_shard_id, attach_req.node_id)
+                    .increment_generation(attach_req.tenant_shard_id, req_node_id)
                     .await?,
             )
         } else {
+            self.persistence.detach(attach_req.tenant_shard_id).await?;
             None
         };
 
@@ -407,6 +408,7 @@ impl Service {
             "attach_hook: tenant {} set generation {:?}, pageserver {}",
             attach_req.tenant_shard_id,
             tenant_state.generation,
+            // TODO: this is an odd number of 0xf's
             attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
         );
 
