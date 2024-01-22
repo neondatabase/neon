@@ -75,7 +75,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
-        println!("cargo:rustc-env=LD_PRELOAD={}",libasan_path);
+        println!("cargo:rustc-env=LD_PRELOAD={}", libasan_path);
     }
 
     for pg_version in &["v14", "v15", "v16"] {

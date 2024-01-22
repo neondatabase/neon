@@ -293,6 +293,7 @@ jobs:
             UBSAN_OPTIONS="abort_on_error=1:print_stacktrace=1"
             CC=gcc
             RUSTFLAGS="-C linker=gcc"
+            LIBASAN_LIB_PATH=$(gcc -print-file-name=libasan.so)
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FLAGS="--locked --release"
@@ -300,6 +301,7 @@ jobs:
             UBSAN_OPTIONS=""
             CC=gcc
             RUSTFLAGS=""
+            LIBASAN_LIB_PATH=""
           fi
           {
             echo "cov_prefix=${cov_prefix}"
@@ -310,6 +312,7 @@ jobs:
             echo "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
             echo "CC=${CC}"
             echo "RUSTFLAGS=${RUSTFLAGS}"
+            echo "LIBASAN_LIB_PATH=${LIBASAN_LIB_PATH}"
           } >> $GITHUB_ENV
 
       # Disabled for now
@@ -372,8 +375,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          export LIBASAN_LIB_PATH=$(gcc -print-file-name=libasan.so)
-          ${cov_prefix} LD_PRELOAD=$LIBASAN_LIB_PATH mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          ${cov_prefix} LD_PRELOAD="${LIBASAN_LIB_PATH}" mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run rust tests
         run: |
