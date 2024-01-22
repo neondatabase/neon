@@ -78,6 +78,8 @@ fn main() -> anyhow::Result<()> {
         println!("output from gcc command {}", output_str);
         let mut result_string = String::from("LD_PRELOAD=");
         result_string.push_str(&*output_str);
+        println!("output from gcc command {}", result_string);
+
 
         let export_ld_preload = Command::new("export")
             .arg(result_string)
