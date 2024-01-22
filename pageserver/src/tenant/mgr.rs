@@ -904,7 +904,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         new_location_config: LocationConf,
         flush: Option<Duration>,
-        spawn_mode: SpawnMode,
+        mut spawn_mode: SpawnMode,
         ctx: &RequestContext,
     ) -> Result<Option<Arc<Tenant>>, UpsertLocationError> {
         debug_assert_current_span_has_tenant_id();
@@ -1051,6 +1051,12 @@ impl TenantManager {
                     }
                 }
                 slot_guard.drop_old_value().expect("We just shut it down");
+
+                // Edge case: if we were called with SpawnMode::Create, but a Tenant already existed, then
+                // the caller thinks they're creating but the tenant already existed.  We must switch to
+                // Normal mode so that when starting this Tenant we properly probe remote storage for timelines,
+                // rather than assuming it to be empty.
+                spawn_mode = SpawnMode::Normal;
             }
             Some(TenantSlot::Secondary(state)) => {
                 info!("Shutting down secondary tenant");
