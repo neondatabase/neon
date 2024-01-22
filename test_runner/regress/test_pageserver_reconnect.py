@@ -30,7 +30,7 @@ def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
     with closing(endpoint.connect()) as con:
         with con.cursor() as c:
             c.execute("SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'")
-            connstring = c.fetchone()[0]
+            connstring = c.fetchall()[0][0]
             for i in range(n_reconnects):
                 time.sleep(timeout)
                 c.execute(
