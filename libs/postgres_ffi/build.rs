@@ -56,6 +56,46 @@ fn main() -> anyhow::Result<()> {
         PathBuf::from("pg_install")
     };
 
+    #[cfg(debug_assertions)]
+    {
+        println!("cargo:rustc-link-arg=-fsanitize=address");
+        println!("cargo:rustc-link-arg=-fsanitize=undefined");
+        println!("cargo:rustc-link-arg=-export-dynamic");
+
+        //setting dynamically the symbols
+        let libasan_path = Command::new("gcc")
+            .arg("-print-file-name=libasan.so")
+            .output()
+            .context("failed to execute `gcc -print-file-name=libasan.so`")?;
+
+        if !libasan_path.status.success() {
+            println!(
+                "stdout: {}",
+                String::from_utf8_lossy(&libasan_path.stdout)
+            );
+            println!(
+                "stderr: {}",
+                String::from_utf8_lossy(&libasan_path.stderr)
+            );
+            panic!("`gcc -print-file-name=libasan.so` failed")
+        }
+
+        let output_str = String::from_utf8(libasan_path.stdout).unwrap();
+        let mut result_string = String::from("LD_PRELOAD=");
+        result_string.push_str(&*output_str);
+
+        let export_ld_preload = Command::new("export")
+            .arg(result_string)
+            .output()
+            .context("failed to execute `export LD_PRELOAD=$(gcc -print-file-name=libasan.so)`")?;
+
+        if !export_ld_preload.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&export_ld_preload.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&export_ld_preload.stderr));
+            panic!("`export LD_PRELOAD=$(gcc -print-file-name=libasan.so)` failed")
+        }
+    }
+
     for pg_version in &["v14", "v15", "v16"] {
         let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
         if pg_install_dir_versioned.is_relative() {
