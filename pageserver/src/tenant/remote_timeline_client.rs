@@ -1080,7 +1080,8 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         backoff::retry(
             || async {
-                preserve_initdb_archive(&self.storage_impl, tenant_id, timeline_id, cancel).await
+                upload::preserve_initdb_archive(&self.storage_impl, tenant_id, timeline_id, cancel)
+                    .await
             },
             |_e| false,
             FAILED_DOWNLOAD_WARN_THRESHOLD,

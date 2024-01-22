@@ -2860,7 +2860,7 @@ impl Timeline {
                 )
                 .await?;
         } else {
-            tracing::info!("No remote storage configured, but was asked to backup the initdb archive for {} / {}", self.tenant_shard_id.tenant_id, self.timeline_id);
+            bail!("No remote storage configured, but was asked to backup the initdb archive for {} / {}", self.tenant_shard_id.tenant_id, self.timeline_id);
         }
         Ok(())
     }
