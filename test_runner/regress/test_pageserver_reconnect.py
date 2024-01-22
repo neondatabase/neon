@@ -33,7 +33,10 @@ def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
             connstring = c.fetchone()[0]
             for i in range(n_reconnects):
                 time.sleep(timeout)
-                c.execute("alter system set neon.pageserver_connstring=%s", (connstring + (' ' * (i % 2)),))
+                c.execute(
+                    "alter system set neon.pageserver_connstring=%s",
+                    (connstring + (" " * (i % 2)),),
+                )
                 c.execute("select pg_reload_conf()")
 
     thread.join()
