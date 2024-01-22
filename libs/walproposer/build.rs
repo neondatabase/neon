@@ -3,7 +3,6 @@
 
 use std::{env, path::PathBuf, process::Command};
 
-use std::io::{self, Write};
 use anyhow::{anyhow, Context};
 use bindgen::CargoCallbacks;
 
@@ -50,8 +49,8 @@ fn main() -> anyhow::Result<()> {
             .context("failed to execute `pg_config --includedir-server`")?;
 
         if !output.status.success() {
-            println!("{}", output.status);
-            io::stdout().write_all(&output.stdout).unwrap();
+            println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
             panic!("`pg_config --includedir-server` failed")
         }
 
