@@ -868,7 +868,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     )
     assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == n_tenants
 
-    # Check that tenant deletion proactively wakes tenants: this is done separately to the main
+    # Check that tenant deletion/detach proactively wakes tenants: this is done separately to the main
     # body of the test because it will disrupt tenant counts
     env.pageserver.stop()
     env.pageserver.start(
@@ -876,9 +876,22 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     )
 
     wait_until(10, 1, at_least_one_active)
-    delete_tenant_id = list(
+
+    detach_tenant_id = list(
         [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
     )[0][0]
+    delete_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[1][0]
+
+    # Detaching a stuck tenant should proceed promptly
+    # (reproducer for https://github.com/neondatabase/neon/pull/6430)
+    env.pageserver.http_client().tenant_detach(detach_tenant_id, timeout_secs=10)
+    tenant_ids.remove(detach_tenant_id)
+    # FIXME: currently the mechanism for cancelling attach is to set state to broken, which is reported spuriously at error level
+    env.pageserver.allowed_errors.append(
+        ".*attach failed, setting tenant state to Broken: Shut down while Attaching"
+    )
 
     # Deleting a stuck tenant should prompt it to go active
     with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -912,9 +925,10 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         wait_tenant_status_404(pageserver_http, tenant_id=delete_tenant_id, iterations=40)
         tenant_ids.remove(delete_tenant_id)
 
-    # Check that all the stuck tenants proceed to active (apart from the one that deletes)
+    # Check that all the stuck tenants proceed to active (apart from the one that deletes, and the one
+    # we detached)
     wait_until(10, 1, all_active)
-    assert len(get_tenant_states()) == n_tenants - 1
+    assert len(get_tenant_states()) == n_tenants - 2
 
 
 def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
