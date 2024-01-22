@@ -4,7 +4,9 @@ pub mod backend;
 pub use backend::BackendType;
 
 mod credentials;
-pub use credentials::{check_peer_addr_is_in_list, endpoint_sni, ComputeUserInfoMaybeEndpoint};
+pub use credentials::{
+    check_peer_addr_is_in_list, endpoint_sni, ComputeUserInfoMaybeEndpoint, IpPattern,
+};
 
 mod password_hack;
 pub use password_hack::parse_endpoint_param;
