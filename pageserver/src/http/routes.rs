@@ -495,6 +495,10 @@ async fn timeline_create_handler(
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
+            Err(_) if tenant.cancel.is_cancelled() => {
+                // In case we get some ugly error type during shutdown, cast it into a clean 503.
+                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg("Tenant shutting down".to_string()))
+            }
             Err(tenant::CreateTimelineError::Conflict | tenant::CreateTimelineError::AlreadyCreating) => {
                 json_response(StatusCode::CONFLICT, ())
             }
