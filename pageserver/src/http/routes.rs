@@ -1261,19 +1261,9 @@ async fn tenant_create_handler(
     };
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
-    if let res @ Err(_) = new_tenant
+    new_tenant
         .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
-        .await
-    {
-        // This shouldn't happen because we just created the tenant directory
-        // in upsert_location, and there aren't any remote timelines
-        // to load, so, nothing can really fail during load.
-        // Don't do cleanup because we don't know how we got here.
-        // The tenant will likely be in `Broken` state and subsequent
-        // calls will fail.
-        res.context("created tenant failed to become active")
-            .map_err(ApiError::InternalServerError)?;
-    }
+        .await?;
 
     json_response(
         StatusCode::CREATED,
