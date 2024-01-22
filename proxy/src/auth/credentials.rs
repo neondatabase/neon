@@ -160,7 +160,7 @@ pub enum IpPattern {
     Subnet(ipnet::IpNet),
     Range(IpAddr, IpAddr),
     Single(IpAddr),
-    Error(String),
+    None,
 }
 
 impl<'de> serde::de::Deserialize<'de> for IpPattern {
@@ -180,7 +180,10 @@ impl<'de> serde::de::Deserialize<'de> for IpPattern {
             where
                 E: serde::de::Error,
             {
-                Ok(parse_ip_pattern(v).unwrap_or_else(|_| IpPattern::Error(v.to_string())))
+                Ok(parse_ip_pattern(v).unwrap_or_else(|e| {
+                    warn!("Cannot parse ip pattern {v}: {e}");
+                    IpPattern::None
+                }))
             }
         }
         deserializer.deserialize_str(StrVisitor)
@@ -214,10 +217,7 @@ fn check_ip(ip: &IpAddr, pattern: &IpPattern) -> bool {
         IpPattern::Subnet(subnet) => subnet.contains(ip),
         IpPattern::Range(start, end) => start <= ip && ip <= end,
         IpPattern::Single(addr) => addr == ip,
-        IpPattern::Error(s) => {
-            warn!("Cannot parse ip pattern: {s}");
-            false
-        }
+        IpPattern::None => false,
     }
 }
 
