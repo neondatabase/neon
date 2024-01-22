@@ -15,9 +15,10 @@ use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::{
     models::{
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
-        TimelineState,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        LayerMapInfo, TimelineState,
     },
+    reltag::BlockNumber,
     shard::{ShardIdentity, TenantShardId},
 };
 use rand::Rng;
@@ -42,33 +43,39 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::context::{
-    AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
-};
-use crate::tenant::storage_layer::delta_layer::DeltaEntry;
-use crate::tenant::storage_layer::{
-    AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
-    LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
-    ValueReconstructState,
-};
-use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
 };
+use crate::{
+    context::{AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder},
+    disk_usage_eviction_task::DiskUsageEvictionInfo,
+};
 use crate::{deletion_queue::DeletionQueueClient, tenant::remote_timeline_client::StopError};
+use crate::{
+    disk_usage_eviction_task::finite_f32,
+    tenant::storage_layer::{
+        AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
+        LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
+        ValueReconstructState,
+    },
+};
+use crate::{
+    disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
+};
+use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
+use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::pgdatadir_mapping::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
-use crate::pgdatadir_mapping::{CalculateLogicalSizeError, LsnForTimestamp};
-use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
-use pageserver_api::reltag::{BlockNumber, RelTag};
+use crate::tenant::config::TenantConfOpt;
+use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
@@ -244,6 +251,10 @@ pub struct Timeline {
     ancestor_lsn: Lsn,
 
     pub(super) metrics: TimelineMetrics,
+
+    // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
+    // in `crate::page_service` writes these metrics.
+    pub(crate) query_metrics: crate::metrics::SmgrQueryTimePerTimeline,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
@@ -1133,12 +1144,7 @@ impl Timeline {
             return Ok(None);
         };
 
-        let rtc = self
-            .remote_client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?;
-
-        match local_layer.evict_and_wait(rtc).await {
+        match local_layer.evict_and_wait().await {
             Ok(()) => Ok(Some(true)),
             Err(EvictionError::NotFound) => Ok(Some(false)),
             Err(EvictionError::Downloaded) => Ok(Some(false)),
@@ -1311,6 +1317,11 @@ impl Timeline {
                         "mtime",
                         evictions_low_residence_duration_metric_threshold,
                     ),
+                ),
+
+                query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
+                    &tenant_shard_id,
+                    &timeline_id,
                 ),
 
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
@@ -2102,7 +2113,7 @@ impl Timeline {
         let layer_file_names = eviction_info
             .resident_layers
             .iter()
-            .map(|l| l.layer.layer_desc().filename())
+            .map(|l| l.layer.get_name())
             .collect::<Vec<_>>();
 
         let decorated = match remote_client.get_layers_metadata(layer_file_names) {
@@ -2120,7 +2131,7 @@ impl Timeline {
         .filter_map(|(layer, remote_info)| {
             remote_info.map(|remote_info| {
                 HeatMapLayer::new(
-                    layer.layer.layer_desc().filename(),
+                    layer.layer.get_name(),
                     IndexLayerMetadata::from(remote_info),
                     layer.last_activity_ts,
                 )
@@ -4423,43 +4434,6 @@ impl Timeline {
     }
 }
 
-pub(crate) struct DiskUsageEvictionInfo {
-    /// Timeline's largest layer (remote or resident)
-    pub max_layer_size: Option<u64>,
-    /// Timeline's resident layers
-    pub resident_layers: Vec<LocalLayerInfoForDiskUsageEviction>,
-}
-
-pub(crate) struct LocalLayerInfoForDiskUsageEviction {
-    pub layer: Layer,
-    pub last_activity_ts: SystemTime,
-}
-
-impl std::fmt::Debug for LocalLayerInfoForDiskUsageEviction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // format the tv_sec, tv_nsec into rfc3339 in case someone is looking at it
-        // having to allocate a string to this is bad, but it will rarely be formatted
-        let ts = chrono::DateTime::<chrono::Utc>::from(self.last_activity_ts);
-        let ts = ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        struct DisplayIsDebug<'a, T>(&'a T);
-        impl<'a, T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'a, T> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.0)
-            }
-        }
-        f.debug_struct("LocalLayerInfoForDiskUsageEviction")
-            .field("layer", &DisplayIsDebug(&self.layer))
-            .field("last_activity", &ts)
-            .finish()
-    }
-}
-
-impl LocalLayerInfoForDiskUsageEviction {
-    pub fn file_size(&self) -> u64 {
-        self.layer.layer_desc().file_size
-    }
-}
-
 impl Timeline {
     /// Returns non-remote layers for eviction.
     pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
@@ -4493,9 +4467,10 @@ impl Timeline {
                 SystemTime::now()
             });
 
-            resident_layers.push(LocalLayerInfoForDiskUsageEviction {
-                layer: l.drop_eviction_guard(),
+            resident_layers.push(EvictionCandidate {
+                layer: l.drop_eviction_guard().into(),
                 last_activity_ts,
+                relative_last_activity: finite_f32::FiniteF32::ZERO,
             });
         }
 
@@ -4652,11 +4627,6 @@ mod tests {
             .await
             .unwrap();
 
-        let rtc = timeline
-            .remote_client
-            .clone()
-            .expect("just configured this");
-
         let layer = find_some_layer(&timeline).await;
         let layer = layer
             .keep_resident()
@@ -4665,8 +4635,8 @@ mod tests {
             .expect("should had been resident")
             .drop_eviction_guard();
 
-        let first = async { layer.evict_and_wait(&rtc).await };
-        let second = async { layer.evict_and_wait(&rtc).await };
+        let first = async { layer.evict_and_wait().await };
+        let second = async { layer.evict_and_wait().await };
 
         let (first, second) = tokio::join!(first, second);
 

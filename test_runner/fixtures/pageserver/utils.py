@@ -1,12 +1,12 @@
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef, ObjectTypeDef
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
-from fixtures.remote_storage import RemoteStorageKind, S3Storage
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
+from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 
 
@@ -22,7 +22,9 @@ def assert_tenant_state(
 
 
 def remote_consistent_lsn(
-    pageserver_http: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
+    pageserver_http: PageserverHttpClient,
+    tenant: Union[TenantId, TenantShardId],
+    timeline: TimelineId,
 ) -> Lsn:
     detail = pageserver_http.timeline_detail(tenant, timeline)
 
@@ -39,7 +41,7 @@ def remote_consistent_lsn(
 
 def wait_for_upload(
     pageserver_http: PageserverHttpClient,
-    tenant: TenantId,
+    tenant: Union[TenantId, TenantShardId],
     timeline: TimelineId,
     lsn: Lsn,
 ):
@@ -92,7 +94,7 @@ def wait_until_tenant_state(
 
 def wait_until_timeline_state(
     pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
+    tenant_id: Union[TenantId, TenantShardId],
     timeline_id: TimelineId,
     expected_state: str,
     iterations: int,
@@ -141,7 +143,9 @@ def wait_until_tenant_active(
 
 
 def last_record_lsn(
-    pageserver_http_client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
+    pageserver_http_client: PageserverHttpClient,
+    tenant: Union[TenantId, TenantShardId],
+    timeline: TimelineId,
 ) -> Lsn:
     detail = pageserver_http_client.timeline_detail(tenant, timeline)
 
@@ -152,7 +156,7 @@ def last_record_lsn(
 
 def wait_for_last_record_lsn(
     pageserver_http: PageserverHttpClient,
-    tenant: TenantId,
+    tenant: Union[TenantId, TenantShardId],
     timeline: TimelineId,
     lsn: Lsn,
 ) -> Lsn:
@@ -194,7 +198,7 @@ def wait_for_upload_queue_empty(
 
 def wait_timeline_detail_404(
     pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
+    tenant_id: Union[TenantId, TenantShardId],
     timeline_id: TimelineId,
     iterations: int,
     interval: Optional[float] = None,
@@ -219,7 +223,7 @@ def wait_timeline_detail_404(
 
 def timeline_delete_wait_completed(
     pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
+    tenant_id: Union[TenantId, TenantShardId],
     timeline_id: TimelineId,
     iterations: int = 20,
     interval: Optional[float] = None,
@@ -229,23 +233,18 @@ def timeline_delete_wait_completed(
     wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations, interval)
 
 
-if TYPE_CHECKING:
-    # TODO avoid by combining remote storage related stuff in single type
-    # and just passing in this type instead of whole builder
-    from fixtures.neon_fixtures import NeonEnvBuilder
-
-
+# remote_storage must not be None, but that's easier for callers to make mypy happy
 def assert_prefix_empty(
-    neon_env_builder: "NeonEnvBuilder",
+    remote_storage: Optional[RemoteStorage],
     prefix: Optional[str] = None,
     allowed_postfix: Optional[str] = None,
 ):
-    response = list_prefix(neon_env_builder, prefix)
+    assert remote_storage is not None
+    response = list_prefix(remote_storage, prefix)
     keys = response["KeyCount"]
     objects: List[ObjectTypeDef] = response.get("Contents", [])
     common_prefixes = response.get("CommonPrefixes", [])
 
-    remote_storage = neon_env_builder.pageserver_remote_storage
     is_mock_s3 = isinstance(remote_storage, S3Storage) and not remote_storage.cleanup
 
     if is_mock_s3:
@@ -279,19 +278,20 @@ def assert_prefix_empty(
     ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
-def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
-    response = list_prefix(neon_env_builder, prefix)
+# remote_storage must not be None, but that's easier for callers to make mypy happy
+def assert_prefix_not_empty(remote_storage: Optional[RemoteStorage], prefix: Optional[str] = None):
+    assert remote_storage is not None
+    response = list_prefix(remote_storage, prefix)
     assert response["KeyCount"] != 0, f"remote dir with prefix {prefix} is empty: {response}"
 
 
 def list_prefix(
-    neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None, delimiter: str = "/"
+    remote: RemoteStorage, prefix: Optional[str] = None, delimiter: str = "/"
 ) -> ListObjectsV2OutputTypeDef:
     """
     Note that this function takes into account prefix_in_bucket.
     """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
-    remote = neon_env_builder.pageserver_remote_storage
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
     assert remote.client is not None
 

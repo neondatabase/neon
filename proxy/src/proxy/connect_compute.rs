@@ -160,8 +160,6 @@ where
     let node_info = loop {
         let wake_res = match user_info {
             auth::BackendType::Console(api, user_info) => api.wake_compute(ctx, user_info).await,
-            #[cfg(feature = "testing")]
-            auth::BackendType::Postgres(api, user_info) => api.wake_compute(ctx, user_info).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
             // test backend

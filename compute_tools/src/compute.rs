@@ -71,10 +71,6 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub build_tag: String,
-    // connection string to pgbouncer to change settings
-    pub pgbouncer_connstr: Option<String>,
-    // path to pgbouncer.ini to change settings
-    pub pgbouncer_ini_path: Option<String>,
 }
 
 // store some metrics about download size that might impact startup time
@@ -769,8 +765,8 @@ impl ComputeNode {
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
-        if let Some(connstr) = &self.pgbouncer_connstr {
-            info!("tuning pgbouncer with connstr: {:?}", connstr);
+        if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
+            info!("tuning pgbouncer");
 
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -779,15 +775,9 @@ impl ComputeNode {
 
             // Spawn a thread to do the tuning,
             // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = spec.pgbouncer_settings.clone();
-            let connstr_clone = connstr.clone();
-            let pgbouncer_ini_path = self.pgbouncer_ini_path.clone();
+            let pgbouncer_settings = pgbouncer_settings.clone();
             let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(
-                    pgbouncer_settings,
-                    &connstr_clone,
-                    pgbouncer_ini_path,
-                ));
+                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
@@ -852,8 +842,8 @@ impl ComputeNode {
         );
 
         // tune pgbouncer
-        if let Some(connstr) = &self.pgbouncer_connstr {
-            info!("tuning pgbouncer with connstr: {:?}", connstr);
+        if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
+            info!("tuning pgbouncer");
 
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -862,15 +852,9 @@ impl ComputeNode {
 
             // Spawn a thread to do the tuning,
             // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pspec.spec.pgbouncer_settings.clone();
-            let connstr_clone = connstr.clone();
-            let pgbouncer_ini_path = self.pgbouncer_ini_path.clone();
+            let pgbouncer_settings = pgbouncer_settings.clone();
             let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(
-                    pgbouncer_settings,
-                    &connstr_clone,
-                    pgbouncer_ini_path,
-                ));
+                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }

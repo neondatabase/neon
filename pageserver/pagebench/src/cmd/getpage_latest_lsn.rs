@@ -349,10 +349,10 @@ async fn main_impl(
 
     let work_sender_task = tokio::spawn(work_sender);
 
+    info!("waiting for everything to become ready");
+    start_work_barrier.wait().await;
+    info!("work started");
     if let Some(runtime) = args.runtime {
-        info!("waiting for everything to become ready");
-        start_work_barrier.wait().await;
-        info!("work started");
         tokio::time::sleep(runtime.into()).await;
         info!("runtime over, signalling cancellation");
         cancel.cancel();
@@ -404,23 +404,27 @@ async fn client(
         .await
         .unwrap();
 
-    start_work_barrier.wait().await;
-
-    while let Some(req) =
-        tokio::select! { work = work.recv() => { work } , _ = cancel.cancelled() => { return; } }
-    {
-        let start = Instant::now();
-
-        let res = tokio::select! {
-            res = client.getpage(req) => { res },
-            _ = cancel.cancelled() => { return; }
-        };
-        res.with_context(|| format!("getpage for {timeline}"))
-            .unwrap();
-        let elapsed = start.elapsed();
-        live_stats.inc();
-        STATS.with(|stats| {
-            stats.borrow().lock().unwrap().observe(elapsed).unwrap();
-        });
+    let do_requests = async {
+        start_work_barrier.wait().await;
+        while let Some(req) = work.recv().await {
+            let start = Instant::now();
+            client
+                .getpage(req)
+                .await
+                .with_context(|| format!("getpage for {timeline}"))
+                .unwrap();
+            let elapsed = start.elapsed();
+            live_stats.inc();
+            STATS.with(|stats| {
+                stats.borrow().lock().unwrap().observe(elapsed).unwrap();
+            });
+        }
+    };
+    tokio::select! {
+        res = do_requests => { res },
+        _ = cancel.cancelled() => {
+            client.shutdown().await;
+            return;
+        }
     }
 }
