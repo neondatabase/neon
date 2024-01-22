@@ -75,7 +75,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         let output_str = String::from_utf8(libasan_path.stdout).unwrap();
-        println!("output from gcc command {}", output_str)
+        println!("output from gcc command {}", output_str);
         let mut result_string = String::from("LD_PRELOAD=");
         result_string.push_str(&*output_str);
 
