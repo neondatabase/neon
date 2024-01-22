@@ -160,10 +160,13 @@ where
     async fn add_block(&mut self, key: &Key, block: Bytes) -> anyhow::Result<()> {
         let (kind, segno, _) = key_to_slru_block(*key)?;
 
-        if kind == SlruKind::Clog {
-            ensure!(block.len() == BLCKSZ as usize || block.len() == BLCKSZ as usize + 8);
-        } else {
-            ensure!(block.len() == BLCKSZ as usize);
+        match kind {
+            SlruKind::Clog => {
+                ensure!(block.len() == BLCKSZ as usize || block.len() == BLCKSZ as usize + 8);
+            }
+            SlruKind::MultiXactMembers | SlruKind::MultiXactOffsets => {
+                ensure!(block.len() == BLCKSZ as usize);
+            }
         }
 
         let segment = (kind, segno);
