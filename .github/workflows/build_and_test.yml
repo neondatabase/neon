@@ -186,7 +186,7 @@ jobs:
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-      options: --init
+      options: --init --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
       matrix:
