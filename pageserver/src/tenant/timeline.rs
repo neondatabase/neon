@@ -404,6 +404,19 @@ pub(crate) enum PageReconstructError {
     WalRedo(anyhow::Error),
 }
 
+impl PageReconstructError {
+    /// Returns true if this error indicates a tenant/timeline shutdown alike situation
+    pub(crate) fn is_stopping(&self) -> bool {
+        use PageReconstructError::*;
+        match self {
+            Other(_) => false,
+            AncestorLsnTimeout(_) => false,
+            Cancelled | AncestorStopping(_) => true,
+            WalRedo(_) => false,
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 enum FlushLayerError {
     /// Timeline cancellation token was cancelled
