@@ -1696,9 +1696,13 @@ impl Tenant {
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         if !self.is_active() {
-            return Err(CreateTimelineError::Other(anyhow::anyhow!(
-                "Cannot create timelines on inactive tenant"
-            )));
+            if matches!(self.current_state(), TenantState::Stopping { .. }) {
+                return Err(CreateTimelineError::ShuttingDown);
+            } else {
+                return Err(CreateTimelineError::Other(anyhow::anyhow!(
+                    "Cannot create timelines on inactive tenant"
+                )));
+            }
         }
 
         let _gate = self
