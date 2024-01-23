@@ -6701,6 +6701,7 @@ dependencies = [
  "clap",
  "clap_builder",
  "crossbeam-utils",
+ "diesel",
  "either",
  "fail",
  "futures-channel",
