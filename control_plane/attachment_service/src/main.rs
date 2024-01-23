@@ -12,9 +12,9 @@ use camino::Utf8PathBuf;
 use clap::Parser;
 use metrics::launch_timestamp::LaunchTimestamp;
 use std::sync::Arc;
+use tokio::signal::unix::SignalKind;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
-use utils::signals::{ShutdownSignals, Signal};
 
 use utils::{project_build_tag, project_git_version, tcp_listener};
 
@@ -71,9 +71,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Some(args.path)
     };
-    let persistence = Arc::new(Persistence::new(json_path));
+    let persistence = Arc::new(Persistence::new(json_path.clone()));
 
-    let service = Service::spawn(config, persistence).await?;
+    let service = Service::spawn(config, persistence.clone()).await?;
 
     let http_listener = tcp_listener::bind(args.listen)?;
 
@@ -86,20 +86,31 @@ async fn main() -> anyhow::Result<()> {
     let router = make_router(service, auth)
         .build()
         .map_err(|err| anyhow!(err))?;
-    let service = utils::http::RouterService::new(router).unwrap();
-    let server = hyper::Server::from_tcp(http_listener)?.serve(service);
+    let router_service = utils::http::RouterService::new(router).unwrap();
+    let server = hyper::Server::from_tcp(http_listener)?.serve(router_service);
 
     tracing::info!("Serving on {0}", args.listen);
 
     tokio::task::spawn(server);
 
-    ShutdownSignals::handle(|signal| match signal {
-        Signal::Interrupt | Signal::Terminate | Signal::Quit => {
-            tracing::info!("Got {}. Terminating", signal.name());
-            // We're just a test helper: no graceful shutdown.
-            std::process::exit(0);
-        }
-    })?;
+    // Wait until we receive a signal
+    let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
+    let mut sigquit = tokio::signal::unix::signal(SignalKind::quit())?;
+    let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate())?;
+    tokio::select! {
+        _ = sigint.recv() => {},
+        _ = sigterm.recv() => {},
+        _ = sigquit.recv() => {},
+    }
+    tracing::info!("Terminating on signal");
 
-    Ok(())
+    if json_path.is_some() {
+        // Write out a JSON dump on shutdown: this is used in compat tests to avoid passing
+        // full postgres dumps around.
+        if let Err(e) = persistence.write_tenants_json().await {
+            tracing::error!("Failed to write JSON on shutdown: {e}")
+        }
+    }
+
+    std::process::exit(0);
 }
