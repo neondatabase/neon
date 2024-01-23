@@ -13,7 +13,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use smol_str::SmolStr;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;

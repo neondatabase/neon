@@ -3,7 +3,6 @@ mod hacks;
 mod link;
 
 pub use link::LinkAuthError;
-use smol_str::SmolStr;
 use tokio_postgres::config::AuthKeys;
 
 use crate::auth::credentials::check_peer_addr_is_in_list;

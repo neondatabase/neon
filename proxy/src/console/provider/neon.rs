@@ -14,7 +14,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use smol_str::SmolStr;
 use std::sync::Arc;
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
