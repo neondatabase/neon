@@ -11,13 +11,16 @@ use smol_str::SmolStr;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
-use crate::{auth::IpPattern, config::ProjectInfoCacheOptions, console::AuthSecret};
+use crate::{
+    auth::IpPattern, config::ProjectInfoCacheOptions, console::AuthSecret, EndpointId, ProjectId,
+    RoleName,
+};
 
 use super::{Cache, Cached};
 
 pub trait ProjectInfoCache {
-    fn invalidate_allowed_ips_for_project(&self, project_id: &SmolStr);
-    fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, role_name: &SmolStr);
+    fn invalidate_allowed_ips_for_project(&self, project_id: &ProjectId);
+    fn invalidate_role_secret_for_project(&self, project_id: &ProjectId, role_name: &RoleName);
     fn enable_ttl(&self);
     fn disable_ttl(&self);
 }
@@ -44,7 +47,7 @@ impl<T> From<T> for Entry<T> {
 
 #[derive(Default)]
 struct EndpointInfo {
-    secret: std::collections::HashMap<SmolStr, Entry<Option<AuthSecret>>>,
+    secret: std::collections::HashMap<RoleName, Entry<Option<AuthSecret>>>,
     allowed_ips: Option<Entry<Arc<Vec<IpPattern>>>>,
 }
 
@@ -57,7 +60,7 @@ impl EndpointInfo {
     }
     pub fn get_role_secret(
         &self,
-        role_name: &SmolStr,
+        role_name: &RoleName,
         valid_since: Instant,
         ignore_cache_since: Option<Instant>,
     ) -> Option<(Option<AuthSecret>, bool)> {
@@ -90,7 +93,7 @@ impl EndpointInfo {
     pub fn invalidate_allowed_ips(&mut self) {
         self.allowed_ips = None;
     }
-    pub fn invalidate_role_secret(&mut self, role_name: &SmolStr) {
+    pub fn invalidate_role_secret(&mut self, role_name: &RoleName) {
         self.secret.remove(role_name);
     }
 }
@@ -103,9 +106,9 @@ impl EndpointInfo {
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
 pub struct ProjectInfoCacheImpl {
-    cache: DashMap<SmolStr, EndpointInfo>,
+    cache: DashMap<EndpointId, EndpointInfo>,
 
-    project2ep: DashMap<SmolStr, HashSet<SmolStr>>,
+    project2ep: DashMap<ProjectId, HashSet<EndpointId>>,
     config: ProjectInfoCacheOptions,
 
     start_time: Instant,
@@ -113,7 +116,7 @@ pub struct ProjectInfoCacheImpl {
 }
 
 impl ProjectInfoCache for ProjectInfoCacheImpl {
-    fn invalidate_allowed_ips_for_project(&self, project_id: &SmolStr) {
+    fn invalidate_allowed_ips_for_project(&self, project_id: &ProjectId) {
         info!("invalidating allowed ips for project `{}`", project_id);
         let endpoints = self
             .project2ep
@@ -126,7 +129,7 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-    fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, role_name: &SmolStr) {
+    fn invalidate_role_secret_for_project(&self, project_id: &ProjectId, role_name: &RoleName) {
         info!(
             "invalidating role secret for project_id `{}` and role_name `{}`",
             project_id, role_name
@@ -167,8 +170,8 @@ impl ProjectInfoCacheImpl {
 
     pub fn get_role_secret(
         &self,
-        endpoint_id: &SmolStr,
-        role_name: &SmolStr,
+        endpoint_id: &EndpointId,
+        role_name: &RoleName,
     ) -> Option<Cached<&Self, Option<AuthSecret>>> {
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(endpoint_id)?;
@@ -188,7 +191,7 @@ impl ProjectInfoCacheImpl {
     }
     pub fn get_allowed_ips(
         &self,
-        endpoint_id: &SmolStr,
+        endpoint_id: &EndpointId,
     ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(endpoint_id)?;
@@ -205,9 +208,9 @@ impl ProjectInfoCacheImpl {
     }
     pub fn insert_role_secret(
         &self,
-        project_id: &SmolStr,
-        endpoint_id: &SmolStr,
-        role_name: &SmolStr,
+        project_id: &ProjectId,
+        endpoint_id: &EndpointId,
+        role_name: &RoleName,
         secret: Option<AuthSecret>,
     ) {
         if self.cache.len() >= self.config.size {
@@ -222,8 +225,8 @@ impl ProjectInfoCacheImpl {
     }
     pub fn insert_allowed_ips(
         &self,
-        project_id: &SmolStr,
-        endpoint_id: &SmolStr,
+        project_id: &ProjectId,
+        endpoint_id: &EndpointId,
         allowed_ips: Arc<Vec<IpPattern>>,
     ) {
         if self.cache.len() >= self.config.size {
@@ -236,7 +239,7 @@ impl ProjectInfoCacheImpl {
             .or_default()
             .allowed_ips = Some(allowed_ips.into());
     }
-    fn inser_project2endpoint(&self, project_id: &SmolStr, endpoint_id: &SmolStr) {
+    fn inser_project2endpoint(&self, project_id: &ProjectId, endpoint_id: &EndpointId) {
         if let Some(mut endpoints) = self.project2ep.get_mut(project_id) {
             endpoints.insert(endpoint_id.clone());
         } else {
@@ -297,18 +300,18 @@ impl ProjectInfoCacheImpl {
 /// This is used to invalidate cache entries.
 pub struct CachedLookupInfo {
     /// Search by this key.
-    endpoint_id: SmolStr,
+    endpoint_id: EndpointId,
     lookup_type: LookupType,
 }
 
 impl CachedLookupInfo {
-    pub(self) fn new_role_secret(endpoint_id: SmolStr, role_name: SmolStr) -> Self {
+    pub(self) fn new_role_secret(endpoint_id: EndpointId, role_name: RoleName) -> Self {
         Self {
             endpoint_id,
             lookup_type: LookupType::RoleSecret(role_name),
         }
     }
-    pub(self) fn new_allowed_ips(endpoint_id: SmolStr) -> Self {
+    pub(self) fn new_allowed_ips(endpoint_id: EndpointId) -> Self {
         Self {
             endpoint_id,
             lookup_type: LookupType::AllowedIps,
@@ -317,7 +320,7 @@ impl CachedLookupInfo {
 }
 
 enum LookupType {
-    RoleSecret(SmolStr),
+    RoleSecret(RoleName),
     AllowedIps,
 }
 
@@ -348,7 +351,6 @@ impl Cache for ProjectInfoCacheImpl {
 mod tests {
     use super::*;
     use crate::{console::AuthSecret, scram::ServerSecret};
-    use smol_str::SmolStr;
     use std::{sync::Arc, time::Duration};
 
     #[tokio::test]
@@ -362,8 +364,8 @@ mod tests {
         });
         let project_id = "project".into();
         let endpoint_id = "endpoint".into();
-        let user1: SmolStr = "user1".into();
-        let user2: SmolStr = "user2".into();
+        let user1: RoleName = "user1".into();
+        let user2: RoleName = "user2".into();
         let secret1 = Some(AuthSecret::Scram(ServerSecret::mock(
             user1.as_str(),
             [1; 32],
@@ -385,7 +387,7 @@ mod tests {
         assert_eq!(cached.value, secret2);
 
         // Shouldn't add more than 2 roles.
-        let user3: SmolStr = "user3".into();
+        let user3: RoleName = "user3".into();
         let secret3 = Some(AuthSecret::Scram(ServerSecret::mock(
             user3.as_str(),
             [3; 32],
@@ -420,8 +422,8 @@ mod tests {
 
         let project_id = "project".into();
         let endpoint_id = "endpoint".into();
-        let user1: SmolStr = "user1".into();
-        let user2: SmolStr = "user2".into();
+        let user1: RoleName = "user1".into();
+        let user2: RoleName = "user2".into();
         let secret1 = Some(AuthSecret::Scram(ServerSecret::mock(
             user1.as_str(),
             [1; 32],
@@ -475,8 +477,8 @@ mod tests {
 
         let project_id = "project".into();
         let endpoint_id = "endpoint".into();
-        let user1: SmolStr = "user1".into();
-        let user2: SmolStr = "user2".into();
+        let user1: RoleName = "user1".into();
+        let user2: RoleName = "user2".into();
         let secret1 = Some(AuthSecret::Scram(ServerSecret::mock(
             user1.as_str(),
             [1; 32],

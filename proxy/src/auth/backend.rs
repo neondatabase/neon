@@ -16,7 +16,6 @@ use crate::context::RequestMonitoring;
 use crate::proxy::connect_compute::handle_try_wake;
 use crate::proxy::retry::retry_after;
 use crate::proxy::NeonOptions;
-use crate::scram;
 use crate::stream::Stream;
 use crate::{
     auth::{self, ComputeUserInfoMaybeEndpoint},
@@ -28,6 +27,7 @@ use crate::{
     },
     stream, url,
 };
+use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 use futures::TryFutureExt;
 use std::borrow::Cow;
 use std::ops::ControlFlow;
@@ -130,19 +130,19 @@ pub struct ComputeCredentials<T> {
 
 #[derive(Debug, Clone)]
 pub struct ComputeUserInfoNoEndpoint {
-    pub user: SmolStr,
+    pub user: RoleName,
     pub options: NeonOptions,
 }
 
 #[derive(Debug, Clone)]
 pub struct ComputeUserInfo {
-    pub endpoint: SmolStr,
-    pub user: SmolStr,
+    pub endpoint: EndpointId,
+    pub user: RoleName,
     pub options: NeonOptions,
 }
 
 impl ComputeUserInfo {
-    pub fn endpoint_cache_key(&self) -> SmolStr {
+    pub fn endpoint_cache_key(&self) -> EndpointCacheKey {
         self.options.get_cache_key(&self.endpoint)
     }
 }
@@ -158,7 +158,7 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
     type Error = ComputeUserInfoNoEndpoint;
 
     fn try_from(user_info: ComputeUserInfoMaybeEndpoint) -> Result<Self, Self::Error> {
-        match user_info.project {
+        match user_info.endpoint_id {
             None => Err(ComputeUserInfoNoEndpoint {
                 user: user_info.user,
                 options: user_info.options,
@@ -317,11 +317,11 @@ async fn auth_and_wake_compute(
 
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
     /// Get compute endpoint name from the credentials.
-    pub fn get_endpoint(&self) -> Option<SmolStr> {
+    pub fn get_endpoint(&self) -> Option<EndpointId> {
         use BackendType::*;
 
         match self {
-            Console(_, user_info) => user_info.project.clone(),
+            Console(_, user_info) => user_info.endpoint_id.clone(),
             Link(_) => Some("link".into()),
             #[cfg(test)]
             Test(_) => Some("test".into()),
@@ -355,7 +355,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
             Console(api, user_info) => {
                 info!(
                     user = &*user_info.user,
-                    project = user_info.project(),
+                    project = user_info.endpoint(),
                     "performing authentication using the console"
                 );
 
