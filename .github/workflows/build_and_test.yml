@@ -375,8 +375,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          export LD_PRELOAD="/usr/lib/gcc/x86_64-linux-gnu/libasan.so.6"
-          sudo mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          ${cov_prefix} cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run rust tests
         run: |
