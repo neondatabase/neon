@@ -848,19 +848,18 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<Lsn, PageStreamError> {
         let last_record_lsn = timeline.get_last_record_lsn();
-        let effective_lsn = Lsn::max(lsn, Lsn::min(horizon, last_record_lsn));
+		let request_horizon = if horizon == Lsn::INVALID { lsn } else { horizon };
+        let effective_lsn = Lsn::max(lsn, Lsn::min(request_horizon, last_record_lsn));
         if effective_lsn > last_record_lsn {
             timeline.wait_lsn(effective_lsn, ctx).await?;
             // Since we waited for 'lsn' to arrive, that is now the last
             // record LSN. (Or close enough for our purposes; the
             // last-record LSN can advance immediately after we return
             // anyway)
-        } else {
-            if effective_lsn == Lsn(0) {
-                return Err(PageStreamError::BadRequest(
-                    "invalid LSN(0) in request".into(),
-                ));
-            }
+        } else if effective_lsn == Lsn(0) {
+            return Err(PageStreamError::BadRequest(
+                "invalid LSN(0) in request".into(),
+            ));
         }
 
         if effective_lsn < **latest_gc_cutoff_lsn {

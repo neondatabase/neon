@@ -112,10 +112,16 @@ static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block
 
 #define MAX_LSN ((XLogRecPtr)~0)
 
+/*
+ * There are three kinds of get_page :
+ * 1. Master compute: get the latest page not older than specified LSN (horizon=Lsn::MAX)
+ * 2. RO replica: get the latest page not newer than current WAL position replica already applied (horizon=GetXLogReplayRecPtr(NULL))
+ * 3. Snapshot: get latest page not new than specified LSN (horizon=request_lsn)
+ */
 static XLogRecPtr
-neon_get_horizon(XLogRecPtr lsn, bool latest)
+neon_get_horizon(bool latest)
 {
-	return latest ? MAX_LSN : RecoveryInProgress() ? GetXLogReplayRecPtr(NULL) : lsn;
+	return latest ? MAX_LSN : RecoveryInProgress() ? GetXLogReplayRecPtr(NULL) : InvalidXlogRecPtr; /* horizon=InvalidXlogRecPtr is replaced with request_lsn at PS */
 }
 
 /*
@@ -735,7 +741,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		prefetch_lsn = Max(prefetch_lsn, lsn);
 		slot->effective_request_lsn = prefetch_lsn;
 	}
-	request.req.horizon = neon_get_horizon(request.req.lsn, latest);
+	request.req.horizon = neon_get_horizon(latest);
 
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
@@ -1664,7 +1670,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
-			.req.horizon = neon_get_horizon(request_lsn, latest),
+			.req.horizon = neon_get_horizon(latest),
 			.req.lsn = request_lsn,
 			.rinfo = InfoFromSMgrRel(reln),
 		.forknum = forkNum};
@@ -2473,7 +2479,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	{
 		NeonNblocksRequest request = {
 			.req.tag = T_NeonNblocksRequest,
-			.req.horizon = neon_get_horizon(request_lsn, latest),
+			.req.horizon = neon_get_horizon(latest),
 			.req.lsn = request_lsn,
 			.rinfo = InfoFromSMgrRel(reln),
 			.forknum = forknum,
@@ -2530,7 +2536,7 @@ neon_dbsize(Oid dbNode)
 	{
 		NeonDbSizeRequest request = {
 			.req.tag = T_NeonDbSizeRequest,
-			.req.horizon = neon_get_horizon(request_lsn, latest),
+			.req.horizon = neon_get_horizon(latest),
 			.req.lsn = request_lsn,
 			.dbNode = dbNode,
 		};
@@ -2979,7 +2985,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		NeonNblocksRequest request = {
 			.req = (NeonRequest) {
 				.lsn = end_recptr,
-				.horizon = neon_get_horizon(end_recptr, false),
+				.horizon = neon_get_horizon(false),
 				.tag = T_NeonNblocksRequest,
 			},
 			.rinfo = rinfo,

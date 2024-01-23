@@ -1005,7 +1005,7 @@ mod tests {
         // Test serialization/deserialization of PagestreamFeMessage
         let messages = vec![
             PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                horizon: Lsn.MAX,
+                horizon: Lsn::MAX,
                 lsn: Lsn(4),
                 rel: RelTag {
                     forknum: 1,
@@ -1025,7 +1025,7 @@ mod tests {
                 },
             }),
             PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                latest: Lsn.MAX,
+                horizon: Lsn::MAX,
                 lsn: Lsn(4),
                 rel: RelTag {
                     forknum: 1,
@@ -1036,7 +1036,7 @@ mod tests {
                 blkno: 7,
             }),
             PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                latest: Lsn::MAX,
+                horizon: Lsn::MAX,
                 lsn: Lsn(4),
                 dbnode: 7,
             }),
