@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
+use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
@@ -531,6 +532,33 @@ impl Timeline {
             }
         }
         Ok(Default::default())
+    }
+
+    pub(crate) async fn get_slru_keyspace(
+        &self,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<KeySpace, PageReconstructError> {
+        let mut accum = KeySpaceAccum::new();
+
+        for kind in SlruKind::iter() {
+            let mut segments: Vec<u32> = self
+                .list_slru_segments(kind, version, ctx)
+                .await?
+                .into_iter()
+                .collect();
+            segments.sort_unstable();
+
+            for seg in segments {
+                let block_count = self.get_slru_segment_size(kind, seg, version, ctx).await?;
+
+                accum.add_range(
+                    slru_block_to_key(kind, seg, 0)..slru_block_to_key(kind, seg, block_count),
+                );
+            }
+        }
+
+        Ok(accum.to_keyspace())
     }
 
     /// Get a list of SLRU segments
