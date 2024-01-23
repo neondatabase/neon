@@ -1197,6 +1197,7 @@ def _shared_simple_env(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
+    pageserver_virtual_file_io_engine: str,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1226,6 +1227,7 @@ def _shared_simple_env(
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
     ) as builder:
         env = builder.init_start()
 
@@ -1264,6 +1266,7 @@ def neon_env_builder(
     request: FixtureRequest,
     test_overlay_dir: Path,
     top_output_dir: Path,
+    pageserver_virtual_file_io_engine: str,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1293,6 +1296,7 @@ def neon_env_builder(
         broker=default_broker,
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,

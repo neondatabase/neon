@@ -186,7 +186,11 @@ jobs:
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-      options: --init
+      # Raise locked memory limit for tokio-epoll-uring.
+      # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
+      # io_uring will account the memory of the CQ and SQ as locked.
+      # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
       matrix:
@@ -341,7 +345,9 @@ jobs:
 
       - name: Run rust tests
         run: |
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+          for io_engine in std-fs tokio-epoll-uring ; do
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+          done
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
@@ -419,13 +425,14 @@ jobs:
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-      # Default shared memory is 64mb
-      options: --init --shm-size=512mb
+      # for changed limits, see comments on `options:` earlier in this file
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
         pg_version: [ v14, v15, v16 ]
+        pageserver_virtual_file_io_engine: [ std-fs, tokio-epoll-uring ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -448,6 +455,7 @@ jobs:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: ${{ matrix.pageserver_virtual_file_io_engine }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
@@ -458,14 +466,16 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-      # Default shared memory is 64mb
-      options: --init --shm-size=512mb
+      # for changed limits, see comments on `options:` earlier in this file
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
       fail-fast: false
       matrix:
+        # the amount of groups (N) should be reflected in `extra_params: --splits N ...`
         pytest_split_group: [ 1, 2, 3, 4 ]
         build_type: [ release ]
+        pageserver_virtual_file_io_engine: [ std-fs, tokio-epoll-uring ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -477,11 +487,12 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: ${{ github.ref_name == 'main' }}
-          extra_params: --splits ${{ strategy.job-total }} --group ${{ matrix.pytest_split_group }}
+          extra_params: --splits 4 --group ${{ matrix.pytest_split_group }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: "${{ matrix.pageserver_virtual_file_io_engine }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
