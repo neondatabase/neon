@@ -137,6 +137,9 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder):
 
     ps_client = env.pageserver.http_client()
 
+    # Mark the initdb archive for preservation
+    ps_client.timeline_preserve_initdb_archive(tenant_id, timeline_id)
+
     # shut down the endpoint and delete the timeline from the pageserver
     endpoint.stop()
 
