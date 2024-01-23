@@ -1,5 +1,5 @@
-import time
 import threading
+import time
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, PgBin
