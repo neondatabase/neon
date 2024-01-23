@@ -1,3 +1,4 @@
+import time
 import threading
 
 from fixtures.log_helper import log
@@ -33,6 +34,7 @@ def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
         t.start()
 
         with env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary") as secondary:
+            time.sleep(2)
             for _ in range(1, n_iterations):
                 primary_lsn = primary.safe_psql_scalar(
                     "SELECT pg_current_wal_flush_lsn()::text", log_query=False
