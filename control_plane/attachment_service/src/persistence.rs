@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    str::FromStr,
-    sync::mpsc::{self, RecvError},
-};
+use std::{collections::HashMap, str::FromStr};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use control_plane::{
@@ -15,6 +11,7 @@ use pageserver_api::{
 };
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 use utils::{
     generation::Generation,
     id::{NodeId, TenantId},
@@ -29,7 +26,7 @@ pub struct Persistence {
 
 struct Inner {
     state: PersistentState,
-    write_queue_tx: mpsc::Sender<PendingWrite>,
+    write_queue_tx: tokio::sync::mpsc::UnboundedSender<PendingWrite>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,7 +82,7 @@ impl PersistentState {
 
 impl Persistence {
     pub async fn spawn(path: &Utf8Path) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let state = PersistentState::load_or_new(path).await;
         tokio::spawn(Self::writer_task(rx, path.to_owned()));
         Self {
@@ -96,10 +93,16 @@ impl Persistence {
         }
     }
 
-    async fn writer_task(rx: std::sync::mpsc::Receiver<PendingWrite>, path: Utf8PathBuf) {
+    async fn writer_task(
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<PendingWrite>,
+        path: Utf8PathBuf,
+    ) {
+        scopeguard::defer! {
+            info!("persistence writer task exiting");
+        };
         loop {
-            match rx.recv() {
-                Ok(write) => {
+            match rx.recv().await {
+                Some(write) => {
                     tokio::task::spawn_blocking({
                         let path = path.clone();
                         move || {
@@ -113,7 +116,7 @@ impl Persistence {
                     .expect("write file");
                     let _ = write.done_tx.send(()); // receiver may lose interest any time
                 }
-                Err(RecvError) => {
+                None => {
                     return;
                 }
             }
