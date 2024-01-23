@@ -126,6 +126,27 @@ pub(super) struct UploadQueueStopped {
     pub(super) deleted_at: SetDeletedFlagProgress,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum NotInitialized {
+    #[error("queue is in state Uninitialized")]
+    Uninitialized,
+    #[error("queue is in state Stopping")]
+    Stopped,
+    #[error("queue is shutting down")]
+    ShuttingDown,
+}
+
+impl NotInitialized {
+    pub(crate) fn is_stopping(&self) -> bool {
+        use NotInitialized::*;
+        match self {
+            Uninitialized => false,
+            Stopped => true,
+            ShuttingDown => true,
+        }
+    }
+}
+
 impl UploadQueue {
     pub(crate) fn initialize_empty_remote(
         &mut self,
@@ -214,17 +235,17 @@ impl UploadQueue {
     }
 
     pub(crate) fn initialized_mut(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
+        use UploadQueue::*;
         match self {
-            UploadQueue::Uninitialized | UploadQueue::Stopped(_) => {
-                anyhow::bail!("queue is in state {}", self.as_str())
-            }
-            UploadQueue::Initialized(x) => {
-                if !x.shutting_down {
-                    Ok(x)
+            Uninitialized => Err(NotInitialized::Uninitialized.into()),
+            Initialized(x) => {
+                if x.shutting_down {
+                    Err(NotInitialized::ShuttingDown.into())
                 } else {
-                    anyhow::bail!("queue is shutting down")
+                    Ok(x)
                 }
             }
+            Stopped(_) => Err(NotInitialized::Stopped.into()),
         }
     }
 
