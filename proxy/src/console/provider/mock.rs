@@ -4,14 +4,13 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
 };
-use crate::cache::Cached;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::context::RequestMonitoring;
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
+use crate::{auth::IpPattern, cache::Cached};
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use smol_str::SmolStr;
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
 use tokio_postgres::{config::SslMode, Client};
 use tracing::{error, info, info_span, warn, Instrument};
@@ -88,7 +87,9 @@ impl Api {
             {
                 Some(s) => {
                     info!("got allowed_ips: {s}");
-                    s.split(',').map(String::from).collect()
+                    s.split(',')
+                        .map(|s| IpPattern::from_str(s).unwrap())
+                        .collect()
                 }
                 None => vec![],
             };
@@ -100,7 +101,7 @@ impl Api {
         .await?;
         Ok(AuthInfo {
             secret,
-            allowed_ips: allowed_ips.iter().map(SmolStr::from).collect(),
+            allowed_ips,
             project_id: None,
         })
     }
