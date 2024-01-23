@@ -35,20 +35,20 @@ fn main() -> anyhow::Result<()> {
         println!("cargo:rustc-link-arg=-fsanitize=undefined");
         println!("cargo:rustc-link-arg=-export-dynamic");
 
-        //setting dynamically the symbols
-        let libasan_path = Command::new("gcc")
-            .arg("-print-file-name=libasan.so")
-            .output()
-            .context("failed to execute `gcc -print-file-name=libasan.so`")?;
-
-        if !libasan_path.status.success() {
-            println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
-            println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
-            panic!("`gcc -print-file-name=libasan.so` failed")
-        }
-
-        let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
-        println!("cargo:rustc-env=LD_PRELOAD={}", libasan_path);
+        // //setting dynamically the symbols
+        // let libasan_path = Command::new("gcc")
+        //     .arg("-print-file-name=libasan.so")
+        //     .output()
+        //     .context("failed to execute `gcc -print-file-name=libasan.so`")?;
+        //
+        // if !libasan_path.status.success() {
+        //     println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
+        //     println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
+        //     panic!("`gcc -print-file-name=libasan.so` failed")
+        // }
+        //
+        // let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
+        // println!("cargo:rustc-env=LD_PRELOAD={}", libasan_path);
     }
 
     println!("cargo:rustc-link-lib=static=pgport");
