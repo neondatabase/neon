@@ -5,6 +5,7 @@ pub mod connect_compute;
 pub mod handshake;
 pub mod passthrough;
 pub mod retry;
+pub mod wake_compute;
 
 use crate::{
     auth,

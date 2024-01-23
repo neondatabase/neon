@@ -12,8 +12,7 @@ use crate::console::errors::GetAuthInfoError;
 use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::AuthSecret;
 use crate::context::RequestMonitoring;
-use crate::proxy::connect_compute::handle_try_wake;
-use crate::proxy::retry::retry_after;
+use crate::proxy::wake_compute::wake_compute;
 use crate::proxy::NeonOptions;
 use crate::stream::Stream;
 use crate::{
@@ -29,10 +28,9 @@ use crate::{
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 use futures::TryFutureExt;
 use std::borrow::Cow;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, warn};
+use tracing::info;
 
 /// This type serves two purposes:
 ///
@@ -275,42 +273,6 @@ async fn authenticate_with_secret(
 
     // Finally, proceed with the main auth flow (SCRAM-based).
     classic::authenticate(info, client, config, &mut ctx.latency_timer, secret).await
-}
-
-/// wake a compute (or retrieve an existing compute session from cache)
-async fn wake_compute(
-    ctx: &mut RequestMonitoring,
-    api: &impl console::Api,
-    compute_credentials: ComputeCredentials<ComputeCredentialKeys>,
-) -> auth::Result<(CachedNodeInfo, ComputeUserInfo)> {
-    let mut num_retries = 0;
-    let mut node = loop {
-        let wake_res = api.wake_compute(ctx, &compute_credentials.info).await;
-        match handle_try_wake(wake_res, num_retries) {
-            Err(e) => {
-                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
-                return Err(e.into());
-            }
-            Ok(ControlFlow::Continue(e)) => {
-                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-            }
-            Ok(ControlFlow::Break(n)) => break n,
-        }
-
-        let wait_duration = retry_after(num_retries);
-        num_retries += 1;
-        tokio::time::sleep(wait_duration).await;
-    };
-
-    ctx.set_project(node.aux.clone());
-
-    match compute_credentials.keys {
-        #[cfg(feature = "testing")]
-        ComputeCredentialKeys::Password(password) => node.config.password(password),
-        ComputeCredentialKeys::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
-    };
-
-    Ok((node, compute_credentials.info))
 }
 
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
