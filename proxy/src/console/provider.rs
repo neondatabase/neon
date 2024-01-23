@@ -4,7 +4,7 @@ pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::backend::ComputeUserInfo,
+    auth::{backend::ComputeUserInfo, IpPattern},
     cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
@@ -212,7 +212,7 @@ pub enum AuthSecret {
 pub struct AuthInfo {
     pub secret: Option<AuthSecret>,
     /// List of IP addresses allowed for the autorization.
-    pub allowed_ips: Vec<SmolStr>,
+    pub allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
     pub project_id: Option<SmolStr>,
 }
@@ -236,7 +236,7 @@ pub struct NodeInfo {
 pub type NodeInfoCache = TimedLru<SmolStr, NodeInfo>;
 pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
 pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
-pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<SmolStr>>>;
+pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.

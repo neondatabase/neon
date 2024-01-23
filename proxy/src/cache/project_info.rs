@@ -11,7 +11,7 @@ use smol_str::SmolStr;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
-use crate::{config::ProjectInfoCacheOptions, console::AuthSecret};
+use crate::{auth::IpPattern, config::ProjectInfoCacheOptions, console::AuthSecret};
 
 use super::{Cache, Cached};
 
@@ -45,7 +45,7 @@ impl<T> From<T> for Entry<T> {
 #[derive(Default)]
 struct EndpointInfo {
     secret: std::collections::HashMap<SmolStr, Entry<Option<AuthSecret>>>,
-    allowed_ips: Option<Entry<Arc<Vec<SmolStr>>>>,
+    allowed_ips: Option<Entry<Arc<Vec<IpPattern>>>>,
 }
 
 impl EndpointInfo {
@@ -76,7 +76,7 @@ impl EndpointInfo {
         &self,
         valid_since: Instant,
         ignore_cache_since: Option<Instant>,
-    ) -> Option<(Arc<Vec<SmolStr>>, bool)> {
+    ) -> Option<(Arc<Vec<IpPattern>>, bool)> {
         if let Some(allowed_ips) = &self.allowed_ips {
             if valid_since < allowed_ips.created_at {
                 return Some((
@@ -189,7 +189,7 @@ impl ProjectInfoCacheImpl {
     pub fn get_allowed_ips(
         &self,
         endpoint_id: &SmolStr,
-    ) -> Option<Cached<&Self, Arc<Vec<SmolStr>>>> {
+    ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(endpoint_id)?;
         let value = endpoint_info.get_allowed_ips(valid_since, ignore_cache_since);
@@ -224,7 +224,7 @@ impl ProjectInfoCacheImpl {
         &self,
         project_id: &SmolStr,
         endpoint_id: &SmolStr,
-        allowed_ips: Arc<Vec<SmolStr>>,
+        allowed_ips: Arc<Vec<IpPattern>>,
     ) {
         if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
@@ -369,7 +369,10 @@ mod tests {
             [1; 32],
         )));
         let secret2 = None;
-        let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
+        let allowed_ips = Arc::new(vec![
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
+        ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
         cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
@@ -427,7 +430,10 @@ mod tests {
             user2.as_str(),
             [2; 32],
         )));
-        let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
+        let allowed_ips = Arc::new(vec![
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
+        ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
         cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
@@ -479,7 +485,10 @@ mod tests {
             user2.as_str(),
             [2; 32],
         )));
-        let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
+        let allowed_ips = Arc::new(vec![
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
+        ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.clone().disable_ttl();
         tokio::time::advance(Duration::from_millis(100)).await;
