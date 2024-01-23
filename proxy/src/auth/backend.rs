@@ -360,7 +360,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
             Link(url) => {
                 info!("performing link authentication");
 
-                let node_info = link::authenticate(&url, client).await?;
+                let node_info = link::authenticate(ctx, &url, client).await?;
 
                 (
                     CachedNodeInfo::new_uncached(node_info),
