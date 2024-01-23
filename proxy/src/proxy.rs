@@ -103,7 +103,7 @@ pub async fn task_main(
                 handle_client(
                     config,
                     &mut ctx,
-                    &cancel_map,
+                    cancel_map,
                     socket,
                     ClientMode::Tcp,
                     endpoint_rate_limiter,
@@ -171,7 +171,7 @@ impl ClientMode {
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    cancel_map: &CancelMap,
+    cancel_map: Arc<CancelMap>,
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -192,7 +192,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let tls = config.tls_config.as_ref();
 
     let pause = ctx.latency_timer.pause();
-    let do_handshake = handshake(stream, mode.handshake_tls(tls), cancel_map);
+    let do_handshake = handshake(stream, mode.handshake_tls(tls), &cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -227,10 +227,9 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         mode.allow_self_signed_compute(config),
         endpoint_rate_limiter,
     );
-    cancel_map
-        .with_session(|session| {
-            client.connect_to_db(ctx, session, mode, &config.authentication_config)
-        })
+    let session = cancel_map.get_session();
+    client
+        .connect_to_db(ctx, session, mode, &config.authentication_config)
         .await
 }
 
@@ -238,7 +237,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 #[tracing::instrument(skip_all)]
 async fn prepare_client_connection(
     node: &compute::PostgresConnection,
-    session: cancellation::Session<'_>,
+    session: &cancellation::Session,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> anyhow::Result<()> {
     // Register compute's query cancellation token and produce a new, unique one.
@@ -305,7 +304,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     async fn connect_to_db(
         self,
         ctx: &mut RequestMonitoring,
-        session: cancellation::Session<'_>,
+        session: cancellation::Session,
         mode: ClientMode,
         config: &'static AuthenticationConfig,
     ) -> anyhow::Result<()> {
@@ -350,7 +349,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             .or_else(|e| stream.throw_error(e))
             .await?;
 
-        prepare_client_connection(&node, session, &mut stream).await?;
+        prepare_client_connection(&node, &session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the
         // PqStream input buffer. Normally there is none, but our serverless npm
         // driver in pipeline mode sends startup, password and first query
