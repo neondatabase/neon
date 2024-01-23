@@ -2,6 +2,7 @@ import concurrent.futures
 import enum
 import os
 import shutil
+import time
 from threading import Thread
 
 import pytest
@@ -859,7 +860,7 @@ def test_tenant_delete_races_timeline_creation(
     except PageserverApiException:
         pass
 
-    os.wait(4)
+    time.sleep(4)
 
     # Physical deletion should have happened
     assert_prefix_empty(
