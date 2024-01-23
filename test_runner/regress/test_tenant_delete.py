@@ -411,9 +411,7 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
     pageserver_http.configure_failpoints((failpoint, "pause"))
 
     def hit_pausable_failpoint_and_later_fail():
-        with pytest.raises(
-            PageserverApiException, match="new timeline \\S+ has invalid disk_consistent_lsn"
-        ):
+        with pytest.raises(PageserverApiException, match="NotFound: tenant"):
             pageserver_http.timeline_create(
                 env.pg_version, env.initial_tenant, env.initial_timeline
             )
@@ -443,8 +441,8 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
     try:
         wait_until(10, 1, has_hit_failpoint)
 
-        # it should start ok, sync up with the stuck creation, then fail because disk_consistent_lsn was not updated
-        # then deletion should fail and set the tenant broken
+        # it should start ok, sync up with the stuck creation, then hang waiting for the timeline
+        # to shut down.
         deletion = Thread(target=start_deletion)
         deletion.start()
 
