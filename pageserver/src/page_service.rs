@@ -61,7 +61,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
-use crate::pgdatadir_mapping::{rel_block_to_key, Version};
+use crate::pgdatadir_mapping::Version;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -75,6 +75,7 @@ use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
 
+use pageserver_api::key::rel_block_to_key;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 

@@ -104,6 +104,7 @@ pub struct KeySpaceAccum {
     accum: Option<Range<Key>>,
 
     ranges: Vec<Range<Key>>,
+    size: u64,
 }
 
 impl KeySpaceAccum {
@@ -111,6 +112,7 @@ impl KeySpaceAccum {
         Self {
             accum: None,
             ranges: Vec::new(),
+            size: 0,
         }
     }
 
@@ -121,6 +123,8 @@ impl KeySpaceAccum {
 
     #[inline(always)]
     pub fn add_range(&mut self, range: Range<Key>) {
+        self.size += key_range_size(&range) as u64;
+
         match self.accum.as_mut() {
             Some(accum) => {
                 if range.start == accum.end {
@@ -145,6 +149,23 @@ impl KeySpaceAccum {
         KeySpace {
             ranges: self.ranges,
         }
+    }
+
+    pub fn consume_keyspace(&mut self) -> KeySpace {
+        if let Some(accum) = self.accum.take() {
+            self.ranges.push(accum);
+        }
+
+        let mut prev_accum = KeySpaceAccum::new();
+        std::mem::swap(self, &mut prev_accum);
+
+        KeySpace {
+            ranges: prev_accum.ranges,
+        }
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
     }
 }
 
@@ -252,6 +273,30 @@ mod tests {
             }
             panic!("{}", msg);
         }
+    }
+
+    #[test]
+    fn keyspace_consume() {
+        let ranges = vec![kr(0..10), kr(20..35), kr(40..45)];
+
+        let mut accum = KeySpaceAccum::new();
+        for range in &ranges {
+            accum.add_range(range.clone());
+        }
+
+        let expected_size: u64 = ranges.iter().map(|r| key_range_size(r) as u64).sum();
+        assert_eq!(accum.size(), expected_size);
+
+        assert_ks_eq(&accum.consume_keyspace(), ranges.clone());
+        assert_eq!(accum.size(), 0);
+
+        assert_ks_eq(&accum.consume_keyspace(), vec![]);
+        assert_eq!(accum.size(), 0);
+
+        for range in &ranges {
+            accum.add_range(range.clone());
+        }
+        assert_ks_eq(&accum.to_keyspace(), ranges);
     }
 
     #[test]

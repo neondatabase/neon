@@ -3041,6 +3041,7 @@ class Endpoint(PgProtocol):
 
         # Write it back updated
         with open(config_path, "w") as file:
+            log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Mock the extension part of spec passed from control plane for local testing

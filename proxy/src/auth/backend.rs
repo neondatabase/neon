@@ -35,6 +35,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, warn};
 
+use super::IpPattern;
+
 /// This type serves two purposes:
 ///
 /// * When `T` is `()`, it's just a regular auth backend selector
@@ -55,7 +57,7 @@ pub enum BackendType<'a, T> {
 
 pub trait TestBackend: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
-    fn get_allowed_ips(&self) -> Result<Vec<SmolStr>, console::errors::GetAuthInfoError>;
+    fn get_allowed_ips(&self) -> Result<Vec<IpPattern>, console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, ()> {
@@ -202,21 +204,18 @@ async fn auth_quirks(
     if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
         return Err(auth::AuthError::ip_address_not_allowed());
     }
-    let maybe_secret = api.get_role_secret(ctx, &info).await?;
+    let cached_secret = api.get_role_secret(ctx, &info).await?;
 
-    let cached_secret = maybe_secret.unwrap_or_else(|| {
+    let secret = cached_secret.value.clone().unwrap_or_else(|| {
         // If we don't have an authentication secret, we mock one to
         // prevent malicious probing (possible due to missing protocol steps).
         // This mocked secret will never lead to successful authentication.
         info!("authentication info not found, mocking it");
-        Cached::new_uncached(AuthSecret::Scram(scram::ServerSecret::mock(
-            &info.user,
-            rand::random(),
-        )))
+        AuthSecret::Scram(scram::ServerSecret::mock(&info.user, rand::random()))
     });
     match authenticate_with_secret(
         ctx,
-        cached_secret.value.clone(),
+        secret,
         info,
         client,
         unauthenticated_password,

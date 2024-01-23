@@ -4,7 +4,7 @@ pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::backend::ComputeUserInfo,
+    auth::{backend::ComputeUserInfo, IpPattern},
     cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
@@ -212,7 +212,7 @@ pub enum AuthSecret {
 pub struct AuthInfo {
     pub secret: Option<AuthSecret>,
     /// List of IP addresses allowed for the autorization.
-    pub allowed_ips: Vec<SmolStr>,
+    pub allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
     pub project_id: Option<SmolStr>,
 }
@@ -235,8 +235,8 @@ pub struct NodeInfo {
 
 pub type NodeInfoCache = TimedLru<SmolStr, NodeInfo>;
 pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
-pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, AuthSecret>;
-pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<SmolStr>>>;
+pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
+pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
@@ -249,7 +249,7 @@ pub trait Api {
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<Option<CachedRoleSecret>, errors::GetAuthInfoError>;
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
@@ -280,7 +280,7 @@ impl Api for ConsoleBackend {
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<Option<CachedRoleSecret>, errors::GetAuthInfoError> {
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
         use ConsoleBackend::*;
         match self {
             Console(api) => api.get_role_secret(ctx, user_info).await,

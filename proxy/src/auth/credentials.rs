@@ -7,7 +7,7 @@ use crate::{
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
-use std::{collections::HashSet, net::IpAddr};
+use std::{collections::HashSet, net::IpAddr, str::FromStr};
 use thiserror::Error;
 use tracing::{info, warn};
 
@@ -151,30 +151,51 @@ impl ComputeUserInfoMaybeEndpoint {
     }
 }
 
-pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &Vec<SmolStr>) -> bool {
-    if ip_list.is_empty() {
-        return true;
-    }
-    for ip in ip_list {
-        // We expect that all ip addresses from control plane are correct.
-        // However, if some of them are broken, we still can check the others.
-        match parse_ip_pattern(ip) {
-            Ok(pattern) => {
-                if check_ip(peer_addr, &pattern) {
-                    return true;
-                }
-            }
-            Err(err) => warn!("Cannot parse ip: {}; err: {}", ip, err),
-        }
-    }
-    false
+pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
+    ip_list.is_empty() || ip_list.iter().any(|pattern| check_ip(peer_addr, pattern))
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-enum IpPattern {
+pub enum IpPattern {
     Subnet(ipnet::IpNet),
     Range(IpAddr, IpAddr),
     Single(IpAddr),
+    None,
+}
+
+impl<'de> serde::de::Deserialize<'de> for IpPattern {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StrVisitor;
+        impl<'de> serde::de::Visitor<'de> for StrVisitor {
+            type Value = IpPattern;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(formatter, "comma separated list with ip address, ip address range, or ip address subnet mask")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(parse_ip_pattern(v).unwrap_or_else(|e| {
+                    warn!("Cannot parse ip pattern {v}: {e}");
+                    IpPattern::None
+                }))
+            }
+        }
+        deserializer.deserialize_str(StrVisitor)
+    }
+}
+
+impl FromStr for IpPattern {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_ip_pattern(s)
+    }
 }
 
 fn parse_ip_pattern(pattern: &str) -> anyhow::Result<IpPattern> {
@@ -196,6 +217,7 @@ fn check_ip(ip: &IpAddr, pattern: &IpPattern) -> bool {
         IpPattern::Subnet(subnet) => subnet.contains(ip),
         IpPattern::Range(start, end) => start <= ip && ip <= end,
         IpPattern::Single(addr) => addr == ip,
+        IpPattern::None => false,
     }
 }
 
@@ -206,6 +228,7 @@ fn project_name_valid(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use ComputeUserInfoParseError::*;
 
     #[test]
@@ -415,21 +438,17 @@ mod tests {
 
     #[test]
     fn test_check_peer_addr_is_in_list() {
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        assert!(check_peer_addr_is_in_list(&peer_addr, &vec![]));
-        assert!(check_peer_addr_is_in_list(
-            &peer_addr,
-            &vec!["127.0.0.1".into()]
-        ));
-        assert!(!check_peer_addr_is_in_list(
-            &peer_addr,
-            &vec!["8.8.8.8".into()]
-        ));
+        fn check(v: serde_json::Value) -> bool {
+            let peer_addr = IpAddr::from([127, 0, 0, 1]);
+            let ip_list: Vec<IpPattern> = serde_json::from_value(v).unwrap();
+            check_peer_addr_is_in_list(&peer_addr, &ip_list)
+        }
+
+        assert!(check(json!([])));
+        assert!(check(json!(["127.0.0.1"])));
+        assert!(!check(json!(["8.8.8.8"])));
         // If there is an incorrect address, it will be skipped.
-        assert!(check_peer_addr_is_in_list(
-            &peer_addr,
-            &vec!["88.8.8".into(), "127.0.0.1".into()]
-        ));
+        assert!(check(json!(["88.8.8", "127.0.0.1"])));
     }
     #[test]
     fn test_parse_ip_v4() -> anyhow::Result<()> {
