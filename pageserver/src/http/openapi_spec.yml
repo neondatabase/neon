@@ -877,6 +877,56 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
+  /v1/tenant/{tenant_id}/{timeline_id}/preserve_initdb_archive:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      description: |
+        Marks the initdb archive for preservation upon deletion of the timeline or tenant.
+        This is meant to be part of the disaster recovery process.
+      responses:
+        "202":
+          description: Tenant scheduled to load successfully
+        "404":
+          description: No tenant or timeline found for the specified ids
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/synthetic_size:
     parameters:

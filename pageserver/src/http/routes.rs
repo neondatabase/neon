@@ -569,6 +569,11 @@ async fn timeline_preserve_initdb_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    // Part of the process for disaster recovery from safekeeper-stored WAL:
+    // If we don't recover into a new timeline but want to keep the timeline ID,
+    // then the initdb archive is deleted. This endpoint copies it to a different
+    // location where timeline recreation cand find it.
+
     async {
         let tenant = mgr::get_tenant(tenant_shard_id, true)?;
 
