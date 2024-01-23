@@ -10,11 +10,11 @@ use crate::{
     auth,
     cancellation::{self, CancelMap},
     compute,
-    config::{AuthenticationConfig, ProxyConfig, TlsConfig},
+    config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
     metrics::{NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE},
     protocol2::WithClientIp,
-    proxy::handshake::handshake,
+    proxy::{handshake::handshake, passthrough::proxy_pass},
     rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
     EndpointCacheKey,
@@ -31,10 +31,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, Instrument};
 
-use self::{
-    connect_compute::{connect_to_compute, TcpMechanism},
-    passthrough::proxy_pass,
-};
+use self::connect_compute::{connect_to_compute, TcpMechanism};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -199,38 +196,76 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     };
     drop(pause);
 
+    let hostname = mode.hostname(stream.get_ref());
+
+    let common_names = tls.map(|tls| &tls.common_names);
+
     // Extract credentials which we're going to use for auth.
-    let user_info = {
-        let hostname = mode.hostname(stream.get_ref());
+    let result = config
+        .auth_backend
+        .as_ref()
+        .map(|_| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
+        .transpose();
 
-        let common_names = tls.map(|tls| &tls.common_names);
-        let result = config
-            .auth_backend
-            .as_ref()
-            .map(|_| {
-                auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names)
-            })
-            .transpose();
-
-        match result {
-            Ok(user_info) => user_info,
-            Err(e) => stream.throw_error(e).await?,
-        }
+    let user_info = match result {
+        Ok(user_info) => user_info,
+        Err(e) => stream.throw_error(e).await?,
     };
 
     ctx.set_endpoint_id(user_info.get_endpoint());
 
-    let client = Client::new(
-        stream,
-        user_info,
-        &params,
-        mode.allow_self_signed_compute(config),
-        endpoint_rate_limiter,
-    );
-    let session = cancel_map.get_session();
-    client
-        .connect_to_db(ctx, session, mode, &config.authentication_config)
+    // check rate limit
+    if let Some(ep) = user_info.get_endpoint() {
+        if !endpoint_rate_limiter.check(ep) {
+            return stream
+                .throw_error(auth::AuthError::too_many_connections())
+                .await;
+        }
+    }
+
+    let user = user_info.get_user().to_owned();
+    let (mut node_info, user_info) = match user_info
+        .authenticate(
+            ctx,
+            &mut stream,
+            mode.allow_cleartext(),
+            &config.authentication_config,
+        )
         .await
+    {
+        Ok(auth_result) => auth_result,
+        Err(e) => {
+            let db = params.get("database");
+            let app = params.get("application_name");
+            let params_span = tracing::info_span!("", ?user, ?db, ?app);
+
+            return stream.throw_error(e).instrument(params_span).await;
+        }
+    };
+
+    node_info.allow_self_signed_compute = mode.allow_self_signed_compute(config);
+
+    let aux = node_info.aux.clone();
+    let mut node = connect_to_compute(
+        ctx,
+        &TcpMechanism { params: &params },
+        node_info,
+        &user_info,
+    )
+    .or_else(|e| stream.throw_error(e))
+    .await?;
+
+    let session = cancel_map.get_session();
+    prepare_client_connection(&node, &session, &mut stream).await?;
+
+    // Before proxy passing, forward to compute whatever data is left in the
+    // PqStream input buffer. Normally there is none, but our serverless npm
+    // driver in pipeline mode sends startup, password and first query
+    // immediately after opening the connection.
+    let (stream, read_buf) = stream.into_inner();
+    node.stream.write_all(&read_buf).await?;
+
+    proxy_pass(ctx, stream, node.stream, aux).await
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
@@ -261,103 +296,6 @@ async fn prepare_client_connection(
         .await?;
 
     Ok(())
-}
-
-/// Thin connection context.
-struct Client<'a, S> {
-    /// The underlying libpq protocol stream.
-    stream: PqStream<Stream<S>>,
-    /// Client credentials that we care about.
-    user_info: auth::BackendType<'a, auth::ComputeUserInfoMaybeEndpoint>,
-    /// KV-dictionary with PostgreSQL connection params.
-    params: &'a StartupMessageParams,
-    /// Allow self-signed certificates (for testing).
-    allow_self_signed_compute: bool,
-    /// Rate limiter for endpoints
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-}
-
-impl<'a, S> Client<'a, S> {
-    /// Construct a new connection context.
-    fn new(
-        stream: PqStream<Stream<S>>,
-        user_info: auth::BackendType<'a, auth::ComputeUserInfoMaybeEndpoint>,
-        params: &'a StartupMessageParams,
-        allow_self_signed_compute: bool,
-        endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> Self {
-        Self {
-            stream,
-            user_info,
-            params,
-            allow_self_signed_compute,
-            endpoint_rate_limiter,
-        }
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
-    /// Let the client authenticate and connect to the designated compute node.
-    // Instrumentation logs endpoint name everywhere. Doesn't work for link
-    // auth; strictly speaking we don't know endpoint name in its case.
-    #[tracing::instrument(name = "", fields(ep = %self.user_info.get_endpoint().unwrap_or_default()), skip_all)]
-    async fn connect_to_db(
-        self,
-        ctx: &mut RequestMonitoring,
-        session: cancellation::Session,
-        mode: ClientMode,
-        config: &'static AuthenticationConfig,
-    ) -> anyhow::Result<()> {
-        let Self {
-            mut stream,
-            user_info,
-            params,
-            allow_self_signed_compute,
-            endpoint_rate_limiter,
-        } = self;
-
-        // check rate limit
-        if let Some(ep) = user_info.get_endpoint() {
-            if !endpoint_rate_limiter.check(ep) {
-                return stream
-                    .throw_error(auth::AuthError::too_many_connections())
-                    .await;
-            }
-        }
-
-        let user = user_info.get_user().to_owned();
-        let auth_result = match user_info
-            .authenticate(ctx, &mut stream, mode.allow_cleartext(), config)
-            .await
-        {
-            Ok(auth_result) => auth_result,
-            Err(e) => {
-                let db = params.get("database");
-                let app = params.get("application_name");
-                let params_span = tracing::info_span!("", ?user, ?db, ?app);
-
-                return stream.throw_error(e).instrument(params_span).await;
-            }
-        };
-
-        let (mut node_info, user_info) = auth_result;
-
-        node_info.allow_self_signed_compute = allow_self_signed_compute;
-
-        let aux = node_info.aux.clone();
-        let mut node = connect_to_compute(ctx, &TcpMechanism { params }, node_info, &user_info)
-            .or_else(|e| stream.throw_error(e))
-            .await?;
-
-        prepare_client_connection(&node, &session, &mut stream).await?;
-        // Before proxy passing, forward to compute whatever data is left in the
-        // PqStream input buffer. Normally there is none, but our serverless npm
-        // driver in pipeline mode sends startup, password and first query
-        // immediately after opening the connection.
-        let (stream, read_buf) = stream.into_inner();
-        node.stream.write_all(&read_buf).await?;
-        proxy_pass(ctx, stream, node.stream, aux).await
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
