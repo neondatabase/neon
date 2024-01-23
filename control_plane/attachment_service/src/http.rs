@@ -364,18 +364,32 @@ pub fn make_router(
 
     router
         .data(Arc::new(HttpState::new(service, auth)))
+        // Non-prefixed generic endpoints (status, metrics)
         .get("/status", |r| request_span(r, handle_status))
-        // Testing endpoints
-        .post("/attach-hook", |r| request_span(r, handle_attach_hook))
-        .post("/inspect", |r| request_span(r, handle_inspect))
-        // Upcalls for the pageserver
-        .post("/re-attach", |r| request_span(r, handle_re_attach))
-        .post("/validate", |r| request_span(r, handle_validate))
+        // Upcalls for the pageserver: point the pageserver's `control_plane_api` config to this prefix
+        .post("/upcall/v1/re-attach", |r| {
+            request_span(r, handle_re_attach)
+        })
+        .post("/upcall/v1/validate", |r| request_span(r, handle_validate))
+        // Test/dev/debug endpoints
+        .post("/debug/v1/attach-hook", |r| {
+            request_span(r, handle_attach_hook)
+        })
+        .post("/debug/v1/inspect", |r| request_span(r, handle_inspect))
+        .get("/control/v1/tenant/:tenant_id/locate", |r| {
+            tenant_service_handler(r, handle_tenant_locate)
+        })
         // Node operations
-        .post("/node", |r| request_span(r, handle_node_register))
-        .get("/node", |r| request_span(r, handle_node_list))
-        .put("/node/:node_id/config", |r| {
+        .post("/control/v1/node", |r| {
+            request_span(r, handle_node_register)
+        })
+        .get("/control/v1/node", |r| request_span(r, handle_node_list))
+        .put("/control/v1/node/:node_id/config", |r| {
             request_span(r, handle_node_configure)
+        })
+        // Tenant Shard operations
+        .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
+            tenant_service_handler(r, handle_tenant_shard_migrate)
         })
         // Tenant operations
         .post("/v1/tenant", |r| {
@@ -384,9 +398,6 @@ pub fn make_router(
         .delete("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(r, handle_tenant_delete)
         })
-        .get("/tenant/:tenant_id/locate", |r| {
-            tenant_service_handler(r, handle_tenant_locate)
-        })
         .put("/v1/tenant/:tenant_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
         })
@@ -394,10 +405,10 @@ pub fn make_router(
         .put("/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(r, handle_tenant_shard_migrate)
         })
+        // Timeline operations
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             tenant_service_handler(r, handle_tenant_timeline_delete)
         })
-        // Timeline operations
         .post("/v1/tenant/:tenant_id/timeline", |r| {
             tenant_service_handler(r, handle_tenant_timeline_create)
         })

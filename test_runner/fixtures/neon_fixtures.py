@@ -993,13 +993,17 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        attachment_service_port = self.port_distributor.get_port()
+        self.attachment_service_port = self.port_distributor.get_port()
         # Reserve the next port after attachment service for use by its postgres: this
         # will assert out if the next port wasn't free.
         attachment_service_pg_port = self.port_distributor.get_port()
-        assert attachment_service_pg_port == attachment_service_port + 1
+        assert attachment_service_pg_port == self.attachment_service_port + 1
 
-        self.control_plane_api: str = f"http://127.0.0.1:{attachment_service_port}"
+        # The URL for the pageserver to use as its control_plane_api config
+        self.control_plane_api: str = f"http://127.0.0.1:{self.attachment_service_port}/upcall/v1"
+        # The base URL of the attachment service
+        self.attachment_service_api: str = f"http://127.0.0.1:{self.attachment_service_port}"
+
         self.attachment_service: NeonAttachmentService = NeonAttachmentService(
             self, config.auth_enabled
         )
@@ -1931,7 +1935,7 @@ class NeonAttachmentService:
     ) -> int:
         response = self.request(
             "POST",
-            f"{self.env.control_plane_api}/attach-hook",
+            f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
             headers=self.headers(),
         )
@@ -1943,7 +1947,7 @@ class NeonAttachmentService:
     def attach_hook_drop(self, tenant_shard_id: Union[TenantId, TenantShardId]):
         response = self.request(
             "POST",
-            f"{self.env.control_plane_api}/attach-hook",
+            f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": None},
             headers=self.headers(),
         )
@@ -1955,7 +1959,7 @@ class NeonAttachmentService:
         """
         response = self.request(
             "POST",
-            f"{self.env.control_plane_api}/inspect",
+            f"{self.env.attachment_service_api}/debug/v1/inspect",
             json={"tenant_shard_id": str(tenant_shard_id)},
             headers=self.headers(),
         )
@@ -1976,7 +1980,27 @@ class NeonAttachmentService:
         }
         log.info(f"node_register({body})")
         self.request(
-            "POST", f"{self.env.control_plane_api}/node", json=body, headers=self.headers()
+            "POST",
+            f"{self.env.attachment_service_api}/control/v1/node",
+            json=body,
+            headers=self.headers(),
+        ).raise_for_status()
+
+    def node_list(self):
+        response = self.request(
+            "GET", f"{self.env.attachment_service_api}/control/v1/node", headers=self.headers()
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def node_configure(self, node_id, body: dict[str, Any]):
+        log.info(f"node_configure({node_id}, {body})")
+        body["node_id"] = node_id
+        self.request(
+            "PUT",
+            f"{self.env.attachment_service_api}/control/v1/node/{node_id}/config",
+            json=body,
+            headers=self.headers(),
         ).raise_for_status()
 
     def tenant_create(
@@ -1999,21 +2023,50 @@ class NeonAttachmentService:
             for k, v in tenant_config.items():
                 body[k] = v
 
-        response = self.request("POST", f"{self.env.control_plane_api}/tenant", json=body)
+        response = self.request("POST", f"{self.env.attachment_service_api}/v1/tenant", json=body)
         response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
+
+    def tenant_delete(self, tenant_id):
+        """
+        Deletion API requires retry loop: to save callers the effort, it is implemented
+        inside this function.  Assumes tests are deleting small tenants, so it should
+        complete fast.
+        """
+        tries = 10
+        delay = 0.5
+        while tries > 0:
+            response = self.request(
+                "DELETE", f"{self.env.attachment_service_api}/v1/tenant/{tenant_id}"
+            )
+            if response.status_code == 404:
+                # Success
+                return
+            elif response.status_code == 202:
+                # Deletion in progress
+                pass
+
+            response.raise_for_status()
+
+            tries -= 1
+            time.sleep(delay)
 
     def tenant_timeline_create(self, tenant_id: TenantId, timeline_id: TimelineId):
         body: Dict[str, Any] = {"new_timeline_id": str(timeline_id)}
 
         response = self.request(
-            "POST", f"{self.env.control_plane_api}/tenant/{tenant_id}/timeline", json=body
+            "POST", f"{self.env.attachment_service_api}/v1/tenant/{tenant_id}/timeline", json=body
         )
         response.raise_for_status()
         log.info(f"tenant_timeline_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
-        response = self.request("GET", f"{self.env.control_plane_api}/tenant/{tenant_id}/locate")
+        """
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        """
+        response = self.request(
+            "GET", f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/locate"
+        )
         response.raise_for_status()
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
@@ -2022,7 +2075,7 @@ class NeonAttachmentService:
     def tenant_shard_split(self, tenant_id: TenantId, shard_count: int) -> list[TenantShardId]:
         response = self.request(
             "PUT",
-            f"{self.env.control_plane_api}/tenant/{tenant_id}/shard_split",
+            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/shard_split",
             json={"new_shard_count": shard_count},
         )
         response.raise_for_status()
@@ -2034,7 +2087,7 @@ class NeonAttachmentService:
     def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
         response = self.request(
             "PUT",
-            f"{self.env.control_plane_api}/tenant/{tenant_shard_id}/migrate",
+            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_shard_id}/migrate",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
         )
         response.raise_for_status()
