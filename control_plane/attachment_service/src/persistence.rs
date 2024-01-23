@@ -41,10 +41,14 @@ struct PendingWrite {
 }
 
 impl PendingWrite {
-    async fn commit(&self) -> anyhow::Result<()> {
-        tokio::fs::write(&self.path, &self.bytes).await?;
-
-        Ok(())
+    async fn commit(self) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(|| {
+            let tmp_path = utils::crashsafe::path_with_suffix_extension(self.path, "___new");
+            utils::crashsafe::overwrite(&self.path, &tmp_path, &self.bytes)
+        })
+        .await
+        .context("spawn_blocking")?
+        .context("write file")
     }
 }
 
