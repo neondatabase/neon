@@ -595,6 +595,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
                 .map(humantime),
             gc_feedback: value.gc_feedback,
             heatmap_period: value.heatmap_period.map(humantime),
+            lazy_slru_download: value.lazy_slru_download,
         }
     }
 }

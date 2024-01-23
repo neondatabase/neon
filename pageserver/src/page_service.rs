@@ -639,7 +639,6 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetSlruSegment(req) => {
-                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetSlruSegment);
                     let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.lsn);
                     (
                         self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)
@@ -1146,6 +1145,11 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+
+        let _timer = timeline
+            .query_metrics
+            .start_timer(metrics::SmgrQueryType::GetSlruSegment);
+
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
