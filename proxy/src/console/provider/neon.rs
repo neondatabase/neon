@@ -14,7 +14,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use itertools::Itertools;
 use smol_str::SmolStr;
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -94,12 +93,7 @@ impl Api {
                     .ok_or(GetAuthInfoError::BadSecret)?;
                 Some(secret)
             };
-            let allowed_ips = body
-                .allowed_ips
-                .into_iter()
-                .flatten()
-                .map(SmolStr::from)
-                .collect_vec();
+            let allowed_ips = body.allowed_ips.unwrap_or_default();
             ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
             Ok(AuthInfo {
                 secret,

@@ -2,6 +2,8 @@ use serde::Deserialize;
 use smol_str::SmolStr;
 use std::fmt;
 
+use crate::auth::IpPattern;
+
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
 #[derive(Debug, Deserialize)]
@@ -14,7 +16,7 @@ pub struct ConsoleError {
 #[derive(Deserialize)]
 pub struct GetRoleSecret {
     pub role_secret: Box<str>,
-    pub allowed_ips: Option<Vec<Box<str>>>,
+    pub allowed_ips: Option<Vec<IpPattern>>,
     pub project_id: Option<Box<str>>,
 }
 
