@@ -123,7 +123,9 @@ impl RelTag {
     PartialOrd,
     Ord,
     strum_macros::EnumIter,
+    strum_macros::FromRepr,
 )]
+#[repr(u8)]
 pub enum SlruKind {
     Clog = 0,
     MultiXactMembers,

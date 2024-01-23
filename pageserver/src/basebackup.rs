@@ -270,9 +270,8 @@ where
                     slru_builder.add_block(&key, block?).await?;
                 }
             }
+            slru_builder.finish().await?;
         }
-
-        slru_builder.finish().await?;
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
         // Create tablespace directories
