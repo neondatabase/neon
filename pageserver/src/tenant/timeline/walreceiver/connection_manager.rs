@@ -554,8 +554,8 @@ impl ConnectionManagerState {
         WALRECEIVER_BROKER_UPDATES.inc();
 
         self.timeline
-            .standby_flush_lsn
-            .store(Lsn(timeline_update.standby_flush_lsn));
+            .standby_horizon
+            .store(Lsn(timeline_update.standby_horizon));
 
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
         let old_entry = self.wal_stream_candidates.insert(
@@ -923,7 +923,7 @@ mod tests {
                 remote_consistent_lsn: 0,
                 peer_horizon_lsn: 0,
                 local_start_lsn: 0,
-                standby_flush_lsn: 0,
+                standby_horizon: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
                 http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,

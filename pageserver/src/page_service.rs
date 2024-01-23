@@ -842,55 +842,34 @@ impl PageServerHandler {
     /// the LSN that should be used to look up the page versions.
     async fn wait_or_get_last_lsn(
         timeline: &Timeline,
-        mut lsn: Lsn,
-        latest: bool,
+        lsn: Lsn,
+        horizon: Lsn,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Lsn, PageStreamError> {
-        if latest {
-            // Latest page version was requested. If LSN is given, it is a hint
-            // to the page server that there have been no modifications to the
-            // page after that LSN. If we haven't received WAL up to that point,
-            // wait until it arrives.
-            let last_record_lsn = timeline.get_last_record_lsn();
-
-            // Note: this covers the special case that lsn == Lsn(0). That
-            // special case means "return the latest version whatever it is",
-            // and it's used for bootstrapping purposes, when the page server is
-            // connected directly to the compute node. That is needed because
-            // when you connect to the compute node, to receive the WAL, the
-            // walsender process will do a look up in the pg_authid catalog
-            // table for authentication. That poses a deadlock problem: the
-            // catalog table lookup will send a GetPage request, but the GetPage
-            // request will block in the page server because the recent WAL
-            // hasn't been received yet, and it cannot be received until the
-            // walsender completes the authentication and starts streaming the
-            // WAL.
-            if lsn <= last_record_lsn {
-                lsn = last_record_lsn;
-            } else {
-                timeline.wait_lsn(lsn, ctx).await?;
-                // Since we waited for 'lsn' to arrive, that is now the last
-                // record LSN. (Or close enough for our purposes; the
-                // last-record LSN can advance immediately after we return
-                // anyway)
-            }
+        let last_record_lsn = timeline.get_last_record_lsn();
+        let effective_lsn = Lsn::max(lsn, Lsn::min(horizon, last_record_lsn));
+        if effective_lsn > last_record_lsn {
+            timeline.wait_lsn(effective_lsn, ctx).await?;
+            // Since we waited for 'lsn' to arrive, that is now the last
+            // record LSN. (Or close enough for our purposes; the
+            // last-record LSN can advance immediately after we return
+            // anyway)
         } else {
-            if lsn == Lsn(0) {
+            if effective_lsn == Lsn(0) {
                 return Err(PageStreamError::BadRequest(
                     "invalid LSN(0) in request".into(),
                 ));
             }
-            timeline.wait_lsn(lsn, ctx).await?;
         }
 
-        if lsn < **latest_gc_cutoff_lsn {
+        if effective_lsn < **latest_gc_cutoff_lsn {
             return Err(PageStreamError::BadRequest(format!(
                 "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
-                lsn, **latest_gc_cutoff_lsn
+                effective_lsn, **latest_gc_cutoff_lsn
             ).into()));
         }
-        Ok(lsn)
+        Ok(effective_lsn)
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -908,11 +887,11 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.horizon, &latest_gc_cutoff_lsn, ctx)
                 .await?;
 
         let exists = timeline
-            .get_rel_exists(req.rel, Version::Lsn(lsn), req.latest, ctx)
+            .get_rel_exists(req.rel, Version::Lsn(lsn), req.horizon, ctx)
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
@@ -936,11 +915,11 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.horizon, &latest_gc_cutoff_lsn, ctx)
                 .await?;
 
         let n_blocks = timeline
-            .get_rel_size(req.rel, Version::Lsn(lsn), req.latest, ctx)
+            .get_rel_size(req.rel, Version::Lsn(lsn), req.horizon, ctx)
             .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
@@ -964,7 +943,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.horizon, &latest_gc_cutoff_lsn, ctx)
                 .await?;
 
         let total_blocks = timeline
@@ -972,7 +951,7 @@ impl PageServerHandler {
                 DEFAULTTABLESPACE_OID,
                 req.dbnode,
                 Version::Lsn(lsn),
-                req.latest,
+                req.horizon,
                 ctx,
             )
             .await?;
@@ -1142,11 +1121,11 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.horizon, &latest_gc_cutoff_lsn, ctx)
                 .await?;
 
         let page = timeline
-            .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), req.latest, ctx)
+            .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), req.horizon, ctx)
             .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {

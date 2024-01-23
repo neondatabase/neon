@@ -1019,7 +1019,7 @@ impl WalIngest {
 
             let nblocks = modification
                 .tline
-                .get_rel_size(src_rel, Version::Modified(modification), true, ctx)
+                .get_rel_size(src_rel, Version::Modified(modification), Lsn::MAX, ctx)
                 .await?;
             let dst_rel = RelTag {
                 spcnode: tablespace_id,
@@ -1057,7 +1057,7 @@ impl WalIngest {
                         src_rel,
                         blknum,
                         Version::Modified(modification),
-                        true,
+                        Lsn::MAX,
                         ctx,
                     )
                     .await?;
@@ -1227,7 +1227,7 @@ impl WalIngest {
                 };
                 if modification
                     .tline
-                    .get_rel_exists(rel, Version::Modified(modification), true, ctx)
+                    .get_rel_exists(rel, Version::Modified(modification), Lsn::MAX, ctx)
                     .await?
                 {
                     self.put_rel_drop(modification, rel, ctx).await?;
@@ -1526,7 +1526,7 @@ impl WalIngest {
             nblocks
         } else if !modification
             .tline
-            .get_rel_exists(rel, Version::Modified(modification), true, ctx)
+            .get_rel_exists(rel, Version::Modified(modification), Lsn::MAX, ctx)
             .await?
         {
             // create it with 0 size initially, the logic below will extend it
@@ -1538,7 +1538,7 @@ impl WalIngest {
         } else {
             modification
                 .tline
-                .get_rel_size(rel, Version::Modified(modification), true, ctx)
+                .get_rel_size(rel, Version::Modified(modification), Lsn::MAX, ctx)
                 .await?
         };
 
@@ -1635,14 +1635,14 @@ async fn get_relsize(
 ) -> anyhow::Result<BlockNumber> {
     let nblocks = if !modification
         .tline
-        .get_rel_exists(rel, Version::Modified(modification), true, ctx)
+        .get_rel_exists(rel, Version::Modified(modification), Lsn::MAX, ctx)
         .await?
     {
         0
     } else {
         modification
             .tline
-            .get_rel_size(rel, Version::Modified(modification), true, ctx)
+            .get_rel_size(rel, Version::Modified(modification), Lsn::MAX, ctx)
             .await?
     };
     Ok(nblocks)

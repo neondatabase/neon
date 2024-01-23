@@ -79,7 +79,7 @@ typedef enum {
 typedef struct
 {
 	NeonMessageTag tag;
-	bool		latest;			/* if true, request latest page version */
+	XLogRecPtr	horizon;		/* uppe boundary for page LSN */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
 } NeonRequest;
 

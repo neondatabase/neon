@@ -124,7 +124,7 @@ pub struct TimelineMemState {
     pub remote_consistent_lsn: Lsn,
     #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
-    pub standby_flush_lsn: Lsn,
+    pub standby_horizon: Lsn,
 }
 
 /// Safekeeper persistent state plus in memory layer, to avoid frequent fsyncs
@@ -149,7 +149,7 @@ where
                 peer_horizon_lsn: state.peer_horizon_lsn,
                 remote_consistent_lsn: state.remote_consistent_lsn,
                 proposer_uuid: state.proposer_uuid,
-                standby_flush_lsn: Lsn::INVALID,
+                standby_horizon: Lsn::INVALID,
             },
             pers: state,
         }

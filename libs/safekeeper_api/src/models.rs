@@ -52,7 +52,7 @@ pub struct SkTimelineInfo {
     pub http_connstr: Option<String>,
     // Minimum of all active RO replicas flush LSN
     #[serde(default = "lsn_invalid")]
-    pub standby_flush_lsn: Lsn,
+    pub standby_horizon: Lsn,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
