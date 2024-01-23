@@ -15,7 +15,10 @@ use crate::{
     context::RequestMonitoring,
     metrics::{NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE},
     protocol2::WithClientIp,
-    proxy::{handshake::handshake, passthrough::proxy_pass},
+    proxy::{
+        handshake::{handshake, HandshakeData},
+        passthrough::proxy_pass,
+    },
     rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
     EndpointCacheKey,
@@ -35,7 +38,6 @@ use tracing::{error, info, info_span, Instrument};
 use self::connect_compute::{connect_to_compute, TcpMechanism};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
-const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
 pub async fn run_until_cancelled<F: std::future::Future>(
     f: F,
@@ -193,11 +195,13 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let tls = config.tls_config.as_ref();
 
     let pause = ctx.latency_timer.pause();
-    let do_handshake = handshake(stream, mode.handshake_tls(tls), &cancel_map);
+    let do_handshake = handshake(stream, mode.handshake_tls(tls));
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
-            Some(x) => x,
-            None => return Ok(()), // it's a cancellation request
+            HandshakeData::Startup(stream, params) => (stream, params),
+            HandshakeData::Cancel(cancel_key_data) => {
+                return cancel_map.cancel_session(cancel_key_data).await
+            }
         };
     drop(pause);
 

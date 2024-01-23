@@ -14,10 +14,6 @@ use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
 pub enum LinkAuthError {
-    /// Authentication error reported by the console.
-    #[error("Authentication failed: {0}")]
-    AuthFailed(String),
-
     #[error(transparent)]
     WaiterRegister(#[from] waiters::RegisterError),
 
@@ -30,18 +26,13 @@ pub enum LinkAuthError {
 
 impl UserFacingError for LinkAuthError {
     fn to_string_client(&self) -> String {
-        use LinkAuthError::*;
-        match self {
-            AuthFailed(_) => self.to_string(),
-            _ => "Internal error".to_string(),
-        }
+        "Internal error".to_string()
     }
 }
 
 impl ReportableError for LinkAuthError {
     fn get_error_type(&self) -> crate::error::ErrorKind {
         match self {
-            LinkAuthError::AuthFailed(_) => crate::error::ErrorKind::User,
             LinkAuthError::WaiterRegister(_) => crate::error::ErrorKind::Service,
             LinkAuthError::WaiterWait(_) => crate::error::ErrorKind::Service,
             LinkAuthError::Io(_) => crate::error::ErrorKind::Disconnect,

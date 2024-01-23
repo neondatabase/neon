@@ -14,6 +14,7 @@ use password_hack::PasswordHackPayload;
 
 mod flow;
 pub use flow::*;
+use tokio::time::error::Elapsed;
 
 use crate::{
     console,
@@ -70,6 +71,9 @@ pub enum AuthErrorImpl {
 
     #[error("Too many connections to this endpoint. Please try again later.")]
     TooManyConnections,
+
+    #[error("Authentication timed out")]
+    UserTimeout(Elapsed),
 }
 
 #[derive(Debug, Error)]
@@ -96,6 +100,10 @@ impl AuthError {
     pub fn is_auth_failed(&self) -> bool {
         matches!(self.0.as_ref(), AuthErrorImpl::AuthFailed(_))
     }
+
+    pub fn user_timeout(elapsed: Elapsed) -> Self {
+        AuthErrorImpl::UserTimeout(elapsed).into()
+    }
 }
 
 impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
@@ -119,6 +127,7 @@ impl UserFacingError for AuthError {
             Io(_) => "Internal error".to_string(),
             IpAddressNotAllowed => self.to_string(),
             TooManyConnections => self.to_string(),
+            UserTimeout(_) => self.to_string(),
         }
     }
 }
@@ -138,6 +147,7 @@ impl ReportableError for AuthError {
             Io(_) => crate::error::ErrorKind::Disconnect,
             IpAddressNotAllowed => crate::error::ErrorKind::User,
             TooManyConnections => crate::error::ErrorKind::RateLimit,
+            UserTimeout(_) => crate::error::ErrorKind::User,
         }
     }
 }

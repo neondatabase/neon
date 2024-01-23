@@ -1,14 +1,56 @@
-use anyhow::{bail, Context};
-use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
+use pq_proto::{BeMessage as Be, CancelKeyData, FeStartupPacket, StartupMessageParams};
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
 use crate::{
-    cancellation::CancelMap,
     config::TlsConfig,
-    proxy::{ERR_INSECURE_CONNECTION, ERR_PROTO_VIOLATION},
-    stream::{PqStream, Stream},
+    error::ReportableError,
+    proxy::ERR_INSECURE_CONNECTION,
+    stream::{PqStream, Stream, StreamUpgradeError},
 };
+
+#[derive(Error, Debug)]
+pub enum HandshakeError {
+    #[error("data is sent before server replied with EncryptionResponse")]
+    EarlyData,
+
+    #[error("protocol violation")]
+    ProtocolViolation,
+
+    #[error("connection is insecure (try using `sslmode=require`)")]
+    InsecureConnection,
+
+    #[error("missing certificate")]
+    MissingCertificate,
+
+    #[error("{0}")]
+    StreamUpgradeError(#[from] StreamUpgradeError),
+
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl ReportableError for HandshakeError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        match self {
+            HandshakeError::EarlyData => crate::error::ErrorKind::User,
+            HandshakeError::ProtocolViolation => crate::error::ErrorKind::User,
+            HandshakeError::InsecureConnection => crate::error::ErrorKind::User,
+            HandshakeError::MissingCertificate => todo!(),
+            HandshakeError::StreamUpgradeError(upgrade) => match upgrade {
+                StreamUpgradeError::AlreadyTls => crate::error::ErrorKind::User,
+                StreamUpgradeError::Io(_) => crate::error::ErrorKind::Disconnect,
+            },
+            HandshakeError::Io(_) => crate::error::ErrorKind::Disconnect,
+        }
+    }
+}
+
+pub enum HandshakeData<S> {
+    Startup(PqStream<Stream<S>>, StartupMessageParams),
+    Cancel(CancelKeyData),
+}
 
 /// Establish a (most probably, secure) connection with the client.
 /// For better testing experience, `stream` can be any object satisfying the traits.
@@ -18,8 +60,7 @@ use crate::{
 pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<&TlsConfig>,
-    cancel_map: &CancelMap,
-) -> anyhow::Result<Option<(PqStream<Stream<S>>, StartupMessageParams)>> {
+) -> Result<HandshakeData<S>, HandshakeError> {
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
 
@@ -49,14 +90,14 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         // pipelining in our node js driver. We should probably
                         // support that by chaining read_buf with the stream.
                         if !read_buf.is_empty() {
-                            bail!("data is sent before server replied with EncryptionResponse");
+                            return Err(HandshakeError::EarlyData);
                         }
                         let tls_stream = raw.upgrade(tls.to_server_config()).await?;
 
                         let (_, tls_server_end_point) = tls
                             .cert_resolver
                             .resolve(tls_stream.get_ref().1.server_name())
-                            .context("missing certificate")?;
+                            .ok_or(HandshakeError::MissingCertificate)?;
 
                         stream = PqStream::new(Stream::Tls {
                             tls: Box::new(tls_stream),
@@ -64,7 +105,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         });
                     }
                 }
-                _ => bail!(ERR_PROTO_VIOLATION),
+                _ => return Err(HandshakeError::ProtocolViolation),
             },
             GssEncRequest => match stream.get_ref() {
                 Stream::Raw { .. } if !tried_gss => {
@@ -73,23 +114,24 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     // Currently, we don't support GSSAPI
                     stream.write_message(&Be::EncryptionResponse(false)).await?;
                 }
-                _ => bail!(ERR_PROTO_VIOLATION),
+                _ => return Err(HandshakeError::ProtocolViolation),
             },
             StartupMessage { params, .. } => {
                 // Check that the config has been consumed during upgrade
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
-                    stream.throw_error_str(ERR_INSECURE_CONNECTION).await?;
+                    stream
+                        .write_message(&Be::ErrorResponse(ERR_INSECURE_CONNECTION, None))
+                        .await?;
+                    return Err(HandshakeError::InsecureConnection);
                 }
 
                 info!(session_type = "normal", "successful handshake");
-                break Ok(Some((stream, params)));
+                break Ok(HandshakeData::Startup(stream, params));
             }
             CancelRequest(cancel_key_data) => {
-                cancel_map.cancel_session(cancel_key_data).await?;
-
                 info!(session_type = "cancellation", "successful handshake");
-                break Ok(None);
+                break Ok(HandshakeData::Cancel(cancel_key_data));
             }
         }
     }
