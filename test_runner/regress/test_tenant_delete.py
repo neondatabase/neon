@@ -638,6 +638,7 @@ def test_tenant_delete_races_timeline_creation(
     def tenant_delete():
         def tenant_delete_inner():
             ps_http.tenant_delete(tenant_id)
+
         wait_until(100, 0.5, tenant_delete_inner)
 
     Thread(target=tenant_delete).start()
