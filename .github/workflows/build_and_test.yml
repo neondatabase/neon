@@ -376,7 +376,7 @@ jobs:
       - name: Run cargo build
         run: |
           export LD_PRELOAD="${LIBASAN_LIB_PATH}"
-          LD_PRELOAD="${LIBASAN_LIB_PATH}" ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run rust tests
         run: |
