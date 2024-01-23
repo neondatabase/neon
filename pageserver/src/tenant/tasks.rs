@@ -232,27 +232,7 @@ fn log_compaction_error(
     let decision = match e {
         ShuttingDown => None,
         _ if task_cancelled => Some(LooksLike::Info),
-        Other(e) => {
-            let root_cause = e.root_cause();
-
-            let is_stopping = {
-                let upload_queue = root_cause
-                    .downcast_ref::<NotInitialized>()
-                    .is_some_and(|e| e.is_stopping());
-
-                let timeline = root_cause
-                    .downcast_ref::<PageReconstructError>()
-                    .is_some_and(|e| e.is_stopping());
-
-                upload_queue || timeline
-            };
-
-            if is_stopping {
-                Some(LooksLike::Info)
-            } else {
-                Some(LooksLike::Error)
-            }
-        }
+        Other(e) => Some(LooksLike::Error),
     };
 
     match decision {

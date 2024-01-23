@@ -103,11 +103,14 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
-use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::{config::TenantConf, upload_queue::NotInitialized};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{
+    remote_timeline_client::index::{IndexLayerMetadata, IndexPart},
+    storage_layer::layer,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -844,8 +847,7 @@ impl Timeline {
                 // "enough".
                 let layers = self
                     .create_image_layers(&partitioning, lsn, false, &image_ctx)
-                    .await
-                    .map_err(anyhow::Error::from)?;
+                    .await?;
                 if let Some(remote_client) = &self.remote_client {
                     for layer in layers {
                         remote_client.schedule_layer_file_upload(layer)?;
@@ -3212,7 +3214,46 @@ pub(crate) enum CompactionError {
     ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl CompactionError {
+    fn other<E>(err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        CompactionError::Other(anyhow::Error::new(err))
+    }
+}
+
+impl From<PageReconstructError> for CompactionError {
+    fn from(value: PageReconstructError) -> Self {
+        if value.is_stopping() {
+            CompactionError::ShuttingDown
+        } else {
+            CompactionError::other(value)
+        }
+    }
+}
+
+impl From<NotInitialized> for CompactionError {
+    fn from(value: NotInitialized) -> Self {
+        if value.is_stopping() {
+            CompactionError::ShuttingDown
+        } else {
+            CompactionError::other(value)
+        }
+    }
+}
+
+impl From<layer::DownloadError> for CompactionError {
+    fn from(value: layer::DownloadError) -> Self {
+        if value.is_cancelled() {
+            CompactionError::ShuttingDown
+        } else {
+            CompactionError::other(value)
+        }
+    }
 }
 
 #[serde_as]
@@ -3345,7 +3386,7 @@ impl Timeline {
         stats.read_lock_held_spawn_blocking_startup_micros =
             stats.read_lock_acquisition_micros.till_now(); // set by caller
         let layers = guard.layer_map();
-        let level0_deltas = layers.get_level0_deltas()?;
+        let level0_deltas = layers.get_level0_deltas();
         let mut level0_deltas = level0_deltas
             .into_iter()
             .map(|x| guard.get_from_desc(&x))
@@ -3392,7 +3433,8 @@ impl Timeline {
                         delta
                             .download_and_keep_resident()
                             .await
-                            .context("download layer for failpoint")?,
+                            .context("download layer for failpoint")
+                            .map_err(CompactionError::Other)?,
                     );
                 }
                 tracing::info!("compact-level0-phase1-return-same"); // so that we can check if we hit the failpoint
@@ -3476,7 +3518,7 @@ impl Timeline {
         let mut all_keys = Vec::new();
 
         for l in deltas_to_compact.iter() {
-            all_keys.extend(l.load_keys(ctx).await?);
+            all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
         }
 
         // FIXME: should spawn_blocking the rest of this function
@@ -3496,7 +3538,10 @@ impl Timeline {
                     // has not so much sense, because largest holes will corresponds field1/field2 changes.
                     // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
                     // That is why it is better to measure size of hole as number of covering image layers.
-                    let coverage_size = layers.image_coverage(&key_range, last_record_lsn)?.len();
+                    let coverage_size = layers
+                        .image_coverage(&key_range, last_record_lsn)
+                        .map_err(CompactionError::Other)?
+                        .len();
                     if coverage_size >= min_hole_coverage_size {
                         heap.push(Hole {
                             key_range,
@@ -3595,7 +3640,7 @@ impl Timeline {
             key, lsn, ref val, ..
         } in all_values_iter
         {
-            let value = val.load(ctx).await?;
+            let value = val.load(ctx).await.map_err(CompactionError::Other)?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -3652,7 +3697,8 @@ impl Timeline {
                                 .take()
                                 .unwrap()
                                 .finish(prev_key.unwrap().next(), self)
-                                .await?,
+                                .await
+                                .map_err(CompactionError::Other)?,
                         );
                         writer = None;
 
@@ -3682,7 +3728,8 @@ impl Timeline {
                             lsn_range.clone()
                         },
                     )
-                    .await?,
+                    .await
+                    .map_err(CompactionError::Other)?,
                 );
             }
 
@@ -3693,7 +3740,12 @@ impl Timeline {
             });
 
             if !self.shard_identity.is_key_disposable(&key) {
-                writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+                writer
+                    .as_mut()
+                    .unwrap()
+                    .put_value(key, lsn, value)
+                    .await
+                    .map_err(CompactionError::Other)?;
             } else {
                 debug!(
                     "Dropping key {} during compaction (it belongs on shard {:?})",
@@ -3709,7 +3761,12 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next(), self).await?);
+            new_layers.push(
+                writer
+                    .finish(prev_key.unwrap().next(), self)
+                    .await
+                    .map_err(CompactionError::Other)?,
+            );
         }
 
         // Sync layers
@@ -3738,7 +3795,8 @@ impl Timeline {
             // minimize latency.
             par_fsync::par_fsync_async(&layer_paths)
                 .await
-                .context("fsync all new layers")?;
+                .context("fsync all new layers")
+                .map_err(CompactionError::Other)?;
 
             let timeline_dir = self
                 .conf
@@ -3746,7 +3804,8 @@ impl Timeline {
 
             par_fsync::par_fsync_async(&[timeline_dir])
                 .await
-                .context("fsync of timeline dir")?;
+                .context("fsync of timeline dir")
+                .map_err(CompactionError::Other)?;
         }
 
         stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
