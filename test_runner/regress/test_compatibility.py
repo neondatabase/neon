@@ -138,6 +138,7 @@ def test_create_snapshot(
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
+    env.attachment_service.stop()
 
     # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
     compatibility_snapshot_dir = (
