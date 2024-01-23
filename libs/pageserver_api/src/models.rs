@@ -1015,7 +1015,7 @@ mod tests {
                 },
             }),
             PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                horizon: Lsn(4),
+                horizon: Lsn::INVALID,
                 lsn: Lsn(4),
                 rel: RelTag {
                     forknum: 1,
@@ -1026,7 +1026,7 @@ mod tests {
             }),
             PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
                 horizon: Lsn::MAX,
-                lsn: Lsn(4),
+                lsn: Lsn::INVALID,
                 rel: RelTag {
                     forknum: 1,
                     spcnode: 2,
