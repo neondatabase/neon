@@ -150,12 +150,10 @@ impl super::Api for Api {
         &self,
         _ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<Option<CachedRoleSecret>, GetAuthInfoError> {
-        Ok(self
-            .do_get_auth_info(user_info)
-            .await?
-            .secret
-            .map(CachedRoleSecret::new_uncached))
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        Ok(CachedRoleSecret::new_uncached(
+            self.do_get_auth_info(user_info).await?.secret,
+        ))
     }
 
     async fn get_allowed_ips(

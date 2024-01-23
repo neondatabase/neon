@@ -235,7 +235,7 @@ pub struct NodeInfo {
 
 pub type NodeInfoCache = TimedLru<SmolStr, NodeInfo>;
 pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
-pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, AuthSecret>;
+pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<SmolStr>>>;
 
 /// This will allocate per each call, but the http requests alone
@@ -249,7 +249,7 @@ pub trait Api {
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<Option<CachedRoleSecret>, errors::GetAuthInfoError>;
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
@@ -280,7 +280,7 @@ impl Api for ConsoleBackend {
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<Option<CachedRoleSecret>, errors::GetAuthInfoError> {
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
         use ConsoleBackend::*;
         match self {
             Console(api) => api.get_role_secret(ctx, user_info).await,
