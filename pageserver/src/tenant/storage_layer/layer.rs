@@ -290,7 +290,7 @@ impl Layer {
     }
 
     /// Downloads if necessary and creates a guard, which will keep this layer from being evicted.
-    pub(crate) async fn download_and_keep_resident(&self) -> anyhow::Result<ResidentLayer> {
+    pub(crate) async fn download_and_keep_resident(&self) -> Result<ResidentLayer, DownloadError> {
         let downloaded = self.0.get_or_maybe_download(true, None).await?;
 
         Ok(ResidentLayer {
@@ -1174,7 +1174,7 @@ pub(crate) enum EvictionError {
 
 /// Error internal to the [`LayerInner::get_or_maybe_download`]
 #[derive(Debug, thiserror::Error)]
-enum DownloadError {
+pub(crate) enum DownloadError {
     #[error("timeline has already shutdown")]
     TimelineShutdown,
     #[error("no remote storage configured")]
@@ -1195,6 +1195,15 @@ enum DownloadError {
     PreStatFailed(#[source] std::io::Error),
     #[error("post-condition: stat after download failed")]
     PostStatFailed(#[source] std::io::Error),
+}
+
+impl DownloadError {
+    pub fn is_cancelled(&self) -> bool {
+        match self {
+            Self::TimelineShutdown | Self::DownloadCancelled => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]

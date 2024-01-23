@@ -1881,7 +1881,7 @@ impl Tenant {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(), timeline::CompactionError> {
+    ) -> Result<(), timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
             return Ok(());

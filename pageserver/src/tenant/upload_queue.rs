@@ -234,7 +234,9 @@ impl UploadQueue {
         Ok(self.initialized_mut().expect("we just set it"))
     }
 
-    pub(crate) fn initialized_mut(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
+    pub(crate) fn initialized_mut(
+        &mut self,
+    ) -> Result<&mut UploadQueueInitialized, NotInitialized> {
         use UploadQueue::*;
         match self {
             Uninitialized => Err(NotInitialized::Uninitialized.into()),

@@ -237,7 +237,7 @@ use utils::id::{TenantId, TimelineId};
 use self::index::IndexPart;
 
 use super::storage_layer::{Layer, LayerFileName, ResidentLayer};
-use super::upload_queue::SetDeletedFlagProgress;
+use super::upload_queue::{self, SetDeletedFlagProgress};
 use super::Generation;
 
 pub(crate) use download::{is_temp_download_file, list_remote_timelines};
@@ -621,7 +621,9 @@ impl RemoteTimelineClient {
     ///
     /// Like schedule_index_upload_for_metadata_update(), this merely adds
     /// the upload to the upload queue and returns quickly.
-    pub fn schedule_index_upload_for_file_changes(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub(crate) fn schedule_index_upload_for_file_changes(
+        self: &Arc<Self>,
+    ) -> Result<(), upload_queue::NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -666,7 +668,7 @@ impl RemoteTimelineClient {
     pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
         layer: ResidentLayer,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), upload_queue::NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -875,7 +877,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         compacted_from: &[Layer],
         compacted_to: &[ResidentLayer],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), upload_queue::NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
