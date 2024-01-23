@@ -13,10 +13,14 @@
 use clap::{command, Parser};
 use futures_core::Stream;
 use futures_util::StreamExt;
+use http::Request;
+use hyper::body::Incoming;
 use hyper::header::CONTENT_TYPE;
 use hyper::server::conn::AddrStream;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, StatusCode};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -24,6 +28,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time;
@@ -596,9 +601,7 @@ impl BrokerService for Broker {
 }
 
 // We serve only metrics and healthcheck through http1.
-async fn http1_handler(
-    req: hyper::Request<hyper::body::Body>,
-) -> Result<hyper::Response<Body>, Infallible> {
+async fn http1_handler(req: hyper::Request<Body>) -> Result<hyper::Response<Body>, Infallible> {
     let resp = match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") => {
             let mut buffer = vec![];
@@ -662,16 +665,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage_broker_server = BrokerServiceServer::new(storage_broker_impl);
 
     info!("listening on {}", &args.listen_addr);
+    let listener = TcpListener::bind(args.listen_addr).await?;
 
     // grpc is served along with http1 for metrics on a single port, hence we
     // don't use tonic's Server.
-    hyper::Server::bind(&args.listen_addr)
-        .http2_keep_alive_interval(Some(args.http2_keepalive_interval))
-        .serve(make_service_fn(move |conn: &AddrStream| {
+    loop {
+        let (stream, remote_addr) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+
+        tokio::task::spawn(async move {
             let storage_broker_server_cloned = storage_broker_server.clone();
             let connect_info = conn.connect_info();
-            async move {
-                Ok::<_, Infallible>(service_fn(move |mut req| {
+            let service = async move {
+                Ok::<_, Infallible>(service_fn(move |mut req: Request<Incoming>| {
                     // That's what tonic's MakeSvc.call does to pass conninfo to
                     // the request handler (and where its request.remote_addr()
                     // expects it to find).
@@ -690,6 +696,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if req.headers().get("content-type").map(|x| x.as_bytes())
                             == Some(b"application/grpc")
                         {
+                            // TODO: this doesn't work :(
+                            let (parts, body) = req.into_parts();
+                            let req = http0_2::Request::from_parts(parts, body);
                             let res_resp = storage_broker_server_svc.call(req).await;
                             // Grpc and http1 handlers have slightly different
                             // Response types: it is UnsyncBoxBody for the
@@ -703,10 +712,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }))
+            };
+
+            let builder = conn::auto::Builder::new(TokioExecutor::new())
+                .http2()
+                .keep_alive_interval(Some(args.http2_keepalive_interval));
+
+            if let Err(err) = builder.serve_connection(io, service).await {
+                tracing::error!("Error serving connection: {:?}", err);
             }
-        }))
-        .await?;
-    Ok(())
+        });
+    }
 }
 
 #[cfg(test)]

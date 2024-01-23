@@ -10,13 +10,15 @@ use std::{
 };
 
 use bytes::{Buf, BytesMut};
-use hyper::server::conn::{AddrIncoming, AddrStream};
 use pin_project_lite::pin_project;
 use tls_listener::AsyncAccept;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf},
+    net::{TcpListener, TcpStream},
+};
 
 pub struct ProxyProtocolAccept {
-    pub incoming: AddrIncoming,
+    pub incoming: TcpListener,
 }
 
 pin_project! {
@@ -327,20 +329,18 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
 }
 
 impl AsyncAccept for ProxyProtocolAccept {
-    type Connection = WithClientIp<AddrStream>;
+    type Connection = WithClientIp<TcpStream>;
 
+    type Address = SocketAddr;
     type Error = io::Error;
 
     fn poll_accept(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Connection, Self::Error>>> {
-        let conn = ready!(Pin::new(&mut self.incoming).poll_accept(cx)?);
-        let Some(conn) = conn else {
-            return Poll::Ready(None);
-        };
-
-        Poll::Ready(Some(Ok(WithClientIp::new(conn))))
+    ) -> Poll<Result<(Self::Connection, Self::Address), Self::Error>> {
+        Pin::new(&mut self.incoming)
+            .poll_accept(cx)
+            .map_ok(|(c, a)| (WithClientIp::new(c), a))
     }
 }
 

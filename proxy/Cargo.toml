@@ -28,7 +28,11 @@ hmac.workspace = true
 hostname.workspace = true
 humantime.workspace = true
 hyper-tungstenite.workspace = true
-hyper.workspace = true
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true, features = ["tokio", "server", "server-auto"] }
+http = { workspace = true, features = [] }
+http-body = { workspace = true, features = [] }
+http-body-util = { workspace = true, features = [] }
 ipnet.workspace = true
 itertools.workspace = true
 md5.workspace = true

@@ -1,6 +1,8 @@
-use anyhow::Context;
-use bytes::Buf;
-use hyper::{header, Body, Request, Response, StatusCode};
+use anyhow::{anyhow, Context};
+use bytes::{Buf, Bytes};
+use http_body_util::{BodyExt, Full};
+use hyper::{header, Request, Response, StatusCode};
+use routerify::Body;
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
@@ -18,10 +20,14 @@ pub async fn json_request<T: for<'de> Deserialize<'de>>(
 pub async fn json_request_or_empty_body<T: for<'de> Deserialize<'de>>(
     request: &mut Request<Body>,
 ) -> Result<Option<T>, ApiError> {
-    let body = hyper::body::aggregate(request.body_mut())
+    let body = request
+        .body_mut()
+        .collect()
         .await
+        .map_err(|e| anyhow!(e))
         .context("Failed to read request body")
-        .map_err(ApiError::BadRequest)?;
+        .map_err(ApiError::BadRequest)?
+        .aggregate();
     if body.remaining() == 0 {
         return Ok(None);
     }
@@ -35,17 +41,24 @@ pub async fn json_request_or_empty_body<T: for<'de> Deserialize<'de>>(
         .map_err(ApiError::BadRequest)
 }
 
-pub fn json_response<T: Serialize>(
+pub fn json_response_body<T: Serialize>(
     status: StatusCode,
     data: T,
 ) -> Result<Response<Body>, ApiError> {
+    json_response(status, data).map(|r| r.map(Body::new))
+}
+
+pub fn json_response<T: Serialize>(
+    status: StatusCode,
+    data: T,
+) -> Result<Response<Full<Bytes>>, ApiError> {
     let json = serde_json::to_string(&data)
         .context("Failed to serialize JSON response")
         .map_err(ApiError::InternalServerError)?;
     let response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json))
+        .body(Full::from(json))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
 }

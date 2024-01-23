@@ -4,7 +4,10 @@ use crate::http::{
     error::ApiError,
     json::{json_request, json_response},
 };
-use hyper::{Body, Request, Response, StatusCode};
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::{Request, Response, StatusCode};
+use routerify::Body;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -151,7 +154,7 @@ pub struct FailpointConfig {
 pub async fn failpoints_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
+) -> Result<Response<Full<Bytes>>, ApiError> {
     if !fail::has_failpoints() {
         return Err(ApiError::BadRequest(anyhow::anyhow!(
             "Cannot manage failpoints because storage was compiled without failpoints support"

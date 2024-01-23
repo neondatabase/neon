@@ -36,7 +36,9 @@ use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
 use bytes::Bytes;
 use futures::stream::Stream;
-use hyper::Body;
+use futures_util::TryStreamExt;
+use http_body::Frame;
+use http_body_util::StreamBody;
 use scopeguard::ScopeGuard;
 
 use super::StorageMetadata;
@@ -469,8 +471,8 @@ impl RemoteStorage for S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let body = Body::wrap_stream(from);
-        let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
+        let body = StreamBody::new(from.map_ok(Frame::data));
+        let bytes_stream = ByteStream::new(SdkBody::from_body_1_x(body));
 
         let res = self
             .client

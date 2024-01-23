@@ -3,8 +3,9 @@ use std::{borrow::Cow, str::FromStr};
 
 use super::error::ApiError;
 use anyhow::anyhow;
-use hyper::{body::HttpBody, Body, Request};
-use routerify::ext::RequestExt;
+use http_body_util::BodyExt;
+use hyper::Request;
+use routerify::{ext::RequestExt, Body};
 
 pub fn get_request_param<'a>(
     request: &'a Request<Body>,
@@ -75,7 +76,7 @@ pub fn parse_query_param<E: fmt::Display, T: FromStr<Err = E>>(
 }
 
 pub async fn ensure_no_body(request: &mut Request<Body>) -> Result<(), ApiError> {
-    match request.body_mut().data().await {
+    match request.body_mut().frame().await {
         Some(_) => Err(ApiError::BadRequest(anyhow!("Unexpected request body"))),
         None => Ok(()),
     }

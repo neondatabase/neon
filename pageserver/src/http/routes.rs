@@ -12,7 +12,7 @@ use futures::TryFutureExt;
 use humantime::format_rfc3339;
 use hyper::header;
 use hyper::StatusCode;
-use hyper::{Body, Request, Response, Uri};
+use hyper::{Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::ShardParameters;
@@ -32,6 +32,7 @@ use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
+use utils::http::Body;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -64,7 +65,7 @@ use utils::{
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
-        json::{json_request, json_response},
+        json::{json_request, json_response_body as json_response},
         request::parse_request_param,
         RequestExt, RouterBuilder,
     },
@@ -1571,7 +1572,7 @@ async fn getpage_at_lsn_handler(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/octet-stream")
-                .body(hyper::Body::from(page))
+                .body(Body::from(page))
                 .unwrap(),
         )
     }
@@ -1868,7 +1869,7 @@ pub fn make_router(
     state: Arc<State>,
     launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<SwappableJwtAuth>>,
-) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
+) -> anyhow::Result<RouterBuilder<Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
     if auth.is_some() {

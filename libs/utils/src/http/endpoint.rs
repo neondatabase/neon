@@ -4,11 +4,11 @@ use anyhow::Context;
 use hyper::header::{HeaderName, AUTHORIZATION};
 use hyper::http::HeaderValue;
 use hyper::Method;
-use hyper::{header::CONTENT_TYPE, Body, Request, Response};
+use hyper::{header::CONTENT_TYPE, Request, Response};
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
-use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
+use routerify::{Body, Middleware, RequestInfo, Router, RouterBuilder};
 use tracing::{self, debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
@@ -238,7 +238,7 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
     let (tx, rx) = mpsc::channel(1);
 
-    let body = Body::wrap_stream(ReceiverStream::new(rx));
+    let body = Body::from_stream(ReceiverStream::new(rx));
 
     let mut writer = ChannelWriter::new(128 * 1024, tx);
 
@@ -284,7 +284,7 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
     Ok(response)
 }
 
-pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
+pub fn add_request_id_middleware<B: hyper::body::Body + Send + Sync + 'static>(
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         let request_id = match req.headers().get(&X_REQUEST_ID_HEADER) {
@@ -317,7 +317,7 @@ async fn add_request_id_header_to_response(
     Ok(res)
 }
 
-pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
+pub fn make_router() -> RouterBuilder<routerify::Body, ApiError> {
     Router::builder()
         .middleware(add_request_id_middleware())
         .middleware(Middleware::post_with_info(
@@ -328,11 +328,11 @@ pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
 }
 
 pub fn attach_openapi_ui(
-    router_builder: RouterBuilder<hyper::Body, ApiError>,
+    router_builder: RouterBuilder<routerify::Body, ApiError>,
     spec: &'static [u8],
     spec_mount_path: &'static str,
     ui_mount_path: &'static str,
-) -> RouterBuilder<hyper::Body, ApiError> {
+) -> RouterBuilder<routerify::Body, ApiError> {
     router_builder
         .get(spec_mount_path,
             move |r| request_span(r, move |_| async move {
@@ -388,7 +388,7 @@ fn parse_token(header_value: &str) -> Result<&str, ApiError> {
     Ok(token)
 }
 
-pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
+pub fn auth_middleware<B: hyper::body::Body + Send + Sync + 'static>(
     provide_auth: fn(&Request<Body>) -> Option<&SwappableJwtAuth>,
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
@@ -423,7 +423,7 @@ pub fn add_response_header_middleware<B>(
     value: &str,
 ) -> anyhow::Result<Middleware<B, ApiError>>
 where
-    B: hyper::body::HttpBody + Send + Sync + 'static,
+    B: hyper::body::Body + Send + Sync + 'static,
 {
     let name =
         HeaderName::from_str(header).with_context(|| format!("invalid header name: {header}"))?;
@@ -464,7 +464,6 @@ pub fn check_permission_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::future::poll_fn;
     use hyper::service::Service;
     use routerify::RequestServiceBuilder;
     use std::net::{IpAddr, SocketAddr};
@@ -473,16 +472,13 @@ mod tests {
     async fn test_request_id_returned() {
         let builder = RequestServiceBuilder::new(make_router().build().unwrap()).unwrap();
         let remote_addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 80);
-        let mut service = builder.build(remote_addr);
-        if let Err(e) = poll_fn(|ctx| service.poll_ready(ctx)).await {
-            panic!("request service is not ready: {:?}", e);
-        }
+        let service = builder.build(remote_addr);
 
         let mut req: Request<Body> = Request::default();
         req.headers_mut()
             .append(&X_REQUEST_ID_HEADER, HeaderValue::from_str("42").unwrap());
 
-        let resp: Response<hyper::body::Body> = service.call(req).await.unwrap();
+        let resp: Response<Body> = service.call(req).await.unwrap();
 
         let header_val = resp.headers().get(&X_REQUEST_ID_HEADER).unwrap();
 
@@ -493,13 +489,10 @@ mod tests {
     async fn test_request_id_empty() {
         let builder = RequestServiceBuilder::new(make_router().build().unwrap()).unwrap();
         let remote_addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 80);
-        let mut service = builder.build(remote_addr);
-        if let Err(e) = poll_fn(|ctx| service.poll_ready(ctx)).await {
-            panic!("request service is not ready: {:?}", e);
-        }
+        let service = builder.build(remote_addr);
 
         let req: Request<Body> = Request::default();
-        let resp: Response<hyper::body::Body> = service.call(req).await.unwrap();
+        let resp: Response<Body> = service.call(req).await.unwrap();
 
         let header_val = resp.headers().get(&X_REQUEST_ID_HEADER);
 
