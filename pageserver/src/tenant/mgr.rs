@@ -2074,18 +2074,22 @@ fn tenant_map_peek_slot<'a>(
     tenant_shard_id: &TenantShardId,
     mode: TenantSlotPeekMode,
 ) -> Result<Option<&'a TenantSlot>, TenantMapError> {
-    let m = match tenants.deref() {
-        TenantsMap::Initializing => return Err(TenantMapError::StillInitializing),
+    match tenants.deref() {
+        TenantsMap::Initializing => Err(TenantMapError::StillInitializing),
         TenantsMap::ShuttingDown(m) => match mode {
-            TenantSlotPeekMode::Read => m,
-            TenantSlotPeekMode::Write => {
-                return Err(TenantMapError::ShuttingDown);
-            }
+            TenantSlotPeekMode::Read => Ok(Some(
+                // When reading in ShuttingDown state, we must translate None results
+                // into a ShuttingDown error, because absence of a tenant shard ID in the map
+                // isn't a reliable indicator of the tenant being gone: it might have been
+                // InProgress when shutdown started, and cleaned up from that state such
+                // that it's now no longer in the map.  Callers will have to wait until
+                // we next start up to get a proper answer.  This avoids incorrect 404 API responses.
+                m.get(tenant_shard_id).ok_or(TenantMapError::ShuttingDown)?,
+            )),
+            TenantSlotPeekMode::Write => Err(TenantMapError::ShuttingDown),
         },
-        TenantsMap::Open(m) => m,
-    };
-
-    Ok(m.get(tenant_shard_id))
+        TenantsMap::Open(m) => Ok(m.get(tenant_shard_id)),
+    }
 }
 
 enum TenantSlotAcquireMode {
