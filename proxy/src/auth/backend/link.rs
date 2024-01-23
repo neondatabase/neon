@@ -2,7 +2,7 @@ use crate::{
     auth, compute,
     console::{self, provider::NodeInfo},
     context::RequestMonitoring,
-    error::UserFacingError,
+    error::{ReportableError, UserFacingError},
     stream::PqStream,
     waiters,
 };
@@ -34,6 +34,17 @@ impl UserFacingError for LinkAuthError {
         match self {
             AuthFailed(_) => self.to_string(),
             _ => "Internal error".to_string(),
+        }
+    }
+}
+
+impl ReportableError for LinkAuthError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        match self {
+            LinkAuthError::AuthFailed(_) => crate::error::ErrorKind::User,
+            LinkAuthError::WaiterRegister(_) => crate::error::ErrorKind::Service,
+            LinkAuthError::WaiterWait(_) => crate::error::ErrorKind::Service,
+            LinkAuthError::Io(_) => crate::error::ErrorKind::Disconnect,
         }
     }
 }

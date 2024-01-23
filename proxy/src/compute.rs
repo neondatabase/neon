@@ -1,6 +1,10 @@
 use crate::{
-    auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
-    context::RequestMonitoring, error::UserFacingError, metrics::NUM_DB_CONNECTIONS_GAUGE,
+    auth::parse_endpoint_param,
+    cancellation::CancelClosure,
+    console::errors::WakeComputeError,
+    context::RequestMonitoring,
+    error::{ReportableError, UserFacingError},
+    metrics::NUM_DB_CONNECTIONS_GAUGE,
     proxy::neon_option,
 };
 use futures::{FutureExt, TryFutureExt};
@@ -54,6 +58,17 @@ impl UserFacingError for ConnectionError {
             },
             WakeComputeError(err) => err.to_string_client(),
             _ => COULD_NOT_CONNECT.to_owned(),
+        }
+    }
+}
+
+impl ReportableError for ConnectionError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        match self {
+            ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::WakeComputeError(e) => e.get_error_type(),
         }
     }
 }

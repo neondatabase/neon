@@ -1,8 +1,12 @@
 //! User credentials used in authentication.
 
 use crate::{
-    auth::password_hack::parse_endpoint_param, context::RequestMonitoring, error::UserFacingError,
-    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::NeonOptions, serverless::SERVERLESS_DRIVER_SNI,
+    auth::password_hack::parse_endpoint_param,
+    context::RequestMonitoring,
+    error::{ReportableError, UserFacingError},
+    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI,
+    proxy::NeonOptions,
+    serverless::SERVERLESS_DRIVER_SNI,
     EndpointId, RoleName,
 };
 use itertools::Itertools;
@@ -38,6 +42,12 @@ pub enum ComputeUserInfoParseError {
 }
 
 impl UserFacingError for ComputeUserInfoParseError {}
+
+impl ReportableError for ComputeUserInfoParseError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        crate::error::ErrorKind::User
+    }
+}
 
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.

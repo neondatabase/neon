@@ -17,7 +17,7 @@ pub fn log_error<E: fmt::Display>(e: E) -> E {
 /// NOTE: This trait should not be implemented for [`anyhow::Error`], since it
 /// is way too convenient and tends to proliferate all across the codebase,
 /// ultimately leading to accidental leaks of sensitive data.
-pub trait UserFacingError: fmt::Display {
+pub trait UserFacingError: ReportableError {
     /// Format the error for client, stripping all sensitive info.
     ///
     /// Although this might be a no-op for many types, it's highly
@@ -61,4 +61,8 @@ impl ErrorKind {
             ErrorKind::Compute => "non-retryable compute error (or exhausted retry capacity)",
         }
     }
+}
+
+pub trait ReportableError: fmt::Display + Send + 'static {
+    fn get_error_type(&self) -> ErrorKind;
 }

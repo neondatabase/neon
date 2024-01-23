@@ -15,7 +15,10 @@ use password_hack::PasswordHackPayload;
 mod flow;
 pub use flow::*;
 
-use crate::{console, error::UserFacingError};
+use crate::{
+    console,
+    error::{ReportableError, UserFacingError},
+};
 use std::io;
 use thiserror::Error;
 
@@ -116,6 +119,25 @@ impl UserFacingError for AuthError {
             Io(_) => "Internal error".to_string(),
             IpAddressNotAllowed => self.to_string(),
             TooManyConnections => self.to_string(),
+        }
+    }
+}
+
+impl ReportableError for AuthError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        use AuthErrorImpl::*;
+        match self.0.as_ref() {
+            Link(e) => e.get_error_type(),
+            GetAuthInfo(e) => e.get_error_type(),
+            WakeCompute(e) => e.get_error_type(),
+            Sasl(e) => e.get_error_type(),
+            AuthFailed(_) => crate::error::ErrorKind::User,
+            BadAuthMethod(_) => crate::error::ErrorKind::User,
+            MalformedPassword(_) => crate::error::ErrorKind::User,
+            MissingEndpointName => crate::error::ErrorKind::User,
+            Io(_) => crate::error::ErrorKind::Disconnect,
+            IpAddressNotAllowed => crate::error::ErrorKind::User,
+            TooManyConnections => crate::error::ErrorKind::RateLimit,
         }
     }
 }
