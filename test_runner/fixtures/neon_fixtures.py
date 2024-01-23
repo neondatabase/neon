@@ -3282,6 +3282,24 @@ class SafekeeperHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def patch_control_file(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        patch: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        res = self.patch(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/control_file",
+            json={
+                "updates": patch,
+                "apply_fields": list(patch.keys()),
+            },
+        )
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
         res.raise_for_status()
