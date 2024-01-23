@@ -75,6 +75,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
+        println!("{}", libasan_path);
         println!("cargo:rustc-env=LD_PRELOAD={}", libasan_path);
     }
 

@@ -289,7 +289,7 @@ jobs:
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_FLAGS="--locked"
             ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:print_stacktrace=1:disable_coredump=0:\
-          strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=0"
+          strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=0:verify_asan_link_order=0"
             UBSAN_OPTIONS="abort_on_error=1:print_stacktrace=1"
             CC=gcc
             RUSTFLAGS="-C linker=gcc"
