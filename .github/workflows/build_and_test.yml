@@ -375,7 +375,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          export LD_PRELOAD=${LIBPATH}:$(gcc -print-file-name=libubsan.so)
+#          export LD_PRELOAD=${LIBPATH}:$(gcc -print-file-name=libubsan.so)
           cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests -v
 
       - name: Run rust tests

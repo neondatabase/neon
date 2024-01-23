@@ -20,7 +20,7 @@ else ifeq ($(BUILD_TYPE),debug)
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 	CPPFLAGS = -fsanitize=address -fsanitize=undefined -fno-sanitize-recover -fno-sanitize=alignment -Wno-cast-function-type-strict
 	LDFLAGS = -fsanitize=address -fsanitize=undefined -export-dynamic
-	LD_PRELOAD=$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libubsan.so)
+#	LD_PRELOAD=$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libubsan.so)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
