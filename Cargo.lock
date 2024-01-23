@@ -286,7 +286,6 @@ dependencies = [
  "pageserver_client",
  "postgres_backend",
  "postgres_connection",
- "scopeguard",
  "serde",
  "serde_json",
  "thiserror",

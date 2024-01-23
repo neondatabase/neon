@@ -1,5 +1,6 @@
 use std::{collections::HashMap, str::FromStr};
 
+use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use control_plane::{
     attachment_service::{NodeAvailability, NodeSchedulingPolicy},
@@ -11,7 +12,6 @@ use pageserver_api::{
 };
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
-use tracing::info;
 use utils::{
     generation::Generation,
     id::{NodeId, TenantId},
@@ -21,28 +21,50 @@ use crate::{node::Node, PlacementPolicy};
 
 /// Placeholder for storage.  This will be replaced with a database client.
 pub struct Persistence {
-    inner: std::sync::Mutex<Inner>,
+    state: std::sync::Mutex<PersistentState>,
 }
 
-struct Inner {
-    state: PersistentState,
-    write_queue_tx: tokio::sync::mpsc::UnboundedSender<PendingWrite>,
-}
-
+// Top level state available to all HTTP handlers
 #[derive(Serialize, Deserialize)]
 struct PersistentState {
     tenants: HashMap<TenantShardId, TenantShardPersistence>,
+
+    #[serde(skip)]
+    path: Utf8PathBuf,
 }
 
+/// A convenience for serializing the state inside a sync lock, and then
+/// writing it to disk outside of the lock.  This will go away when switching
+/// to a database backend.
 struct PendingWrite {
     bytes: Vec<u8>,
-    done_tx: tokio::sync::oneshot::Sender<()>,
+    path: Utf8PathBuf,
+}
+
+impl PendingWrite {
+    async fn commit(self) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            let tmp_path = utils::crashsafe::path_with_suffix_extension(&self.path, "___new");
+            utils::crashsafe::overwrite(&self.path, &tmp_path, &self.bytes)
+        })
+        .await
+        .context("spawn_blocking")?
+        .context("write file")
+    }
 }
 
 impl PersistentState {
+    fn save(&self) -> PendingWrite {
+        PendingWrite {
+            bytes: serde_json::to_vec(self).expect("Serialization error"),
+            path: self.path.clone(),
+        }
+    }
+
     async fn load(path: &Utf8Path) -> anyhow::Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         let mut decoded = serde_json::from_slice::<Self>(&bytes)?;
+        decoded.path = path.to_owned();
 
         for (tenant_id, tenant) in &mut decoded.tenants {
             // Backward compat: an old attachments.json from before PR #6251, replace
@@ -71,6 +93,7 @@ impl PersistentState {
                 tracing::info!("Will create state file at {}", path);
                 Self {
                     tenants: HashMap::new(),
+                    path: path.to_owned(),
                 }
             }
             Err(e) => {
@@ -81,72 +104,11 @@ impl PersistentState {
 }
 
 impl Persistence {
-    pub async fn spawn(path: &Utf8Path) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    pub async fn new(path: &Utf8Path) -> Self {
         let state = PersistentState::load_or_new(path).await;
-        tokio::spawn(Self::writer_task(rx, path.to_owned()));
         Self {
-            inner: std::sync::Mutex::new(Inner {
-                state,
-                write_queue_tx: tx,
-            }),
+            state: std::sync::Mutex::new(state),
         }
-    }
-
-    async fn writer_task(
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<PendingWrite>,
-        path: Utf8PathBuf,
-    ) {
-        scopeguard::defer! {
-            info!("persistence writer task exiting");
-        };
-        loop {
-            match rx.recv().await {
-                Some(write) => {
-                    tokio::task::spawn_blocking({
-                        let path = path.clone();
-                        move || {
-                            let tmp_path =
-                                utils::crashsafe::path_with_suffix_extension(&path, "___new");
-                            utils::crashsafe::overwrite(&path, &tmp_path, &write.bytes)
-                        }
-                    })
-                    .await
-                    .expect("spawn_blocking")
-                    .expect("write file");
-                    let _ = write.done_tx.send(()); // receiver may lose interest any time
-                }
-                None => {
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Perform a modification on our [`PersistentState`].
-    /// Return a future that completes once our modification has been persisted.
-    /// The output of the future is the return value of the `txn`` closure.
-    async fn mutating_transaction<F, R>(&self, txn: F) -> R
-    where
-        F: FnOnce(&mut PersistentState) -> R,
-    {
-        let (ret, done_rx) = {
-            let mut inner = self.inner.lock().unwrap();
-            let ret = txn(&mut inner.state);
-            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            let write = PendingWrite {
-                bytes: serde_json::to_vec(&inner.state).expect("Serialization error"),
-                done_tx,
-            };
-            inner
-                .write_queue_tx
-                .send(write)
-                .expect("writer task always outlives self");
-            (ret, done_rx)
-        };
-        // the write task can go away once we start .await'ing
-        let _: () = done_rx.await.expect("writer task dead, check logs");
-        ret
     }
 
     /// When registering a node, persist it so that on next start we will be able to
@@ -192,8 +154,8 @@ impl Persistence {
 
     /// At startup, we populate our map of tenant shards from persistent storage.
     pub(crate) async fn list_tenant_shards(&self) -> anyhow::Result<Vec<TenantShardPersistence>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner.state.tenants.values().cloned().collect())
+        let locked = self.state.lock().unwrap();
+        Ok(locked.tenants.values().cloned().collect())
     }
 
     /// Tenants must be persisted before we schedule them for the first time.  This enables us
@@ -202,7 +164,8 @@ impl Persistence {
         &self,
         shards: Vec<TenantShardPersistence>,
     ) -> anyhow::Result<()> {
-        self.mutating_transaction(|locked| {
+        let write = {
+            let mut locked = self.state.lock().unwrap();
             for shard in shards {
                 let tenant_shard_id = TenantShardId {
                     tenant_id: TenantId::from_str(shard.tenant_id.as_str())?,
@@ -212,9 +175,12 @@ impl Persistence {
 
                 locked.tenants.insert(tenant_shard_id, shard);
             }
-            Ok(())
-        })
-        .await
+            locked.save()
+        };
+
+        write.commit().await?;
+
+        Ok(())
     }
 
     /// Reconciler calls this immediately before attaching to a new pageserver, to acquire a unique, monotonically
@@ -225,7 +191,8 @@ impl Persistence {
         tenant_shard_id: TenantShardId,
         node_id: NodeId,
     ) -> anyhow::Result<Generation> {
-        self.mutating_transaction(|locked| {
+        let (write, gen) = {
+            let mut locked = self.state.lock().unwrap();
             let Some(shard) = locked.tenants.get_mut(&tenant_shard_id) else {
                 anyhow::bail!("Tried to increment generation of unknown shard");
             };
@@ -234,38 +201,46 @@ impl Persistence {
             shard.generation_pageserver = Some(node_id);
 
             let gen = Generation::new(shard.generation);
-            Ok(gen)
-        })
-        .await
+            (locked.save(), gen)
+        };
+
+        write.commit().await?;
+        Ok(gen)
     }
 
     pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
-        self.mutating_transaction(|locked| {
+        let write = {
+            let mut locked = self.state.lock().unwrap();
             let Some(shard) = locked.tenants.get_mut(&tenant_shard_id) else {
                 anyhow::bail!("Tried to increment generation of unknown shard");
             };
             shard.generation_pageserver = None;
             shard.placement_policy = serde_json::to_string(&PlacementPolicy::Detached).unwrap();
-            Ok(())
-        })
-        .await
+            locked.save()
+        };
+        write.commit().await?;
+        Ok(())
     }
 
     pub(crate) async fn re_attach(
         &self,
         node_id: NodeId,
     ) -> anyhow::Result<HashMap<TenantShardId, Generation>> {
-        self.mutating_transaction(|locked| {
+        let (write, result) = {
             let mut result = HashMap::new();
+            let mut locked = self.state.lock().unwrap();
             for (tenant_shard_id, shard) in locked.tenants.iter_mut() {
                 if shard.generation_pageserver == Some(node_id) {
                     shard.generation += 1;
                     result.insert(*tenant_shard_id, Generation::new(shard.generation));
                 }
             }
-            Ok(result)
-        })
-        .await
+
+            (locked.save(), result)
+        };
+
+        write.commit().await?;
+        Ok(result)
     }
 
     // TODO: when we start shard splitting, we must durably mark the tenant so that
