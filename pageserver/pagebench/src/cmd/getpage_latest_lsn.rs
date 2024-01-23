@@ -423,8 +423,8 @@ async fn client(
     tokio::select! {
         res = do_requests => { res },
         _ = cancel.cancelled() => {
-            client.shutdown().await;
-            return;
+            // fallthrough to shutdown
         }
     }
+    client.shutdown().await;
 }
