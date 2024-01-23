@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     sync::{atomic::AtomicU64, Arc},
     time::Duration,
 };
@@ -7,6 +6,7 @@ use std::{
 use dashmap::DashMap;
 use hashlink::LruCache;
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use smol_str::SmolStr;
 use tokio::time::Instant;
 use tracing::info;
@@ -60,7 +60,27 @@ pub struct ProjectInfoCacheImpl {
     ip_cache: Mutex<LruCache<SmolStr, Entry<Arc<Vec<IpPattern>>>>>,
     role_cache: Mutex<LruCache<(SmolStr, SmolStr), Entry<AuthSecret>>>,
 
-    project2ep: DashMap<SmolStr, HashSet<SmolStr>>,
+    // endpoints per project:
+    // P90:  1
+    // P99:  2
+    // P995: 3
+    // P999: 10
+    // P9999: 186
+    //
+    // Assuming 1 million projects with this distribution:
+    // (0.9 * 1 + 0.09 * 2 + 0.005 * 3 + 0.004 * 10 + 0.0009 * 186) * 1,000,000
+    // =~ 1,500,000 endpoints
+    //
+    // 1,000,000 * size_of(SmolStr) = 24MB
+    // 1,500,000 * size_of(SmolStr) = 36MB
+    // SmallVec inline overhead: 8B * 0.9 * 1,000,000 = 7.2MB
+    // SmallVec outline overhead: 32B * 0.1 * 1,000,000 = 3.2MB
+    //
+    // Total size: 70.4MB.
+    //
+    // We do not need to prune this hashmap and can safely
+    // keep it in memory up until 100s of millions of projects
+    project2ep: DashMap<SmolStr, SmallVec<[SmolStr; 1]>>,
 
     start_time: Instant,
     ttl: Duration,
@@ -204,7 +224,7 @@ impl ProjectInfoCacheImpl {
         self.project2ep
             .entry(project_id.clone())
             .or_default()
-            .insert(endpoint_id.clone());
+            .push(endpoint_id.clone());
     }
 
     fn get_cache_times(&self) -> (Instant, Option<Instant>) {
