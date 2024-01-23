@@ -859,6 +859,8 @@ def test_tenant_delete_races_timeline_creation(
     except PageserverApiException:
         pass
 
+    os.wait(4)
+
     # Physical deletion should have happened
     assert_prefix_empty(
         neon_env_builder.pageserver_remote_storage,
