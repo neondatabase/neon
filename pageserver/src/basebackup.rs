@@ -13,7 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
-use pageserver_api::key::Key;
+use pageserver_api::key::{key_to_slru_block, Key};
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
@@ -24,7 +24,7 @@ use tracing::*;
 use tokio_tar::{Builder, EntryType, Header};
 
 use crate::context::RequestContext;
-use crate::pgdatadir_mapping::{key_to_slru_block, Version};
+use crate::pgdatadir_mapping::Version;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
