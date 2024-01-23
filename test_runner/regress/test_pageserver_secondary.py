@@ -138,6 +138,16 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
             pageserver.stop()
             pageserver.start()
             if last_state_ps[0].startswith("Attached") and latest_attached == pageserver.id:
+                # /re-attach call will bump generation: track that in our state in case we do an
+                # "attach in same generation" operation later
+                assert last_state_ps[1] is not None  # latest_attached == pageserfer.id implies this
+                # The re-attach API increments generation by exactly one.
+                new_generation = last_state_ps[1] + 1
+                last_state[pageserver.id] = (last_state_ps[0], new_generation)
+                tenants = pageserver.http_client().tenant_list()
+                assert len(tenants) == 1
+                assert tenants[0]["generation"] == new_generation
+
                 log.info("Entering postgres...")
                 workload.churn_rows(rng.randint(128, 256), pageserver.id)
                 workload.validate(pageserver.id)
