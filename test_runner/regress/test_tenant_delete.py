@@ -571,9 +571,11 @@ def test_tenant_delete_races_timeline_creation(
     ps_http = env.pageserver.http_client()
     tenant_id = env.initial_tenant
 
-    # Sometimes it ends with "InternalServerError(Cancelled", sometimes with "InternalServerError(Operation was cancelled"
+    # When timeline creation is cancelled by tenant deletion, it is during Tenant::shutdown(), and
+    # acting on a shutdown tenant generates a 503 response (if caller retried they would later) get
+    # a 404 after the tenant is fully deleted.
     CANCELLED_ERROR = (
-        ".*POST.*Cancelled request finished with an error: InternalServerError\\(.*ancelled"
+        ".*POST.*Cancelled request finished successfully status=503 Service Unavailable"
     )
 
     # This can occur sometimes.
