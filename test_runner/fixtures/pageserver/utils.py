@@ -337,8 +337,22 @@ def tenant_delete_wait_completed(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
     iterations: int,
+    ignore_errors: bool = False,
 ):
-    pageserver_http.tenant_delete(tenant_id=tenant_id)
+    if not ignore_errors:
+        pageserver_http.tenant_delete(tenant_id=tenant_id)
+    else:
+        interval = 0.5
+        def delete_request_sent():
+            try:
+                pageserver_http.tenant_delete(tenant_id=tenant_id)
+            except PageserverApiException as e:
+                log.debug(e)
+                if e.status_code == 404:
+                    return
+            except Exception as e:
+                log.debug(e)
+        wait_until(iterations, interval=interval, func=delete_request_sent)
     wait_tenant_status_404(pageserver_http, tenant_id=tenant_id, iterations=iterations)
 
 

@@ -636,7 +636,9 @@ def test_tenant_delete_races_timeline_creation(
     ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
 
     def tenant_delete():
-        ps_http.tenant_delete(tenant_id)
+        def tenant_delete_inner():
+            ps_http.tenant_delete(tenant_id)
+        wait_until(100, 0.5, tenant_delete_inner)
 
     Thread(target=tenant_delete).start()
 
@@ -653,10 +655,8 @@ def test_tenant_delete_races_timeline_creation(
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-    try:
-        tenant_delete_wait_completed(ps_http, tenant_id, iterations)
-    except PageserverApiException:
-        pass
+
+    tenant_delete_wait_completed(ps_http, tenant_id, iterations, ignore_errors=True)
 
     # Physical deletion should have happened
     assert_prefix_empty(
