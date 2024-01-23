@@ -121,7 +121,7 @@ static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block
 static XLogRecPtr
 neon_get_horizon(bool latest)
 {
-	return latest ? MAX_LSN : RecoveryInProgress() ? GetXLogReplayRecPtr(NULL) : InvalidXlogRecPtr; /* horizon=InvalidXlogRecPtr is replaced with request_lsn at PS */
+	return latest ? MAX_LSN : RecoveryInProgress() ? GetXLogReplayRecPtr(NULL) : InvalidXLogRecPtr; /* horizon=InvalidXlogRecPtr is replaced with request_lsn at PS */
 }
 
 /*
