@@ -35,6 +35,7 @@ fn main() {
         logging::Output::Stderr,
     )
     .unwrap();
+    logging::replace_panic_hook_with_tracing_panic_hook().forget();
 
     let args = Args::parse();
     match args {

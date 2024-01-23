@@ -6,12 +6,15 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
+use tokio::io::AsyncBufReadExt;
+use tokio::time::timeout;
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, instrument};
 
@@ -363,7 +366,7 @@ pub fn create_pgdata(pgdata: &str) -> Result<()> {
 }
 
 /// Update pgbouncer.ini with provided options
-pub fn update_pgbouncer_ini(
+fn update_pgbouncer_ini(
     pgbouncer_config: HashMap<String, String>,
     pgbouncer_ini_path: &str,
 ) -> Result<()> {
@@ -372,6 +375,10 @@ pub fn update_pgbouncer_ini(
 
     for (option_name, value) in pgbouncer_config.iter() {
         section.insert(option_name, value);
+        debug!(
+            "Updating pgbouncer.ini with new values {}={}",
+            option_name, value
+        );
     }
 
     conf.write_to_file(pgbouncer_ini_path)?;
@@ -381,46 +388,146 @@ pub fn update_pgbouncer_ini(
 /// Tune pgbouncer.
 /// 1. Apply new config using pgbouncer admin console
 /// 2. Add new values to pgbouncer.ini to preserve them after restart
-pub async fn tune_pgbouncer(
-    pgbouncer_settings: Option<HashMap<String, String>>,
-    pgbouncer_connstr: &str,
-    pgbouncer_ini_path: Option<String>,
-) -> Result<()> {
-    if let Some(pgbouncer_config) = pgbouncer_settings {
-        // Apply new config
-        let connect_result = tokio_postgres::connect(pgbouncer_connstr, NoTls).await;
-        let (client, connection) = connect_result.unwrap();
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result<()> {
+    let pgbouncer_connstr = if std::env::var_os("AUTOSCALING").is_some() {
+        // for VMs use pgbouncer specific way to connect to
+        // pgbouncer admin console without password
+        // when pgbouncer is running under the same user.
+        "host=/tmp port=6432 dbname=pgbouncer user=pgbouncer".to_string()
+    } else {
+        // for k8s use normal connection string with password
+        // to connect to pgbouncer admin console
+        let mut pgbouncer_connstr =
+            "host=localhost port=6432 dbname=pgbouncer user=postgres sslmode=disable".to_string();
+        if let Ok(pass) = std::env::var("PGBOUNCER_PASSWORD") {
+            pgbouncer_connstr.push_str(format!(" password={}", pass).as_str());
+        }
+        pgbouncer_connstr
+    };
+
+    info!(
+        "Connecting to pgbouncer with connection string: {}",
+        pgbouncer_connstr
+    );
+
+    // connect to pgbouncer, retrying several times
+    // because pgbouncer may not be ready yet
+    let mut retries = 3;
+    let client = loop {
+        match tokio_postgres::connect(&pgbouncer_connstr, NoTls).await {
+            Ok((client, connection)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        eprintln!("connection error: {}", e);
+                    }
+                });
+                break client;
             }
-        });
+            Err(e) => {
+                if retries == 0 {
+                    return Err(e.into());
+                }
+                error!("Failed to connect to pgbouncer: pgbouncer_connstr {}", e);
+                retries -= 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    };
 
-        for (option_name, value) in pgbouncer_config.iter() {
-            info!(
-                "Applying pgbouncer setting change: {} = {}",
-                option_name, value
+    // Apply new config
+    for (option_name, value) in pgbouncer_config.iter() {
+        let query = format!("SET {}={}", option_name, value);
+        // keep this log line for debugging purposes
+        info!("Applying pgbouncer setting change: {}", query);
+
+        if let Err(err) = client.simple_query(&query).await {
+            // Don't fail on error, just print it into log
+            error!(
+                "Failed to apply pgbouncer setting change: {},  {}",
+                query, err
             );
-            let query = format!("SET {} = {}", option_name, value);
+        };
+    }
 
-            let result = client.simple_query(&query).await;
+    // save values to pgbouncer.ini
+    // so that they are preserved after pgbouncer restart
+    let pgbouncer_ini_path = if std::env::var_os("AUTOSCALING").is_some() {
+        // in VMs we use /etc/pgbouncer.ini
+        "/etc/pgbouncer.ini".to_string()
+    } else {
+        // in pods we use /var/db/postgres/pgbouncer/pgbouncer.ini
+        // this is a shared volume between pgbouncer and postgres containers
+        // FIXME: fix permissions for this file
+        "/var/db/postgres/pgbouncer/pgbouncer.ini".to_string()
+    };
+    update_pgbouncer_ini(pgbouncer_config, &pgbouncer_ini_path)?;
 
-            info!("Applying pgbouncer setting change: {}", query);
-            info!("pgbouncer setting change result: {:?}", result);
+    Ok(())
+}
 
-            if let Err(err) = result {
-                // Don't fail on error, just print it into log
-                error!(
-                    "Failed to apply pgbouncer setting change: {},  {}",
-                    query, err
-                );
-            };
+/// Spawn a thread that will read Postgres logs from `stderr`, join multiline logs
+/// and send them to the logger. In the future we may also want to add context to
+/// these logs.
+pub fn handle_postgres_logs(stderr: std::process::ChildStderr) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+
+        let res = runtime.block_on(async move {
+            let stderr = tokio::process::ChildStderr::from_std(stderr)?;
+            handle_postgres_logs_async(stderr).await
+        });
+        if let Err(e) = res {
+            tracing::error!("error while processing postgres logs: {}", e);
+        }
+    })
+}
+
+/// Read Postgres logs from `stderr` until EOF. Buffer is flushed on one of the following conditions:
+/// - next line starts with timestamp
+/// - EOF
+/// - no new lines were written for the last second
+async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Result<()> {
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let timeout_duration = Duration::from_millis(100);
+    let ts_regex =
+        regex::Regex::new(r"^\d+-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").expect("regex is valid");
+
+    let mut buf = vec![];
+    loop {
+        let next_line = timeout(timeout_duration, lines.next_line()).await;
+
+        // we should flush lines from the buffer if we cannot continue reading multiline message
+        let should_flush_buf = match next_line {
+            // Flushing if new line starts with timestamp
+            Ok(Ok(Some(ref line))) => ts_regex.is_match(line),
+            // Flushing on EOF, timeout or error
+            _ => true,
+        };
+
+        if !buf.is_empty() && should_flush_buf {
+            // join multiline message into a single line, separated by unicode Zero Width Space.
+            // "PG:" suffix is used to distinguish postgres logs from other logs.
+            let combined = format!("PG:{}\n", buf.join("\u{200B}"));
+            buf.clear();
+
+            // sync write to stderr to avoid interleaving with other logs
+            use std::io::Write;
+            let res = std::io::stderr().lock().write_all(combined.as_bytes());
+            if let Err(e) = res {
+                tracing::error!("error while writing to stderr: {}", e);
+            }
         }
 
-        // save values to pgbouncer.ini
-        // so that they are preserved after pgbouncer restart
-        if let Some(pgbouncer_ini_path) = pgbouncer_ini_path {
-            update_pgbouncer_ini(pgbouncer_config, &pgbouncer_ini_path)?;
+        // if not timeout, append line to the buffer
+        if next_line.is_ok() {
+            match next_line?? {
+                Some(line) => buf.push(line),
+                // EOF
+                None => break,
+            };
         }
     }
 

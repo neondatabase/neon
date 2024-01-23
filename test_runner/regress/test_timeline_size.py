@@ -759,15 +759,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     tenant_ids = {env.initial_tenant}
     for _i in range(0, n_tenants - 1):
         tenant_id = TenantId.generate()
-        env.pageserver.tenant_create(tenant_id)
-
-        # Empty tenants are not subject to waiting for logical size calculations, because
-        # those hapen on timeline level
-        timeline_id = TimelineId.generate()
-        env.neon_cli.create_timeline(
-            new_branch_name="main", tenant_id=tenant_id, timeline_id=timeline_id
-        )
-
+        env.neon_cli.create_tenant(tenant_id)
         tenant_ids.add(tenant_id)
 
     # Restart pageserver with logical size calculations paused
@@ -923,3 +915,68 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     # Check that all the stuck tenants proceed to active (apart from the one that deletes)
     wait_until(10, 1, all_active)
     assert len(get_tenant_states()) == n_tenants - 1
+
+
+def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
+    """
+    /v1/tenant/:tenant_shard_id/timeline and /v1/tenant/:tenant_shard_id
+    should not bump the priority of the initial logical size computation
+    background task, unless the force-await-initial-logical-size query param
+    is set to true.
+
+    This test verifies the invariant stated above. A couple of tricks are involved:
+    1. Detach the tenant and re-attach it after the page server is restarted. This circumvents
+    the warm-up which forces the initial logical size calculation.
+    2. A fail point (initial-size-calculation-permit-pause) is used to block the initial
+    computation of the logical size until forced.
+    3. A fail point (walreceiver-after-ingest) is used to pause the walreceiver since
+    otherwise it would force the logical size computation.
+    """
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # load in some data
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    endpoint.safe_psql_many(
+        [
+            "CREATE TABLE foo (x INTEGER)",
+            "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
+        ]
+    )
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    # restart with failpoint inside initial size calculation task
+    log.info(f"Detaching tenant {tenant_id} and stopping pageserver...")
+
+    endpoint.stop()
+    env.pageserver.tenant_detach(tenant_id)
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={
+            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest=pause"
+        }
+    )
+
+    log.info(f"Re-attaching tenant {tenant_id}...")
+    env.pageserver.tenant_attach(tenant_id)
+
+    # kick off initial size calculation task (the response we get here is the estimated size)
+    def assert_initial_logical_size_not_prioritised():
+        details = client.timeline_detail(tenant_id, timeline_id)
+        assert details["current_logical_size_is_accurate"] is False
+
+    assert_initial_logical_size_not_prioritised()
+
+    # ensure that's actually the case
+    time.sleep(2)
+    assert_initial_logical_size_not_prioritised()
+
+    details = client.timeline_detail(tenant_id, timeline_id, force_await_initial_logical_size=True)
+    assert details["current_logical_size_is_accurate"] is True
+
+    client.configure_failpoints(
+        [("initial-size-calculation-permit-pause", "off"), ("walreceiver-after-ingest", "off")]
+    )

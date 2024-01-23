@@ -6,7 +6,7 @@ pub mod messages;
 
 /// Wrappers for console APIs and their mocks.
 pub mod provider;
-pub use provider::{errors, Api, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo};
+pub use provider::{errors, Api, AuthSecret, CachedNodeInfo, NodeInfo};
 
 /// Various cache-related types.
 pub mod caches {

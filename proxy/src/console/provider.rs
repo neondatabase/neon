@@ -197,22 +197,6 @@ pub mod errors {
     }
 }
 
-/// Extra query params we'd like to pass to the console.
-pub struct ConsoleReqExtra {
-    pub options: Vec<(String, String)>,
-}
-
-impl ConsoleReqExtra {
-    // https://swagger.io/docs/specification/serialization/ DeepObject format
-    // paramName[prop1]=value1&paramName[prop2]=value2&....
-    pub fn options_as_deep_object(&self) -> Vec<(String, String)> {
-        self.options
-            .iter()
-            .map(|(k, v)| (format!("options[{}]", k), v.to_string()))
-            .collect()
-    }
-}
-
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum AuthSecret {
@@ -249,9 +233,9 @@ pub struct NodeInfo {
     pub allow_self_signed_compute: bool,
 }
 
-pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
+pub type NodeInfoCache = TimedLru<SmolStr, NodeInfo>;
 pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
-pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, AuthSecret>;
+pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<SmolStr>>>;
 
 /// This will allocate per each call, but the http requests alone
@@ -264,22 +248,73 @@ pub trait Api {
     async fn get_role_secret(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
-    ) -> Result<Option<CachedRoleSecret>, errors::GetAuthInfoError>;
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedAllowedIps, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
+}
+
+#[derive(Clone)]
+pub enum ConsoleBackend {
+    /// Current Cloud API (V2).
+    Console(neon::Api),
+    /// Local mock of Cloud API (V2).
+    #[cfg(feature = "testing")]
+    Postgres(mock::Api),
+}
+
+#[async_trait]
+impl Api for ConsoleBackend {
+    async fn get_role_secret(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
+        use ConsoleBackend::*;
+        match self {
+            Console(api) => api.get_role_secret(ctx, user_info).await,
+            #[cfg(feature = "testing")]
+            Postgres(api) => api.get_role_secret(ctx, user_info).await,
+        }
+    }
+
+    async fn get_allowed_ips(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedAllowedIps, errors::GetAuthInfoError> {
+        use ConsoleBackend::*;
+        match self {
+            Console(api) => api.get_allowed_ips(ctx, user_info).await,
+            #[cfg(feature = "testing")]
+            Postgres(api) => api.get_allowed_ips(ctx, user_info).await,
+        }
+    }
+
+    async fn wake_compute(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
+        use ConsoleBackend::*;
+
+        match self {
+            Console(api) => api.wake_compute(ctx, user_info).await,
+            #[cfg(feature = "testing")]
+            Postgres(api) => api.wake_compute(ctx, user_info).await,
+        }
+    }
 }
 
 /// Various caches for [`console`](super).
@@ -310,7 +345,7 @@ impl ApiCaches {
 /// Various caches for [`console`](super).
 pub struct ApiLocks {
     name: &'static str,
-    node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
+    node_locks: DashMap<SmolStr, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
     registered: prometheus::IntCounter,
@@ -378,7 +413,7 @@ impl ApiLocks {
 
     pub async fn get_wake_compute_permit(
         &self,
-        key: &Arc<str>,
+        key: &SmolStr,
     ) -> Result<WakeComputePermit, errors::WakeComputeError> {
         if self.permits == 0 {
             return Ok(WakeComputePermit { permit: None });

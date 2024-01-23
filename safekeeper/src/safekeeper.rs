@@ -18,17 +18,16 @@ use tracing::*;
 use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 
+use crate::state::TimelineState;
 use crate::wal_storage;
 use pq_proto::SystemId;
 use utils::pageserver_feedback::PageserverFeedback;
 use utils::{
     bin_ser::LeSer,
-    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
+    id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
 };
 
-pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 7;
 const SK_PROTOCOL_VERSION: u32 = 2;
 pub const UNKNOWN_SERVER_VERSION: u32 = 0;
 
@@ -222,7 +221,7 @@ pub struct PersistedPeerInfo {
 }
 
 impl PersistedPeerInfo {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             backup_lsn: Lsn::INVALID,
             term: INVALID_TERM,
@@ -232,111 +231,10 @@ impl PersistedPeerInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PersistedPeers(pub Vec<(NodeId, PersistedPeerInfo)>);
-
-/// Persistent information stored on safekeeper node
-/// On disk data is prefixed by magic and format version and followed by checksum.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SafeKeeperState {
-    #[serde(with = "hex")]
-    pub tenant_id: TenantId,
-    #[serde(with = "hex")]
-    pub timeline_id: TimelineId,
-    /// persistent acceptor state
-    pub acceptor_state: AcceptorState,
-    /// information about server
-    pub server: ServerInfo,
-    /// Unique id of the last *elected* proposer we dealt with. Not needed
-    /// for correctness, exists for monitoring purposes.
-    #[serde(with = "hex")]
-    pub proposer_uuid: PgUuid,
-    /// Since which LSN this timeline generally starts. Safekeeper might have
-    /// joined later.
-    pub timeline_start_lsn: Lsn,
-    /// Since which LSN safekeeper has (had) WAL for this timeline.
-    /// All WAL segments next to one containing local_start_lsn are
-    /// filled with data from the beginning.
-    pub local_start_lsn: Lsn,
-    /// Part of WAL acknowledged by quorum *and available locally*. Always points
-    /// to record boundary.
-    pub commit_lsn: Lsn,
-    /// LSN that points to the end of the last backed up segment. Useful to
-    /// persist to avoid finding out offloading progress on boot.
-    pub backup_lsn: Lsn,
-    /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
-    /// of last record streamed to everyone). Persisting it helps skipping
-    /// recovery in walproposer, generally we compute it from peers. In
-    /// walproposer proto called 'truncate_lsn'. Updates are currently drived
-    /// only by walproposer.
-    pub peer_horizon_lsn: Lsn,
-    /// LSN of the oldest known checkpoint made by pageserver and successfully
-    /// pushed to s3. We don't remove WAL beyond it. Persisted only for
-    /// informational purposes, we receive it from pageserver (or broker).
-    pub remote_consistent_lsn: Lsn,
-    // Peers and their state as we remember it. Knowing peers themselves is
-    // fundamental; but state is saved here only for informational purposes and
-    // obviously can be stale. (Currently not saved at all, but let's provision
-    // place to have less file version upgrades).
-    pub peers: PersistedPeers,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-// In memory safekeeper state. Fields mirror ones in `SafeKeeperState`; values
-// are not flushed yet.
-pub struct SafekeeperMemState {
-    pub commit_lsn: Lsn,
-    pub backup_lsn: Lsn,
-    pub peer_horizon_lsn: Lsn,
-    #[serde(with = "hex")]
-    pub proposer_uuid: PgUuid,
-}
-
-impl SafeKeeperState {
-    pub fn new(
-        ttid: &TenantTimelineId,
-        server_info: ServerInfo,
-        peers: Vec<NodeId>,
-        commit_lsn: Lsn,
-        local_start_lsn: Lsn,
-    ) -> SafeKeeperState {
-        SafeKeeperState {
-            tenant_id: ttid.tenant_id,
-            timeline_id: ttid.timeline_id,
-            acceptor_state: AcceptorState {
-                term: 0,
-                term_history: TermHistory::empty(),
-            },
-            server: server_info,
-            proposer_uuid: [0; 16],
-            timeline_start_lsn: Lsn(0),
-            local_start_lsn,
-            commit_lsn,
-            backup_lsn: local_start_lsn,
-            peer_horizon_lsn: local_start_lsn,
-            remote_consistent_lsn: Lsn(0),
-            peers: PersistedPeers(
-                peers
-                    .iter()
-                    .map(|p| (*p, PersistedPeerInfo::new()))
-                    .collect(),
-            ),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn empty() -> Self {
-        SafeKeeperState::new(
-            &TenantTimelineId::empty(),
-            ServerInfo {
-                pg_version: UNKNOWN_SERVER_VERSION, /* Postgres server version */
-                system_id: 0,                       /* Postgres system identifier */
-                wal_seg_size: 0,
-            },
-            vec![],
-            Lsn::INVALID,
-            Lsn::INVALID,
-        )
+// make clippy happy
+impl Default for PersistedPeerInfo {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -583,9 +481,7 @@ pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
     /// determines epoch switch point.
     pub epoch_start_lsn: Lsn,
 
-    pub inmem: SafekeeperMemState, // in memory part
-    pub state: CTRL,               // persistent state storage
-
+    pub state: TimelineState<CTRL>, // persistent state storage
     pub wal_store: WAL,
 
     node_id: NodeId, // safekeeper's node id
@@ -612,13 +508,7 @@ where
 
         Ok(SafeKeeper {
             epoch_start_lsn: Lsn(0),
-            inmem: SafekeeperMemState {
-                commit_lsn: state.commit_lsn,
-                backup_lsn: state.backup_lsn,
-                peer_horizon_lsn: state.peer_horizon_lsn,
-                proposer_uuid: state.proposer_uuid,
-            },
-            state,
+            state: TimelineState::new(state),
             wal_store,
             node_id,
         })
@@ -726,12 +616,12 @@ where
                 );
             }
 
-            let mut state = self.state.clone();
+            let mut state = self.state.start_change();
             state.server.system_id = msg.system_id;
             if msg.pg_version != UNKNOWN_SERVER_VERSION {
                 state.server.pg_version = msg.pg_version;
             }
-            self.state.persist(&state).await?;
+            self.state.finish_change(&state).await?;
         }
 
         info!(
@@ -766,15 +656,15 @@ where
             term: self.state.acceptor_state.term,
             vote_given: false as u64,
             flush_lsn: self.flush_lsn(),
-            truncate_lsn: self.inmem.peer_horizon_lsn,
+            truncate_lsn: self.state.inmem.peer_horizon_lsn,
             term_history: self.get_term_history(),
             timeline_start_lsn: self.state.timeline_start_lsn,
         };
         if self.state.acceptor_state.term < msg.term {
-            let mut state = self.state.clone();
+            let mut state = self.state.start_change();
             state.acceptor_state.term = msg.term;
             // persist vote before sending it out
-            self.state.persist(&state).await?;
+            self.state.finish_change(&state).await?;
 
             resp.term = self.state.acceptor_state.term;
             resp.vote_given = true as u64;
@@ -803,9 +693,9 @@ where
     ) -> Result<Option<AcceptorProposerMessage>> {
         info!("received ProposerElected {:?}", msg);
         if self.state.acceptor_state.term < msg.term {
-            let mut state = self.state.clone();
+            let mut state = self.state.start_change();
             state.acceptor_state.term = msg.term;
-            self.state.persist(&state).await?;
+            self.state.finish_change(&state).await?;
         }
 
         // If our term is higher, ignore the message (next feedback will inform the compute)
@@ -825,10 +715,10 @@ where
         }
         // Otherwise we must never attempt to truncate committed data.
         assert!(
-            msg.start_streaming_at >= self.inmem.commit_lsn,
+            msg.start_streaming_at >= self.state.inmem.commit_lsn,
             "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}",
             msg.start_streaming_at,
-            self.inmem.commit_lsn
+            self.state.inmem.commit_lsn
         );
 
         // TODO: cross check divergence point, check if msg.start_streaming_at corresponds to
@@ -839,7 +729,7 @@ where
 
         // and now adopt term history from proposer
         {
-            let mut state = self.state.clone();
+            let mut state = self.state.start_change();
 
             // Here we learn initial LSN for the first time, set fields
             // interested in that.
@@ -852,6 +742,11 @@ where
                     state.timeline_start_lsn
                 );
             }
+            if state.peer_horizon_lsn == Lsn(0) {
+                // Update peer_horizon_lsn as soon as we know where timeline starts.
+                // It means that peer_horizon_lsn cannot be zero after we know timeline_start_lsn.
+                state.peer_horizon_lsn = msg.timeline_start_lsn;
+            }
             if state.local_start_lsn == Lsn(0) {
                 state.local_start_lsn = msg.start_streaming_at;
                 info!("setting local_start_lsn to {:?}", state.local_start_lsn);
@@ -863,13 +758,13 @@ where
             // NB: on new clusters, this happens at the same time as
             // timeline_start_lsn initialization, it is taken outside to provide
             // upgrade.
-            self.inmem.commit_lsn = max(self.inmem.commit_lsn, state.timeline_start_lsn);
+            state.commit_lsn = max(state.commit_lsn, state.timeline_start_lsn);
 
             // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
-            self.inmem.backup_lsn = max(self.inmem.backup_lsn, state.timeline_start_lsn);
+            state.backup_lsn = max(state.backup_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
-            self.persist_control_file(state).await?;
+            self.state.finish_change(&state).await?;
         }
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
@@ -892,63 +787,41 @@ where
     async fn update_commit_lsn(&mut self, mut candidate: Lsn) -> Result<()> {
         // Both peers and walproposer communicate this value, we might already
         // have a fresher (higher) version.
-        candidate = max(candidate, self.inmem.commit_lsn);
+        candidate = max(candidate, self.state.inmem.commit_lsn);
         let commit_lsn = min(candidate, self.flush_lsn());
         assert!(
-            commit_lsn >= self.inmem.commit_lsn,
+            commit_lsn >= self.state.inmem.commit_lsn,
             "commit_lsn monotonicity violated: old={} new={}",
-            self.inmem.commit_lsn,
+            self.state.inmem.commit_lsn,
             commit_lsn
         );
 
-        self.inmem.commit_lsn = commit_lsn;
+        self.state.inmem.commit_lsn = commit_lsn;
 
         // If new commit_lsn reached epoch switch, force sync of control
         // file: walproposer in sync mode is very interested when this
         // happens. Note: this is for sync-safekeepers mode only, as
         // otherwise commit_lsn might jump over epoch_start_lsn.
         if commit_lsn >= self.epoch_start_lsn && self.state.commit_lsn < self.epoch_start_lsn {
-            self.persist_control_file(self.state.clone()).await?;
+            self.state.flush().await?;
         }
 
         Ok(())
     }
 
-    /// Persist in-memory state of control file to disk.
-    //
-    // TODO: passing inmem_remote_consistent_lsn everywhere is ugly, better
-    // separate state completely and give Arc to all those who need it.
-    pub async fn persist_inmem(&mut self, inmem_remote_consistent_lsn: Lsn) -> Result<()> {
-        let mut state = self.state.clone();
-        state.remote_consistent_lsn = inmem_remote_consistent_lsn;
-        self.persist_control_file(state).await
-    }
-
-    /// Persist in-memory state to the disk, taking other data from state.
-    async fn persist_control_file(&mut self, mut state: SafeKeeperState) -> Result<()> {
-        state.commit_lsn = self.inmem.commit_lsn;
-        state.backup_lsn = self.inmem.backup_lsn;
-        state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
-        state.proposer_uuid = self.inmem.proposer_uuid;
-        self.state.persist(&state).await
-    }
-
     /// Persist control file if there is something to save and enough time
     /// passed after the last save.
-    pub async fn maybe_persist_inmem_control_file(
-        &mut self,
-        inmem_remote_consistent_lsn: Lsn,
-    ) -> Result<()> {
+    pub async fn maybe_persist_inmem_control_file(&mut self) -> Result<()> {
         const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
-        if self.state.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
+        if self.state.pers.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
             return Ok(());
         }
-        let need_persist = self.inmem.commit_lsn > self.state.commit_lsn
-            || self.inmem.backup_lsn > self.state.backup_lsn
-            || self.inmem.peer_horizon_lsn > self.state.peer_horizon_lsn
-            || inmem_remote_consistent_lsn > self.state.remote_consistent_lsn;
+        let need_persist = self.state.inmem.commit_lsn > self.state.commit_lsn
+            || self.state.inmem.backup_lsn > self.state.backup_lsn
+            || self.state.inmem.peer_horizon_lsn > self.state.peer_horizon_lsn
+            || self.state.inmem.remote_consistent_lsn > self.state.remote_consistent_lsn;
         if need_persist {
-            self.persist_inmem(inmem_remote_consistent_lsn).await?;
+            self.state.flush().await?;
             trace!("saved control file: {CF_SAVE_INTERVAL:?} passed");
         }
         Ok(())
@@ -974,7 +847,7 @@ where
         // Now we know that we are in the same term as the proposer,
         // processing the message.
 
-        self.inmem.proposer_uuid = msg.h.proposer_uuid;
+        self.state.inmem.proposer_uuid = msg.h.proposer_uuid;
 
         // do the job
         if !msg.wal_data.is_empty() {
@@ -998,15 +871,16 @@ where
         // - if we make safekeepers always send persistent value,
         //   any compute restart would pull it down.
         // Thus, take max before adopting.
-        self.inmem.peer_horizon_lsn = max(self.inmem.peer_horizon_lsn, msg.h.truncate_lsn);
+        self.state.inmem.peer_horizon_lsn =
+            max(self.state.inmem.peer_horizon_lsn, msg.h.truncate_lsn);
 
         // Update truncate and commit LSN in control file.
         // To avoid negative impact on performance of extra fsync, do it only
-        // when truncate_lsn delta exceeds WAL segment size.
-        if self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
-            < self.inmem.peer_horizon_lsn
+        // when commit_lsn delta exceeds WAL segment size.
+        if self.state.commit_lsn + (self.state.server.wal_seg_size as u64)
+            < self.state.inmem.commit_lsn
         {
-            self.persist_control_file(self.state.clone()).await?;
+            self.state.flush().await?;
         }
 
         trace!(
@@ -1048,27 +922,27 @@ where
             }
         }
 
-        let new_backup_lsn = max(Lsn(sk_info.backup_lsn), self.inmem.backup_lsn);
-        sync_control_file |=
-            self.state.backup_lsn + (self.state.server.wal_seg_size as u64) < new_backup_lsn;
-        self.inmem.backup_lsn = new_backup_lsn;
+        self.state.inmem.backup_lsn = max(Lsn(sk_info.backup_lsn), self.state.inmem.backup_lsn);
+        sync_control_file |= self.state.backup_lsn + (self.state.server.wal_seg_size as u64)
+            < self.state.inmem.backup_lsn;
 
-        // value in sk_info should be maximized over our local in memory value.
-        let new_remote_consistent_lsn = Lsn(sk_info.remote_consistent_lsn);
-        assert!(self.state.remote_consistent_lsn <= new_remote_consistent_lsn);
+        self.state.inmem.remote_consistent_lsn = max(
+            Lsn(sk_info.remote_consistent_lsn),
+            self.state.inmem.remote_consistent_lsn,
+        );
         sync_control_file |= self.state.remote_consistent_lsn
             + (self.state.server.wal_seg_size as u64)
-            < new_remote_consistent_lsn;
+            < self.state.inmem.remote_consistent_lsn;
 
-        let new_peer_horizon_lsn = max(Lsn(sk_info.peer_horizon_lsn), self.inmem.peer_horizon_lsn);
+        self.state.inmem.peer_horizon_lsn = max(
+            Lsn(sk_info.peer_horizon_lsn),
+            self.state.inmem.peer_horizon_lsn,
+        );
         sync_control_file |= self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
-            < new_peer_horizon_lsn;
-        self.inmem.peer_horizon_lsn = new_peer_horizon_lsn;
+            < self.state.inmem.peer_horizon_lsn;
 
         if sync_control_file {
-            let mut state = self.state.clone();
-            state.remote_consistent_lsn = new_remote_consistent_lsn;
-            self.persist_control_file(state).await?;
+            self.state.flush().await?;
         }
         Ok(())
     }
@@ -1096,17 +970,20 @@ mod tests {
     use postgres_ffi::WAL_SEGMENT_SIZE;
 
     use super::*;
-    use crate::wal_storage::Storage;
+    use crate::{
+        state::{PersistedPeers, TimelinePersistentState},
+        wal_storage::Storage,
+    };
     use std::{ops::Deref, str::FromStr, time::Instant};
 
     // fake storage for tests
     struct InMemoryState {
-        persisted_state: SafeKeeperState,
+        persisted_state: TimelinePersistentState,
     }
 
     #[async_trait::async_trait]
     impl control_file::Storage for InMemoryState {
-        async fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
+        async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
             self.persisted_state = s.clone();
             Ok(())
         }
@@ -1117,15 +994,15 @@ mod tests {
     }
 
     impl Deref for InMemoryState {
-        type Target = SafeKeeperState;
+        type Target = TimelinePersistentState;
 
         fn deref(&self) -> &Self::Target {
             &self.persisted_state
         }
     }
 
-    fn test_sk_state() -> SafeKeeperState {
-        let mut state = SafeKeeperState::empty();
+    fn test_sk_state() -> TimelinePersistentState {
+        let mut state = TimelinePersistentState::empty();
         state.server.wal_seg_size = WAL_SEGMENT_SIZE as u32;
         state.tenant_id = TenantId::from([1u8; 16]);
         state.timeline_id = TimelineId::from([1u8; 16]);
@@ -1182,7 +1059,7 @@ mod tests {
         }
 
         // reboot...
-        let state = sk.state.persisted_state.clone();
+        let state = sk.state.deref().clone();
         let storage = InMemoryState {
             persisted_state: state,
         };
@@ -1321,7 +1198,7 @@ mod tests {
         use utils::Hex;
         let tenant_id = TenantId::from_str("cf0480929707ee75372337efaa5ecf96").unwrap();
         let timeline_id = TimelineId::from_str("112ded66422aa5e953e5440fa5427ac4").unwrap();
-        let state = SafeKeeperState {
+        let state = TimelinePersistentState {
             tenant_id,
             timeline_id,
             acceptor_state: AcceptorState {
@@ -1405,7 +1282,7 @@ mod tests {
 
         assert_eq!(Hex(&ser), Hex(&expected));
 
-        let deser = SafeKeeperState::des(&ser).unwrap();
+        let deser = TimelinePersistentState::des(&ser).unwrap();
 
         assert_eq!(deser, state);
     }

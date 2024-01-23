@@ -93,6 +93,22 @@ typedef struct
 static ShardMap* shard_map;
 static uint64    shard_map_update_counter;
 
+/*
+ * The "neon.pageserver_connstring" GUC is marked with the PGC_SIGHUP option,
+ * allowing it to be changed using pg_reload_conf(). The control plane can
+ * update the connection string if the pageserver crashes, is relocated, or
+ * new shards are added. A copy of the current value of the GUC is kept in
+ * shared memory, updated by the postmaster, because regular backends don't
+ * reload the config during query execution, but we might need to re-establish
+ * the pageserver connection with the new connection string even in the middle
+ * of a query.
+ *
+ * The shared memory copy is protected by a lockless algorithm using two
+ * atomic counters. The counters allow a backend to quickly check if the value
+ * has changed since last access, and to detect and retry copying the value if
+ * the postmaster changes the value concurrently. (Postmaster doesn't have a
+ * PGPROC entry and therefore cannot use LWLocks.)
+ */
 typedef struct
 {
 	/*
@@ -241,14 +257,14 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	static TimestampTz last_connect_time = 0;
 	static uint64_t delay_us = MIN_RECONNECT_INTERVAL_USEC;
 	TimestampTz now;
-	uint64_t us_since_last_connect;
+	uint64_t	us_since_last_connect;
 
 	Assert(page_servers[shard_no].conn == NULL);
 
 	(void)load_shard_map(shard_no, connstr); /* refresh shard map if needed */
 
 	now = GetCurrentTimestamp();
-        us_since_last_connect = now - last_connect_time;
+	us_since_last_connect = now - last_connect_time;
 	if (us_since_last_connect < delay_us)
 	{
 		pg_usleep(delay_us - us_since_last_connect);
@@ -636,7 +652,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	 *
 	 * Copying GUC value to shared memory is usually performed by postmaster.
 	 */
-	if (shard_map != NULL && UsedShmemSegAddr != NULL && MyProcPid == PostmasterPid)
+	if (shard_map != NULL && UsedShmemSegAddr != NULL && !IsUnderPostmaster)
 	{
 		const char* shard_connstr = newval;
 		const char* sep;

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
@@ -9,7 +9,6 @@ use pbkdf2::{
     password_hash::{PasswordHashString, PasswordHasher, PasswordVerifier, SaltString},
     Params, Pbkdf2,
 };
-use pq_proto::StartupMessageParams;
 use prometheus::{exponential_buckets, register_histogram, Histogram};
 use rand::Rng;
 use smol_str::SmolStr;
@@ -27,10 +26,10 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
-    console,
+    console::{self, messages::MetricsAuxInfo},
     context::RequestMonitoring,
     metrics::NUM_DB_CONNECTIONS_GAUGE,
-    proxy::{connect_compute::ConnectMechanism, neon_options},
+    proxy::connect_compute::ConnectMechanism,
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
@@ -38,28 +37,37 @@ use crate::{compute, config};
 use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
-pub const APP_NAME: &str = "/sql_over_http";
+pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
 
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
-    pub username: SmolStr,
+    pub user_info: ComputeUserInfo,
     pub dbname: SmolStr,
-    pub hostname: SmolStr,
     pub password: SmolStr,
-    pub options: Option<SmolStr>,
 }
 
 impl ConnInfo {
     // hm, change to hasher to avoid cloning?
     pub fn db_and_user(&self) -> (SmolStr, SmolStr) {
-        (self.dbname.clone(), self.username.clone())
+        (self.dbname.clone(), self.user_info.user.clone())
+    }
+
+    pub fn endpoint_cache_key(&self) -> SmolStr {
+        self.user_info.endpoint_cache_key()
     }
 }
 
 impl fmt::Display for ConnInfo {
     // use custom display to avoid logging password
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{}/{}", self.username, self.hostname, self.dbname)
+        write!(
+            f,
+            "{}@{}/{}?{}",
+            self.user_info.user,
+            self.user_info.endpoint,
+            self.dbname,
+            self.user_info.options.get_cache_key("")
+        )
     }
 }
 
@@ -319,7 +327,7 @@ impl GlobalConnPool {
         let mut hash_valid = false;
         let mut endpoint_pool = Weak::new();
         if !force_new {
-            let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+            let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
             endpoint_pool = Arc::downgrade(&pool);
             let mut hash = None;
 
@@ -354,6 +362,7 @@ impl GlobalConnPool {
 
         // ok return cached connection if found and establish a new one otherwise
         let new_client = if let Some(client) = client {
+            ctx.set_project(client.aux.clone());
             if client.inner.is_closed() {
                 let conn_id = uuid::Uuid::new_v4();
                 info!(%conn_id, "pool: cached connection '{conn_info}' is closed, opening a new one");
@@ -401,7 +410,7 @@ impl GlobalConnPool {
             Err(err)
                 if hash_valid && err.to_string().contains("password authentication failed") =>
             {
-                let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+                let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
                 let mut pool = pool.write();
                 if let Some(entry) = pool.pools.get_mut(&conn_info.db_and_user()) {
                     entry.password_hash = None;
@@ -418,7 +427,7 @@ impl GlobalConnPool {
                 })
                 .await??;
 
-                let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+                let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
                 let mut pool = pool.write();
                 pool.pools
                     .entry(conn_info.db_and_user())
@@ -520,23 +529,11 @@ async fn connect_to_compute(
     conn_id: uuid::Uuid,
     pool: Weak<RwLock<EndpointConnPool>>,
 ) -> anyhow::Result<ClientInner> {
-    let tls = config.tls_config.as_ref();
-    let common_names = tls.and_then(|tls| tls.common_names.clone());
-
-    let params = StartupMessageParams::new([
-        ("user", &conn_info.username),
-        ("database", &conn_info.dbname),
-        ("application_name", APP_NAME),
-        ("options", conn_info.options.as_deref().unwrap_or("")),
-    ]);
-    let creds =
-        auth::ClientCredentials::parse(ctx, &params, Some(&conn_info.hostname), common_names)?;
-
-    let creds =
-        ComputeUserInfo::try_from(creds).map_err(|_| anyhow!("missing endpoint identifier"))?;
-    let backend = config.auth_backend.as_ref().map(|_| creds);
-
-    let console_options = neon_options(&params);
+    ctx.set_application(Some(APP_NAME));
+    let backend = config
+        .auth_backend
+        .as_ref()
+        .map(|_| conn_info.user_info.clone());
 
     if !config.disable_ip_check_for_http {
         let allowed_ips = backend.get_allowed_ips(ctx).await?;
@@ -544,11 +541,8 @@ async fn connect_to_compute(
             return Err(auth::AuthError::ip_address_not_allowed().into());
         }
     }
-    let extra = console::ConsoleReqExtra {
-        options: console_options,
-    };
     let node_info = backend
-        .wake_compute(ctx, &extra)
+        .wake_compute(ctx)
         .await?
         .context("missing cache entry from wake_compute")?;
 
@@ -563,7 +557,6 @@ async fn connect_to_compute(
             idle: config.http_config.pool_options.idle_timeout,
         },
         node_info,
-        &extra,
         &backend,
     )
     .await
@@ -582,7 +575,7 @@ async fn connect_to_compute_once(
     let mut session = ctx.session_id;
 
     let (client, mut connection) = config
-        .user(&conn_info.username)
+        .user(&conn_info.user_info.user)
         .password(&*conn_info.password)
         .dbname(&conn_info.dbname)
         .connect_timeout(timeout)
@@ -601,10 +594,6 @@ async fn connect_to_compute_once(
     span.in_scope(|| {
         info!(%conn_info, %session, "new connection");
     });
-    let ids = Ids {
-        endpoint_id: node_info.aux.endpoint_id.clone(),
-        branch_id: node_info.aux.branch_id.clone(),
-    };
 
     let db_user = conn_info.db_and_user();
     tokio::spawn(
@@ -672,7 +661,7 @@ async fn connect_to_compute_once(
     Ok(ClientInner {
         inner: client,
         session: tx,
-        ids,
+        aux: node_info.aux.clone(),
         conn_id,
     })
 }
@@ -680,13 +669,17 @@ async fn connect_to_compute_once(
 struct ClientInner {
     inner: tokio_postgres::Client,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
-    ids: Ids,
+    aux: MetricsAuxInfo,
     conn_id: uuid::Uuid,
 }
 
 impl Client {
     pub fn metrics(&self) -> Arc<MetricCounter> {
-        USAGE_METRICS.register(self.inner.as_ref().unwrap().ids.clone())
+        let aux = &self.inner.as_ref().unwrap().aux;
+        USAGE_METRICS.register(Ids {
+            endpoint_id: aux.endpoint_id.clone(),
+            branch_id: aux.branch_id.clone(),
+        })
     }
 }
 

@@ -9,7 +9,7 @@ use crate::{
     cancellation::{self, CancelMap},
     compute,
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
-    console::{self, messages::MetricsAuxInfo},
+    console::messages::MetricsAuxInfo,
     context::RequestMonitoring,
     metrics::{
         NUM_BYTES_PROXIED_COUNTER, NUM_BYTES_PROXIED_PER_CLIENT_COUNTER,
@@ -26,6 +26,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use regex::Regex;
+use smol_str::SmolStr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -198,27 +199,29 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     drop(pause);
 
     // Extract credentials which we're going to use for auth.
-    let creds = {
+    let user_info = {
         let hostname = mode.hostname(stream.get_ref());
 
-        let common_names = tls.and_then(|tls| tls.common_names.clone());
+        let common_names = tls.map(|tls| &tls.common_names);
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(ctx, &params, hostname, common_names))
+            .map(|_| {
+                auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names)
+            })
             .transpose();
 
         match result {
-            Ok(creds) => creds,
+            Ok(user_info) => user_info,
             Err(e) => stream.throw_error(e).await?,
         }
     };
 
-    ctx.set_endpoint_id(creds.get_endpoint());
+    ctx.set_endpoint_id(user_info.get_endpoint());
 
     let client = Client::new(
         stream,
-        creds,
+        user_info,
         &params,
         mode.allow_self_signed_compute(config),
         endpoint_rate_limiter,
@@ -353,6 +356,7 @@ pub async fn proxy_pass(
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
+    ctx.set_success();
     ctx.log();
 
     let usage = USAGE_METRICS.register(Ids {
@@ -397,7 +401,7 @@ struct Client<'a, S> {
     /// The underlying libpq protocol stream.
     stream: PqStream<Stream<S>>,
     /// Client credentials that we care about.
-    creds: auth::BackendType<'a, auth::ClientCredentials>,
+    user_info: auth::BackendType<'a, auth::ComputeUserInfoMaybeEndpoint>,
     /// KV-dictionary with PostgreSQL connection params.
     params: &'a StartupMessageParams,
     /// Allow self-signed certificates (for testing).
@@ -410,14 +414,14 @@ impl<'a, S> Client<'a, S> {
     /// Construct a new connection context.
     fn new(
         stream: PqStream<Stream<S>>,
-        creds: auth::BackendType<'a, auth::ClientCredentials>,
+        user_info: auth::BackendType<'a, auth::ComputeUserInfoMaybeEndpoint>,
         params: &'a StartupMessageParams,
         allow_self_signed_compute: bool,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> Self {
         Self {
             stream,
-            creds,
+            user_info,
             params,
             allow_self_signed_compute,
             endpoint_rate_limiter,
@@ -429,7 +433,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
     // Instrumentation logs endpoint name everywhere. Doesn't work for link
     // auth; strictly speaking we don't know endpoint name in its case.
-    #[tracing::instrument(name = "", fields(ep = %self.creds.get_endpoint().unwrap_or_default()), skip_all)]
+    #[tracing::instrument(name = "", fields(ep = %self.user_info.get_endpoint().unwrap_or_default()), skip_all)]
     async fn connect_to_db(
         self,
         ctx: &mut RequestMonitoring,
@@ -439,14 +443,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
-            creds,
+            user_info,
             params,
             allow_self_signed_compute,
             endpoint_rate_limiter,
         } = self;
 
         // check rate limit
-        if let Some(ep) = creds.get_endpoint() {
+        if let Some(ep) = user_info.get_endpoint() {
             if !endpoint_rate_limiter.check(ep) {
                 return stream
                     .throw_error(auth::AuthError::too_many_connections())
@@ -454,13 +458,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             }
         }
 
-        let extra = console::ConsoleReqExtra {
-            options: neon_options(params),
-        };
-
-        let user = creds.get_user().to_owned();
-        let auth_result = match creds
-            .authenticate(ctx, &extra, &mut stream, mode.allow_cleartext(), config)
+        let user = user_info.get_user().to_owned();
+        let auth_result = match user_info
+            .authenticate(ctx, &mut stream, mode.allow_cleartext(), config)
             .await
         {
             Ok(auth_result) => auth_result,
@@ -473,12 +473,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             }
         };
 
-        let (mut node_info, creds) = auth_result;
+        let (mut node_info, user_info) = auth_result;
 
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
         let aux = node_info.aux.clone();
-        let mut node = connect_to_compute(ctx, &TcpMechanism { params }, node_info, &extra, &creds)
+        let mut node = connect_to_compute(ctx, &TcpMechanism { params }, node_info, &user_info)
             .or_else(|e| stream.throw_error(e))
             .await?;
 
@@ -493,29 +493,52 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     }
 }
 
-pub fn neon_options(params: &StartupMessageParams) -> Vec<(String, String)> {
-    #[allow(unstable_name_collisions)]
-    match params.options_raw() {
-        Some(options) => options.filter_map(neon_option).collect(),
-        None => vec![],
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NeonOptions(Vec<(SmolStr, SmolStr)>);
+
+impl NeonOptions {
+    pub fn parse_params(params: &StartupMessageParams) -> Self {
+        params
+            .options_raw()
+            .map(Self::parse_from_iter)
+            .unwrap_or_default()
+    }
+    pub fn parse_options_raw(options: &str) -> Self {
+        Self::parse_from_iter(StartupMessageParams::parse_options_raw(options))
+    }
+
+    fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {
+        let mut options = options
+            .filter_map(neon_option)
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect_vec();
+        options.sort();
+        Self(options)
+    }
+
+    pub fn get_cache_key(&self, prefix: &str) -> SmolStr {
+        // prefix + format!(" {k}:{v}")
+        // kinda jank because SmolStr is immutable
+        std::iter::once(prefix)
+            .chain(self.0.iter().flat_map(|(k, v)| [" ", &**k, ":", &**v]))
+            .collect()
+    }
+
+    /// <https://swagger.io/docs/specification/serialization/> DeepObject format
+    /// `paramName[prop1]=value1&paramName[prop2]=value2&...`
+    pub fn to_deep_object(&self) -> Vec<(String, SmolStr)> {
+        self.0
+            .iter()
+            .map(|(k, v)| (format!("options[{}]", k), v.clone()))
+            .collect()
     }
 }
 
-pub fn neon_options_str(params: &StartupMessageParams) -> String {
-    #[allow(unstable_name_collisions)]
-    neon_options(params)
-        .iter()
-        .map(|(k, v)| format!("{}:{}", k, v))
-        .sorted() // we sort it to use as cache key
-        .intersperse(" ".to_owned())
-        .collect()
-}
-
-pub fn neon_option(bytes: &str) -> Option<(String, String)> {
+pub fn neon_option(bytes: &str) -> Option<(&str, &str)> {
     static RE: OnceCell<Regex> = OnceCell::new();
     let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
 
     let cap = re.captures(bytes)?;
     let (_, [k, v]) = cap.extract();
-    Some((k.to_owned(), v.to_owned()))
+    Some((k, v))
 }

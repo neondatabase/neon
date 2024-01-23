@@ -47,9 +47,10 @@ use crate::metrics::{
     WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM,
     WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
 };
-use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
 use crate::walrecord::NeonWalRecord;
+
+use pageserver_api::key::{key_to_rel_block, key_to_slru_block};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
@@ -835,9 +836,8 @@ impl WalRedoProcess {
         let mut proc = { input }; // TODO: remove this legacy rename, but this keep the patch small.
         let mut nwrite = 0usize;
 
-        let mut stdin_pollfds = [PollFd::new(proc.stdin.as_raw_fd(), PollFlags::POLLOUT)];
-
         while nwrite < writebuf.len() {
+            let mut stdin_pollfds = [PollFd::new(&proc.stdin, PollFlags::POLLOUT)];
             let n = loop {
                 match nix::poll::poll(&mut stdin_pollfds[..], wal_redo_timeout.as_millis() as i32) {
                     Err(nix::errno::Errno::EINTR) => continue,
@@ -876,7 +876,6 @@ impl WalRedoProcess {
         // advancing processed responses number.
 
         let mut output = self.stdout.lock().unwrap();
-        let mut stdout_pollfds = [PollFd::new(output.stdout.as_raw_fd(), PollFlags::POLLIN)];
         let n_processed_responses = output.n_processed_responses;
         while n_processed_responses + output.pending_responses.len() <= request_no {
             // We expect the WAL redo process to respond with an 8k page image. We read it
@@ -884,6 +883,7 @@ impl WalRedoProcess {
             let mut resultbuf = vec![0; BLCKSZ.into()];
             let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
             while nresult < BLCKSZ.into() {
+                let mut stdout_pollfds = [PollFd::new(&output.stdout, PollFlags::POLLIN)];
                 // We do two things simultaneously: reading response from stdout
                 // and forward any logging information that the child writes to its stderr to the page server's log.
                 let n = loop {

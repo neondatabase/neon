@@ -1,4 +1,5 @@
 use anyhow::Context;
+use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
 
 use utils::id::TenantTimelineId;
@@ -92,10 +93,12 @@ async fn main_impl(
     for timeline in &timelines {
         js.spawn({
             let timeline = *timeline;
-            // FIXME: this triggers initial logical size calculation
-            // https://github.com/neondatabase/neon/issues/6168
             let info = mgmt_api_client
-                .timeline_info(timeline.tenant_id, timeline.timeline_id)
+                .timeline_info(
+                    timeline.tenant_id,
+                    timeline.timeline_id,
+                    ForceAwaitLogicalSize::No,
+                )
                 .await
                 .unwrap();
             async move {

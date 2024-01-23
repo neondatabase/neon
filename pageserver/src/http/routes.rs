@@ -14,6 +14,8 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::LocationConfigListResponse;
+use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
@@ -38,11 +40,11 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
-use crate::tenant::mgr::UpsertLocationError;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
+use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
@@ -265,7 +267,7 @@ impl From<SetNewTenantConfigError> for ApiError {
             SetNewTenantConfigError::GetTenant(tid) => {
                 ApiError::NotFound(anyhow!("tenant {}", tid).into())
             }
-            e @ SetNewTenantConfigError::Persist(_) => {
+            e @ (SetNewTenantConfigError::Persist(_) | SetNewTenantConfigError::Other(_)) => {
                 ApiError::InternalServerError(anyhow::Error::new(e))
             }
         }
@@ -323,11 +325,21 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
+    force_await_initial_logical_size: bool,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
 
-    let mut info = build_timeline_info_common(timeline, ctx).await?;
+    if force_await_initial_logical_size {
+        timeline.clone().await_initial_logical_size().await
+    }
+
+    let mut info = build_timeline_info_common(
+        timeline,
+        ctx,
+        tenant::timeline::GetLogicalSizePriority::Background,
+    )
+    .await?;
     if include_non_incremental_logical_size {
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
         // Otherwise, if someone deletes the timeline / detaches the tenant while
@@ -344,6 +356,7 @@ async fn build_timeline_info(
 async fn build_timeline_info_common(
     timeline: &Arc<Timeline>,
     ctx: &RequestContext,
+    logical_size_task_priority: tenant::timeline::GetLogicalSizePriority,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
     let initdb_lsn = timeline.initdb_lsn;
@@ -366,8 +379,7 @@ async fn build_timeline_info_common(
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size =
-        timeline.get_current_logical_size(tenant::timeline::GetLogicalSizePriority::User, ctx);
+    let current_logical_size = timeline.get_current_logical_size(logical_size_task_priority, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn_projected = timeline
@@ -478,7 +490,7 @@ async fn timeline_create_handler(
         .await {
             Ok(new_timeline) => {
                 // Created. Construct a TimelineInfo for it.
-                let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
+                let timeline_info = build_timeline_info_common(&new_timeline, &ctx, tenant::timeline::GetLogicalSizePriority::User)
                     .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
@@ -514,6 +526,8 @@ async fn timeline_list_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let include_non_incremental_logical_size: Option<bool> =
         parse_query_param(&request, "include-non-incremental-logical-size")?;
+    let force_await_initial_logical_size: Option<bool> =
+        parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -527,6 +541,7 @@ async fn timeline_list_handler(
             let timeline_info = build_timeline_info(
                 &timeline,
                 include_non_incremental_logical_size.unwrap_or(false),
+                force_await_initial_logical_size.unwrap_or(false),
                 &ctx,
             )
             .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
@@ -554,6 +569,8 @@ async fn timeline_detail_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size: Option<bool> =
         parse_query_param(&request, "include-non-incremental-logical-size")?;
+    let force_await_initial_logical_size: Option<bool> =
+        parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     // Logical size calculation needs downloading.
@@ -569,6 +586,7 @@ async fn timeline_detail_handler(
         let timeline_info = build_timeline_info(
             &timeline,
             include_non_incremental_logical_size.unwrap_or(false),
+            force_await_initial_logical_size.unwrap_or(false),
             &ctx,
         )
         .await
@@ -688,7 +706,9 @@ async fn tenant_attach_handler(
     }
 
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let shard_params = ShardParameters::default();
+    let location_conf = LocationConf::attached_single(tenant_conf, generation, &shard_params);
+
     let tenant = state
         .tenant_manager
         .upsert_location(
@@ -858,11 +878,12 @@ async fn tenant_list_handler(
             ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
         })?
         .iter()
-        .map(|(id, state)| TenantInfo {
+        .map(|(id, state, gen)| TenantInfo {
             id: *id,
             state: state.clone(),
             current_physical_size: None,
             attachment_status: state.attachment_status(),
+            generation: (*gen).into(),
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -892,6 +913,7 @@ async fn tenant_status(
                 state: state.clone(),
                 current_physical_size: Some(current_physical_size),
                 attachment_status: state.attachment_status(),
+                generation: tenant.generation().into(),
             },
             timelines: tenant.list_timeline_ids(),
         })
@@ -1176,7 +1198,8 @@ async fn tenant_create_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let location_conf =
+        LocationConf::attached_single(tenant_conf, generation, &request_data.shard_parameters);
 
     let new_tenant = state
         .tenant_manager
@@ -1195,7 +1218,6 @@ async fn tenant_create_handler(
             "Upsert succeeded but didn't return tenant!"
         )));
     };
-
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
     if let res @ Err(_) = new_tenant
@@ -1214,7 +1236,7 @@ async fn tenant_create_handler(
 
     json_response(
         StatusCode::CREATED,
-        TenantCreateResponse(new_tenant.tenant_id()),
+        TenantCreateResponse(new_tenant.tenant_shard_id().tenant_id),
     )
 }
 
@@ -1331,6 +1353,28 @@ async fn put_tenant_location_config_handler(
     }
 
     json_response(StatusCode::OK, ())
+}
+
+async fn list_location_config_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let slots = state.tenant_manager.list();
+    let result = LocationConfigListResponse {
+        tenant_shards: slots
+            .into_iter()
+            .map(|(tenant_shard_id, slot)| {
+                let v = match slot {
+                    TenantSlot::Attached(t) => Some(t.get_location_conf()),
+                    TenantSlot::Secondary(s) => Some(s.get_location_conf()),
+                    TenantSlot::InProgress(_) => None,
+                };
+                (tenant_shard_id, v)
+            })
+            .collect(),
+    };
+    json_response(StatusCode::OK, result)
 }
 
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
@@ -1634,12 +1678,13 @@ async fn disk_usage_eviction_run(
         )));
     };
 
-    let state = state.disk_usage_eviction_state.clone();
+    let eviction_state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-        &state,
+        &eviction_state,
         storage,
         usage,
+        &state.tenant_manager,
         config.eviction_order,
         &cancel,
     )
@@ -1873,6 +1918,9 @@ pub fn make_router(
         })
         .put("/v1/tenant/:tenant_shard_id/location_config", |r| {
             api_handler(r, put_tenant_location_config_handler)
+        })
+        .get("/v1/location_config", |r| {
+            api_handler(r, list_location_config_handler)
         })
         .get("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_list_handler)

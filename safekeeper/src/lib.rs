@@ -28,6 +28,7 @@ pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
 pub mod send_wal;
+pub mod state;
 pub mod timeline;
 pub mod wal_backup;
 pub mod wal_service;
@@ -86,6 +87,10 @@ impl SafeKeeperConf {
     pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> Utf8PathBuf {
         self.tenant_dir(&ttid.tenant_id)
             .join(ttid.timeline_id.to_string())
+    }
+
+    pub fn is_wal_backup_enabled(&self) -> bool {
+        self.remote_storage.is_some() && self.wal_backup_enabled
     }
 }
 

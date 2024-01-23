@@ -21,7 +21,7 @@ use utils::pageserver_feedback::PageserverFeedback;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
-    safekeeper::{SafeKeeperState, SafekeeperMemState},
+    state::{TimelineMemState, TimelinePersistentState},
     GlobalTimelines,
 };
 
@@ -110,7 +110,7 @@ pub static REMOVED_WAL_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
 pub static BACKED_UP_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "safekeeper_backed_up_segments_total",
-        "Number of WAL segments backed up to the broker"
+        "Number of WAL segments backed up to the S3"
     )
     .expect("Failed to register safekeeper_backed_up_segments_total counter")
 });
@@ -308,11 +308,10 @@ pub struct FullTimelineInfo {
     pub last_removed_segno: XLogSegNo,
 
     pub epoch_start_lsn: Lsn,
-    pub mem_state: SafekeeperMemState,
-    pub persisted_state: SafeKeeperState,
+    pub mem_state: TimelineMemState,
+    pub persisted_state: TimelinePersistentState,
 
     pub flush_lsn: Lsn,
-    pub remote_consistent_lsn: Lsn,
 
     pub wal_storage: WalStorageMetrics,
 }
@@ -338,6 +337,7 @@ pub struct TimelineCollector {
     flushed_wal_seconds: GaugeVec,
     collect_timeline_metrics: Gauge,
     timelines_count: IntGauge,
+    active_timelines_count: IntGauge,
 }
 
 impl Default for TimelineCollector {
@@ -521,6 +521,13 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(timelines_count.desc().into_iter().cloned());
 
+        let active_timelines_count = IntGauge::new(
+            "safekeeper_active_timelines",
+            "Total number of active timelines",
+        )
+        .unwrap();
+        descs.extend(active_timelines_count.desc().into_iter().cloned());
+
         TimelineCollector {
             descs,
             commit_lsn,
@@ -541,6 +548,7 @@ impl TimelineCollector {
             flushed_wal_seconds,
             collect_timeline_metrics,
             timelines_count,
+            active_timelines_count,
         }
     }
 }
@@ -573,6 +581,7 @@ impl Collector for TimelineCollector {
 
         let timelines = GlobalTimelines::get_all();
         let timelines_count = timelines.len();
+        let mut active_timelines_count = 0;
 
         // Prometheus Collector is sync, and data is stored under async lock. To
         // bridge the gap with a crutch, collect data in spawned thread with
@@ -591,6 +600,10 @@ impl Collector for TimelineCollector {
             let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
 
+            if tli.timeline_is_active {
+                active_timelines_count += 1;
+            }
+
             self.commit_lsn
                 .with_label_values(labels)
                 .set(tli.mem_state.commit_lsn.into());
@@ -608,7 +621,7 @@ impl Collector for TimelineCollector {
                 .set(tli.mem_state.peer_horizon_lsn.into());
             self.remote_consistent_lsn
                 .with_label_values(labels)
-                .set(tli.remote_consistent_lsn.into());
+                .set(tli.mem_state.remote_consistent_lsn.into());
             self.timeline_active
                 .with_label_values(labels)
                 .set(tli.timeline_is_active as u64);
@@ -682,6 +695,8 @@ impl Collector for TimelineCollector {
 
         // report total number of timelines
         self.timelines_count.set(timelines_count as i64);
+        self.active_timelines_count
+            .set(active_timelines_count as i64);
         mfs.extend(self.timelines_count.collect());
 
         mfs

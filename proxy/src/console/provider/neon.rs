@@ -4,7 +4,7 @@ use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
-    ConsoleReqExtra, NodeInfo,
+    NodeInfo,
 };
 use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use crate::{
@@ -55,7 +55,7 @@ impl Api {
     async fn do_get_auth_info(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let application_name = ctx.console_application_name();
@@ -68,8 +68,8 @@ impl Api {
                 .query(&[("session_id", ctx.session_id)])
                 .query(&[
                     ("application_name", application_name.as_str()),
-                    ("project", creds.endpoint.as_str()),
-                    ("role", creds.inner.user.as_str()),
+                    ("project", user_info.endpoint.as_str()),
+                    ("role", user_info.user.as_str()),
                 ])
                 .build()?;
 
@@ -86,9 +86,14 @@ impl Api {
                 },
             };
 
-            let secret = scram::ServerSecret::parse(&body.role_secret)
-                .map(AuthSecret::Scram)
-                .ok_or(GetAuthInfoError::BadSecret)?;
+            let secret = if body.role_secret.is_empty() {
+                None
+            } else {
+                let secret = scram::ServerSecret::parse(&body.role_secret)
+                    .map(AuthSecret::Scram)
+                    .ok_or(GetAuthInfoError::BadSecret)?;
+                Some(secret)
+            };
             let allowed_ips = body
                 .allowed_ips
                 .into_iter()
@@ -97,7 +102,7 @@ impl Api {
                 .collect_vec();
             ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
             Ok(AuthInfo {
-                secret: Some(secret),
+                secret,
                 allowed_ips,
                 project_id: body.project_id.map(SmolStr::from),
             })
@@ -110,8 +115,7 @@ impl Api {
     async fn do_wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let application_name = ctx.console_application_name();
@@ -124,14 +128,14 @@ impl Api {
                 .query(&[("session_id", ctx.session_id)])
                 .query(&[
                     ("application_name", application_name.as_str()),
-                    ("project", creds.endpoint.as_str()),
+                    ("project", user_info.endpoint.as_str()),
                 ]);
 
-            request_builder = if extra.options.is_empty() {
-                request_builder
-            } else {
-                request_builder.query(&extra.options_as_deep_object())
-            };
+            let options = user_info.options.to_deep_object();
+            if !options.is_empty() {
+                request_builder = request_builder.query(&options);
+            }
+
             let request = request_builder.build()?;
 
             info!(url = request.url().as_str(), "sending http request");
@@ -172,35 +176,37 @@ impl super::Api for Api {
     async fn get_role_secret(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
-    ) -> Result<Option<CachedRoleSecret>, GetAuthInfoError> {
-        let ep = &creds.endpoint;
-        let user = &creds.inner.user;
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        let ep = &user_info.endpoint;
+        let user = &user_info.user;
         if let Some(role_secret) = self.caches.project_info.get_role_secret(ep, user) {
-            return Ok(Some(role_secret));
+            return Ok(role_secret);
         }
-        let auth_info = self.do_get_auth_info(ctx, creds).await?;
-        let project_id = auth_info.project_id.unwrap_or(ep.clone());
-        if let Some(secret) = &auth_info.secret {
-            self.caches
-                .project_info
-                .insert_role_secret(&project_id, ep, user, secret.clone())
+        let auth_info = self.do_get_auth_info(ctx, user_info).await?;
+        if let Some(project_id) = auth_info.project_id {
+            self.caches.project_info.insert_role_secret(
+                &project_id,
+                ep,
+                user,
+                auth_info.secret.clone(),
+            );
+            self.caches.project_info.insert_allowed_ips(
+                &project_id,
+                ep,
+                Arc::new(auth_info.allowed_ips),
+            );
         }
-        self.caches.project_info.insert_allowed_ips(
-            &project_id,
-            ep,
-            Arc::new(auth_info.allowed_ips),
-        );
         // When we just got a secret, we don't need to invalidate it.
-        Ok(auth_info.secret.map(Cached::new_uncached))
+        Ok(Cached::new_uncached(auth_info.secret))
     }
 
     async fn get_allowed_ips(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedAllowedIps, GetAuthInfoError> {
-        let ep = &creds.endpoint;
+        let ep = &user_info.endpoint;
         if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(ep) {
             ALLOWED_IPS_BY_CACHE_OUTCOME
                 .with_label_values(&["hit"])
@@ -210,18 +216,20 @@ impl super::Api for Api {
         ALLOWED_IPS_BY_CACHE_OUTCOME
             .with_label_values(&["miss"])
             .inc();
-        let auth_info = self.do_get_auth_info(ctx, creds).await?;
+        let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
-        let user = &creds.inner.user;
-        let project_id = auth_info.project_id.unwrap_or(ep.clone());
-        if let Some(secret) = &auth_info.secret {
+        let user = &user_info.user;
+        if let Some(project_id) = auth_info.project_id {
+            self.caches.project_info.insert_role_secret(
+                &project_id,
+                ep,
+                user,
+                auth_info.secret.clone(),
+            );
             self.caches
                 .project_info
-                .insert_role_secret(&project_id, ep, user, secret.clone())
+                .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
         }
-        self.caches
-            .project_info
-            .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
         Ok(Cached::new_uncached(allowed_ips))
     }
 
@@ -229,21 +237,18 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key: &str = &creds.inner.cache_key;
+        let key = user_info.endpoint_cache_key();
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(key) {
-            info!(key = key, "found cached compute node info");
+        if let Some(cached) = self.caches.node_info.get(&*key) {
+            info!(key = &*key, "found cached compute node info");
             return Ok(cached);
         }
-
-        let key: Arc<str> = key.into();
 
         let permit = self.locks.get_wake_compute_permit(&key).await?;
 
@@ -256,7 +261,7 @@ impl super::Api for Api {
             }
         }
 
-        let node = self.do_wake_compute(ctx, extra, creds).await?;
+        let node = self.do_wake_compute(ctx, user_info).await?;
         let (_, cached) = self.caches.node_info.insert(key.clone(), node);
         info!(key = &*key, "created a cache entry for compute node info");
 

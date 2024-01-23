@@ -9,6 +9,7 @@ use reqwest::StatusCode;
 use tracing::{error, info, info_span, instrument, span_enabled, warn, Level};
 
 use crate::config;
+use crate::logger::inlinify;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
@@ -189,18 +190,20 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
     // Print a list of existing Postgres roles (only in debug mode)
     if span_enabled!(Level::INFO) {
-        info!("postgres roles:");
+        let mut vec = Vec::new();
         for r in &existing_roles {
-            info!(
-                "    - {}:{}",
+            vec.push(format!(
+                "{}:{}",
                 r.name,
                 if r.encrypted_password.is_some() {
                     "[FILTERED]"
                 } else {
                     "(null)"
                 }
-            );
+            ));
         }
+
+        info!("postgres roles (total {}): {:?}", vec.len(), vec);
     }
 
     // Process delta operations first
@@ -238,7 +241,10 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     // Refresh Postgres roles info to handle possible roles renaming
     let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
 
-    info!("cluster spec roles:");
+    info!(
+        "handling cluster spec roles (total {})",
+        spec.cluster.roles.len()
+    );
     for role in &spec.cluster.roles {
         let name = &role.name;
         // XXX: with a limited number of roles it is fine, but consider making it a HashMap
@@ -301,7 +307,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
-                info!("role create query: '{}'", &query);
+                info!("running role create query: '{}'", &query);
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }
@@ -318,7 +324,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 RoleAction::Create => " -> create",
                 RoleAction::Update => " -> update",
             };
-            info!("   - {}:{}{}", name, pwd, action_str);
+            info!(" - {}:{}{}", name, pwd, action_str);
         }
     }
 
@@ -427,10 +433,11 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
     // Print a list of existing Postgres databases (only in debug mode)
     if span_enabled!(Level::INFO) {
-        info!("postgres databases:");
+        let mut vec = Vec::new();
         for (dbname, db) in &existing_dbs {
-            info!("    {}:{}", dbname, db.owner);
+            vec.push(format!("{}:{}", dbname, db.owner));
         }
+        info!("postgres databases (total {}): {:?}", vec.len(), vec);
     }
 
     // Process delta operations first
@@ -502,7 +509,10 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     // Refresh Postgres databases info to handle possible renames
     let existing_dbs = get_existing_dbs(client)?;
 
-    info!("cluster spec databases:");
+    info!(
+        "handling cluster spec databases (total {})",
+        spec.cluster.databases.len()
+    );
     for db in &spec.cluster.databases {
         let name = &db.name;
         let pg_db = existing_dbs.get(name);
@@ -561,7 +571,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 DatabaseAction::Create => " -> create",
                 DatabaseAction::Update => " -> update",
             };
-            info!("   - {}:{}{}", db.name, db.owner, action_str);
+            info!(" - {}:{}{}", db.name, db.owner, action_str);
         }
     }
 
@@ -662,7 +672,11 @@ pub fn handle_grants(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> 
             $$;"
         .to_string();
 
-        info!("grant query for db {} : {}", &db.name, &grant_query);
+        info!(
+            "grant query for db {} : {}",
+            &db.name,
+            inlinify(&grant_query)
+        );
         db_client.simple_query(&grant_query)?;
     }
 
@@ -711,5 +725,81 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
     info!("update neon extension schema with query: {}", query);
     client.simple_query(query)?;
 
+    Ok(())
+}
+
+#[instrument(skip_all)]
+pub fn handle_migrations(client: &mut Client) -> Result<()> {
+    info!("handle migrations");
+
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // !BE SURE TO ONLY ADD MIGRATIONS TO THE END OF THIS ARRAY. IF YOU DO NOT, VERY VERY BAD THINGS MAY HAPPEN!
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+    let migrations = [
+        "ALTER ROLE neon_superuser BYPASSRLS",
+        r#"
+DO $$
+DECLARE
+    role_name text;
+BEGIN
+    FOR role_name IN SELECT rolname FROM pg_roles WHERE pg_has_role(rolname, 'neon_superuser', 'member')
+    LOOP
+        RAISE NOTICE 'EXECUTING ALTER ROLE % INHERIT', quote_ident(role_name);
+        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' INHERIT';
+    END LOOP;
+
+    FOR role_name IN SELECT rolname FROM pg_roles
+        WHERE
+            NOT pg_has_role(rolname, 'neon_superuser', 'member') AND NOT starts_with(rolname, 'pg_')
+    LOOP
+        RAISE NOTICE 'EXECUTING ALTER ROLE % NOBYPASSRLS', quote_ident(role_name);
+        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOBYPASSRLS';
+    END LOOP;
+END $$;
+"#,
+    ];
+
+    let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
+    client.simple_query(query)?;
+
+    query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)";
+    client.simple_query(query)?;
+
+    query = "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING";
+    client.simple_query(query)?;
+
+    query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
+    client.simple_query(query)?;
+
+    query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
+    client.simple_query(query)?;
+
+    query = "SELECT id FROM neon_migration.migration_id";
+    let row = client.query_one(query, &[])?;
+    let mut current_migration: usize = row.get::<&str, i64>("id") as usize;
+    let starting_migration_id = current_migration;
+
+    query = "BEGIN";
+    client.simple_query(query)?;
+
+    while current_migration < migrations.len() {
+        info!("Running migration:\n{}\n", migrations[current_migration]);
+        client.simple_query(migrations[current_migration])?;
+        current_migration += 1;
+    }
+    let setval = format!(
+        "UPDATE neon_migration.migration_id SET id={}",
+        migrations.len()
+    );
+    client.simple_query(&setval)?;
+
+    query = "COMMIT";
+    client.simple_query(query)?;
+
+    info!(
+        "Ran {} migrations",
+        (migrations.len() - starting_migration_id)
+    );
     Ok(())
 }

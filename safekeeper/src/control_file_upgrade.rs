@@ -1,6 +1,7 @@
 //! Code to deal with safekeeper control file upgrades
-use crate::safekeeper::{
-    AcceptorState, PersistedPeers, PgUuid, SafeKeeperState, ServerInfo, Term, TermHistory, TermLsn,
+use crate::{
+    safekeeper::{AcceptorState, PgUuid, ServerInfo, Term, TermHistory, TermLsn},
+    state::{PersistedPeers, TimelinePersistentState},
 };
 use anyhow::{bail, Result};
 use pq_proto::SystemId;
@@ -137,7 +138,7 @@ pub struct SafeKeeperStateV4 {
     pub peers: PersistedPeers,
 }
 
-pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState> {
+pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersistentState> {
     // migrate to storing full term history
     if version == 1 {
         info!("reading safekeeper control file version {}", version);
@@ -149,7 +150,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
                 lsn: Lsn(0),
             }]),
         };
-        return Ok(SafeKeeperState {
+        return Ok(TimelinePersistentState {
             tenant_id: oldstate.server.tenant_id,
             timeline_id: oldstate.server.timeline_id,
             acceptor_state: ac,
@@ -176,7 +177,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             system_id: oldstate.server.system_id,
             wal_seg_size: oldstate.server.wal_seg_size,
         };
-        return Ok(SafeKeeperState {
+        return Ok(TimelinePersistentState {
             tenant_id: oldstate.server.tenant_id,
             timeline_id: oldstate.server.timeline_id,
             acceptor_state: oldstate.acceptor_state,
@@ -199,7 +200,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             system_id: oldstate.server.system_id,
             wal_seg_size: oldstate.server.wal_seg_size,
         };
-        return Ok(SafeKeeperState {
+        return Ok(TimelinePersistentState {
             tenant_id: oldstate.server.tenant_id,
             timeline_id: oldstate.server.timeline_id,
             acceptor_state: oldstate.acceptor_state,
@@ -222,7 +223,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
             system_id: oldstate.server.system_id,
             wal_seg_size: oldstate.server.wal_seg_size,
         };
-        return Ok(SafeKeeperState {
+        return Ok(TimelinePersistentState {
             tenant_id: oldstate.tenant_id,
             timeline_id: oldstate.timeline_id,
             acceptor_state: oldstate.acceptor_state,
@@ -238,7 +239,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
         });
     } else if version == 5 {
         info!("reading safekeeper control file version {}", version);
-        let mut oldstate = SafeKeeperState::des(&buf[..buf.len()])?;
+        let mut oldstate = TimelinePersistentState::des(&buf[..buf.len()])?;
         if oldstate.timeline_start_lsn != Lsn(0) {
             return Ok(oldstate);
         }
@@ -251,7 +252,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
         return Ok(oldstate);
     } else if version == 6 {
         info!("reading safekeeper control file version {}", version);
-        let mut oldstate = SafeKeeperState::des(&buf[..buf.len()])?;
+        let mut oldstate = TimelinePersistentState::des(&buf[..buf.len()])?;
         if oldstate.server.pg_version != 0 {
             return Ok(oldstate);
         }

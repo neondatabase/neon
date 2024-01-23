@@ -24,8 +24,9 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
-from fixtures.types import TenantId
+from fixtures.types import TenantId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
+from requests.exceptions import ReadTimeout
 
 
 def test_tenant_delete_smoke(
@@ -74,7 +75,7 @@ def test_tenant_delete_smoke(
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
 
             assert_prefix_not_empty(
-                neon_env_builder,
+                neon_env_builder.pageserver_remote_storage,
                 prefix="/".join(
                     (
                         "tenants",
@@ -95,7 +96,7 @@ def test_tenant_delete_smoke(
     assert not tenant_path.exists()
 
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -206,7 +207,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
         assert_prefix_not_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -267,7 +268,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
 
     # Check remote is empty
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -303,7 +304,7 @@ def test_tenant_delete_is_resumed_on_attach(
 
     # sanity check, data should be there
     assert_prefix_not_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -342,7 +343,7 @@ def test_tenant_delete_is_resumed_on_attach(
     )
 
     assert_prefix_not_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -377,7 +378,7 @@ def test_tenant_delete_is_resumed_on_attach(
 
     ps_http.deletion_queue_flush(execute=True)
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -542,13 +543,121 @@ def test_tenant_delete_concurrent(
 
     # Physical deletion should have happened
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
                 str(tenant_id),
             )
         ),
+    )
+
+    # Zero tenants remain (we deleted the default tenant)
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+
+
+def test_tenant_delete_races_timeline_creation(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    """
+    Validate that timeline creation executed in parallel with deletion works correctly.
+
+    This is a reproducer for https://github.com/neondatabase/neon/issues/6255
+    """
+    # The remote storage kind doesn't really matter but we use it for iterations calculation below
+    # (and there is no way to reconstruct the used remote storage kind)
+    remote_storage_kind = RemoteStorageKind.MOCK_S3
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    ps_http = env.pageserver.http_client()
+    tenant_id = env.initial_tenant
+
+    # Sometimes it ends with "InternalServerError(Cancelled", sometimes with "InternalServerError(Operation was cancelled"
+    CANCELLED_ERROR = (
+        ".*POST.*Cancelled request finished with an error: InternalServerError\\(.*ancelled"
+    )
+
+    env.pageserver.allowed_errors.extend(
+        [
+            # lucky race with stopping from flushing a layer we fail to schedule any uploads
+            ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
+            # We need the http connection close for successful reproduction
+            ".*POST.*/timeline.* request was dropped before completing",
+            # Timeline creation runs into this error
+            CANCELLED_ERROR,
+        ]
+    )
+
+    BEFORE_INITDB_UPLOAD_FAILPOINT = "before-initdb-upload"
+    DELETE_BEFORE_CLEANUP_FAILPOINT = "tenant-delete-before-cleanup-remaining-fs-traces-pausable"
+
+    # Wait just before the initdb upload
+    ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "pause"))
+
+    def timeline_create():
+        try:
+            ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
+            raise RuntimeError("creation succeeded even though it shouldn't")
+        except ReadTimeout:
+            pass
+
+    Thread(target=timeline_create).start()
+
+    def hit_initdb_upload_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
+
+    wait_until(100, 0.1, hit_initdb_upload_failpoint)
+
+    def creation_connection_timed_out():
+        assert env.pageserver.log_contains(
+            "POST.*/timeline.* request was dropped before completing"
+        )
+
+    # Wait so that we hit the timeout and the connection is dropped
+    # (But timeline creation still continues)
+    wait_until(100, 0.1, creation_connection_timed_out)
+
+    ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
+
+    def tenant_delete():
+        ps_http.tenant_delete(tenant_id)
+
+    Thread(target=tenant_delete).start()
+
+    def deletion_arrived():
+        assert env.pageserver.log_contains(
+            f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
+        )
+
+    wait_until(100, 0.1, deletion_arrived)
+
+    ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "off"))
+
+    # Disable the failpoint and wait for deletion to finish
+    ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
+
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
+    try:
+        tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    except PageserverApiException:
+        pass
+
+    # Physical deletion should have happened
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
+
+    # Ensure that creation cancelled and deletion didn't end up in broken state or encountered the leftover temp file
+    assert env.pageserver.log_contains(CANCELLED_ERROR)
+    assert not env.pageserver.log_contains(
+        ".*ERROR.*delete_tenant.*Timelines directory is not empty after all timelines deletion"
     )
 
     # Zero tenants remain (we deleted the default tenant)

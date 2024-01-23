@@ -128,8 +128,7 @@ pub async fn connect_to_compute<M: ConnectMechanism>(
     ctx: &mut RequestMonitoring,
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
-    extra: &console::ConsoleReqExtra,
-    creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
+    user_info: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
 ) -> Result<M::Connection, M::Error>
 where
     M::ConnectError: ShouldRetry + std::fmt::Debug,
@@ -159,10 +158,8 @@ where
     // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
     info!("compute node's state has likely changed; requesting a wake-up");
     let node_info = loop {
-        let wake_res = match creds {
-            auth::BackendType::Console(api, creds) => api.wake_compute(ctx, extra, creds).await,
-            #[cfg(feature = "testing")]
-            auth::BackendType::Postgres(api, creds) => api.wake_compute(ctx, extra, creds).await,
+        let wake_res = match user_info {
+            auth::BackendType::Console(api, user_info) => api.wake_compute(ctx, user_info).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
             // test backend

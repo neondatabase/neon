@@ -12,9 +12,11 @@ from pathlib import Path
 # Type-related stuff
 from typing import Callable, ClassVar, Dict, Iterator, Optional
 
+import allure
 import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
+from _pytest.fixtures import FixtureRequest
 from _pytest.terminal import TerminalReporter
 
 from fixtures.log_helper import log
@@ -411,13 +413,31 @@ class NeonBenchmarker:
 
 
 @pytest.fixture(scope="function")
-def zenbenchmark(record_property: Callable[[str, object], None]) -> Iterator[NeonBenchmarker]:
+def zenbenchmark(
+    request: FixtureRequest,
+    record_property: Callable[[str, object], None],
+) -> Iterator[NeonBenchmarker]:
     """
     This is a python decorator for benchmark fixtures. It contains functions for
     recording measurements, and prints them out at the end.
     """
     benchmarker = NeonBenchmarker(record_property)
     yield benchmarker
+
+    results = {}
+    for _, recorded_property in request.node.user_properties:
+        name = recorded_property["name"]
+        value = str(recorded_property["value"])
+        if (unit := recorded_property["unit"].strip()) != "":
+            value += f" {unit}"
+        results[name] = value
+
+    content = json.dumps(results, indent=2)
+    allure.attach(
+        content,
+        "benchmarks.json",
+        allure.attachment_type.JSON,
+    )
 
 
 def pytest_addoption(parser: Parser):

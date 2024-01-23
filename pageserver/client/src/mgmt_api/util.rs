@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use pageserver_api::shard::TenantShardId;
 use tokio::task::JoinSet;
 use utils::id::{TenantId, TenantTimelineId};
 
@@ -31,7 +32,10 @@ pub async fn get_pageserver_tenant_timelines_unsharded(
             async move {
                 (
                     tenant_id,
-                    mgmt_api_client.tenant_details(tenant_id).await.unwrap(),
+                    mgmt_api_client
+                        .tenant_details(TenantShardId::unsharded(tenant_id))
+                        .await
+                        .unwrap(),
                 )
             }
         });
