@@ -627,9 +627,15 @@ impl Tenant {
             deletion_queue_client,
         ));
 
+        // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
+        // we shut down while attaching.
+        let Ok(attach_gate_guard) = tenant.gate.enter() else {
+            // We just created the Tenant: nothing else can have shut it down yet
+            unreachable!();
+        };
+
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
-
         let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
@@ -639,6 +645,8 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                let _gate_guard = attach_gate_guard;
+
                 // Is this tenant being spawned as part of process startup?
                 let starting_up = init_order.is_some();
                 scopeguard::defer! {
