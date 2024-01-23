@@ -391,8 +391,7 @@ pub(crate) enum PageReconstructError {
     #[error("Ancestor LSN wait error: {0}")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
-    /// The operation was cancelled
-    #[error("Cancelled")]
+    #[error("timeline shutting down")]
     Cancelled,
 
     /// The ancestor of this is being stopped
