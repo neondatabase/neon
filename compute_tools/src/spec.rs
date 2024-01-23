@@ -727,3 +727,79 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
 
     Ok(())
 }
+
+#[instrument(skip_all)]
+pub fn handle_migrations(client: &mut Client) -> Result<()> {
+    info!("handle migrations");
+
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // !BE SURE TO ONLY ADD MIGRATIONS TO THE END OF THIS ARRAY. IF YOU DO NOT, VERY VERY BAD THINGS MAY HAPPEN!
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+    let migrations = [
+        "ALTER ROLE neon_superuser BYPASSRLS",
+        r#"
+DO $$
+DECLARE
+    role_name text;
+BEGIN
+    FOR role_name IN SELECT rolname FROM pg_roles WHERE pg_has_role(rolname, 'neon_superuser', 'member')
+    LOOP
+        RAISE NOTICE 'EXECUTING ALTER ROLE % INHERIT', quote_ident(role_name);
+        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' INHERIT';
+    END LOOP;
+
+    FOR role_name IN SELECT rolname FROM pg_roles
+        WHERE
+            NOT pg_has_role(rolname, 'neon_superuser', 'member') AND NOT starts_with(rolname, 'pg_')
+    LOOP
+        RAISE NOTICE 'EXECUTING ALTER ROLE % NOBYPASSRLS', quote_ident(role_name);
+        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOBYPASSRLS';
+    END LOOP;
+END $$;
+"#,
+    ];
+
+    let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
+    client.simple_query(query)?;
+
+    query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)";
+    client.simple_query(query)?;
+
+    query = "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING";
+    client.simple_query(query)?;
+
+    query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
+    client.simple_query(query)?;
+
+    query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
+    client.simple_query(query)?;
+
+    query = "SELECT id FROM neon_migration.migration_id";
+    let row = client.query_one(query, &[])?;
+    let mut current_migration: usize = row.get::<&str, i64>("id") as usize;
+    let starting_migration_id = current_migration;
+
+    query = "BEGIN";
+    client.simple_query(query)?;
+
+    while current_migration < migrations.len() {
+        info!("Running migration:\n{}\n", migrations[current_migration]);
+        client.simple_query(migrations[current_migration])?;
+        current_migration += 1;
+    }
+    let setval = format!(
+        "UPDATE neon_migration.migration_id SET id={}",
+        migrations.len()
+    );
+    client.simple_query(&setval)?;
+
+    query = "COMMIT";
+    client.simple_query(query)?;
+
+    info!(
+        "Ran {} migrations",
+        (migrations.len() - starting_migration_id)
+    );
+    Ok(())
+}

@@ -110,7 +110,7 @@ pub static REMOVED_WAL_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
 pub static BACKED_UP_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "safekeeper_backed_up_segments_total",
-        "Number of WAL segments backed up to the broker"
+        "Number of WAL segments backed up to the S3"
     )
     .expect("Failed to register safekeeper_backed_up_segments_total counter")
 });
@@ -337,6 +337,7 @@ pub struct TimelineCollector {
     flushed_wal_seconds: GaugeVec,
     collect_timeline_metrics: Gauge,
     timelines_count: IntGauge,
+    active_timelines_count: IntGauge,
 }
 
 impl Default for TimelineCollector {
@@ -520,6 +521,13 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(timelines_count.desc().into_iter().cloned());
 
+        let active_timelines_count = IntGauge::new(
+            "safekeeper_active_timelines",
+            "Total number of active timelines",
+        )
+        .unwrap();
+        descs.extend(active_timelines_count.desc().into_iter().cloned());
+
         TimelineCollector {
             descs,
             commit_lsn,
@@ -540,6 +548,7 @@ impl TimelineCollector {
             flushed_wal_seconds,
             collect_timeline_metrics,
             timelines_count,
+            active_timelines_count,
         }
     }
 }
@@ -572,6 +581,7 @@ impl Collector for TimelineCollector {
 
         let timelines = GlobalTimelines::get_all();
         let timelines_count = timelines.len();
+        let mut active_timelines_count = 0;
 
         // Prometheus Collector is sync, and data is stored under async lock. To
         // bridge the gap with a crutch, collect data in spawned thread with
@@ -589,6 +599,10 @@ impl Collector for TimelineCollector {
             let tenant_id = tli.ttid.tenant_id.to_string();
             let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
+
+            if tli.timeline_is_active {
+                active_timelines_count += 1;
+            }
 
             self.commit_lsn
                 .with_label_values(labels)
@@ -681,6 +695,8 @@ impl Collector for TimelineCollector {
 
         // report total number of timelines
         self.timelines_count.set(timelines_count as i64);
+        self.active_timelines_count
+            .set(active_timelines_count as i64);
         mfs.extend(self.timelines_count.collect());
 
         mfs

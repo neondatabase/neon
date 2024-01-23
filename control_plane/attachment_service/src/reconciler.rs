@@ -296,7 +296,7 @@ impl Reconciler {
         // Increment generation before attaching to new pageserver
         self.generation = self
             .persistence
-            .increment_generation(self.tenant_shard_id, Some(dest_ps_id))
+            .increment_generation(self.tenant_shard_id, dest_ps_id)
             .await?;
 
         let dest_conf = build_location_config(
@@ -395,7 +395,7 @@ impl Reconciler {
                     // as locations with unknown (None) observed state.
                     self.generation = self
                         .persistence
-                        .increment_generation(self.tenant_shard_id, Some(node_id))
+                        .increment_generation(self.tenant_shard_id, node_id)
                         .await?;
                     wanted_conf.generation = self.generation.into();
                     tracing::info!("Observed configuration requires update.");

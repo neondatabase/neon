@@ -1,7 +1,6 @@
 use std::{
     io,
     net::{TcpListener, ToSocketAddrs},
-    os::unix::prelude::AsRawFd,
 };
 
 use nix::sys::socket::{setsockopt, sockopt::ReuseAddr};
@@ -10,7 +9,7 @@ use nix::sys::socket::{setsockopt, sockopt::ReuseAddr};
 pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<TcpListener> {
     let listener = TcpListener::bind(addr)?;
 
-    setsockopt(listener.as_raw_fd(), ReuseAddr, &true)?;
+    setsockopt(&listener, ReuseAddr, &true)?;
 
     Ok(listener)
 }

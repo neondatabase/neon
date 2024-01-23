@@ -75,7 +75,7 @@ def test_tenant_delete_smoke(
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
 
             assert_prefix_not_empty(
-                neon_env_builder,
+                neon_env_builder.pageserver_remote_storage,
                 prefix="/".join(
                     (
                         "tenants",
@@ -96,7 +96,7 @@ def test_tenant_delete_smoke(
     assert not tenant_path.exists()
 
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -207,7 +207,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
         assert_prefix_not_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -268,7 +268,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
 
     # Check remote is empty
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -304,7 +304,7 @@ def test_tenant_delete_is_resumed_on_attach(
 
     # sanity check, data should be there
     assert_prefix_not_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -343,7 +343,7 @@ def test_tenant_delete_is_resumed_on_attach(
     )
 
     assert_prefix_not_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -378,7 +378,7 @@ def test_tenant_delete_is_resumed_on_attach(
 
     ps_http.deletion_queue_flush(execute=True)
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -543,7 +543,7 @@ def test_tenant_delete_concurrent(
 
     # Physical deletion should have happened
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -645,7 +645,7 @@ def test_tenant_delete_races_timeline_creation(
 
     # Physical deletion should have happened
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",

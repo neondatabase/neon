@@ -2914,6 +2914,7 @@ class Endpoint(PgProtocol):
 
         # Write it back updated
         with open(config_path, "w") as file:
+            log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Mock the extension part of spec passed from control plane for local testing
@@ -3352,9 +3353,15 @@ class SafekeeperHttpClient(requests.Session):
         )
         res.raise_for_status()
 
-    def timeline_delete_force(self, tenant_id: TenantId, timeline_id: TimelineId) -> Dict[Any, Any]:
+    # only_local doesn't remove segments in the remote storage.
+    def timeline_delete(
+        self, tenant_id: TenantId, timeline_id: TimelineId, only_local: bool = False
+    ) -> Dict[Any, Any]:
         res = self.delete(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
+            params={
+                "only_local": str(only_local).lower(),
+            },
         )
         res.raise_for_status()
         res_json = res.json()

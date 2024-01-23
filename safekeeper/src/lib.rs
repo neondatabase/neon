@@ -88,6 +88,10 @@ impl SafeKeeperConf {
         self.tenant_dir(&ttid.tenant_id)
             .join(ttid.timeline_id.to_string())
     }
+
+    pub fn is_wal_backup_enabled(&self) -> bool {
+        self.remote_storage.is_some() && self.wal_backup_enabled
+    }
 }
 
 impl SafeKeeperConf {
