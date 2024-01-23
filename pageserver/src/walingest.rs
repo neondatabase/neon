@@ -1888,7 +1888,13 @@ mod tests {
         for blk in 2..1500 {
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), Lsn::INVALID, &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blk,
+                        Version::Lsn(Lsn(0x80)),
+                        Lsn::INVALID,
+                        &ctx
+                    )
                     .await?,
                 ZERO_PAGE
             );
@@ -2053,7 +2059,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), Lsn::INVALID, &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x60)),
+                        Lsn::INVALID,
+                        &ctx
+                    )
                     .await?,
                 TEST_IMG(&data)
             );
@@ -2071,7 +2083,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), Lsn::INVALID, &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x50)),
+                        Lsn::INVALID,
+                        &ctx
+                    )
                     .await?,
                 TEST_IMG(&data)
             );
@@ -2107,7 +2125,13 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), Lsn::INVALID, &ctx)
+                    .get_rel_page_at_lsn(
+                        TESTREL_A,
+                        blkno,
+                        Version::Lsn(Lsn(0x80)),
+                        Lsn::INVALID,
+                        &ctx
+                    )
                     .await?,
                 TEST_IMG(&data)
             );
