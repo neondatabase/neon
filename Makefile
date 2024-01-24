@@ -140,6 +140,10 @@ postgres-check-%: postgres-%
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
 	+@echo "Compiling neon $*"
+	ifeq ($@,walproposer-lib)
+		+@echo "unsetting sanitisers for walproposer-lib"
+		unset CPPFLAGS LDFLAGS LD_PRELOAD
+	endif
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
@@ -191,8 +195,8 @@ neon-pg-ext-clean-%:
 # Rust build.
 .PHONY: walproposer-lib
 walproposer-lib: neon-pg-ext-v16
-	unset CPPFLAGS LDFLAGS LD_PRELOAD
 	+@echo "Compiling walproposer-lib"
+	unset CPPFLAGS LDFLAGS LD_PRELOAD
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
