@@ -295,6 +295,7 @@ jobs:
             RUSTFLAGS="-C linker=gcc"
             LIBPATH=$(gcc -print-file-name=libasan.so)
             stat -c%N $(gcc -print-file-name=libasan.so)
+            stat -c%N $(gcc -print-file-name=libubsan.so)
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FLAGS="--locked --release"
