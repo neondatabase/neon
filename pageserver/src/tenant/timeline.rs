@@ -4383,12 +4383,14 @@ impl Timeline {
                 };
 
                 let last_rec_lsn = data.records.last().unwrap().0;
+                let base_img_lsn = data.img.as_ref().map(|x| x.0);
+                let n_records = data.records.len();
 
                 let img = match self
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
                     .await
-                    .context("Failed to reconstruct a page image:")
+                    .with_context(|| format!("reconstruct a page image for {key:?}@{request_lsn} from {n_records} records on top of {base_img_lsn:?}"))
                 {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::WalRedo(e)),
