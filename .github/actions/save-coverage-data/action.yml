@@ -8,6 +8,10 @@ runs:
       shell: bash -euxo pipefail {0}
       run: find /tmp/coverage -type f
 
+    - name: List pids for profraw
+      shell: bash -euxo pipefail {0}
+      run: find /tmp/coverage -type f | xargs -I{} fuser {}
+
     - name: Merge coverage data
       shell: bash -euxo pipefail {0}
       run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
