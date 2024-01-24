@@ -666,6 +666,10 @@ impl Timeline {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
+        let _timer = crate::metrics::GET_VECTORED_LATENCY
+            .for_task_kind(ctx.task_kind())
+            .map(|t| t.start_timer());
+
         let mut values = BTreeMap::new();
         for range in key_ranges {
             let mut key = range.start;
