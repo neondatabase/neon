@@ -350,7 +350,6 @@ impl Service {
                 Mode::Detach
             }
         };
-        drop(attach_req);
 
         tracing::info!(?mode, "attach-hook start");
         match mode {
