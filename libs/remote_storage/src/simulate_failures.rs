@@ -3,10 +3,10 @@
 //! testing purposes.
 use bytes::Bytes;
 use futures::stream::Stream;
-use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::{collections::hash_map::Entry, time::SystemTime};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
