@@ -377,7 +377,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          LD_PRELOAD=$(gcc -print-file-name=libasan.so) mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests -v
+          mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests -v
 
       - name: Run rust tests
         run: |
