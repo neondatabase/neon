@@ -18,7 +18,7 @@ ifeq ($(BUILD_TYPE),release)
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
-	CPPFLAGS = -fsanitize=address -fno-sanitize-recover -fno-sanitize=alignment -Wno-cast-function-type-strict -fPIE
+	CPPFLAGS = -fsanitize=address -fno-sanitize-recover -fno-omit-frame-pointer -fno-sanitize=alignment -Wno-cast-function-type-strict
 	LDFLAGS = -fsanitize=address -lasan
 	LD_PRELOAD=$(gcc -print-file-name=libasan.so)
 else
