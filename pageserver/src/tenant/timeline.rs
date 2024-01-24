@@ -2973,6 +2973,21 @@ impl Timeline {
         Ok(())
     }
 
+    pub(crate) async fn preserve_initdb_archive(&self) -> anyhow::Result<()> {
+        if let Some(remote_client) = &self.remote_client {
+            remote_client
+                .preserve_initdb_archive(
+                    &self.tenant_shard_id.tenant_id,
+                    &self.timeline_id,
+                    &self.cancel,
+                )
+                .await?;
+        } else {
+            bail!("No remote storage configured, but was asked to backup the initdb archive for {} / {}", self.tenant_shard_id.tenant_id, self.timeline_id);
+        }
+        Ok(())
+    }
+
     // Write out the given frozen in-memory layer as a new L0 delta file. This L0 file will not be tracked
     // in layer map immediately. The caller is responsible to put it into the layer map.
     async fn create_delta_layer(

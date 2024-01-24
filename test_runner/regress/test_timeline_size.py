@@ -953,10 +953,6 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
 
     endpoint.stop()
     env.pageserver.tenant_detach(tenant_id)
-    env.pageserver.allowed_errors.append(
-        # tenant detach causes this because the underlying attach-hook removes the tenant from attachment_service entirely
-        ".*Dropped remote consistent LSN updates.*",
-    )
     env.pageserver.stop()
     env.pageserver.start(
         extra_env_vars={
