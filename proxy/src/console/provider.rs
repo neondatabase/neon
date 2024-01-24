@@ -9,11 +9,10 @@ use crate::{
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
     context::RequestMonitoring,
-    scram,
+    scram, EndpointCacheKey, ProjectId,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use smol_str::SmolStr;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
@@ -214,7 +213,7 @@ pub struct AuthInfo {
     /// List of IP addresses allowed for the autorization.
     pub allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
-    pub project_id: Option<SmolStr>,
+    pub project_id: Option<ProjectId>,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -233,7 +232,7 @@ pub struct NodeInfo {
     pub allow_self_signed_compute: bool,
 }
 
-pub type NodeInfoCache = TimedLru<SmolStr, NodeInfo>;
+pub type NodeInfoCache = TimedLru<EndpointCacheKey, NodeInfo>;
 pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
 pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
@@ -345,7 +344,7 @@ impl ApiCaches {
 /// Various caches for [`console`](super).
 pub struct ApiLocks {
     name: &'static str,
-    node_locks: DashMap<SmolStr, Arc<Semaphore>>,
+    node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
     registered: prometheus::IntCounter,
@@ -413,7 +412,7 @@ impl ApiLocks {
 
     pub async fn get_wake_compute_permit(
         &self,
-        key: &SmolStr,
+        key: &EndpointCacheKey,
     ) -> Result<WakeComputePermit, errors::WakeComputeError> {
         if self.permits == 0 {
             return Ok(WakeComputePermit { permit: None });

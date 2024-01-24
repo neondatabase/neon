@@ -14,7 +14,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use smol_str::SmolStr;
 use std::sync::Arc;
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
@@ -98,7 +97,7 @@ impl Api {
             Ok(AuthInfo {
                 secret,
                 allowed_ips,
-                project_id: body.project_id.map(SmolStr::from),
+                project_id: body.project_id,
             })
         }
         .map_err(crate::error::log_error)
@@ -239,7 +238,7 @@ impl super::Api for Api {
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(&*key) {
+        if let Some(cached) = self.caches.node_info.get(&key) {
             info!(key = &*key, "found cached compute node info");
             return Ok(cached);
         }

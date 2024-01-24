@@ -31,6 +31,7 @@ use crate::{
     metrics::NUM_DB_CONNECTIONS_GAUGE,
     proxy::connect_compute::ConnectMechanism,
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
+    DbName, EndpointCacheKey, RoleName,
 };
 use crate::{compute, config};
 
@@ -42,17 +43,17 @@ pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
     pub user_info: ComputeUserInfo,
-    pub dbname: SmolStr,
+    pub dbname: DbName,
     pub password: SmolStr,
 }
 
 impl ConnInfo {
     // hm, change to hasher to avoid cloning?
-    pub fn db_and_user(&self) -> (SmolStr, SmolStr) {
+    pub fn db_and_user(&self) -> (DbName, RoleName) {
         (self.dbname.clone(), self.user_info.user.clone())
     }
 
-    pub fn endpoint_cache_key(&self) -> SmolStr {
+    pub fn endpoint_cache_key(&self) -> EndpointCacheKey {
         self.user_info.endpoint_cache_key()
     }
 }
@@ -79,14 +80,14 @@ struct ConnPoolEntry {
 // Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
 pub struct EndpointConnPool {
-    pools: HashMap<(SmolStr, SmolStr), DbUserConnPool>,
+    pools: HashMap<(DbName, RoleName), DbUserConnPool>,
     total_conns: usize,
     max_conns: usize,
     _guard: IntCounterPairGuard,
 }
 
 impl EndpointConnPool {
-    fn get_conn_entry(&mut self, db_user: (SmolStr, SmolStr)) -> Option<ConnPoolEntry> {
+    fn get_conn_entry(&mut self, db_user: (DbName, RoleName)) -> Option<ConnPoolEntry> {
         let Self {
             pools, total_conns, ..
         } = self;
@@ -95,7 +96,7 @@ impl EndpointConnPool {
             .and_then(|pool_entries| pool_entries.get_conn_entry(total_conns))
     }
 
-    fn remove_client(&mut self, db_user: (SmolStr, SmolStr), conn_id: uuid::Uuid) -> bool {
+    fn remove_client(&mut self, db_user: (DbName, RoleName), conn_id: uuid::Uuid) -> bool {
         let Self {
             pools, total_conns, ..
         } = self;
@@ -196,7 +197,7 @@ pub struct GlobalConnPool {
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: DashMap<SmolStr, Arc<RwLock<EndpointConnPool>>>,
+    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool>>>,
 
     /// Number of endpoint-connection pools
     ///
@@ -440,7 +441,10 @@ impl GlobalConnPool {
         Ok(Client::new(new_client, conn_info, endpoint_pool).await)
     }
 
-    fn get_or_create_endpoint_pool(&self, endpoint: &SmolStr) -> Arc<RwLock<EndpointConnPool>> {
+    fn get_or_create_endpoint_pool(
+        &self,
+        endpoint: &EndpointCacheKey,
+    ) -> Arc<RwLock<EndpointConnPool>> {
         // fast path
         if let Some(pool) = self.global_pool.get(endpoint) {
             return pool.clone();

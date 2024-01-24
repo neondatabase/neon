@@ -11,10 +11,11 @@ use anyhow::bail;
 use dashmap::DashMap;
 use itertools::Itertools;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use smol_str::SmolStr;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
+
+use crate::EndpointId;
 
 use super::{
     limit_algorithm::{LimitAlgorithm, Sample},
@@ -33,7 +34,7 @@ use super::{
 // does not look very nice (`SSL SYSCALL error: Undefined error: 0`), so for now
 // I went with a more expensive way that yields user-friendlier error messages.
 pub struct EndpointRateLimiter<Rand = StdRng, Hasher = RandomState> {
-    map: DashMap<SmolStr, Vec<RateBucket>, Hasher>,
+    map: DashMap<EndpointId, Vec<RateBucket>, Hasher>,
     info: &'static [RateBucketInfo],
     access_count: AtomicUsize,
     rand: Mutex<Rand>,
@@ -146,7 +147,7 @@ impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
-    pub fn check(&self, endpoint: SmolStr) -> bool {
+    pub fn check(&self, endpoint: EndpointId) -> bool {
         // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
@@ -493,11 +494,13 @@ mod tests {
     use futures::{task::noop_waker_ref, Future};
     use rand::SeedableRng;
     use rustc_hash::FxHasher;
-    use smol_str::SmolStr;
     use tokio::time;
 
     use super::{EndpointRateLimiter, Limiter, Outcome};
-    use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm};
+    use crate::{
+        rate_limiter::{RateBucketInfo, RateLimitAlgorithm},
+        EndpointId,
+    };
 
     #[tokio::test]
     async fn it_works() {
@@ -654,7 +657,7 @@ mod tests {
         RateBucketInfo::validate(&mut rates).unwrap();
         let limiter = EndpointRateLimiter::new(Vec::leak(rates));
 
-        let endpoint = SmolStr::from("ep-my-endpoint-1234");
+        let endpoint = EndpointId::from("ep-my-endpoint-1234");
 
         time::pause();
 

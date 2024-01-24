@@ -7,7 +7,10 @@ use std::net::IpAddr;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::{console::messages::MetricsAuxInfo, error::ErrorKind, metrics::LatencyTimer};
+use crate::{
+    console::messages::MetricsAuxInfo, error::ErrorKind, metrics::LatencyTimer, BranchId,
+    EndpointId, ProjectId, RoleName,
+};
 
 pub mod parquet;
 
@@ -26,10 +29,10 @@ pub struct RequestMonitoring {
     region: &'static str,
 
     // filled in as they are discovered
-    project: Option<SmolStr>,
-    branch: Option<SmolStr>,
-    endpoint_id: Option<SmolStr>,
-    user: Option<SmolStr>,
+    project: Option<ProjectId>,
+    branch: Option<BranchId>,
+    endpoint_id: Option<EndpointId>,
+    user: Option<RoleName>,
     application: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
     success: bool,
@@ -86,7 +89,7 @@ impl RequestMonitoring {
         self.project = Some(x.project_id);
     }
 
-    pub fn set_endpoint_id(&mut self, endpoint_id: Option<SmolStr>) {
+    pub fn set_endpoint_id(&mut self, endpoint_id: Option<EndpointId>) {
         self.endpoint_id = endpoint_id.or_else(|| self.endpoint_id.clone());
     }
 
@@ -94,7 +97,7 @@ impl RequestMonitoring {
         self.application = app.or_else(|| self.application.clone());
     }
 
-    pub fn set_user(&mut self, user: SmolStr) {
+    pub fn set_user(&mut self, user: RoleName) {
         self.user = Some(user);
     }
 

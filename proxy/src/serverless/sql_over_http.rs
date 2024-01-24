@@ -13,7 +13,6 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
-use smol_str::SmolStr;
 use tokio_postgres::error::DbError;
 use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::types::Kind;
@@ -36,6 +35,8 @@ use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
+use crate::EndpointId;
+use crate::RoleName;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -155,7 +156,7 @@ fn get_conn_info(
         .next()
         .ok_or(anyhow::anyhow!("invalid database name"))?;
 
-    let username = SmolStr::from(connection_url.username());
+    let username = RoleName::from(connection_url.username());
     if username.is_empty() {
         return Err(anyhow::anyhow!("missing username"));
     }
@@ -189,7 +190,7 @@ fn get_conn_info(
 
     let endpoint = endpoint_sni(hostname, &tls.common_names)?;
 
-    let endpoint: SmolStr = endpoint.into();
+    let endpoint: EndpointId = endpoint.into();
     ctx.set_endpoint_id(Some(endpoint.clone()));
 
     let pairs = connection_url.query_pairs();
