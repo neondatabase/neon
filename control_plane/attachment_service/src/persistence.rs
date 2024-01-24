@@ -245,6 +245,7 @@ impl Persistence {
                 anyhow::bail!("Tried to increment generation of unknown shard");
             };
             shard.generation_pageserver = None;
+            shard.placement_policy = serde_json::to_string(&PlacementPolicy::Detached).unwrap();
             Ok(())
         })
         .await

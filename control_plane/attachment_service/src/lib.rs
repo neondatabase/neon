@@ -17,6 +17,8 @@ enum PlacementPolicy {
     /// Production-ready way to attach a tenant: one attached pageserver and
     /// some number of secondaries.
     Double(usize),
+    /// Do not attach to any pageservers
+    Detached,
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
