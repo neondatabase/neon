@@ -13,7 +13,7 @@ use std::{
     time::SystemTime,
 };
 
-use anyhow::Context as _;
+use anyhow::{anyhow, Context as _};
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider,
@@ -41,6 +41,7 @@ use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
+use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
@@ -638,7 +639,7 @@ impl RemoteStorage for S3Bucket {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::TimeTravel;
         let _guard = self.permit(kind).await;
@@ -653,13 +654,27 @@ impl RemoteStorage for S3Bucket {
             .map(|p| self.relative_path_to_s3_object(p))
             .or_else(|| self.prefix_in_bucket.clone());
 
-        let list = self
-            .client
-            .list_object_versions()
-            .bucket(self.bucket_name.clone())
-            .set_prefix(prefix.clone())
-            .send()
-            .await?;
+        let warn_threshold = 3;
+        let max_retries = 10;
+        let is_permanent = |_e: &_| false;
+
+        let list = backoff::retry(
+            || async {
+                Ok(self
+                    .client
+                    .list_object_versions()
+                    .bucket(self.bucket_name.clone())
+                    .set_prefix(prefix.clone())
+                    .send()
+                    .await?)
+            },
+            is_permanent,
+            warn_threshold,
+            max_retries,
+            "listing object versions for time_travel_recover",
+            backoff::Cancel::new(cancel.clone(), || anyhow!("Cancelled")),
+        )
+        .await?;
 
         if list.is_truncated().unwrap_or_default() {
             anyhow::bail!("Received truncated ListObjectVersions response for prefix={prefix:?}");
@@ -735,13 +750,24 @@ impl RemoteStorage for S3Bucket {
                         let source_id =
                             format!("{}/{key}?versionId={version_id}", self.bucket_name);
 
-                        self.client
-                            .copy_object()
-                            .bucket(self.bucket_name.clone())
-                            .key(key)
-                            .copy_source(source_id)
-                            .send()
-                            .await?;
+                        backoff::retry(
+                            || async {
+                                Ok(self
+                                    .client
+                                    .copy_object()
+                                    .bucket(self.bucket_name.clone())
+                                    .key(key)
+                                    .copy_source(&source_id)
+                                    .send()
+                                    .await?)
+                            },
+                            is_permanent,
+                            warn_threshold,
+                            max_retries,
+                            "listing object versions for time_travel_recover",
+                            backoff::Cancel::new(cancel.clone(), || anyhow!("Cancelled")),
+                        )
+                        .await?;
                     }
                     (VerOrDelete::DeleteMarker(_), _last_modified, _version_id) => {
                         do_delete = true;
