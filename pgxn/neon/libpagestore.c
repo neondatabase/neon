@@ -53,52 +53,21 @@ static int	n_reconnect_attempts = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
 
-bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
-
-static bool pageserver_flush(shardno_t shard_no);
-static void pageserver_disconnect(shardno_t shard_no);
-static void AssignPageserverConnstring(const char *newval, void *extra);
-static bool CheckPageserverConnstring(char **newval, void **extra, GucSource source);
-
-static shmem_startup_hook_type prev_shmem_startup_hook;
-#if PG_VERSION_NUM>=150000
-static shmem_request_hook_type prev_shmem_request_hook;
-#endif
-
-/*
- * ShardMap is kept in shared memory. It contains the connection strings for
- * each shard.
- *
- * There is "neon.pageserver_connstring" GUC with PGC_SIGHUP option, allowing to change it using
- * pg_reload_conf(). It is used by control plane to update shards information if page server is crashed,
- * relocated or new shards are added. This GUC variable contains comma separated list of connection strings.
- * It is copied to shared memory because config can not be loaded during query execution and we need to
- * reestablish connection to page server.
- *
- * Copying connection string to shared memory is done by postmaster. And other backends
- * should check update counter to determine of connection URL is changed and connection needs to be reestablished.
- * We can not use standard Postgres LW-locks, because postmaster has proc entry and so can not wait
- * on this primitive. This is why lockless access algorithm is implemented using two atomic counters to enforce
- * consistent reading of connection string value from shared memory.
- */
 typedef struct
 {
-	size_t n_shards;
-	pg_atomic_uint64 begin_update_counter;
-	pg_atomic_uint64 end_update_counter;
-	char   shard_connstr[MAX_SHARDS][MAX_PS_CONNSTR_LEN];
+	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
+	size_t		num_shards;
 } ShardMap;
 
-
-static ShardMap* shard_map;
-static uint64    shard_map_update_counter;
-
 /*
+ * PagestoreShmemState is kept in shared memory. It contains the connection
+ * strings for each shard.
+ *
  * The "neon.pageserver_connstring" GUC is marked with the PGC_SIGHUP option,
  * allowing it to be changed using pg_reload_conf(). The control plane can
  * update the connection string if the pageserver crashes, is relocated, or
- * new shards are added. A copy of the current value of the GUC is kept in
- * shared memory, updated by the postmaster, because regular backends don't
+ * new shards are added. A parsed copy of the current value of the GUC is kept
+ * in shared memory, updated by the postmaster, because regular backends don't
  * reload the config during query execution, but we might need to re-establish
  * the pageserver connection with the new connection string even in the middle
  * of a query.
@@ -111,132 +80,221 @@ static uint64    shard_map_update_counter;
  */
 typedef struct
 {
-	/*
-	 * Connection for each shard
-	 */
+	pg_atomic_uint64 begin_update_counter;
+	pg_atomic_uint64 end_update_counter;
+	ShardMap	shard_map;
+} PagestoreShmemState;
+
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static void walproposer_shmem_request(void);
+#endif
+static shmem_startup_hook_type prev_shmem_startup_hook;
+static PagestoreShmemState *pagestore_shared;
+static uint64 pagestore_local_counter = 0;
+
+/* This backend's per-shard connections */
+typedef struct
+{
 	PGconn	   *conn;
-    /*
+
+	/*---
 	 * WaitEventSet containing:
 	 * - WL_SOCKET_READABLE on 'conn'
 	 * - WL_LATCH_SET on MyLatch, and
 	 * - WL_EXIT_ON_PM_DEATH.
 	 */
-	WaitEventSet    *wes;
+	WaitEventSet *wes;
 } PageServer;
 
 static PageServer page_servers[MAX_SHARDS];
 
-static void
-psm_shmem_startup(void)
+static bool pageserver_flush(shardno_t shard_no);
+static void pageserver_disconnect(shardno_t shard_no);
+
+static bool
+PagestoreShmemIsValid(void)
 {
-	bool found;
-	if (prev_shmem_startup_hook)
-	{
-		prev_shmem_startup_hook();
-	}
-
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-
-	shard_map = (ShardMap*)ShmemInitStruct("shard_map", sizeof(ShardMap), &found);
-	if (!found)
-	{
-		shard_map->n_shards = 0;
-		pg_atomic_init_u64(&shard_map->begin_update_counter, 0);
-		pg_atomic_init_u64(&shard_map->end_update_counter, 0);
-		AssignPageserverConnstring(page_server_connstring, NULL);
-	}
-	LWLockRelease(AddinShmemInitLock);
-}
-
-static void
-psm_shmem_request(void)
-{
-#if PG_VERSION_NUM>=150000
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-#endif
-
-	RequestAddinShmemSpace(sizeof(ShardMap));
-}
-
-static void
-psm_init(void)
-{
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = psm_shmem_startup;
-#if PG_VERSION_NUM>=150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = psm_shmem_request;
-#else
-	psm_shmem_request();
-#endif
+	return pagestore_shared && UsedShmemSegAddr;
 }
 
 /*
- * Reload shard map if needed and return number of shards and connection string for the specified shard
- * 'connstr' is an output buffer. If not NULL, it must point to a buffer at least MAX_PS_CONNSTR_LEN bytes
- * long. The connection string for the gven shard is copied to it.
+ * Parse a comma-separated list of connection strings into a ShardMap.
+ *
+ * If 'result' is NULL, just checks that the input is valid. If the input is
+ * not valid, returns false. The contents of *result are undefined in
+ * that case, and must not be relied on.
  */
-static shardno_t
-load_shard_map(shardno_t shard_no, char* connstr)
+static bool
+ParseShardMap(const char *connstr, ShardMap *result)
 {
-	shardno_t n_shards;
-	uint64 begin_update_counter;
-	uint64 end_update_counter;
+	const char *p;
+	int			nshards = 0;
+
+	if (result)
+		memset(result, 0, sizeof(ShardMap));
+
+	p = connstr;
+	nshards = 0;
+	for (;;)
+	{
+		const char *sep;
+		size_t		connstr_len;
+
+		sep = strchr(p, ',');
+		connstr_len = sep != NULL ? sep - p : strlen(p);
+
+		if (connstr_len == 0 && sep == NULL)
+			break;				/* ignore trailing comma */
+
+		if (nshards >= MAX_SHARDS)
+		{
+			neon_log(LOG, "Too many shards");
+			return false;
+		}
+		if (connstr_len >= MAX_PAGESERVER_CONNSTRING_SIZE)
+		{
+			neon_log(LOG, "Connection string too long");
+			return false;
+		}
+		if (result)
+		{
+			memcpy(result->connstring[nshards], p, connstr_len);
+			result->connstring[nshards][connstr_len] = '\0';
+		}
+		nshards++;
+
+		if (sep == NULL)
+			break;
+		p = sep + 1;
+	}
+	if (result)
+		result->num_shards = nshards;
+
+	return true;
+}
+
+static bool
+CheckPageserverConnstring(char **newval, void **extra, GucSource source)
+{
+	char	   *p = *newval;
+
+	return ParseShardMap(p, NULL);
+}
+
+static void
+AssignPageserverConnstring(const char *newval, void *extra)
+{
+	ShardMap	shard_map;
 
 	/*
-	 * There is race condition here between backend and postmaster which can update shard map.
-	 * We recheck update counter after copying shard map to check that configuration was not changed.
+	 * Only postmaster updates the copy in shared memory.
+	 */
+	if (!PagestoreShmemIsValid() || IsUnderPostmaster)
+		return;
+
+	if (!ParseShardMap(newval, &shard_map))
+	{
+		/*
+		 * shouldn't happen, because we already checked the value in
+		 * CheckPageserverConnstring
+		 */
+		elog(ERROR, "could not parse shard map");
+	}
+
+	if (memcmp(&pagestore_shared->shard_map, &shard_map, sizeof(ShardMap)) != 0)
+	{
+		pg_atomic_add_fetch_u64(&pagestore_shared->begin_update_counter, 1);
+		pg_write_barrier();
+		memcpy(&pagestore_shared->shard_map, &shard_map, sizeof(ShardMap));
+		pg_write_barrier();
+		pg_atomic_add_fetch_u64(&pagestore_shared->end_update_counter, 1);
+	}
+	else
+	{
+		/* no change */
+	}
+}
+
+/*
+ * Get the current number of shards, and/or the connection string for a
+ * particular shard from the shard map in shared memory.
+ *
+ * If num_shards_p is not NULL, it is set to the current number of shards.
+ *
+ * If connstr_p is not NULL, the connection string for 'shard_no' is copied to
+ * it. It must point to a buffer at least MAX_PAGESERVER_CONNSTRING_SIZE bytes
+ * long.
+ *
+ * As a side-effect, if the shard map in shared memory had changed since the
+ * last call, terminates all existing connections to all pageservers.
+ */
+static void
+load_shard_map(shardno_t shard_no, char *connstr_p, size_t *num_shards_p)
+{
+	uint64		begin_update_counter;
+	uint64		end_update_counter;
+	ShardMap   *shard_map = &pagestore_shared->shard_map;
+	size_t		num_shards;
+
+	/*
+	 * Postmaster can update the shared memory values concurrently, in which
+	 * case we would copy a garbled mix of the old and new values. We will
+	 * detect it because the counter's won't match, and retry. But it's
+	 * important that we don't do anything within the retry-loop that would
+	 * depend on the string having valid contents.
 	 */
 	do
 	{
-		begin_update_counter = pg_atomic_read_u64(&shard_map->begin_update_counter);
-		end_update_counter = pg_atomic_read_u64(&shard_map->end_update_counter);
+		begin_update_counter = pg_atomic_read_u64(&pagestore_shared->begin_update_counter);
+		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
 
-		n_shards = shard_map->n_shards;
-		if (shard_no >= n_shards)
-			neon_log(ERROR, "Shard %d is greater or equal than number of shards %d", shard_no, n_shards);
-
-		if (connstr)
-		{
-			strlcpy(connstr, shard_map->shard_connstr[shard_no], MAX_PS_CONNSTR_LEN);
-			pg_memory_barrier();
-		}
-
+		num_shards = shard_map->num_shards;
+		if (connstr_p && shard_no < MAX_SHARDS)
+			strlcpy(connstr_p, shard_map->connstring[shard_no], MAX_PAGESERVER_CONNSTRING_SIZE);
+		pg_memory_barrier();
 	}
 	while (begin_update_counter != end_update_counter
-		   || begin_update_counter != pg_atomic_read_u64(&shard_map->begin_update_counter)
-		   || end_update_counter != pg_atomic_read_u64(&shard_map->end_update_counter));
+		   || begin_update_counter != pg_atomic_read_u64(&pagestore_shared->begin_update_counter)
+		   || end_update_counter != pg_atomic_read_u64(&pagestore_shared->end_update_counter));
 
+	if (connstr_p && shard_no >= num_shards)
+		neon_log(ERROR, "Shard %d is greater or equal than number of shards %d",
+				 shard_no, num_shards);
 
-	if (shard_map_update_counter != end_update_counter)
+	/*
+	 * If any of the connection strings changed, reset all connections.
+	 */
+	if (pagestore_local_counter != end_update_counter)
 	{
-		/* Reset all connections if connection strings are changed */
 		for (shardno_t i = 0; i < MAX_SHARDS; i++)
 		{
 			if (page_servers[i].conn)
 				pageserver_disconnect(i);
 		}
-		shard_map_update_counter = end_update_counter;
+		pagestore_local_counter = end_update_counter;
 	}
 
-	return n_shards;
+	if (num_shards_p)
+		*num_shards_p = num_shards;
 }
 
 #define MB (1024*1024)
 
 shardno_t
-get_shard_number(BufferTag* tag)
+get_shard_number(BufferTag *tag)
 {
-	shardno_t n_shards = load_shard_map(0, NULL);
-	uint32	  hash;
+	size_t		n_shards;
+	uint32		hash;
+
+	load_shard_map(0, NULL, &n_shards);
 
 #if PG_MAJORVERSION_NUM < 16
 	hash = murmurhash32(tag->rnode.relNode);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum/stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
 #else
 	hash = murmurhash32(tag->relNumber);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum/stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
 #endif
 
 	return hash % n_shards;
@@ -250,9 +308,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	const char *keywords[3];
 	const char *values[3];
 	int			n;
-	PGconn*		conn;
+	PGconn	   *conn;
 	WaitEventSet *wes;
-	char        connstr[MAX_PS_CONNSTR_LEN];
+	char		connstr[MAX_PAGESERVER_CONNSTRING_SIZE];
 
 	static TimestampTz last_connect_time = 0;
 	static uint64_t delay_us = MIN_RECONNECT_INTERVAL_USEC;
@@ -261,7 +319,12 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 	Assert(page_servers[shard_no].conn == NULL);
 
-	(void)load_shard_map(shard_no, connstr); /* refresh shard map if needed */
+	/*
+	 * Get the connection string for this shard. If the shard map has been
+	 * updated since we last looked, this will also disconnect any existing
+	 * pageserver connections as a side effect.
+	 */
+	load_shard_map(shard_no, connstr, NULL);
 
 	now = GetCurrentTimestamp();
 	us_since_last_connect = now - last_connect_time;
@@ -385,7 +448,8 @@ static int
 call_PQgetCopyData(shardno_t shard_no, char **buffer)
 {
 	int			ret;
-	PGconn*     pageserver_conn = page_servers[shard_no].conn;
+	PGconn	   *pageserver_conn = page_servers[shard_no].conn;
+
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
 
@@ -436,8 +500,10 @@ pageserver_disconnect(shardno_t shard_no)
 		page_servers[shard_no].conn = NULL;
 
 		/*
-		 * If the connection to any pageserver is lost, we throw away the whole prefetch queue, even for other pageservers.
-		 * It should not cause big problems, because connection loss is supposed to be a rare event.
+		 * If the connection to any pageserver is lost, we throw away the
+		 * whole prefetch queue, even for other pageservers. It should not
+		 * cause big problems, because connection loss is supposed to be a
+		 * rare event.
 		 */
 		prefetch_on_ps_disconnect();
 	}
@@ -452,7 +518,7 @@ static bool
 pageserver_send(shardno_t shard_no, NeonRequest *request)
 {
 	StringInfoData req_buff;
-	PGconn* pageserver_conn = page_servers[shard_no].conn;
+	PGconn	   *pageserver_conn = page_servers[shard_no].conn;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (pageserver_conn && PQstatus(pageserver_conn) == CONNECTION_BAD)
@@ -484,7 +550,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 
 	pageserver_conn = page_servers[shard_no].conn;
 
-    /*
+	/*
 	 * Send request.
 	 *
 	 * In principle, this could block if the output buffer is full, and we
@@ -495,6 +561,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+
 		pageserver_disconnect(shard_no);
 		neon_shard_log(shard_no, LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
 		pfree(msg);
@@ -519,7 +586,8 @@ pageserver_receive(shardno_t shard_no)
 {
 	StringInfoData resp_buff;
 	NeonResponse *resp;
-	PGconn* pageserver_conn = page_servers[shard_no].conn;
+	PGconn	   *pageserver_conn = page_servers[shard_no].conn;
+
 	if (!pageserver_conn)
 		return NULL;
 
@@ -578,7 +646,8 @@ pageserver_receive(shardno_t shard_no)
 static bool
 pageserver_flush(shardno_t shard_no)
 {
-	PGconn* pageserver_conn = page_servers[shard_no].conn;
+	PGconn	   *pageserver_conn = page_servers[shard_no].conn;
+
 	if (!pageserver_conn)
 	{
 		neon_shard_log(shard_no, WARNING, "Tried to flush while disconnected");
@@ -613,82 +682,63 @@ check_neon_id(char **newval, void **extra, GucSource source)
 	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
-static bool
-CheckPageserverConnstring(char **newval, void **extra, GucSource source)
+static Size
+PagestoreShmemSize(void)
 {
-	const char* shard_connstr = *newval;
-	const char* sep;
-	size_t connstr_len;
-	int i = 0;
-	do
-	{
-		sep = strchr(shard_connstr, ',');
-		connstr_len = sep != NULL ? sep - shard_connstr : strlen(shard_connstr);
-		if (connstr_len == 0 && sep == NULL)
-			break; /* trailing comma */
-		if (i >= MAX_SHARDS)
-		{
-			neon_log(LOG, "Too many shards");
-			return false;
-		}
-		if (connstr_len >= MAX_PS_CONNSTR_LEN)
-		{
-			neon_log(LOG, "Connection string too long");
-			return false;
-		}
-		shard_connstr = sep + 1;
-		i += 1;
-	} while (sep != NULL);
+	return sizeof(PagestoreShmemState);
+}
 
-	return true;
+static bool
+PagestoreShmemInit(void)
+{
+	bool		found;
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	pagestore_shared = ShmemInitStruct("libpagestore shared state",
+									   PagestoreShmemSize(),
+									   &found);
+	if (!found)
+	{
+		pg_atomic_init_u64(&pagestore_shared->begin_update_counter, 0);
+		pg_atomic_init_u64(&pagestore_shared->end_update_counter, 0);
+		memset(&pagestore_shared->shard_map, 0, sizeof(ShardMap));
+		AssignPageserverConnstring(page_server_connstring, NULL);
+	}
+	LWLockRelease(AddinShmemInitLock);
+	return found;
 }
 
 static void
-AssignPageserverConnstring(const char *newval, void *extra)
+pagestore_shmem_startup_hook(void)
 {
-	/*
-	 * Load shard map only at Postmaster.
-	 * If old page server is not available, then backends can be blocked in attempts to reconnect to it and do not reload config in this loop
-	 *
-	 * Copying GUC value to shared memory is usually performed by postmaster.
-	 */
-	if (shard_map != NULL && UsedShmemSegAddr != NULL && !IsUnderPostmaster)
-	{
-		const char* shard_connstr = newval;
-		const char* sep;
-		size_t connstr_len;
-		int i = 0;
-		bool shard_map_changed = false;
-		do
-		{
-			sep = strchr(shard_connstr, ',');
-			connstr_len = sep != NULL ? sep - shard_connstr : strlen(shard_connstr);
-			if (connstr_len == 0)
-				break; /* trailing comma */
-			Assert(i < MAX_SHARDS);
-			Assert(connstr_len < MAX_PS_CONNSTR_LEN);
-			if (i >= shard_map->n_shards ||
-				strcmp(shard_map->shard_connstr[i], shard_connstr) != 0)
-			{
-				if (!shard_map_changed)
-				{
-					pg_atomic_add_fetch_u64(&shard_map->begin_update_counter, 1);
-					shard_map_changed = true;
-				}
-				memcpy(shard_map->shard_connstr[i], shard_connstr, connstr_len);
-				shard_map->shard_connstr[i][connstr_len] = '\0';
-			}
-			shard_connstr = sep + 1;
-			i += 1;
-		} while (sep != NULL);
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
 
-		if (shard_map_changed)
-		{
-			shard_map->n_shards = i;
-			pg_memory_barrier();
-			pg_atomic_add_fetch_u64(&shard_map->end_update_counter, 1);
-		}
-	}
+	PagestoreShmemInit();
+}
+
+static void
+pagestore_shmem_request(void)
+{
+#if PG_VERSION_NUM >= 150000
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+#endif
+
+	RequestAddinShmemSpace(PagestoreShmemSize());
+}
+
+static void
+pagestore_prepare_shmem(void)
+{
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = pagestore_shmem_request;
+#else
+	pagestore_shmem_request();
+#endif
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = pagestore_shmem_startup_hook;
 }
 
 /*
@@ -697,6 +747,8 @@ AssignPageserverConnstring(const char *newval, void *extra)
 void
 pg_init_libpagestore(void)
 {
+	pagestore_prepare_shmem();
+
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
 							   NULL,
@@ -796,5 +848,4 @@ pg_init_libpagestore(void)
 	}
 
 	lfc_init();
-	psm_init();
 }

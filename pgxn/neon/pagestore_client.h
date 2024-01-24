@@ -29,7 +29,7 @@
 #include "pg_config.h"
 
 #define MAX_SHARDS 128
-#define MAX_PS_CONNSTR_LEN 128
+#define MAX_PAGESERVER_CONNSTRING_SIZE 256
 
 typedef enum
 {
