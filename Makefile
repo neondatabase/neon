@@ -140,10 +140,6 @@ postgres-check-%: postgres-%
 .PHONY: neon-pg-ext-%
 neon-pg-ext-%: postgres-%
 	+@echo "Compiling neon $*"
-	ifeq ($@,walproposer-lib)
-		+@echo "unsetting sanitisers for walproposer-lib"
-		unset CPPFLAGS LDFLAGS LD_PRELOAD
-	endif
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
