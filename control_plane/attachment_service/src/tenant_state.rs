@@ -79,7 +79,7 @@ pub(crate) struct IntentState {
     pub(crate) secondary: Vec<NodeId>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub(crate) struct ObservedState {
     pub(crate) locations: HashMap<NodeId, ObservedStateLocation>,
 }
@@ -93,7 +93,7 @@ pub(crate) struct ObservedState {
 ///       what it is (e.g. we failed partway through configuring it)
 ///     * Instance exists with conf==Some: this tells us what we last successfully configured on this node,
 ///       and that configuration will still be present unless something external interfered.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ObservedStateLocation {
     /// If None, it means we do not know the status of this shard's location on this node, but
     /// we know that we might have some state on this node.
