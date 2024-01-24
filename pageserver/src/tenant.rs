@@ -91,7 +91,6 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::ops::Bound::Included;
-use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -3762,27 +3761,25 @@ async fn run_initdb(
         .env_clear()
         .env("LD_LIBRARY_PATH", &initdb_lib_dir)
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // If the `select!` below doesn't finish the `wait_with_output`,
-        // let the task get `wait()`ed for asynchronously by tokio.
-        // This means there is a slim chance we can go over the INIT_DB_SEMAPHORE.
-        // TODO: fix for this is non-trivial, see
-        // https://github.com/neondatabase/neon/pull/5921#pullrequestreview-1750858021
-        //
-        .kill_on_drop(true)
         .spawn()?;
 
-    tokio::select! {
-        initdb_output = initdb_command.wait_with_output() => {
-            let initdb_output = initdb_output?;
-            if !initdb_output.status.success() {
-                return Err(InitdbError::Failed(initdb_output.status, initdb_output.stderr));
-            }
-        }
-        _ = cancel.cancelled() => {
-            return Err(InitdbError::Cancelled);
-        }
+    // Ideally we'd select here with the cancellation token, but the problem is that
+    // we can't safely terminate initdb: it launches processes of its own, and killing
+    // initdb doesn't kill them. After we return from this function, we want the target
+    // directory to be able to be cleaned up.
+    // See https://github.com/neondatabase/neon/issues/6385
+    let initdb_output = initdb_command.wait_with_output().await?;
+    if !initdb_output.status.success() {
+        return Err(InitdbError::Failed(
+            initdb_output.status,
+            initdb_output.stderr,
+        ));
+    }
+
+    // This isn't true cancellation support, see above. Still return an error to
+    // excercise the cancellation code path.
+    if cancel.is_cancelled() {
+        return Err(InitdbError::Cancelled);
     }
 
     Ok(())
