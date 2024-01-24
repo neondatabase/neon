@@ -40,6 +40,7 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
+use tokio_util::sync::CancellationToken;
 
 use super::StorageMetadata;
 use crate::{
@@ -637,6 +638,7 @@ impl RemoteStorage for S3Bucket {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
+        _cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::TimeTravel;
         let _guard = self.permit(kind).await;

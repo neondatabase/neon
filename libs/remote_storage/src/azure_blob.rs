@@ -24,6 +24,7 @@ use futures::stream::Stream;
 use futures_util::StreamExt;
 use http_types::{StatusCode, Url};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
@@ -378,6 +379,7 @@ impl RemoteStorage for AzureBlobStorage {
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
+        _cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         // TODO use Azure point in time recovery feature for this
         // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview

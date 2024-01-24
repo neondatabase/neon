@@ -25,6 +25,7 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use toml_edit::Item;
 use tracing::info;
 
@@ -217,6 +218,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()>;
 }
 
@@ -400,22 +402,23 @@ impl GenericRemoteStorage {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         match self {
             Self::LocalFs(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
                     .await
             }
             Self::AwsS3(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
                     .await
             }
             Self::AzureBlob(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
                     .await
             }
             Self::Unreliable(s) => {
-                s.time_travel_recover(prefix, timestamp, done_if_after)
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
                     .await
             }
         }

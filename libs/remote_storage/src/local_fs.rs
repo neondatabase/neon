@@ -14,7 +14,7 @@ use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
-use tokio_util::io::ReaderStream;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
@@ -430,6 +430,7 @@ impl RemoteStorage for LocalFs {
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
+        _cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         unimplemented!()
     }

@@ -3,6 +3,7 @@
 //! testing purposes.
 use bytes::Bytes;
 use futures::stream::Stream;
+use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::{collections::hash_map::Entry, time::SystemTime};
@@ -176,10 +177,11 @@ impl RemoteStorage for UnreliableWrapper {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))?;
         self.inner
-            .time_travel_recover(prefix, timestamp, done_if_after)
+            .time_travel_recover(prefix, timestamp, done_if_after, cancel)
             .await
     }
 }
