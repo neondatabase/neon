@@ -6,7 +6,7 @@ runs:
   steps:
     - name: List coverage files
       shell: bash -euxo pipefail {0}
-      run: find /tmp/coverage -type f
+      run: find /tmp/coverage -type f -exec du -h {} \;
 
     - name: List pids for profraw
       shell: bash -euxo pipefail {0}
