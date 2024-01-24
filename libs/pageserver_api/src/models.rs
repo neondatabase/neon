@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -251,7 +251,7 @@ impl std::ops::Deref for TenantCreateRequest {
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
@@ -266,21 +266,41 @@ pub struct TenantConfig {
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub trace_read_requests: Option<bool>,
-    // We defer the parsing of the eviction_policy field to the request handler.
-    // Otherwise we'd have to move the types for eviction policy into this package.
-    // We might do that once the eviction feature has stabilizied.
-    // For now, this field is not even documented in the openapi_spec.yml.
-    pub eviction_policy: Option<serde_json::Value>,
+    pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum EvictionPolicy {
+    NoEviction,
+    LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+}
+
+impl EvictionPolicy {
+    pub fn discriminant_str(&self) -> &'static str {
+        match self {
+            EvictionPolicy::NoEviction => "NoEviction",
+            EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvictionPolicyLayerAccessThreshold {
+    #[serde(with = "humantime_serde")]
+    pub period: Duration,
+    #[serde(with = "humantime_serde")]
+    pub threshold: Duration,
+}
+
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
 /// lists out all possible states (and the virtual "Detached" state)
 /// in a flat form rather than using rust-style enums.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum LocationConfigMode {
     AttachedSingle,
     AttachedMulti,
@@ -289,19 +309,21 @@ pub enum LocationConfigMode {
     Detached,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct LocationConfigSecondary {
     pub warm: bool,
 }
 
 /// An alternative representation of `pageserver::tenant::LocationConf`,
 /// for use in external-facing APIs.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct LocationConfig {
     pub mode: LocationConfigMode,
     /// If attaching, in what generation?
     #[serde(default)]
     pub generation: Option<u32>,
+
+    // If requesting mode `Secondary`, configuration for that.
     #[serde(default)]
     pub secondary_conf: Option<LocationConfigSecondary>,
 
@@ -314,9 +336,15 @@ pub struct LocationConfig {
     #[serde(default)]
     pub shard_stripe_size: u32,
 
-    // If requesting mode `Secondary`, configuration for that.
-    // Custom storage configuration for the tenant, if any
+    // This configuration only affects attached mode, but should be provided irrespective
+    // of the mode, as a secondary location might transition on startup if the response
+    // to the `/re-attach` control plane API requests it.
     pub tenant_conf: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LocationConfigListResponse {
+    pub tenant_shards: Vec<(TenantShardId, Option<LocationConfig>)>,
 }
 
 #[derive(Serialize, Deserialize)]

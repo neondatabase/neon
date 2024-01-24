@@ -9,7 +9,8 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
-use pageserver_api::models::{self, ShardParameters};
+use pageserver_api::models;
+use pageserver_api::models::EvictionPolicy;
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -170,7 +171,7 @@ impl LocationConf {
     pub(crate) fn attached_single(
         tenant_conf: TenantConfOpt,
         generation: Generation,
-        shard_params: &ShardParameters,
+        shard_params: &models::ShardParameters,
     ) -> Self {
         Self {
             mode: LocationMode::Attached(AttachedLocationConfig {
@@ -431,30 +432,6 @@ pub struct TenantConfOpt {
     pub heatmap_period: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum EvictionPolicy {
-    NoEviction,
-    LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
-}
-
-impl EvictionPolicy {
-    pub fn discriminant_str(&self) -> &'static str {
-        match self {
-            EvictionPolicy::NoEviction => "NoEviction",
-            EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvictionPolicyLayerAccessThreshold {
-    #[serde(with = "humantime_serde")]
-    pub period: Duration,
-    #[serde(with = "humantime_serde")]
-    pub threshold: Duration,
-}
-
 impl TenantConfOpt {
     pub fn merge(&self, global_conf: TenantConf) -> TenantConf {
         TenantConf {
@@ -575,6 +552,38 @@ impl TryFrom<toml_edit::Item> for TenantConfOpt {
             _ => {
                 bail!("expected non-inline table but found {item}")
             }
+        }
+    }
+}
+
+/// This is a conversion from our internal tenant config object to the one used
+/// in external APIs.
+impl From<TenantConfOpt> for models::TenantConfig {
+    fn from(value: TenantConfOpt) -> Self {
+        fn humantime(d: Duration) -> String {
+            format!("{}s", d.as_secs())
+        }
+        Self {
+            checkpoint_distance: value.checkpoint_distance,
+            checkpoint_timeout: value.checkpoint_timeout.map(humantime),
+            compaction_target_size: value.compaction_target_size,
+            compaction_period: value.compaction_period.map(humantime),
+            compaction_threshold: value.compaction_threshold,
+            gc_horizon: value.gc_horizon,
+            gc_period: value.gc_period.map(humantime),
+            image_creation_threshold: value.image_creation_threshold,
+            pitr_interval: value.pitr_interval.map(humantime),
+            walreceiver_connect_timeout: value.walreceiver_connect_timeout.map(humantime),
+            lagging_wal_timeout: value.lagging_wal_timeout.map(humantime),
+            max_lsn_wal_lag: value.max_lsn_wal_lag,
+            trace_read_requests: value.trace_read_requests,
+            eviction_policy: value.eviction_policy,
+            min_resident_size_override: value.min_resident_size_override,
+            evictions_low_residence_duration_metric_threshold: value
+                .evictions_low_residence_duration_metric_threshold
+                .map(humantime),
+            gc_feedback: value.gc_feedback,
+            heatmap_period: value.heatmap_period.map(humantime),
         }
     }
 }

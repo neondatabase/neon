@@ -14,10 +14,12 @@ use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::{
+    keyspace::{key_range_size, KeySpaceAccum},
     models::{
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
-        TimelineState,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        LayerMapInfo, TimelineState,
     },
+    reltag::BlockNumber,
     shard::{ShardIdentity, TenantShardId},
 };
 use rand::Rng;
@@ -31,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::sync::gate::Gate;
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -42,7 +44,6 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -65,16 +66,17 @@ use crate::{
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
 };
+use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
-use crate::pgdatadir_mapping::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
-use crate::pgdatadir_mapping::{CalculateLogicalSizeError, LsnForTimestamp};
-use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
-use pageserver_api::reltag::{BlockNumber, RelTag};
+use crate::pgdatadir_mapping::CalculateLogicalSizeError;
+use crate::tenant::config::TenantConfOpt;
+use pageserver_api::key::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
+use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
@@ -251,6 +253,10 @@ pub struct Timeline {
 
     pub(super) metrics: TimelineMetrics,
 
+    // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
+    // in `crate::page_service` writes these metrics.
+    pub(crate) query_metrics: crate::metrics::SmgrQueryTimePerTimeline,
+
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
@@ -400,16 +406,43 @@ pub(crate) enum PageReconstructError {
 }
 
 #[derive(thiserror::Error, Debug)]
+enum CreateImageLayersError {
+    #[error("timeline shutting down")]
+    Cancelled,
+
+    #[error(transparent)]
+    GetVectoredError(GetVectoredError),
+
+    #[error(transparent)]
+    PageReconstructError(PageReconstructError),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
 enum FlushLayerError {
     /// Timeline cancellation token was cancelled
     #[error("timeline shutting down")]
     Cancelled,
 
     #[error(transparent)]
-    PageReconstructError(#[from] PageReconstructError),
+    CreateImageLayersError(CreateImageLayersError),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum GetVectoredError {
+    #[error("timeline shutting down")]
+    Cancelled,
+
+    #[error("Requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
+    Oversized(u64),
+
+    #[error("Requested at invalid LSN: {0}")]
+    InvalidLsn(Lsn),
 }
 
 #[derive(Clone, Copy)]
@@ -449,6 +482,45 @@ pub(crate) enum WaitLsnError {
     // Timeout expired while waiting for LSN to catch up with goal.
     #[error("{0}")]
     Timeout(String),
+}
+
+// The impls below achieve cancellation mapping for errors.
+// Perhaps there's a way of achieving this with less cruft.
+
+impl From<CreateImageLayersError> for CompactionError {
+    fn from(e: CreateImageLayersError) -> Self {
+        match e {
+            CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            _ => CompactionError::Other(e.into()),
+        }
+    }
+}
+
+impl From<CreateImageLayersError> for FlushLayerError {
+    fn from(e: CreateImageLayersError) -> Self {
+        match e {
+            CreateImageLayersError::Cancelled => FlushLayerError::Cancelled,
+            any => FlushLayerError::CreateImageLayersError(any),
+        }
+    }
+}
+
+impl From<PageReconstructError> for CreateImageLayersError {
+    fn from(e: PageReconstructError) -> Self {
+        match e {
+            PageReconstructError::Cancelled => CreateImageLayersError::Cancelled,
+            _ => CreateImageLayersError::PageReconstructError(e),
+        }
+    }
+}
+
+impl From<GetVectoredError> for CreateImageLayersError {
+    fn from(e: GetVectoredError) -> Self {
+        match e {
+            GetVectoredError::Cancelled => CreateImageLayersError::Cancelled,
+            _ => CreateImageLayersError::GetVectoredError(e),
+        }
+    }
 }
 
 /// Public interface functions
@@ -568,6 +640,53 @@ impl Timeline {
         }
 
         res
+    }
+
+    pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
+
+    /// Look up multiple page versions at a given LSN
+    ///
+    /// This naive implementation will be replaced with a more efficient one
+    /// which actually vectorizes the read path.
+    pub(crate) async fn get_vectored(
+        &self,
+        key_ranges: &[Range<Key>],
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        if !lsn.is_valid() {
+            return Err(GetVectoredError::InvalidLsn(lsn));
+        }
+
+        let key_count = key_ranges
+            .iter()
+            .map(|range| key_range_size(range) as u64)
+            .sum();
+        if key_count > Timeline::MAX_GET_VECTORED_KEYS {
+            return Err(GetVectoredError::Oversized(key_count));
+        }
+
+        let mut values = BTreeMap::new();
+        for range in key_ranges {
+            let mut key = range.start;
+            while key != range.end {
+                assert!(!self.shard_identity.is_key_disposable(&key));
+
+                let block = self.get(key, lsn, ctx).await;
+
+                if matches!(
+                    block,
+                    Err(PageReconstructError::Cancelled | PageReconstructError::AncestorStopping(_))
+                ) {
+                    return Err(GetVectoredError::Cancelled);
+                }
+
+                values.insert(key, block);
+                key = key.next();
+            }
+        }
+
+        Ok(values)
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -1312,6 +1431,11 @@ impl Timeline {
                         "mtime",
                         evictions_low_residence_duration_metric_threshold,
                     ),
+                ),
+
+                query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
+                    &tenant_shard_id,
+                    &timeline_id,
                 ),
 
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
@@ -2572,7 +2696,7 @@ impl Timeline {
                         return;
                     }
                     err @ Err(
-                        FlushLayerError::Other(_) | FlushLayerError::PageReconstructError(_),
+                        FlushLayerError::Other(_) | FlushLayerError::CreateImageLayersError(_),
                     ) => {
                         error!("could not flush frozen layer: {err:?}");
                         break err;
@@ -2849,6 +2973,21 @@ impl Timeline {
         Ok(())
     }
 
+    pub(crate) async fn preserve_initdb_archive(&self) -> anyhow::Result<()> {
+        if let Some(remote_client) = &self.remote_client {
+            remote_client
+                .preserve_initdb_archive(
+                    &self.tenant_shard_id.tenant_id,
+                    &self.timeline_id,
+                    &self.cancel,
+                )
+                .await?;
+        } else {
+            bail!("No remote storage configured, but was asked to backup the initdb archive for {} / {}", self.tenant_shard_id.tenant_id, self.timeline_id);
+        }
+        Ok(())
+    }
+
     // Write out the given frozen in-memory layer as a new L0 delta file. This L0 file will not be tracked
     // in layer map immediately. The caller is responsible to put it into the layer map.
     async fn create_delta_layer(
@@ -2940,11 +3079,7 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    async fn time_for_new_image_layer(
-        &self,
-        partition: &KeySpace,
-        lsn: Lsn,
-    ) -> anyhow::Result<bool> {
+    async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;
@@ -2964,20 +3099,20 @@ impl Timeline {
                     // but the range is already covered by image layers at more recent LSNs. Before we
                     // create a new image layer, check if the range is already covered at more recent LSNs.
                     if !layers
-                        .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))?
+                        .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))
                     {
                         debug!(
                             "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
                             img_range.start, img_range.end, cutoff_lsn, lsn
                         );
-                        return Ok(true);
+                        return true;
                     }
                 }
             }
         }
 
         for part_range in &partition.ranges {
-            let image_coverage = layers.image_coverage(part_range, lsn)?;
+            let image_coverage = layers.image_coverage(part_range, lsn);
             for (img_range, last_img) in image_coverage {
                 let img_lsn = if let Some(last_img) = last_img {
                     last_img.get_lsn_range().end
@@ -2998,7 +3133,7 @@ impl Timeline {
                 // after we read last_record_lsn, which is passed here in the 'lsn' argument.
                 if img_lsn < lsn {
                     let num_deltas =
-                        layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
+                        layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold));
 
                     max_deltas = max_deltas.max(num_deltas);
                     if num_deltas >= threshold {
@@ -3006,7 +3141,7 @@ impl Timeline {
                             "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
                             img_range.start, img_range.end, num_deltas, img_lsn, lsn
                         );
-                        return Ok(true);
+                        return true;
                     }
                 }
             }
@@ -3016,7 +3151,7 @@ impl Timeline {
             max_deltas,
             "none of the partitioned ranges had >= {threshold} deltas"
         );
-        Ok(false)
+        false
     }
 
     #[tracing::instrument(skip_all, fields(%lsn, %force))]
@@ -3026,7 +3161,7 @@ impl Timeline {
         lsn: Lsn,
         force: bool,
         ctx: &RequestContext,
-    ) -> Result<Vec<ResidentLayer>, PageReconstructError> {
+    ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers = Vec::new();
 
@@ -3044,7 +3179,7 @@ impl Timeline {
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
             start = img_range.end;
-            if force || self.time_for_new_image_layer(partition, lsn).await? {
+            if force || self.time_for_new_image_layer(partition, lsn).await {
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
@@ -3055,10 +3190,12 @@ impl Timeline {
                 .await?;
 
                 fail_point!("image-layer-writer-fail-before-finish", |_| {
-                    Err(PageReconstructError::Other(anyhow::anyhow!(
+                    Err(CreateImageLayersError::Other(anyhow::anyhow!(
                         "failpoint image-layer-writer-fail-before-finish"
                     )))
                 });
+
+                let mut key_request_accum = KeySpaceAccum::new();
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
@@ -3071,34 +3208,55 @@ impl Timeline {
                             key = key.next();
                             continue;
                         }
-                        let img = match self.get(key, lsn, ctx).await {
-                            Ok(img) => img,
-                            Err(err) => {
-                                // If we fail to reconstruct a VM or FSM page, we can zero the
-                                // page without losing any actual user data. That seems better
-                                // than failing repeatedly and getting stuck.
-                                //
-                                // We had a bug at one point, where we truncated the FSM and VM
-                                // in the pageserver, but the Postgres didn't know about that
-                                // and continued to generate incremental WAL records for pages
-                                // that didn't exist in the pageserver. Trying to replay those
-                                // WAL records failed to find the previous image of the page.
-                                // This special case allows us to recover from that situation.
-                                // See https://github.com/neondatabase/neon/issues/2601.
-                                //
-                                // Unfortunately we cannot do this for the main fork, or for
-                                // any metadata keys, keys, as that would lead to actual data
-                                // loss.
-                                if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
-                                    warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
-                                    ZERO_PAGE.clone()
-                                } else {
-                                    return Err(err);
-                                }
-                            }
-                        };
 
-                        image_layer_writer.put_image(key, &img).await?;
+                        key_request_accum.add_key(key);
+                        if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
+                            || key.next() == range.end
+                        {
+                            let results = self
+                                .get_vectored(
+                                    &key_request_accum.consume_keyspace().ranges,
+                                    lsn,
+                                    ctx,
+                                )
+                                .await?;
+
+                            for (img_key, img) in results {
+                                let img = match img {
+                                    Ok(img) => img,
+                                    Err(err) => {
+                                        // If we fail to reconstruct a VM or FSM page, we can zero the
+                                        // page without losing any actual user data. That seems better
+                                        // than failing repeatedly and getting stuck.
+                                        //
+                                        // We had a bug at one point, where we truncated the FSM and VM
+                                        // in the pageserver, but the Postgres didn't know about that
+                                        // and continued to generate incremental WAL records for pages
+                                        // that didn't exist in the pageserver. Trying to replay those
+                                        // WAL records failed to find the previous image of the page.
+                                        // This special case allows us to recover from that situation.
+                                        // See https://github.com/neondatabase/neon/issues/2601.
+                                        //
+                                        // Unfortunately we cannot do this for the main fork, or for
+                                        // any metadata keys, keys, as that would lead to actual data
+                                        // loss.
+                                        if is_rel_fsm_block_key(img_key)
+                                            || is_rel_vm_block_key(img_key)
+                                        {
+                                            warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
+                                            ZERO_PAGE.clone()
+                                        } else {
+                                            return Err(
+                                                CreateImageLayersError::PageReconstructError(err),
+                                            );
+                                        }
+                                    }
+                                };
+
+                                image_layer_writer.put_image(img_key, &img).await?;
+                            }
+                        }
+
                         key = key.next();
                     }
                 }
@@ -3474,7 +3632,7 @@ impl Timeline {
                     // has not so much sense, because largest holes will corresponds field1/field2 changes.
                     // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
                     // That is why it is better to measure size of hole as number of covering image layers.
-                    let coverage_size = layers.image_coverage(&key_range, last_record_lsn)?.len();
+                    let coverage_size = layers.image_coverage(&key_range, last_record_lsn).len();
                     if coverage_size >= min_hole_coverage_size {
                         heap.push(Hole {
                             key_range,
@@ -4100,7 +4258,7 @@ impl Timeline {
             // we cannot remove C, even though it's older than 2500, because
             // the delta layer 2000-3000 depends on it.
             if !layers
-                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
+                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
             {
                 debug!("keeping {} because it is the latest layer", l.filename());
                 // Collect delta key ranges that need image layers to allow garbage
@@ -4230,7 +4388,7 @@ impl Timeline {
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
                     .await
-                    .context("Failed to reconstruct a page image:")
+                    .context("reconstruct a page image")
                 {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::WalRedo(e)),

@@ -1,12 +1,11 @@
 //! Periodically collect proxy consumption metrics
 //! and push them to a HTTP endpoint.
-use crate::{config::MetricCollectionConfig, http};
+use crate::{config::MetricCollectionConfig, http, BranchId, EndpointId};
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use dashmap::{mapref::entry::Entry, DashMap};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use smol_str::SmolStr;
 use std::{
     convert::Infallible,
     sync::{
@@ -30,8 +29,8 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// because we enrich the event with project_id in the control-plane endpoint.
 #[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
 pub struct Ids {
-    pub endpoint_id: SmolStr,
-    pub branch_id: SmolStr,
+    pub endpoint_id: EndpointId,
+    pub branch_id: BranchId,
 }
 
 #[derive(Debug)]

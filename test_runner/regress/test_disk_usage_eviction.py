@@ -1,5 +1,6 @@
 import enum
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
@@ -16,7 +17,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
@@ -119,6 +120,19 @@ class EvictionEnv:
             for tid, tlid in self.timelines
         }
 
+    def count_layers_per_tenant(self, pageserver: NeonPageserver) -> Dict[TenantId, int]:
+        ret: Counter[TenantId] = Counter()
+
+        for tenant_id, timeline_id in self.timelines:
+            timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
+            assert timeline_dir.exists()
+            for file in timeline_dir.iterdir():
+                if "__" not in file.name:
+                    continue
+                ret[tenant_id] += 1
+
+        return dict(ret)
+
     def warm_up_tenant(self, tenant_id: TenantId):
         """
         Start a read-only compute at the LSN after pgbench -i, and run pgbench -S against it.
@@ -214,9 +228,6 @@ def _eviction_env(
     env = neon_env_builder.init_configs()
     env.start()
 
-    # We will create all tenants on the 0th pageserver
-    pageserver_http = env.pageservers[0].http_client()
-
     # allow because we are invoking this manually; we always warn on executing disk based eviction
     for ps in env.pageservers:
         ps.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
@@ -244,7 +255,7 @@ def _eviction_env(
 
         with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
             pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
-            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id, pageserver_id=1)
+            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
         timelines.append((tenant_id, timeline_id))
 
@@ -255,6 +266,8 @@ def _eviction_env(
 
     # after stopping the safekeepers, we know that no new WAL will be coming in
     for tenant_id, timeline_id in timelines:
+        pageserver_http = env.get_tenant_pageserver(tenant_id).http_client()
+
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
         tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
@@ -504,6 +517,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
 
     (total_on_disk, _, _) = env.timelines_du(env.pageserver)
     du_by_timeline = env.du_by_timeline(env.pageserver)
+    tenant_layers = env.count_layers_per_tenant(env.pageserver)
 
     # pick smaller or greater (iteration order is insertion order of scale=4 and scale=6)
     [warm, cold] = list(du_by_timeline.keys())
@@ -557,8 +571,31 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
             cold_size < cold_upper
         ), "the cold tenant should be evicted to its min_resident_size, i.e., max layer file size"
     else:
-        # just go with the space was freed, find proper limits later
-        pass
+        # with relative order what matters is the amount of layers, with a
+        # fudge factor of whether the eviction bothers tenants with highest
+        # layer count the most. last accessed times between tenants does not
+        # matter.
+        layers_now = env.count_layers_per_tenant(env.pageserver)
+
+        expected_ratio = later_total_on_disk / total_on_disk
+        log.info(
+            f"freed up {100 * expected_ratio}%, expecting the layer counts to decrease in similar ratio"
+        )
+
+        for tenant_id, original_count in tenant_layers.items():
+            count_now = layers_now[tenant_id]
+            ratio = count_now / original_count
+            abs_diff = abs(ratio - expected_ratio)
+            assert original_count > count_now
+            log.info(
+                f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < 0.1"
+            )
+
+            # in this test case both relative_spare and relative_equal produce
+            # the same outcomes; this must be a quantization effect of similar
+            # sizes (-s4 and -s6) and small (5MB) layer size.
+            # for pg15 and pg16 the absdiff is < 0.01, for pg14 it is closer to 0.02
+            assert abs_diff < 0.05
 
 
 def poor_mans_du(
@@ -710,10 +747,20 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
 
     tenant_ids = [t[0] for t in env.timelines]
 
+    # Set up a situation where one pageserver _only_ has secondary locations on it,
+    # so that when we release space we are sure it is via secondary locations.
+
     log.info("Setting up secondary location...")
     ps_attached = env.neon_env.pageservers[0]
     ps_secondary = env.neon_env.pageservers[1]
     for tenant_id in tenant_ids:
+        # Migrate all attached tenants to the same pageserver, so that all the secondaries
+        # will run on the other pageserver.  This is necessary because when we create tenants,
+        # they are spread over pageservers by default.
+        env.neon_env.attachment_service.tenant_shard_migrate(
+            TenantShardId(tenant_id, 0, 0), ps_attached.id
+        )
+
         ps_secondary.tenant_location_configure(
             tenant_id,
             {

@@ -71,10 +71,6 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub build_tag: String,
-    // connection string to pgbouncer to change settings
-    pub pgbouncer_connstr: Option<String>,
-    // path to pgbouncer.ini to change settings
-    pub pgbouncer_ini_path: Option<String>,
 }
 
 // store some metrics about download size that might impact startup time
@@ -704,13 +700,14 @@ impl ComputeNode {
         // In this case we need to connect with old `zenith_admin` name
         // and create new user. We cannot simply rename connected user,
         // but we can create a new one and grant it all privileges.
-        let mut client = match Client::connect(self.connstr.as_str(), NoTls) {
+        let connstr = self.connstr.clone();
+        let mut client = match Client::connect(connstr.as_str(), NoTls) {
             Err(e) => {
                 info!(
                     "cannot connect to postgres: {}, retrying with `zenith_admin` username",
                     e
                 );
-                let mut zenith_admin_connstr = self.connstr.clone();
+                let mut zenith_admin_connstr = connstr.clone();
 
                 zenith_admin_connstr
                     .set_username("zenith_admin")
@@ -723,8 +720,8 @@ impl ComputeNode {
                 client.simple_query("GRANT zenith_admin TO cloud_admin")?;
                 drop(client);
 
-                // reconnect with connsting with expected name
-                Client::connect(self.connstr.as_str(), NoTls)?
+                // reconnect with connstring with expected name
+                Client::connect(connstr.as_str(), NoTls)?
             }
             Ok(client) => client,
         };
@@ -738,8 +735,8 @@ impl ComputeNode {
         cleanup_instance(&mut client)?;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
-        handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(spec, &mut client, self.connstr.as_str())?;
+        handle_role_deletions(spec, connstr.as_str(), &mut client)?;
+        handle_grants(spec, &mut client, connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
         handle_extension_neon(&mut client)?;
         create_availability_check_data(&mut client)?;
@@ -747,6 +744,12 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
+        if self.has_feature(ComputeFeature::Migrations) {
+            thread::spawn(move || {
+                let mut client = Client::connect(connstr.as_str(), NoTls)?;
+                handle_migrations(&mut client)
+            });
+        }
         Ok(())
     }
 
@@ -769,8 +772,8 @@ impl ComputeNode {
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
-        if let Some(connstr) = &self.pgbouncer_connstr {
-            info!("tuning pgbouncer with connstr: {:?}", connstr);
+        if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
+            info!("tuning pgbouncer");
 
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -779,15 +782,9 @@ impl ComputeNode {
 
             // Spawn a thread to do the tuning,
             // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = spec.pgbouncer_settings.clone();
-            let connstr_clone = connstr.clone();
-            let pgbouncer_ini_path = self.pgbouncer_ini_path.clone();
+            let pgbouncer_settings = pgbouncer_settings.clone();
             let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(
-                    pgbouncer_settings,
-                    &connstr_clone,
-                    pgbouncer_ini_path,
-                ));
+                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
@@ -817,6 +814,10 @@ impl ComputeNode {
             handle_grants(&spec, &mut client, self.connstr.as_str())?;
             handle_extensions(&spec, &mut client)?;
             handle_extension_neon(&mut client)?;
+            // We can skip handle_migrations here because a new migration can only appear
+            // if we have a new version of the compute_ctl binary, which can only happen
+            // if compute got restarted, in which case we'll end up inside of apply_config
+            // instead of reconfigure.
         }
 
         // 'Close' connection
@@ -852,8 +853,8 @@ impl ComputeNode {
         );
 
         // tune pgbouncer
-        if let Some(connstr) = &self.pgbouncer_connstr {
-            info!("tuning pgbouncer with connstr: {:?}", connstr);
+        if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
+            info!("tuning pgbouncer");
 
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -862,15 +863,9 @@ impl ComputeNode {
 
             // Spawn a thread to do the tuning,
             // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pspec.spec.pgbouncer_settings.clone();
-            let connstr_clone = connstr.clone();
-            let pgbouncer_ini_path = self.pgbouncer_ini_path.clone();
+            let pgbouncer_settings = pgbouncer_settings.clone();
             let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(
-                    pgbouncer_settings,
-                    &connstr_clone,
-                    pgbouncer_ini_path,
-                ));
+                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
                 }

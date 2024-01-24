@@ -14,6 +14,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantState;
@@ -39,11 +40,11 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
-use crate::tenant::mgr::UpsertLocationError;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
+use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
@@ -558,6 +559,43 @@ async fn timeline_list_handler(
     .await?;
 
     json_response(StatusCode::OK, response_data)
+}
+
+async fn timeline_preserve_initdb_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    // Part of the process for disaster recovery from safekeeper-stored WAL:
+    // If we don't recover into a new timeline but want to keep the timeline ID,
+    // then the initdb archive is deleted. This endpoint copies it to a different
+    // location where timeline recreation cand find it.
+
+    async {
+        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+
+        let timeline = tenant
+            .get_timeline(timeline_id, false)
+            .map_err(|e| ApiError::NotFound(e.into()))?;
+
+        timeline
+            .preserve_initdb_archive()
+            .await
+            .context("preserving initdb archive")
+            .map_err(ApiError::InternalServerError)?;
+
+        Ok::<_, ApiError>(())
+    }
+    .instrument(info_span!("timeline_preserve_initdb_archive",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug(),
+                %timeline_id))
+    .await?;
+
+    json_response(StatusCode::OK, ())
 }
 
 async fn timeline_detail_handler(
@@ -1235,7 +1273,7 @@ async fn tenant_create_handler(
 
     json_response(
         StatusCode::CREATED,
-        TenantCreateResponse(new_tenant.tenant_id()),
+        TenantCreateResponse(new_tenant.tenant_shard_id().tenant_id),
     )
 }
 
@@ -1352,6 +1390,28 @@ async fn put_tenant_location_config_handler(
     }
 
     json_response(StatusCode::OK, ())
+}
+
+async fn list_location_config_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let slots = state.tenant_manager.list();
+    let result = LocationConfigListResponse {
+        tenant_shards: slots
+            .into_iter()
+            .map(|(tenant_shard_id, slot)| {
+                let v = match slot {
+                    TenantSlot::Attached(t) => Some(t.get_location_conf()),
+                    TenantSlot::Secondary(s) => Some(s.get_location_conf()),
+                    TenantSlot::InProgress(_) => None,
+                };
+                (tenant_shard_id, v)
+            })
+            .collect(),
+    };
+    json_response(StatusCode::OK, result)
 }
 
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
@@ -1896,6 +1956,9 @@ pub fn make_router(
         .put("/v1/tenant/:tenant_shard_id/location_config", |r| {
             api_handler(r, put_tenant_location_config_handler)
         })
+        .get("/v1/location_config", |r| {
+            api_handler(r, list_location_config_handler)
+        })
         .get("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_list_handler)
         })
@@ -1917,6 +1980,10 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/ignore", |r| {
             api_handler(r, tenant_ignore_handler)
         })
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
+            |r| api_handler(r, timeline_preserve_initdb_handler),
+        )
         .get("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)
         })

@@ -32,7 +32,8 @@ use utils::id::TimelineId;
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
     parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
-    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
+    remote_initdb_preserved_archive_path, FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES,
+    INITDB_PATH,
 };
 
 ///
@@ -430,6 +431,9 @@ pub(crate) async fn download_initdb_tar_zst(
 
     let remote_path = remote_initdb_archive_path(&tenant_shard_id.tenant_id, timeline_id);
 
+    let remote_preserved_path =
+        remote_initdb_preserved_archive_path(&tenant_shard_id.tenant_id, timeline_id);
+
     let timeline_path = conf.timelines_path(tenant_shard_id);
 
     if !timeline_path.exists() {
@@ -456,8 +460,16 @@ pub(crate) async fn download_initdb_tar_zst(
                 .with_context(|| format!("tempfile creation {temp_path}"))
                 .map_err(DownloadError::Other)?;
 
-            let download =
-                download_cancellable(&cancel_inner, storage.download(&remote_path)).await?;
+            let download = match download_cancellable(&cancel_inner, storage.download(&remote_path))
+                .await
+            {
+                Ok(dl) => dl,
+                Err(DownloadError::NotFound) => {
+                    download_cancellable(&cancel_inner, storage.download(&remote_preserved_path))
+                        .await?
+                }
+                Err(other) => Err(other)?,
+            };
             let mut download = tokio_util::io::StreamReader::new(download.download_stream);
             let mut writer = tokio::io::BufWriter::with_capacity(8 * 1024, file);
 

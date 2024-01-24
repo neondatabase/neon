@@ -75,7 +75,7 @@ def test_tenant_delete_smoke(
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
 
             assert_prefix_not_empty(
-                neon_env_builder,
+                neon_env_builder.pageserver_remote_storage,
                 prefix="/".join(
                     (
                         "tenants",
@@ -96,7 +96,7 @@ def test_tenant_delete_smoke(
     assert not tenant_path.exists()
 
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -207,7 +207,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
         assert_prefix_not_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -268,7 +268,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
 
     # Check remote is empty
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -304,7 +304,7 @@ def test_tenant_delete_is_resumed_on_attach(
 
     # sanity check, data should be there
     assert_prefix_not_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -343,7 +343,7 @@ def test_tenant_delete_is_resumed_on_attach(
     )
 
     assert_prefix_not_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -378,7 +378,7 @@ def test_tenant_delete_is_resumed_on_attach(
 
     ps_http.deletion_queue_flush(execute=True)
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -543,7 +543,7 @@ def test_tenant_delete_concurrent(
 
     # Physical deletion should have happened
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -578,6 +578,9 @@ def test_tenant_delete_races_timeline_creation(
         ".*POST.*Cancelled request finished with an error: InternalServerError\\(.*ancelled"
     )
 
+    # This can occur sometimes.
+    CONFLICT_MESSAGE = ".*Precondition failed: Invalid state Stopping. Expected Active or Broken.*"
+
     env.pageserver.allowed_errors.extend(
         [
             # lucky race with stopping from flushing a layer we fail to schedule any uploads
@@ -586,6 +589,9 @@ def test_tenant_delete_races_timeline_creation(
             ".*POST.*/timeline.* request was dropped before completing",
             # Timeline creation runs into this error
             CANCELLED_ERROR,
+            # Timeline deletion can run into this error during deletion
+            CONFLICT_MESSAGE,
+            ".*tenant_delete_handler.*still waiting, taking longer than expected.*",
         ]
     )
 
@@ -621,7 +627,10 @@ def test_tenant_delete_races_timeline_creation(
     ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
 
     def tenant_delete():
-        ps_http.tenant_delete(tenant_id)
+        def tenant_delete_inner():
+            ps_http.tenant_delete(tenant_id)
+
+        wait_until(100, 0.5, tenant_delete_inner)
 
     Thread(target=tenant_delete).start()
 
@@ -638,14 +647,12 @@ def test_tenant_delete_races_timeline_creation(
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-    try:
-        tenant_delete_wait_completed(ps_http, tenant_id, iterations)
-    except PageserverApiException:
-        pass
+
+    tenant_delete_wait_completed(ps_http, tenant_id, iterations, ignore_errors=True)
 
     # Physical deletion should have happened
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",

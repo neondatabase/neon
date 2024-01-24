@@ -18,7 +18,7 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
-use pageserver_api::models::ShardParameters;
+use pageserver_api::models;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
@@ -91,7 +91,6 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::ops::Bound::Included;
-use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -112,7 +111,7 @@ use toml_edit;
 use utils::{
     crashsafe,
     generation::Generation,
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     lsn::{Lsn, RecordLsn},
 };
 
@@ -371,13 +370,13 @@ impl WalRedoManager {
 pub enum GetTimelineError {
     #[error("Timeline {tenant_id}/{timeline_id} is not active, state: {state:?}")]
     NotActive {
-        tenant_id: TenantId,
+        tenant_id: TenantShardId,
         timeline_id: TimelineId,
         state: TimelineState,
     },
     #[error("Timeline {tenant_id}/{timeline_id} was not found")]
     NotFound {
-        tenant_id: TenantId,
+        tenant_id: TenantShardId,
         timeline_id: TimelineId,
     },
 }
@@ -716,6 +715,10 @@ impl Tenant {
                             // stayed in Activating for such a long time that shutdown found it in
                             // that state.
                             tracing::info!(state=%tenant_clone.current_state(), "Tenant shut down before activation");
+                            // Make the tenant broken so that set_stopping will not hang waiting for it to leave
+                            // the Attaching state.  This is an over-reaction (nothing really broke, the tenant is
+                            // just shutting down), but ensures progress.
+                            make_broken(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"));
                             return Ok(());
                         },
                     )
@@ -1013,7 +1016,10 @@ impl Tenant {
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
 
-        failpoint_support::sleep_millis_async!("attach-before-activate", &self.cancel);
+        fail::fail_point!("attach-before-activate", |_| {
+            anyhow::bail!("attach-before-activate");
+        });
+        failpoint_support::sleep_millis_async!("attach-before-activate-sleep", &self.cancel);
 
         info!("Done");
 
@@ -1517,10 +1523,6 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::Load)
     }
 
-    pub(crate) fn tenant_id(&self) -> TenantId {
-        self.tenant_shard_id.tenant_id
-    }
-
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
         self.tenant_shard_id
     }
@@ -1536,13 +1538,13 @@ impl Tenant {
         let timeline = timelines_accessor
             .get(&timeline_id)
             .ok_or(GetTimelineError::NotFound {
-                tenant_id: self.tenant_shard_id.tenant_id,
+                tenant_id: self.tenant_shard_id,
                 timeline_id,
             })?;
 
         if active_only && !timeline.is_active() {
             Err(GetTimelineError::NotActive {
-                tenant_id: self.tenant_shard_id.tenant_id,
+                tenant_id: self.tenant_shard_id,
                 timeline_id,
                 state: timeline.current_state(),
             })
@@ -2326,6 +2328,32 @@ impl Tenant {
             .clone()
     }
 
+    /// For API access: generate a LocationConfig equivalent to the one that would be used to
+    /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
+    /// rare external API calls, like a reconciliation at startup.
+    pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
+        let conf = self.tenant_conf.read().unwrap();
+
+        let location_config_mode = match conf.location.attach_mode {
+            AttachmentMode::Single => models::LocationConfigMode::AttachedSingle,
+            AttachmentMode::Multi => models::LocationConfigMode::AttachedMulti,
+            AttachmentMode::Stale => models::LocationConfigMode::AttachedStale,
+        };
+
+        // We have a pageserver TenantConf, we need the API-facing TenantConfig.
+        let tenant_config: models::TenantConfig = conf.tenant_conf.into();
+
+        models::LocationConfig {
+            mode: location_config_mode,
+            generation: self.generation.into(),
+            secondary_conf: None,
+            shard_number: self.shard_identity.number.0,
+            shard_count: self.shard_identity.count.0,
+            shard_stripe_size: self.shard_identity.stripe_size.0,
+            tenant_conf: tenant_config,
+        }
+    }
+
     pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
     }
@@ -2571,7 +2599,9 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
+            // Strings for metric labels
             let tid = tenant_shard_id.to_string();
+            let shard_id_str = format!("{}", tenant_shard_id.shard_slug());
 
             fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
                 ([state.into()], matches!(state, TenantState::Broken { .. }))
@@ -2584,13 +2614,15 @@ impl Tenant {
                 // the tenant might be ignored and reloaded, so first remove any previous set
                 // element. it most likely has already been scraped, as these are manual operations
                 // right now. most likely we will add it back very soon.
-                drop(crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid]));
+                drop(
+                    crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid, &shard_id_str]),
+                );
                 false
             } else {
                 // add the id to the set right away, there should not be any updates on the channel
                 // after
                 crate::metrics::BROKEN_TENANTS_SET
-                    .with_label_values(&[&tid])
+                    .with_label_values(&[&tid, &shard_id_str])
                     .set(1);
                 true
             };
@@ -2616,7 +2648,7 @@ impl Tenant {
                     counted_broken = true;
                     // insert the tenant_id (back) into the set
                     crate::metrics::BROKEN_TENANTS_SET
-                        .with_label_values(&[&tid])
+                        .with_label_values(&[&tid, &shard_id_str])
                         .inc();
                 }
             }
@@ -2680,7 +2712,7 @@ impl Tenant {
             Ok(LocationConf::attached_single(
                 tenant_conf,
                 Generation::none(),
-                &ShardParameters::default(),
+                &models::ShardParameters::default(),
             ))
         } else {
             // FIXME If the config file is not found, assume that we're attaching
@@ -3603,6 +3635,9 @@ impl Tenant {
         self.cached_synthetic_tenant_size
             .store(size, Ordering::Relaxed);
 
+        // Only shard zero should be calculating synthetic sizes
+        debug_assert!(self.shard_identity.is_zero());
+
         TENANT_SYNTHETIC_SIZE_METRIC
             .get_metric_with_label_values(&[&self.tenant_shard_id.tenant_id.to_string()])
             .unwrap()
@@ -3726,27 +3761,25 @@ async fn run_initdb(
         .env_clear()
         .env("LD_LIBRARY_PATH", &initdb_lib_dir)
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // If the `select!` below doesn't finish the `wait_with_output`,
-        // let the task get `wait()`ed for asynchronously by tokio.
-        // This means there is a slim chance we can go over the INIT_DB_SEMAPHORE.
-        // TODO: fix for this is non-trivial, see
-        // https://github.com/neondatabase/neon/pull/5921#pullrequestreview-1750858021
-        //
-        .kill_on_drop(true)
         .spawn()?;
 
-    tokio::select! {
-        initdb_output = initdb_command.wait_with_output() => {
-            let initdb_output = initdb_output?;
-            if !initdb_output.status.success() {
-                return Err(InitdbError::Failed(initdb_output.status, initdb_output.stderr));
-            }
-        }
-        _ = cancel.cancelled() => {
-            return Err(InitdbError::Cancelled);
-        }
+    // Ideally we'd select here with the cancellation token, but the problem is that
+    // we can't safely terminate initdb: it launches processes of its own, and killing
+    // initdb doesn't kill them. After we return from this function, we want the target
+    // directory to be able to be cleaned up.
+    // See https://github.com/neondatabase/neon/issues/6385
+    let initdb_output = initdb_command.wait_with_output().await?;
+    if !initdb_output.status.success() {
+        return Err(InitdbError::Failed(
+            initdb_output.status,
+            initdb_output.stderr,
+        ));
+    }
+
+    // This isn't true cancellation support, see above. Still return an error to
+    // excercise the cancellation code path.
+    if cancel.is_cancelled() {
+        return Err(InitdbError::Cancelled);
     }
 
     Ok(())
@@ -3754,7 +3787,7 @@ async fn run_initdb(
 
 impl Drop for Tenant {
     fn drop(&mut self) {
-        remove_tenant_metrics(&self.tenant_shard_id.tenant_id);
+        remove_tenant_metrics(&self.tenant_shard_id);
     }
 }
 /// Dump contents of a layer file to stdout.
@@ -3793,6 +3826,7 @@ pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
     use camino::Utf8PathBuf;
     use once_cell::sync::OnceCell;
+    use pageserver_api::models::ShardParameters;
     use pageserver_api::shard::ShardIndex;
     use std::fs;
     use std::sync::Arc;
@@ -5181,7 +5215,7 @@ mod tests {
                 assert_eq!(
                     e,
                     GetTimelineError::NotFound {
-                        tenant_id: tenant.tenant_shard_id.tenant_id,
+                        tenant_id: tenant.tenant_shard_id,
                         timeline_id: TIMELINE_ID,
                     }
                 )

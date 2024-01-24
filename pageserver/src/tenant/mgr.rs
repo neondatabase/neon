@@ -57,6 +57,7 @@ use super::TenantSharedResources;
 /// that way we avoid having to carefully switch a tenant's ingestion etc on and off during
 /// its lifetime, and we can preserve some important safety invariants like `Tenant` always
 /// having a properly acquired generation (Secondary doesn't need a generation)
+#[derive(Clone)]
 pub(crate) enum TenantSlot {
     Attached(Arc<Tenant>),
     Secondary(Arc<SecondaryTenant>),
@@ -477,6 +478,8 @@ pub async fn init_tenant_mgr(
                             tenant_shard_id,
                             TenantSlot::Secondary(SecondaryTenant::new(
                                 tenant_shard_id,
+                                location_conf.shard,
+                                location_conf.tenant_conf,
                                 secondary_config,
                             )),
                         );
@@ -844,15 +847,13 @@ impl TenantManager {
                 TenantState::Active => Ok(Arc::clone(tenant)),
                 _ => {
                     if active_only {
-                        Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
+                        Err(GetTenantError::NotActive(tenant_shard_id))
                     } else {
                         Ok(Arc::clone(tenant))
                     }
                 }
             },
-            Some(TenantSlot::InProgress(_)) => {
-                Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
-            }
+            Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_shard_id)),
             None | Some(TenantSlot::Secondary(_)) => {
                 Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
             }
@@ -921,6 +922,7 @@ impl TenantManager {
                     Some(TenantSlot::Secondary(secondary_tenant)),
                 ) => {
                     secondary_tenant.set_config(secondary_conf);
+                    secondary_tenant.set_tenant_conf(&new_location_config.tenant_conf);
                     Some(FastPathModified::Secondary(secondary_tenant.clone()))
                 }
                 _ => {
@@ -1053,16 +1055,36 @@ impl TenantManager {
 
         let new_slot = match &new_location_config.mode {
             LocationMode::Secondary(secondary_config) => {
-                TenantSlot::Secondary(SecondaryTenant::new(tenant_shard_id, secondary_config))
+                let shard_identity = new_location_config.shard;
+                TenantSlot::Secondary(SecondaryTenant::new(
+                    tenant_shard_id,
+                    shard_identity,
+                    new_location_config.tenant_conf,
+                    secondary_config,
+                ))
             }
             LocationMode::Attached(_attach_config) => {
                 let shard_identity = new_location_config.shard;
+
+                // Testing hack: if we are configured with no control plane, then drop the generation
+                // from upserts.  This enables creating generation-less tenants even though neon_local
+                // always uses generations when calling the location conf API.
+                let attached_conf = if cfg!(feature = "testing") {
+                    let mut conf = AttachedTenantConf::try_from(new_location_config)?;
+                    if self.conf.control_plane_api.is_none() {
+                        conf.location.generation = Generation::none();
+                    }
+                    conf
+                } else {
+                    AttachedTenantConf::try_from(new_location_config)?
+                };
+
                 let tenant = tenant_spawn(
                     self.conf,
                     tenant_shard_id,
                     &tenant_path,
                     self.resources.clone(),
-                    AttachedTenantConf::try_from(new_location_config)?,
+                    attached_conf,
                     shard_identity,
                     None,
                     self.tenants,
@@ -1203,6 +1225,17 @@ impl TenantManager {
         }
     }
 
+    /// Total list of all tenant slots: this includes attached, secondary, and InProgress.
+    pub(crate) fn list(&self) -> Vec<(TenantShardId, TenantSlot)> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => Vec::new(),
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => {
+                map.iter().map(|(k, v)| (*k, v.clone())).collect()
+            }
+        }
+    }
+
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1271,10 +1304,13 @@ impl TenantManager {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GetTenantError {
+    /// NotFound is a TenantId rather than TenantShardId, because this error type is used from
+    /// getters that use a TenantId and a ShardSelector, not just getters that target a specific shard.
     #[error("Tenant {0} not found")]
     NotFound(TenantId),
+
     #[error("Tenant {0} is not active")]
-    NotActive(TenantId),
+    NotActive(TenantShardId),
     /// Broken is logically a subset of NotActive, but a distinct error is useful as
     /// NotActive is usually a retryable state for API purposes, whereas Broken
     /// is a stuck error state
@@ -1307,15 +1343,13 @@ pub(crate) fn get_tenant(
             TenantState::Active => Ok(Arc::clone(tenant)),
             _ => {
                 if active_only {
-                    Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
+                    Err(GetTenantError::NotActive(tenant_shard_id))
                 } else {
                     Ok(Arc::clone(tenant))
                 }
             }
         },
-        Some(TenantSlot::InProgress(_)) => {
-            Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
-        }
+        Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_shard_id)),
         None | Some(TenantSlot::Secondary(_)) => {
             Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
         }
@@ -1391,7 +1425,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
             }
             Some(TenantSlot::Secondary(_)) => {
                 return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
-                    tenant_id,
+                    tenant_shard_id,
                 )))
             }
             Some(TenantSlot::InProgress(barrier)) => {
@@ -1430,7 +1464,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
                     Some(TenantSlot::Attached(tenant)) => tenant.clone(),
                     _ => {
                         return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
-                            tenant_id,
+                            tenant_shard_id,
                         )))
                     }
                 }
@@ -1458,7 +1492,7 @@ pub(crate) enum DeleteTimelineError {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TenantStateError {
     #[error("Tenant {0} is stopping")]
-    IsStopping(TenantId),
+    IsStopping(TenantShardId),
     #[error(transparent)]
     SlotError(#[from] TenantSlotError),
     #[error(transparent)]
@@ -2088,7 +2122,7 @@ where
                     // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
                     // wait for it but return an error right away because these are distinct requests.
                     slot_guard.revert();
-                    return Err(TenantStateError::IsStopping(tenant_shard_id.tenant_id));
+                    return Err(TenantStateError::IsStopping(tenant_shard_id));
                 }
             }
             Some(tenant)
@@ -2217,7 +2251,6 @@ pub(crate) async fn immediate_gc(
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::shard::TenantShardId;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use tracing::{info_span, Instrument};
@@ -2238,7 +2271,7 @@ mod tests {
 
         // harness loads it to active, which is forced and nothing is running on the tenant
 
-        let id = TenantShardId::unsharded(t.tenant_id());
+        let id = t.tenant_shard_id();
 
         // tenant harness configures the logging and we cannot escape it
         let _e = info_span!("testing", tenant_id = %id).entered();

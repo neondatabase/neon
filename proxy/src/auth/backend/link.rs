@@ -57,24 +57,31 @@ pub(super) async fn authenticate(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {
-    let psql_session_id = new_psql_session_id();
+    // registering waiter can fail if we get unlucky with rng.
+    // just try again.
+    let (psql_session_id, waiter) = loop {
+        let psql_session_id = new_psql_session_id();
+
+        match console::mgmt::get_waiter(&psql_session_id) {
+            Ok(waiter) => break (psql_session_id, waiter),
+            Err(_e) => continue,
+        }
+    };
+
     let span = info_span!("link", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
 
-    let db_info = console::mgmt::with_waiter(psql_session_id, |waiter| async {
-        // Give user a URL to spawn a new database.
-        info!(parent: &span, "sending the auth URL to the user");
-        client
-            .write_message_noflush(&Be::AuthenticationOk)?
-            .write_message_noflush(&Be::CLIENT_ENCODING)?
-            .write_message(&Be::NoticeResponse(&greeting))
-            .await?;
+    // Give user a URL to spawn a new database.
+    info!(parent: &span, "sending the auth URL to the user");
+    client
+        .write_message_noflush(&Be::AuthenticationOk)?
+        .write_message_noflush(&Be::CLIENT_ENCODING)?
+        .write_message(&Be::NoticeResponse(&greeting))
+        .await?;
 
-        // Wait for web console response (see `mgmt`).
-        info!(parent: &span, "waiting for console's reply...");
-        waiter.await?.map_err(LinkAuthError::AuthFailed)
-    })
-    .await?;
+    // Wait for web console response (see `mgmt`).
+    info!(parent: &span, "waiting for console's reply...");
+    let db_info = waiter.await.map_err(LinkAuthError::from)?;
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 

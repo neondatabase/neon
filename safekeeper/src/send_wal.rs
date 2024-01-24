@@ -407,7 +407,7 @@ impl SafekeeperPostgresHandler {
             self.conf.timeline_dir(&tli.ttid),
             &persisted_state,
             start_pos,
-            self.conf.wal_backup_enabled,
+            self.conf.is_wal_backup_enabled(),
         )?;
 
         // Split to concurrently receive and send data; replies are generally

@@ -504,7 +504,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     tenant_delete_wait_completed(ps_attached.http_client(), tenant_id, 10)
 
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",

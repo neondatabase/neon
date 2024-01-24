@@ -742,6 +742,11 @@ where
                     state.timeline_start_lsn
                 );
             }
+            if state.peer_horizon_lsn == Lsn(0) {
+                // Update peer_horizon_lsn as soon as we know where timeline starts.
+                // It means that peer_horizon_lsn cannot be zero after we know timeline_start_lsn.
+                state.peer_horizon_lsn = msg.timeline_start_lsn;
+            }
             if state.local_start_lsn == Lsn(0) {
                 state.local_start_lsn = msg.start_streaming_at;
                 info!("setting local_start_lsn to {:?}", state.local_start_lsn);

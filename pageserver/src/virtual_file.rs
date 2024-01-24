@@ -14,6 +14,7 @@ use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
+use pageserver_api::shard::TenantShardId;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
@@ -60,6 +61,7 @@ pub struct VirtualFile {
     // It makes no sense for us to constantly turn the `TimelineId` and `TenantId` into
     // strings.
     tenant_id: String,
+    shard_id: String,
     timeline_id: String,
 }
 
@@ -301,15 +303,24 @@ impl VirtualFile {
     ) -> Result<VirtualFile, std::io::Error> {
         let path_str = path.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
-        let tenant_id;
-        let timeline_id;
-        if parts.len() > 5 && parts[parts.len() - 5] == TENANTS_SEGMENT_NAME {
-            tenant_id = parts[parts.len() - 4].to_string();
-            timeline_id = parts[parts.len() - 2].to_string();
-        } else {
-            tenant_id = "*".to_string();
-            timeline_id = "*".to_string();
-        }
+        let (tenant_id, shard_id, timeline_id) =
+            if parts.len() > 5 && parts[parts.len() - 5] == TENANTS_SEGMENT_NAME {
+                let tenant_shard_part = parts[parts.len() - 4];
+                let (tenant_id, shard_id) = match tenant_shard_part.parse::<TenantShardId>() {
+                    Ok(tenant_shard_id) => (
+                        tenant_shard_id.tenant_id.to_string(),
+                        format!("{}", tenant_shard_id.shard_slug()),
+                    ),
+                    Err(_) => {
+                        // Malformed path: this ID is just for observability, so tolerate it
+                        // and pass through
+                        (tenant_shard_part.to_string(), "*".to_string())
+                    }
+                };
+                (tenant_id, shard_id, parts[parts.len() - 2].to_string())
+            } else {
+                ("*".to_string(), "*".to_string(), "*".to_string())
+            };
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
         // NB: there is also StorageIoOperation::OpenAfterReplace which is for the case
@@ -333,6 +344,7 @@ impl VirtualFile {
             path: path.to_path_buf(),
             open_options: reopen_options,
             tenant_id,
+            shard_id,
             timeline_id,
         };
 
@@ -344,12 +356,7 @@ impl VirtualFile {
         Ok(vfile)
     }
 
-    /// Writes a file to the specified `final_path` in a crash safe fasion
-    ///
-    /// The file is first written to the specified tmp_path, and in a second
-    /// step, the tmp path is renamed to the final path. As renames are
-    /// atomic, a crash during the write operation will never leave behind a
-    /// partially written file.
+    /// Async & [`VirtualFile`]-enabled version of [`::utils::crashsafe::overwrite`].
     pub async fn crashsafe_overwrite(
         final_path: &Utf8Path,
         tmp_path: &Utf8Path,
@@ -574,7 +581,7 @@ impl VirtualFile {
             .read_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
-                .with_label_values(&["read", &self.tenant_id, &self.timeline_id])
+                .with_label_values(&["read", &self.tenant_id, &self.shard_id, &self.timeline_id])
                 .add(size as i64);
         }
         result
@@ -586,7 +593,7 @@ impl VirtualFile {
             .write_at(buf, offset));
         if let Ok(size) = result {
             STORAGE_IO_SIZE
-                .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
+                .with_label_values(&["write", &self.tenant_id, &self.shard_id, &self.timeline_id])
                 .add(size as i64);
         }
         result
