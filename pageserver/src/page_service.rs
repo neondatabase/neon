@@ -332,11 +332,11 @@ enum PageStreamError {
     /// The entity required to serve the request (tenant or timeline) is not found,
     /// or is not found in a suitable state to serve a request.
     #[error("Not found: {0}")]
-    NotFound(std::borrow::Cow<'static, str>),
+    NotFound(Cow<'static, str>),
 
     /// Request asked for something that doesn't make sense, like an invalid LSN
     #[error("Bad request: {0}")]
-    BadRequest(std::borrow::Cow<'static, str>),
+    BadRequest(Cow<'static, str>),
 }
 
 impl From<PageReconstructError> for PageStreamError {
