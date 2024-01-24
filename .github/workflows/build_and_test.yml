@@ -684,6 +684,9 @@ jobs:
               \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
             }"
 
+          # Pass current concurrency group to the e2e-tests CI job to make sure e2e-tests job won't have unneeded parallel runs
+          CONCURRENCY_GROUP="${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}"
+
           curl -f -X POST \
           https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
           -H "Accept: application/vnd.github.v3+json" \
@@ -696,7 +699,8 @@ jobs:
                 \"commit_hash\": \"$COMMIT_SHA\",
                 \"remote_repo\": \"${{ github.repository }}\",
                 \"storage_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
-                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\"
+                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"concurrency_group\": \"${CONCURRENCY_GROUP}\"
               }
             }"
 
