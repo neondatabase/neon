@@ -13,7 +13,7 @@ runs:
       run: |
         # lsof returns 1 if no one uses the file; xargs then returns 123
         pids=$(find /tmp/coverage -type f | xargs -I{} lsof -t {} || true)
-        for pid in "${pids[@]}"; do
+        for pid in ${pids[@]}; do
           echo "$pid: $(cat /proc/$pid/cmdline) ----"
           gdb -p $pid --batch -ex "thread apply all bt" || echo "gdb failed with $?"
           echo
