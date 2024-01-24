@@ -143,7 +143,7 @@ pub struct Listing {
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
-#[async_trait::async_trait]
+#[allow(async_fn_in_trait)]
 pub trait RemoteStorage: Send + Sync + 'static {
     /// Lists all top level subdirectories for a given prefix
     /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
@@ -272,14 +272,15 @@ impl std::error::Error for DownloadError {}
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
 #[derive(Clone)]
-pub enum GenericRemoteStorage {
+// Require Clone for `Other` due to https://github.com/rust-lang/rust/issues/26925
+pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
     AzureBlob(Arc<AzureBlobStorage>),
-    Unreliable(Arc<UnreliableWrapper>),
+    Unreliable(Other),
 }
 
-impl GenericRemoteStorage {
+impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     pub async fn list(
         &self,
         prefix: Option<&RemotePath>,
