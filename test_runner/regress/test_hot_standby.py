@@ -3,23 +3,7 @@ import re
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnv
-
-
-def wait_caughtup(primary: Endpoint, secondary: Endpoint):
-    primary_lsn = primary.safe_psql_scalar(
-        "SELECT pg_current_wal_insert_lsn()::text", log_query=False
-    )
-    while True:
-        secondary_lsn = secondary.safe_psql_scalar(
-            "SELECT pg_last_wal_replay_lsn()", log_query=False
-        )
-        caught_up = secondary_lsn >= primary_lsn
-        log.info(f"caughtup={caught_up}, primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}")
-        if caught_up:
-            return
-        time.sleep(1)
-
+from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
 
 # Check for corrupted WAL messages which might otherwise go unnoticed if
 # reconnection fixes this.
@@ -79,7 +63,7 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                     primary.safe_psql("create table t(key int, value text)")
                     primary.safe_psql("insert into t select generate_series(1, 100000), 'payload'")
 
-            wait_caughtup(primary, secondary)
+            wait_replica_caughtup(primary, secondary)
 
             with secondary.connect() as s_con:
                 with s_con.cursor() as s_cur:

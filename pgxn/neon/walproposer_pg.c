@@ -1923,12 +1923,14 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
 	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &quorumFeedback.hs, sizeof hsFeedback) != 0)
 	{
 		quorumFeedback.hs = hsFeedback;
+		elog(LOG, "ProcessStandbyHSFeedback(xmin=%d, catalog_xmin=%d", XidFromFullTransactionId(hsFeedback.xmin), XidFromFullTransactionId(hsFeedback.catalog_xmin));
 		ProcessStandbyHSFeedback(hsFeedback.ts,
 								 XidFromFullTransactionId(hsFeedback.xmin),
 								 EpochFromFullTransactionId(hsFeedback.xmin),
 								 XidFromFullTransactionId(hsFeedback.catalog_xmin),
 								 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
-	}
+	} else
+		elog(LOG, "Skip HSFeedback ts=%ld, xmin=%d, catalog_xmin=%d", hsFeedback.ts, XidFromFullTransactionId(hsFeedback.xmin), XidFromFullTransactionId(hsFeedback.catalog_xmin));
 }
 
 static XLogRecPtr
