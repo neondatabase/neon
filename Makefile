@@ -191,6 +191,7 @@ neon-pg-ext-clean-%:
 # Rust build.
 .PHONY: walproposer-lib
 walproposer-lib: neon-pg-ext-v16
+	unset CPPFLAGS LDFLAGS LD_PRELOAD
 	+@echo "Compiling walproposer-lib"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
