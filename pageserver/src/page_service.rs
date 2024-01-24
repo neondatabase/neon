@@ -667,6 +667,7 @@ impl PageServerHandler {
                         // print the all details to the log with {:#}, but for the client the
                         // error message is enough.  Do not log if shutting down, as the anyhow::Error
                         // here includes cancellation which is not an error.
+                        let e = utils::error::report_compact_sources(&e);
                         span.in_scope(|| error!("error reading relation or page version: {:#}", e));
                         PagestreamBeMessage::Error(PagestreamErrorResponse {
                             message: e.to_string(),
