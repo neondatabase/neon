@@ -7,6 +7,8 @@ use tracing::*;
 
 use crate::{GlobalTimelines, SafeKeeperConf};
 
+const ALLOW_INACTIVE_TIMELINES: bool = true;
+
 pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
     let wal_removal_interval = Duration::from_millis(5000);
     loop {
@@ -15,10 +17,13 @@ pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
 
         let tlis = GlobalTimelines::get_all();
         for tli in &tlis {
-            if !tli.is_active().await {
+            let is_active = tli.is_active().await;
+            if is_active {
+                active_timelines += 1;
+            }
+            if !ALLOW_INACTIVE_TIMELINES && !is_active {
                 continue;
             }
-            active_timelines += 1;
             let ttid = tli.ttid;
             async {
                 if let Err(e) = tli.maybe_persist_control_file().await {
