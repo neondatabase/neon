@@ -482,7 +482,7 @@ def test_detach_while_attaching(
     pageserver_http.tenant_detach(tenant_id)
 
     # And re-attach
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "return(5000)")])
 
     env.pageserver.tenant_attach(tenant_id)
 
@@ -681,7 +681,7 @@ def test_detach_while_activating(
     pageserver_http.tenant_detach(tenant_id)
 
     # And re-attach, but stop attach task_mgr task from completing
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(600000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "return(600000)")])
     env.pageserver.tenant_attach(tenant_id)
 
     # The tenant is in the Activating state.  This should not block us from
@@ -695,7 +695,7 @@ def test_detach_while_activating(
     ), "Only ignored tenant should be missing"
 
     # Subsequently attaching it again should still work
-    pageserver_http.configure_failpoints([("attach-before-activate", "off")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "off")])
     env.pageserver.tenant_attach(tenant_id)
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
