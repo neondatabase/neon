@@ -259,7 +259,7 @@ impl WalSendersShared {
                     } else {
                         agg.xmin = hs_feedback.xmin;
                     }
-                    agg.ts = min(agg.ts, hs_feedback.ts);
+                    agg.ts = max(agg.ts, hs_feedback.ts);
                 }
                 if hs_feedback.catalog_xmin != INVALID_FULL_TRANSACTION_ID {
                     if agg.catalog_xmin != INVALID_FULL_TRANSACTION_ID {
@@ -267,7 +267,7 @@ impl WalSendersShared {
                     } else {
                         agg.catalog_xmin = hs_feedback.catalog_xmin;
                     }
-                    agg.ts = min(agg.ts, hs_feedback.ts);
+                    agg.ts = max(agg.ts, hs_feedback.ts);
                 }
                 let reply = standby_feedback.reply;
                 if reply.write_lsn != Lsn::INVALID
