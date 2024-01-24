@@ -262,7 +262,7 @@ impl std::error::Error for DownloadError {}
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
 #[derive(Clone)]
-// Require Clone for `Other`` due to https://github.com/rust-lang/rust/issues/26925
+// Require Clone for `Other` due to https://github.com/rust-lang/rust/issues/26925
 pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
