@@ -1838,23 +1838,24 @@ static void
 CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
 {
 	hs->ts = 0;
-	hs->xmin.value = InvalidFullTransactionId;
-	hs->catalog_xmin.value = InvalidFullTransactionId;
+	hs->xmin = InvalidFullTransactionId;
+	hs->catalog_xmin = InvalidFullTransactionId;
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
-		if (wp->safekeeper[i].appendResponse.hs.ts != 0)
+		elog(LOG, "hs.ts=%ld hs.xmin=%ld", wp->safekeeper[i].appendResponse.hs.ts, wp->safekeeper[i].appendResponse.hs.xmin);
+ 		if (wp->safekeeper[i].appendResponse.hs.ts != 0)
 		{
 			HotStandbyFeedback *skhs = &wp->safekeeper[i].appendResponse.hs;
 
 			if (FullTransactionIdIsNormal(skhs->xmin)
-				&& (hs->xmin.value == InvalidFullTransactionId || FullTransactionIdPrecedes(skhs->xmin, hs->xmin)))
+				&& (!FullTransactionIdIsValid(hs->xmin) || FullTransactionIdPrecedes(skhs->xmin, hs->xmin)))
 			{
 				hs->xmin = skhs->xmin;
 				hs->ts = skhs->ts;
 			}
 			if (FullTransactionIdIsNormal(skhs->catalog_xmin)
-				&& (hs->xmin.value == InvalidFullTransactionId || FullTransactionIdPrecedes(skhs->catalog_xmin, hs->catalog_xmin)))
+				&& (!FullTransactionIdIsValid(hs->catalog_xmin) || FullTransactionIdPrecedes(skhs->catalog_xmin, hs->catalog_xmin)))
 			{
 				hs->catalog_xmin = skhs->catalog_xmin;
 				hs->ts = skhs->ts;

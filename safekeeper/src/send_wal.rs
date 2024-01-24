@@ -689,8 +689,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
         match msg.first().cloned() {
             Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
                 // Note: deserializing is on m[1..] because we skip the tag byte.
-                let hs_feedback = HotStandbyFeedback::des(&msg[1..])
+                let mut hs_feedback = HotStandbyFeedback::des(&msg[1..])
                     .context("failed to deserialize HotStandbyFeedback")?;
+                // TODO: xmin/catalog_xmin are serialized by walreceiver.c in this way:
+                // pq_sendint32(&reply_message, xmin);
+                // pq_sendint32(&reply_message, xmin_epoch);
+                // So it is two big endian 32-bit words in low endian order!
+                hs_feedback.xmin = (hs_feedback.xmin >> 32) | (hs_feedback.xmin << 32);
+                hs_feedback.catalog_xmin =
+                    (hs_feedback.catalog_xmin >> 32) | (hs_feedback.catalog_xmin << 32);
                 self.ws_guard
                     .walsenders
                     .record_hs_feedback(self.ws_guard.id, &hs_feedback);

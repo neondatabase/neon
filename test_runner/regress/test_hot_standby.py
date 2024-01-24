@@ -3,7 +3,7 @@ import re
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
+from fixtures.neon_fixtures import NeonEnv, wait_replica_caughtup
 
 # Check for corrupted WAL messages which might otherwise go unnoticed if
 # reconnection fixes this.
