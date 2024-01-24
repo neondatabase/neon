@@ -32,6 +32,7 @@ pub mod send_wal;
 pub mod state;
 pub mod timeline;
 pub mod wal_backup;
+pub mod wal_backup_partial;
 pub mod wal_service;
 pub mod wal_storage;
 
@@ -48,6 +49,7 @@ pub mod defaults {
 
     pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
+    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +81,8 @@ pub struct SafeKeeperConf {
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
     pub current_thread_runtime: bool,
     pub walsenders_keep_horizon: bool,
+    pub partial_backup_enabled: bool,
+    pub partial_backup_timeout: Duration,
 }
 
 impl SafeKeeperConf {
@@ -123,6 +127,8 @@ impl SafeKeeperConf {
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,
             walsenders_keep_horizon: false,
+            partial_backup_enabled: false,
+            partial_backup_timeout: Duration::from_secs(0),
         }
     }
 }
