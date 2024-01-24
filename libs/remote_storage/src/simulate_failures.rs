@@ -3,16 +3,17 @@
 //! testing purposes.
 use bytes::Bytes;
 use futures::stream::Stream;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::{collections::hash_map::Entry, sync::Arc};
 
 use crate::{
-    Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
+    Download, DownloadError, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorage,
+    StorageMetadata,
 };
 
 pub struct UnreliableWrapper {
-    inner: crate::GenericRemoteStorage,
+    inner: GenericRemoteStorage<Arc<VoidStorage>>,
 
     // This many attempts of each operation will fail, then we let it succeed.
     attempts_to_fail: u64,
@@ -34,6 +35,15 @@ enum RemoteOp {
 impl UnreliableWrapper {
     pub fn new(inner: crate::GenericRemoteStorage, attempts_to_fail: u64) -> Self {
         assert!(attempts_to_fail > 0);
+        let inner = match inner {
+            GenericRemoteStorage::AwsS3(s) => GenericRemoteStorage::AwsS3(s),
+            GenericRemoteStorage::AzureBlob(s) => GenericRemoteStorage::AzureBlob(s),
+            GenericRemoteStorage::LocalFs(s) => GenericRemoteStorage::LocalFs(s),
+            // We could also make this a no-op, as in, extract the inner of the passed generic remote storage
+            GenericRemoteStorage::Unreliable(_s) => {
+                panic!("Can't wrap unreliable wrapper unreliably")
+            }
+        };
         UnreliableWrapper {
             inner,
             attempts_to_fail,
@@ -84,7 +94,9 @@ impl UnreliableWrapper {
     }
 }
 
-#[async_trait::async_trait]
+// We never construct this, so the type is not important, just has to not be UnreliableWrapper and impl RemoteStorage.
+type VoidStorage = crate::LocalFs;
+
 impl RemoteStorage for UnreliableWrapper {
     async fn list_prefixes(
         &self,

@@ -183,7 +183,6 @@ fn to_download_error(error: azure_core::Error) -> DownloadError {
     }
 }
 
-#[async_trait::async_trait]
 impl RemoteStorage for AzureBlobStorage {
     async fn list(
         &self,
