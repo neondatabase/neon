@@ -1083,9 +1083,7 @@ impl Timeline {
             Err(e) => {
                 // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
                 // we have some extra WAL replay to do next time the timeline starts.
-                // This can happen if shutdown races with [`Tenant::attach`], such that we shut
-                // down timelines before their flush loops have been started.
-                info!("failed to freeze and flush: {e:#}");
+                warn!("failed to freeze and flush: {e:#}");
             }
         }
 
