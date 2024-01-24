@@ -4388,7 +4388,7 @@ impl Timeline {
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
                     .await
-                    .context("Failed to reconstruct a page image:")
+                    .context("reconstruct a page image")
                 {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::WalRedo(e)),
