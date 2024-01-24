@@ -322,11 +322,6 @@ enum PageStreamError {
     Shutdown,
 
     /// Something went wrong reading a page: this likely indicates a pageserver bug
-    #[cfg(test)] // just demoing in the first commit
-    #[error("Read error: {0}")]
-    ReadExisting(PageReconstructError),
-
-    /// Something went wrong reading a page: this likely indicates a pageserver bug
     #[error("Read error")]
     Read(#[source] PageReconstructError),
 
@@ -342,45 +337,6 @@ enum PageStreamError {
     /// Request asked for something that doesn't make sense, like an invalid LSN
     #[error("Bad request: {0}")]
     BadRequest(Cow<'static, str>),
-}
-
-#[test]
-fn walredo_failed_to_start_due_to_concurrent_deploy_current() {
-    // spawn returns permission denied; we need to have it in our logs to ignore it
-    // the contexts captured here are from writing this test.
-    let res = Err::<(), _>(std::io::Error::from_raw_os_error(13))
-        .context("spawn process")
-        .context("launch walredo process")
-        .context("Failed to reconstruct a page image:")
-        .map_err(PageReconstructError::WalRedo)
-        .map_err(PageStreamError::ReadExisting);
-
-    let e = res.unwrap_err();
-
-    let s = format!("{e:#}");
-
-    assert_eq!(
-        "Read error: Failed to reconstruct a page image:", s,
-        "this is not helpful in the logs"
-    );
-}
-
-#[test]
-fn walredo_failed_to_start_due_to_concurrent_deploy_fixed() {
-    let res = Err::<(), _>(std::io::Error::from_raw_os_error(13))
-        .context("spawn process")
-        .context("launch walredo process")
-        .context("reconstruct a page image at xyz@abc of N records on top of None")
-        .map_err(PageReconstructError::WalRedo)
-        .map_err(PageStreamError::Read);
-
-    let e = res.unwrap_err();
-
-    let e = utils::error::report_compact_sources(&e);
-
-    let s = format!("{e:#}");
-
-    assert_eq!("Read error: reconstruct a page image at xyz@abc of N records on top of None: launch walredo process: spawn process: Permission denied (os error 13)", s);
 }
 
 impl From<PageReconstructError> for PageStreamError {
