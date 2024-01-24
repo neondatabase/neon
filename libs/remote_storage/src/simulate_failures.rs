@@ -94,56 +94,9 @@ impl UnreliableWrapper {
     }
 }
 
-#[derive(Clone)]
-struct VoidStorage;
+// We never construct this, so the type is not important, just has to not be UnreliableWrapper and impl RemoteStorage.
+type VoidStorage = crate::LocalFs;
 
-impl RemoteStorage for VoidStorage {
-    async fn list_prefixes(
-        &self,
-        _prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        unimplemented!()
-    }
-    async fn list_files(&self, _prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        unimplemented!()
-    }
-    async fn list(
-        &self,
-        _prefix: Option<&RemotePath>,
-        _mode: ListingMode,
-    ) -> anyhow::Result<Listing, DownloadError> {
-        unimplemented!()
-    }
-    async fn upload(
-        &self,
-        _from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
-        _data_size_bytes: usize,
-        _to: &RemotePath,
-        _metadata: Option<StorageMetadata>,
-    ) -> anyhow::Result<()> {
-        unimplemented!()
-    }
-    async fn download(&self, _from: &RemotePath) -> Result<Download, DownloadError> {
-        unimplemented!()
-    }
-    async fn download_byte_range(
-        &self,
-        _from: &RemotePath,
-        _start_inclusive: u64,
-        _end_exclusive: Option<u64>,
-    ) -> Result<Download, DownloadError> {
-        unimplemented!()
-    }
-    async fn delete(&self, _path: &RemotePath) -> anyhow::Result<()> {
-        unimplemented!()
-    }
-    async fn delete_objects<'a>(&self, _paths: &'a [RemotePath]) -> anyhow::Result<()> {
-        unimplemented!()
-    }
-    async fn copy(&self, _from: &RemotePath, _to: &RemotePath) -> anyhow::Result<()> {
-        unimplemented!()
-    }
-}
 impl RemoteStorage for UnreliableWrapper {
     async fn list_prefixes(
         &self,
