@@ -239,12 +239,15 @@ impl Persistence {
         .await
     }
 
-    pub(crate) async fn detach(
-        &self,
-        tenant_shard_id: TenantShardId,
-    ) -> Option<TenantShardPersistence> {
-        self.mutating_transaction(|locked| locked.tenants.remove(&tenant_shard_id))
-            .await
+    pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
+        self.mutating_transaction(|locked| {
+            let Some(shard) = locked.tenants.get_mut(&tenant_shard_id) else {
+                anyhow::bail!("Tried to increment generation of unknown shard");
+            };
+            shard.generation_pageserver = None;
+            Ok(())
+        })
+        .await
     }
 
     pub(crate) async fn re_attach(

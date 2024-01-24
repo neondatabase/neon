@@ -389,7 +389,7 @@ impl Reconciler {
                     // Nothing to do
                     tracing::info!("Observed configuration already correct.")
                 }
-                observed_conf => {
+                _ => {
                     // In all cases other than a matching observed configuration, we will
                     // reconcile this location.  This includes locations with different configurations, as well
                     // as locations with unknown (None) observed state.
@@ -399,7 +399,6 @@ impl Reconciler {
                         .await?;
                     wanted_conf.generation = self.generation.into();
                     tracing::info!("Observed configuration requires update.");
-                    tracing::debug!(?wanted_conf, ?observed_conf, "observed configuration");
                     self.location_config(node_id, wanted_conf, None).await?;
                     if let Err(e) = self
                         .compute_hook

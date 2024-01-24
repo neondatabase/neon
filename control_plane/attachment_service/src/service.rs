@@ -329,110 +329,94 @@ impl Service {
         &self,
         attach_req: AttachHookRequest,
     ) -> anyhow::Result<AttachHookResponse> {
-        #[derive(Debug)]
-        enum Mode {
-            Insert { new: bool, node_id: NodeId },
-            Detach,
-        }
-
         // This is a test hook.  To enable using it on tenants that were created directly with
         // the pageserver API (not via this service), we will auto-create any missing tenant
         // shards with default state.
-        let tenant_shard_id = attach_req.tenant_shard_id;
-        let mode = {
+        let insert = {
             let locked = self.inner.write().unwrap();
-            if let Some(node_id) = attach_req.node_id {
-                Mode::Insert {
-                    new: !locked.tenants.contains_key(&attach_req.tenant_shard_id),
-                    node_id,
-                }
-            } else {
-                Mode::Detach
-            }
+            !locked.tenants.contains_key(&attach_req.tenant_shard_id)
         };
 
-        tracing::info!(?mode, "attach-hook start");
-        match mode {
-            Mode::Insert { new, node_id } => {
-                if new {
-                    let tsp = TenantShardPersistence {
-                        tenant_id: tenant_shard_id.tenant_id.to_string(),
-                        shard_number: tenant_shard_id.shard_number.0 as i32,
-                        shard_count: tenant_shard_id.shard_count.0 as i32,
-                        shard_stripe_size: 0,
-                        generation: 0,
-                        generation_pageserver: None,
-                        placement_policy: serde_json::to_string(&PlacementPolicy::default())
-                            .unwrap(),
-                        config: serde_json::to_string(&TenantConfig::default()).unwrap(),
-                    };
+        if insert {
+            let tsp = TenantShardPersistence {
+                tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
+                shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
+                shard_count: attach_req.tenant_shard_id.shard_count.0 as i32,
+                shard_stripe_size: 0,
+                generation: 0,
+                generation_pageserver: None,
+                placement_policy: serde_json::to_string(&PlacementPolicy::default()).unwrap(),
+                config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+            };
 
-                    self.persistence.insert_tenant_shards(vec![tsp]).await?;
+            self.persistence.insert_tenant_shards(vec![tsp]).await?;
 
-                    let mut locked = self.inner.write().unwrap();
-                    locked.tenants.insert(
-                        tenant_shard_id,
-                        TenantState::new(
-                            tenant_shard_id,
-                            ShardIdentity::unsharded(),
-                            PlacementPolicy::Single,
-                        ),
-                    );
-                }
-
-                let new_generation = self
-                    .persistence
-                    .increment_generation(tenant_shard_id, node_id)
-                    .await?;
-
-                let mut locked = self.inner.write().unwrap();
-                let tenant_state = locked
-                    .tenants
-                    .get_mut(&tenant_shard_id)
-                    .expect("Checked for existence above");
-                tenant_state.generation = new_generation;
-                tenant_state.intent.attached = Some(node_id);
-
-                tracing::info!(
-                    "attach_hook: tenant {} set generation {:?}, pageserver {}",
-                    tenant_shard_id,
-                    tenant_state.generation,
-                    node_id,
-                );
-
-                Ok(AttachHookResponse {
-                    gen: tenant_state.generation.into(),
-                })
-            }
-            Mode::Detach => {
-                let res = { self.persistence.detach(tenant_shard_id).await };
-
-                let mut locked = self.inner.write().unwrap();
-                let tenant_state = locked.tenants.remove(&tenant_shard_id);
-                match res {
-                    Some(detached) => {
-                        tracing::info!(
-                            tenant_id = %tenant_shard_id,
-                            ps_id = ?detached.generation_pageserver,
-                            generation = ?detached.generation,
-                            "dropping",
-                        );
-                        assert!(tenant_state.is_some(), "persistence state said it existed");
-                    }
-                    None => {
-                        tracing::info!(
-                            tenant_id = %tenant_shard_id,
-                            "no-op: tenant already has no pageserver");
-                        assert!(
-                            tenant_state.is_none(),
-                            "persistence state said it already doesn't exist"
-                        );
-                    }
-                }
-
-                Ok(AttachHookResponse { gen: None })
-            }
+            let mut locked = self.inner.write().unwrap();
+            locked.tenants.insert(
+                attach_req.tenant_shard_id,
+                TenantState::new(
+                    attach_req.tenant_shard_id,
+                    ShardIdentity::unsharded(),
+                    PlacementPolicy::Single,
+                ),
+            );
         }
+
+        let new_generation = if let Some(req_node_id) = attach_req.node_id {
+            Some(
+                self.persistence
+                    .increment_generation(attach_req.tenant_shard_id, req_node_id)
+                    .await?,
+            )
+        } else {
+            self.persistence.detach(attach_req.tenant_shard_id).await?;
+            None
+        };
+
+        let mut locked = self.inner.write().unwrap();
+        let tenant_state = locked
+            .tenants
+            .get_mut(&attach_req.tenant_shard_id)
+            .expect("Checked for existence above");
+
+        if let Some(new_generation) = new_generation {
+            tenant_state.generation = new_generation;
+        }
+
+        if let Some(attaching_pageserver) = attach_req.node_id.as_ref() {
+            tracing::info!(
+                tenant_id = %attach_req.tenant_shard_id,
+                ps_id = %attaching_pageserver,
+                generation = ?tenant_state.generation,
+                "issuing",
+            );
+        } else if let Some(ps_id) = tenant_state.intent.attached {
+            tracing::info!(
+                tenant_id = %attach_req.tenant_shard_id,
+                %ps_id,
+                generation = ?tenant_state.generation,
+                "dropping",
+            );
+        } else {
+            tracing::info!(
+            tenant_id = %attach_req.tenant_shard_id,
+            "no-op: tenant already has no pageserver");
+        }
+        tenant_state.intent.attached = attach_req.node_id;
+
+        tracing::info!(
+            "attach_hook: tenant {} set generation {:?}, pageserver {}",
+            attach_req.tenant_shard_id,
+            tenant_state.generation,
+            // TODO: this is an odd number of 0xf's
+            attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
+        );
+
+        Ok(AttachHookResponse {
+            gen: attach_req
+                .node_id
+                .map(|_| tenant_state.generation.into().unwrap()),
+        })
     }
 
     pub(crate) fn inspect(&self, inspect_req: InspectRequest) -> InspectResponse {
