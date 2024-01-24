@@ -161,6 +161,10 @@ def setup_pageserver_with_pgbench_tenants(
         }
         template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
         env.pageserver.tenant_detach(template_tenant)
+        env.pageserver.allowed_errors.append(
+            # tenant detach causes this because the underlying attach-hook removes the tenant from attachment_service entirely
+            ".*Dropped remote consistent LSN updates.*",
+        )
         env.pageserver.tenant_attach(template_tenant, config)
         ps_http = env.pageserver.http_client()
         with env.endpoints.create_start("main", tenant_id=template_tenant) as ep:
