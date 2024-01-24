@@ -381,6 +381,11 @@ impl Service {
 
         if let Some(new_generation) = new_generation {
             tenant_state.generation = new_generation;
+        } else {
+            // This is a detach notification.  We must update placement policy to avoid re-attaching
+            // during background scheduling/reconciliation, or during attachment service restart.
+            assert!(attach_req.node_id.is_none());
+            tenant_state.policy = PlacementPolicy::Detached;
         }
 
         if let Some(attaching_pageserver) = attach_req.node_id.as_ref() {
@@ -870,7 +875,6 @@ impl Service {
             } else {
                 let old_attached = shard.intent.attached;
 
-                shard.intent.attached = Some(migrate_req.node_id);
                 match shard.policy {
                     PlacementPolicy::Single => {
                         shard.intent.secondary.clear();
@@ -884,7 +888,13 @@ impl Service {
                             shard.intent.secondary.push(old_attached);
                         }
                     }
+                    PlacementPolicy::Detached => {
+                        return Err(ApiError::BadRequest(anyhow::anyhow!(
+                            "Cannot migrate a tenant that is PlacementPolicy::Detached: configure it to an attached policy first"
+                        )))
+                    }
                 }
+                shard.intent.attached = Some(migrate_req.node_id);
 
                 tracing::info!("Migrating: new intent {:?}", shard.intent);
                 shard.sequence = shard.sequence.next();
