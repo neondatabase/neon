@@ -348,7 +348,7 @@ enum PageStreamError {
 fn walredo_failed_to_start_due_to_concurrent_deploy_current() {
     // spawn returns permission denied; we need to have it in our logs to ignore it
     // the contexts captured here are from writing this test.
-    let res = Err::<(), _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    let res = Err::<(), _>(std::io::Error::from_raw_os_error(13))
         .context("spawn process")
         .context("launch walredo process")
         .context("Failed to reconstruct a page image:")
@@ -367,7 +367,7 @@ fn walredo_failed_to_start_due_to_concurrent_deploy_current() {
 
 #[test]
 fn walredo_failed_to_start_due_to_concurrent_deploy_fixed() {
-    let res = Err::<(), _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    let res = Err::<(), _>(std::io::Error::from_raw_os_error(13))
         .context("spawn process")
         .context("launch walredo process")
         .context("reconstruct a page image at xyz@abc of N records on top of None")
@@ -380,7 +380,7 @@ fn walredo_failed_to_start_due_to_concurrent_deploy_fixed() {
 
     let s = format!("{e:#}");
 
-    assert_eq!("Read error: reconstruct a page image at xyz@abc of N records on top of None: launch walredo process: spawn process: permission denied", s);
+    assert_eq!("Read error: reconstruct a page image at xyz@abc of N records on top of None: launch walredo process: spawn process: Permission denied (os error 13)", s);
 }
 
 impl From<PageReconstructError> for PageStreamError {
