@@ -17,16 +17,12 @@
 
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
-#include "storage/block.h"
-#include "storage/smgr.h"
-#include "storage/buf_internals.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "storage/block.h"
+#include "storage/buf_internals.h"
 #include "storage/smgr.h"
 #include "utils/memutils.h"
-
-#include "pg_config.h"
 
 #define MAX_SHARDS 128
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
