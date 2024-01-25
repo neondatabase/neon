@@ -246,7 +246,7 @@ impl PageServerNode {
                                 if e.is_connect() {
                                     Ok(false)
                                 } else {
-                                    Ok(true)
+                                    anyhow::bail!(e)
                                 }
                             }
                             e => anyhow::bail!(e),
