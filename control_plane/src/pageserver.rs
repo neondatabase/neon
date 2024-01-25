@@ -236,11 +236,18 @@ impl PageServerNode {
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
-                let st = self.check_status().await;
-                match st {
-                    Ok(()) => Ok(true),
-                    Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
-                    Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
+                match self.http_client.list_tenants().await {
+                    Ok(_) => Ok(true),
+                    Err(e) => match e {
+                        mgmt_api::Error::ReceiveBody(e) => {
+                            if e.is_connect() || e.is_timeout() {
+                                Ok(false)
+                            } else {
+                                Ok(true)
+                            }
+                        }
+                        e => anyhow::bail!(e),
+                    },
                 }
             },
         )
