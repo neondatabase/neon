@@ -116,6 +116,72 @@ impl EvictionOrder {
             } => *highest_layer_count_loses_first,
         }
     }
+
+    fn sort(&self, candidates: &mut [(MinResidentSizePartition, EvictionCandidate)]) {
+        use EvictionOrder::*;
+
+        match self {
+            AbsoluteAccessed => {
+                candidates.sort_unstable_by_key(|(partition, candidate)| {
+                    (*partition, candidate.last_activity_ts)
+                });
+            }
+            RelativeAccessed { .. } => candidates.sort_unstable_by_key(|(partition, candidate)| {
+                (*partition, candidate.relative_last_activity)
+            }),
+        }
+    }
+
+    /// Called to fill in the [`EvictionCandidate::relative_last_activity`] while iterating tenants
+    /// layers in **most** recently used order.
+    fn relative_last_activity(&self, total: usize, index: usize) -> finite_f32::FiniteF32 {
+        use EvictionOrder::*;
+
+        match self {
+            AbsoluteAccessed => finite_f32::FiniteF32::ZERO,
+            RelativeAccessed {
+                highest_layer_count_loses_first,
+            } => {
+                // keeping the -1 or not decides if every tenant should lose their least recently accessed
+                // layer OR if this should happen in the order of having highest layer count:
+                let fudge = if *highest_layer_count_loses_first {
+                    // relative_last_activity vs. tenant layer count:
+                    // - 0.1..=1.0 (10 layers)
+                    // - 0.01..=1.0 (100 layers)
+                    // - 0.001..=1.0 (1000 layers)
+                    //
+                    // leading to evicting less of the smallest tenants.
+                    0
+                } else {
+                    // use full 0.0..=1.0 range, which means even the smallest tenants could always lose a
+                    // layer. the actual ordering is unspecified: for 10k tenants on a pageserver it could
+                    // be that less than 10k layer evictions is enough, so we would not need to evict from
+                    // all tenants.
+                    //
+                    // as the tenant ordering is now deterministic this could hit the same tenants
+                    // disproportionetly on multiple invocations. alternative could be to remember how many
+                    // layers did we evict last time from this tenant, and inject that as an additional
+                    // fudge here.
+                    1
+                };
+
+                let total = total.checked_sub(fudge).filter(|&x| x > 1).unwrap_or(1);
+                let divider = total as f32;
+
+                // most recently used is always (total - 0) / divider == 1.0
+                // least recently used depends on the fudge:
+                // -       (total - 1) - (total - 1) / total => 0 / total
+                // -             total - (total - 1) / total => 1 / total
+                let distance = (total - index) as f32;
+
+                finite_f32::FiniteF32::try_from_normalized(distance / divider)
+                    .unwrap_or_else(|val| {
+                        tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={index}, total={total}: {val}");
+                        finite_f32::FiniteF32::ZERO
+                    })
+            }
+        }
+    }
 }
 
 #[derive(Default)]
