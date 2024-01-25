@@ -1095,7 +1095,9 @@ class NeonEnv:
         assert that there is only one. Tests with multiple pageservers should always use
         get_pageserver with an explicit ID.
         """
-        assert len(self.pageservers) == 1
+        assert (
+            len(self.pageservers) == 1
+        ), "env.pageserver must only be used with single pageserver NeonEnv"
         return self.pageservers[0]
 
     def get_pageserver(self, id: Optional[int]) -> NeonPageserver:
