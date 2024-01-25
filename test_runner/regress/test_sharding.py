@@ -22,11 +22,15 @@ def test_sharding_smoke(
     neon_env_builder.num_pageservers = shard_count
 
     # 1MiB stripes: enable getting some meaningful data distribution without
-    # writing large quantities of data in this test.
+    # writing large quantities of data in this test.  The stripe size is given
+    # in number of 8KiB pages.
     stripe_size = 128
 
+    # Use S3-compatible remote storage so that we can scrub: this test validates
+    # that the scrubber doesn't barf when it sees a sharded tenant.
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
+
     neon_env_builder.preserve_database_files = True
 
     env = neon_env_builder.init_start(

@@ -33,10 +33,8 @@ class Workload:
         self.timeline_id = timeline_id
         self.table = "foo"
 
-        if branch_name is None:
-            # Default branch for initial tenant in NeonEnv
-            branch_name = "main"
-        self.branch_name = branch_name
+        # By default, use the default branch name for initial tenant in NeonEnv
+        self.branch_name = branch_name or "main"
 
         self.expect_rows = 0
         self.churn_cursor = 0
