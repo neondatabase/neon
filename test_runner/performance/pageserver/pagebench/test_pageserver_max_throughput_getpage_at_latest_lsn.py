@@ -29,7 +29,7 @@ from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 # 46G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-6
 @pytest.mark.parametrize("duration", [30])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(s) for s in [100, 200]])
-@pytest.mark.parametrize("n_tenants", [1, 10])
+@pytest.mark.parametrize("n_tenants", [1, 10, 100])
 @pytest.mark.timeout(
     10000
 )  # TODO: this value is just "a really high number"; have this per instance type
