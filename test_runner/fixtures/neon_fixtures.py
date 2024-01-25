@@ -3062,6 +3062,17 @@ class Endpoint(PgProtocol):
 
         return self
 
+    def edit_hba(self, hba: List[str]):
+        """Prepend hba lines into pg_hba.conf file."""
+        with open(os.path.join(self.pg_data_dir_path(), "pg_hba.conf"), "r+") as conf_file:
+            data = conf_file.read()
+            conf_file.seek(0)
+            conf_file.write("\n".join(hba) + "\n")
+            conf_file.write(data)
+
+        if self.running:
+            self.safe_psql("SELECT pg_reload_conf()")
+
     def reconfigure(self, pageserver_id: Optional[int] = None):
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
