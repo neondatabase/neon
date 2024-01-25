@@ -318,7 +318,7 @@ impl Reconciler {
 
         tracing::info!("🔁 Notifying compute to use pageserver {}", dest_ps_id);
         self.compute_hook
-            .notify(self.tenant_shard_id, dest_ps_id)
+            .notify(self.tenant_shard_id, dest_ps_id, &self.cancel)
             .await?;
 
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Single, then
@@ -402,7 +402,7 @@ impl Reconciler {
                     self.location_config(node_id, wanted_conf, None).await?;
                     if let Err(e) = self
                         .compute_hook
-                        .notify(self.tenant_shard_id, node_id)
+                        .notify(self.tenant_shard_id, node_id, &self.cancel)
                         .await
                     {
                         tracing::warn!(

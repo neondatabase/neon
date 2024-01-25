@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::LocalEnv;
@@ -8,11 +8,14 @@ use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use utils::{
-    backoff,
+    backoff::{self},
     id::{NodeId, TenantId},
 };
 
 use crate::service::Config;
+
+const BUSY_DELAY: Duration = Duration::from_secs(1);
+const SLOWDOWN_DELAY: Duration = Duration::from_secs(5);
 
 pub(super) struct ComputeHookTenant {
     shards: Vec<(ShardIndex, NodeId)>,
@@ -163,6 +166,7 @@ impl ComputeHook {
         client: &reqwest::Client,
         url: &String,
         reconfigure_request: &ComputeHookNotifyRequest,
+        cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let req = client.request(Method::POST, url);
         let req = if let Some(value) = &self.authorization_header {
@@ -196,15 +200,25 @@ impl ComputeHook {
             return Ok(());
         }
 
-        // Error response codes:
-        //  - 423: an operation in progress prevents reconfiguring compute
-        //  - 429: please delay, under heavy load
-        //  - 5xx: control plane is unavailable, perhaps undergoing restart.
-        //  - 200: compute has been updated (or wasn't running)
-        //  - other 2xx: unexpected
+        // Error response codes
         match response.status() {
-            StatusCode::TOO_MANY_REQUESTS => Err(NotifyError::SlowDown),
-            StatusCode::LOCKED => Err(NotifyError::Busy),
+            StatusCode::TOO_MANY_REQUESTS => {
+                // TODO: 429 handling should be global: set some state visible to other requests
+                // so that they will delay before starting, rather than all notifications trying
+                // once before backing off.
+                tokio::time::timeout(SLOWDOWN_DELAY, cancel.cancelled())
+                    .await
+                    .ok();
+                Err(NotifyError::SlowDown)
+            }
+            StatusCode::LOCKED => {
+                // Delay our retry if busy: the usual fast exponential backoff in backoff::retry
+                // is not appropriate
+                tokio::time::timeout(BUSY_DELAY, cancel.cancelled())
+                    .await
+                    .ok();
+                Err(NotifyError::Busy)
+            }
             StatusCode::SERVICE_UNAVAILABLE
             | StatusCode::GATEWAY_TIMEOUT
             | StatusCode::BAD_GATEWAY => Err(NotifyError::Unavailable(response.status())),
@@ -219,16 +233,16 @@ impl ComputeHook {
         &self,
         url: &String,
         reconfigure_request: ComputeHookNotifyRequest,
+        cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let client = reqwest::Client::new();
-        let cancel = CancellationToken::new();
         backoff::retry(
-            || self.do_notify_iteration(&client, url, &reconfigure_request),
+            || self.do_notify_iteration(&client, url, &reconfigure_request, cancel),
             |e| matches!(e, NotifyError::Fatal(_)),
             3,
             10,
             "Send compute notification",
-            backoff::Cancel::new(cancel, || NotifyError::ShuttingDown),
+            backoff::Cancel::new(cancel.clone(), || NotifyError::ShuttingDown),
         )
         .await
     }
@@ -239,11 +253,15 @@ impl ComputeHook {
     /// condition that:
     /// - We know a pageserver for every shard.
     /// - All the shards have the same shard_count (i.e. we are not mid-split)
+    ///
+    /// Cancellation token enables callers to drop out, e.g. if calling from a Reconciler
+    /// that is cancelled
     #[tracing::instrument(skip_all, fields(tenant_shard_id, node_id))]
     pub(super) async fn notify(
         &self,
         tenant_shard_id: TenantShardId,
         node_id: NodeId,
+        cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let mut locked = self.state.lock().await;
         let entry = locked
@@ -274,8 +292,13 @@ impl ComputeHook {
             return Ok(());
         };
 
+        // TODO: if our cancellation token fires, we may drop out without notifying.  But the
+        // Reconciler that calls us might consider its work complete, and never retry.  Should
+        // carry some dirty flag and retry in the background.
+
         if let Some(notify_url) = &self.config.compute_hook_url {
-            self.do_notify(notify_url, reconfigure_request).await
+            self.do_notify(notify_url, reconfigure_request, cancel)
+                .await
         } else {
             self.do_notify_local(reconfigure_request)
                 .await
