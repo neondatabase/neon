@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
@@ -23,6 +24,7 @@ use futures::stream::Stream;
 use futures_util::StreamExt;
 use http_types::{StatusCode, Url};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
@@ -369,6 +371,20 @@ impl RemoteStorage for AzureBlobStorage {
             }
             copy_status = status;
         }
+    }
+
+    async fn time_travel_recover(
+        &self,
+        _prefix: Option<&RemotePath>,
+        _timestamp: SystemTime,
+        _done_if_after: SystemTime,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        // TODO use Azure point in time recovery feature for this
+        // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview
+        Err(anyhow::anyhow!(
+            "time travel recovery for azure blob storage is not implemented"
+        ))
     }
 }
 

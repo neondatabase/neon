@@ -5,7 +5,9 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::SystemTime;
 use std::{collections::hash_map::Entry, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Download, DownloadError, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorage,
@@ -30,6 +32,7 @@ enum RemoteOp {
     Download(RemotePath),
     Delete(RemotePath),
     DeleteObjects(Vec<RemotePath>),
+    TimeTravelRecover(Option<RemotePath>),
 }
 
 impl UnreliableWrapper {
@@ -180,5 +183,18 @@ impl RemoteStorage for UnreliableWrapper {
         self.attempt(RemoteOp::Download(from.clone()))?;
         self.attempt(RemoteOp::Upload(to.clone()))?;
         self.inner.copy_object(from, to).await
+    }
+
+    async fn time_travel_recover(
+        &self,
+        prefix: Option<&RemotePath>,
+        timestamp: SystemTime,
+        done_if_after: SystemTime,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))?;
+        self.inner
+            .time_travel_recover(prefix, timestamp, done_if_after, cancel)
+            .await
     }
 }

@@ -25,6 +25,7 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use toml_edit::Item;
 use tracing::info;
 
@@ -210,6 +211,15 @@ pub trait RemoteStorage: Send + Sync + 'static {
 
     /// Copy a remote object inside a bucket from one path to another.
     async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()>;
+
+    /// Resets the content of everything with the given prefix to the given state
+    async fn time_travel_recover(
+        &self,
+        prefix: Option<&RemotePath>,
+        timestamp: SystemTime,
+        done_if_after: SystemTime,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()>;
 }
 
 pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
@@ -385,6 +395,33 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.copy(from, to).await,
             Self::AzureBlob(s) => s.copy(from, to).await,
             Self::Unreliable(s) => s.copy(from, to).await,
+        }
+    }
+
+    pub async fn time_travel_recover(
+        &self,
+        prefix: Option<&RemotePath>,
+        timestamp: SystemTime,
+        done_if_after: SystemTime,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                    .await
+            }
+            Self::AwsS3(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                    .await
+            }
+            Self::AzureBlob(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                    .await
+            }
+            Self::Unreliable(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                    .await
+            }
         }
     }
 }
@@ -674,6 +711,7 @@ impl ConcurrencyLimiter {
             RequestKind::List => &self.read,
             RequestKind::Delete => &self.write,
             RequestKind::Copy => &self.write,
+            RequestKind::TimeTravel => &self.write,
         }
     }
 
