@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import errno
 import filecmp
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import textwrap
@@ -171,6 +173,35 @@ def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Ite
 
     log.info(f"versioned_pg_distrib_dir is {versioned_dir}")
     yield versioned_dir
+
+
+@pytest.fixture(scope="function")
+def test_cgroup_dir(request: FixtureRequest) -> Optional[Path]:
+    ## Use like so:
+    #   systemd-run --user --shell
+    #   cat /proc/self/cgroup
+    # # will look like so: 0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u5.service
+    #   env \
+    #      NEON_TEST_SUITE_USE_CGROUPS=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/run-u5.service \
+    #      BUILD_TYPE=debug \
+    #      DEFAULT_PG_VERSION=15 \
+    #      ./scripts/pytest
+
+    var = os.getenv("NEON_TEST_SUITE_USE_CGROUPS")
+    if var is None:
+        return None
+    root = Path(var)
+    assert root.is_dir()
+    assert (
+        "cgroup2fs"
+        == subprocess.check_output(
+            ["stat", "--file-system", "--format=%T", root],
+            text=True,
+        ).strip()
+    )
+    test_cgroup_dir: Path = get_test_cgroup_dir(request, root)
+    test_cgroup_dir.mkdir(exist_ok=False, parents=False)
+    return test_cgroup_dir
 
 
 def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "function"]:
@@ -446,6 +477,7 @@ class NeonEnvBuilder:
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
+        test_cgroup_dir: Optional[Path] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -480,6 +512,7 @@ class NeonEnvBuilder:
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
+        self.test_cgroup_dir = test_cgroup_dir
 
         assert test_name.startswith(
             "test_"
@@ -873,6 +906,15 @@ class NeonEnvBuilder:
                 x.do_cleanup()
 
     def __enter__(self) -> "NeonEnvBuilder":
+        if self.test_cgroup_dir is not None:
+            log.info(f"putting test runner into cgroup {self.test_cgroup_dir}")
+            procs_file = self.test_cgroup_dir / "cgroup.procs"
+            # TODO: auto-cleanup the cgroup, share code with __exit__
+            pids = procs_file.read_text().split()
+            assert pids == []
+            mypid = os.getpid()
+            with open(procs_file, "a") as f:
+                f.write(f" {mypid}\n")
         return self
 
     def __exit__(
@@ -925,6 +967,53 @@ class NeonEnvBuilder:
             log.error(f"Error cleaning up overlay state: {e}")
             if cleanup_error is not None:
                 cleanup_error = e
+
+        if self.test_cgroup_dir is not None:
+            log.info(f"check test runner cgroup for leaked processes: {self.test_cgroup_dir}")
+            procs_file = self.test_cgroup_dir / "cgroup.procs"
+            mypid = os.getpid()
+            # move ourselves out of cgroup
+            with open(self.test_cgroup_dir.parent / "cgroup.procs", "a") as f:
+                f.write(f"{mypid}")
+            # now freeze the test cgroup, so we can race-free list & SIGKILL the processes
+            freeze_file = self.test_cgroup_dir / "cgroup.freeze"
+            freeze_file.write_text("1")
+            # inspect remaining pids
+            pids = [int(pid) for pid in procs_file.read_text().split()]
+            had_leaked_pids = len(pids) > 0
+            for pid in pids:
+                # dump info
+                try:
+                    args_file = Path(f"/proc/{pid}/cmdline").read_bytes()
+                    args_parsed = [
+                        bytes.decode("utf-8") for bytes in args_file.split(b"\x00")
+                    ]  # NULL-byte separated
+                    args = f"{args_parsed}"
+                except Exception as e:
+                    args = f"cmdline unavailable, {type(e)}, {e}"
+                log.warning(f"SIGKILLing leaked process: {pid}: {args}")
+                # send SIGKILL to the frozen process
+                os.kill(pid, signal.SIGKILL)
+            # thaw the cgroup
+            freeze_file.write_text("0")
+            # wait for processes to exit
+            while True:
+                try:
+                    self.test_cgroup_dir.rmdir()
+                    break
+                except OSError as e:
+                    if e.errno != errno.EBUSY:
+                        raise
+                    pids = [int(pid) for pid in procs_file.read_text().split()]
+                    if len(pids) == 0:
+                        break
+                    log.warning(f"waiting for pids to exit: {pids}")
+                    time.sleep(0.1)
+            log.info("all pids exited and test cgroup has been deleted")
+            cleanup_cmd = (
+                f"for pid in $(cat '{procs_file}'); do; kill -9 $pid; done; rmdir {procs_file}"
+            )
+            assert not had_leaked_pids, f"had pids in test cgroup after NeonEnvBuilder teardown, see logs for details & cleanup help\ncleanup using bash command: {cleanup_cmd}\n"
 
 
 class NeonEnv:
@@ -1256,6 +1345,7 @@ def neon_env_builder(
     request: FixtureRequest,
     test_overlay_dir: Path,
     top_output_dir: Path,
+    test_cgroup_dir: Optional[Path],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1288,6 +1378,7 @@ def neon_env_builder(
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
+        test_cgroup_dir=test_cgroup_dir,
     ) as builder:
         yield builder
 
@@ -3620,6 +3711,10 @@ def get_shared_snapshot_dir_path(top_output_dir: Path, snapshot_name: str) -> Pa
 
 def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return get_test_output_dir(request, top_output_dir) / "repo"
+
+
+def get_test_cgroup_dir(request: FixtureRequest, top_cgroup_dir: Path) -> Path:
+    return _get_test_dir(request, top_cgroup_dir, "")
 
 
 def pytest_addoption(parser: Parser):
