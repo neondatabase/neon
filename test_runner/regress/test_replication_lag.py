@@ -1,3 +1,4 @@
+import time
 import threading
 
 from fixtures.log_helper import log
@@ -7,6 +8,7 @@ from fixtures.neon_fixtures import NeonEnv, PgBin, wait_replica_caughtup
 def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
     n_iterations = 10
+    max_retries = 10
 
     # Use aggressive GC and checkpoint settings
     tenant, _ = env.neon_cli.create_tenant(
@@ -34,6 +36,7 @@ def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
 
         with env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary") as secondary:
             wait_replica_caughtup(primary, secondary)
+            time.sleep(1) # Without this sleep replica sometime failed to find relation: could not open relation with OID 16404
             for _ in range(1, n_iterations):
                 primary_lsn = primary.safe_psql_scalar(
                     "SELECT pg_current_wal_flush_lsn()::text", log_query=False
@@ -41,7 +44,19 @@ def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
                 secondary_lsn = secondary.safe_psql_scalar(
                     "SELECT pg_last_wal_replay_lsn()", log_query=False
                 )
-                balance = secondary.safe_psql_scalar("select sum(abalance) from pgbench_accounts")
+                retries = 0
+                while True:
+                    try:
+                        balance = secondary.safe_psql_scalar(
+                            "select sum(abalance) from pgbench_accounts"
+                        )
+                        break
+                    except Exception as error:
+                        print(f"Query failed: {error}")
+                        if retries < max_retries:
+                            retries += 1
+                        else:
+                            raise
                 log.info(
                     f"primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}, balance={balance}"
                 )

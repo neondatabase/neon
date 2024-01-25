@@ -4087,6 +4087,7 @@ def tenant_get_shards(
         # Assume an unsharded tenant
         return [(TenantShardId(tenant_id, 0, 0), override_pageserver or env.pageserver)]
 
+
 def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
     primary_lsn = primary.safe_psql_scalar(
         "SELECT pg_current_wal_flush_lsn()::text", log_query=False
@@ -4100,6 +4101,7 @@ def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
         if caught_up:
             return
         time.sleep(1)
+
 
 def wait_for_last_flush_lsn(
     env: NeonEnv,
