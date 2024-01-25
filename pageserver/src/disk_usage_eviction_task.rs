@@ -455,52 +455,6 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
     let selection = select_victims(&candidates, usage_pre);
 
-    let mut candidates = candidates;
-
-    let selection = if matches!(eviction_order, EvictionOrder::RelativeAccessed { .. }) {
-        // we currently have the layers ordered by AbsoluteAccessed so that we can get the summary
-        // for comparison here. this is a temporary measure to develop alternatives.
-        use std::fmt::Write;
-
-        let mut summary_buf = String::with_capacity(256);
-
-        {
-            let absolute_summary = candidates
-                .iter()
-                .take(selection.amount)
-                .map(|(_, candidate)| candidate)
-                .collect::<summary::EvictionSummary>();
-
-            write!(summary_buf, "{absolute_summary}").expect("string grows");
-
-            info!("absolute accessed selection summary: {summary_buf}");
-        }
-
-        candidates.sort_unstable_by_key(|(partition, candidate)| {
-            (*partition, candidate.relative_last_activity)
-        });
-
-        let selection = select_victims(&candidates, usage_pre);
-
-        {
-            summary_buf.clear();
-
-            let relative_summary = candidates
-                .iter()
-                .take(selection.amount)
-                .map(|(_, candidate)| candidate)
-                .collect::<summary::EvictionSummary>();
-
-            write!(summary_buf, "{relative_summary}").expect("string grows");
-
-            info!("relative accessed selection summary: {summary_buf}");
-        }
-
-        selection
-    } else {
-        selection
-    };
-
     let (evicted_amount, usage_planned) = selection.into_amount_and_planned();
 
     // phase2: evict layers
@@ -995,8 +949,7 @@ async fn collect_eviction_candidates(
 
     // always behave as if AbsoluteAccessed was selected. if RelativeAccessed is in use, we
     // will sort later by candidate.relative_last_activity to get compare evictions.
-    candidates
-        .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
+    eviction_order.sort(&mut candidates);
 
     Ok(EvictionCandidates::Finished(candidates))
 }
