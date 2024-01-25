@@ -24,7 +24,7 @@ def wait_caughtup(primary: Endpoint, secondary: Endpoint):
 # Check for corrupted WAL messages which might otherwise go unnoticed if
 # reconnection fixes this.
 def scan_standby_log_for_errors(secondary):
-    log_path = secondary.endpoint_path() / "compute.log"
+    log_path = secondary.endpoint_path() / "compute_ctl.log"
     with log_path.open("r") as f:
         markers = re.compile(
             r"incorrect resource manager data|record with incorrect|invalid magic number|unexpected pageaddr"
