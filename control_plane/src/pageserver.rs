@@ -236,18 +236,24 @@ impl PageServerNode {
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
-                match self.http_client.list_tenants().await {
-                    Ok(_) => Ok(true),
-                    Err(e) => match e {
-                        mgmt_api::Error::ReceiveBody(e) => {
-                            if e.is_connect() || e.is_timeout() {
-                                Ok(false)
-                            } else {
-                                Ok(true)
+                let res =
+                    tokio::time::timeout(Duration::from_secs(1), self.http_client.list_tenants())
+                        .await;
+                match res {
+                    Ok(res) => match res {
+                        Ok(_) => Ok(true),
+                        Err(e) => match e {
+                            mgmt_api::Error::ReceiveBody(e) => {
+                                if e.is_connect() || e.is_timeout() {
+                                    Ok(false)
+                                } else {
+                                    Ok(true)
+                                }
                             }
-                        }
-                        e => anyhow::bail!(e),
+                            e => anyhow::bail!(e),
+                        },
                     },
+                    Err(_timeout) => Ok(false),
                 }
             },
         )
