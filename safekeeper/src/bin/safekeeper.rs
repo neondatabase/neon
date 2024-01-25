@@ -8,6 +8,8 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use remote_storage::RemoteStorageConfig;
+use safekeeper::control_file::FileStorage;
+use safekeeper::state::TimelinePersistentState;
 use sd_notify::NotifyState;
 use tokio::runtime::Handle;
 use tokio::signal::unix::{signal, SignalKind};
@@ -30,12 +32,12 @@ use safekeeper::defaults::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
     DEFAULT_PG_LISTEN_ADDR,
 };
-use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, WAL_SERVICE_RUNTIME};
 use safekeeper::{control_file, BROKER_RUNTIME};
 use safekeeper::{http, WAL_REMOVER_RUNTIME};
+use safekeeper::{json_merge, wal_service};
 use safekeeper::{remove_wal, WAL_BACKUP_RUNTIME};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
@@ -105,9 +107,6 @@ struct Args {
     /// Do not wait for changes to be written safely to disk. Unsafe.
     #[arg(short, long)]
     no_sync: bool,
-    /// Dump control file at path specified by this argument and exit.
-    #[arg(long)]
-    dump_control_file: Option<Utf8PathBuf>,
     /// Broker endpoint for storage nodes coordination in the form
     /// http[s]://host:port. In case of https schema TLS is connection is
     /// established; plaintext otherwise.
@@ -166,6 +165,21 @@ struct Args {
     /// useful for debugging.
     #[arg(long)]
     current_thread_runtime: bool,
+    /// Dump control file at path specified by this argument and exit.
+    #[arg(long)]
+    dump_control_file: Option<Utf8PathBuf>,
+    /// Patch control file at path specified by this argument and exit.
+    /// Patch is specified in --patch option and imposed over
+    /// control file as per rfc7386.
+    /// Without --write-patched the result is only printed.
+    #[arg(long, verbatim_doc_comment)]
+    patch_control_file: Option<Utf8PathBuf>,
+    /// The patch to apply to control file at --patch-control-file, in JSON.
+    #[arg(long, default_value = None)]
+    patch: Option<String>,
+    /// Write --patch-control-file result back in place.
+    #[arg(long, default_value = "false")]
+    write_patched: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -207,7 +221,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(addr) = args.dump_control_file {
         let state = control_file::FileStorage::load_control_file(addr)?;
         let json = serde_json::to_string(&state)?;
-        print!("{json}");
+        println!("{json}");
+        return Ok(());
+    }
+
+    if let Some(cfile_path) = args.patch_control_file {
+        let patch = args.patch.ok_or(anyhow::anyhow!("patch is missing"))?;
+        patch_control_file(cfile_path, patch, args.write_patched).await?;
         return Ok(());
     }
 
@@ -527,6 +547,26 @@ fn parse_remote_storage(storage_conf: &str) -> anyhow::Result<RemoteStorageConfi
         // XXX: Don't print the original toml here, there might be some sensitive data
         parsed_config.context("Incorrectly parsed remote storage toml as no remote storage config")
     })
+}
+
+async fn patch_control_file(
+    cfile_path: Utf8PathBuf,
+    patch: String,
+    write: bool,
+) -> anyhow::Result<()> {
+    let state = control_file::FileStorage::load_control_file(&cfile_path)?;
+    // serialize to json, impose patch and deserialize back
+    let mut state_json =
+        serde_json::to_value(state).context("failed to serialize state to json")?;
+    let patch_json = serde_json::from_str(&patch).context("failed to parse patch")?;
+    json_merge(&mut state_json, patch_json);
+    let patched_state: TimelinePersistentState =
+        serde_json::from_value(state_json.clone()).context("failed to deserialize patched json")?;
+    println!("{state_json}");
+    if write {
+        FileStorage::do_persist(&patched_state, &cfile_path, true).await?;
+    }
+    return Ok(());
 }
 
 #[test]

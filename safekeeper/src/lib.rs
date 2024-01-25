@@ -2,6 +2,7 @@
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
+use serde_json::Value;
 use tokio::runtime::Runtime;
 
 use std::time::Duration;
@@ -175,3 +176,24 @@ pub static METRICS_SHIFTER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .build()
         .expect("Failed to create broker runtime")
 });
+
+/// Merge json b into json a according to
+/// https://www.rfc-editor.org/rfc/rfc7396
+/// https://stackoverflow.com/a/54118457/4014587
+pub fn json_merge(a: &mut Value, b: Value) {
+    if let Value::Object(a) = a {
+        if let Value::Object(b) = b {
+            for (k, v) in b {
+                if v.is_null() {
+                    a.remove(&k);
+                } else {
+                    json_merge(a.entry(k).or_insert(Value::Null), v);
+                }
+            }
+
+            return;
+        }
+    }
+
+    *a = b;
+}
