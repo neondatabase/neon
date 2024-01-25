@@ -155,8 +155,9 @@ RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.t
     rm -rf /plv8-* && \
     find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
     # don't break computes with installed old version of plv8
-    ln -s /usr/local/pgsql/lib/plv8-3.1.10.so /usr/local/pgsql/lib/plv8-3.1.5.so && \
-    ln -s /usr/local/pgsql/lib/plv8-3.1.10.so /usr/local/pgsql/lib/plv8-3.1.8.so && \
+    cd /usr/local/pgsql/lib/ && \
+    ln -s plv8-3.1.10.so plv8-3.1.5.so && \
+    ln -s plv8-3.1.10.so plv8-3.1.8.so && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
