@@ -1843,7 +1843,7 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
-		elog(LOG, "hs.ts=%ld hs.xmin=%ld", wp->safekeeper[i].appendResponse.hs.ts, wp->safekeeper[i].appendResponse.hs.xmin);
+		elog(LOG, "hs.ts=%ld hs.xmin=%d", wp->safekeeper[i].appendResponse.hs.ts, XidFromFullTransactionId(wp->safekeeper[i].appendResponse.hs.xmin));
  		if (wp->safekeeper[i].appendResponse.hs.ts != 0)
 		{
 			HotStandbyFeedback *skhs = &wp->safekeeper[i].appendResponse.hs;
@@ -1925,8 +1925,7 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
 								 EpochFromFullTransactionId(hsFeedback.xmin),
 								 XidFromFullTransactionId(hsFeedback.catalog_xmin),
 								 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
-	} else
-		elog(LOG, "Skip HSFeedback ts=%ld, xmin=%d, catalog_xmin=%d", hsFeedback.ts, XidFromFullTransactionId(hsFeedback.xmin), XidFromFullTransactionId(hsFeedback.catalog_xmin));
+	}
 }
 
 static XLogRecPtr
