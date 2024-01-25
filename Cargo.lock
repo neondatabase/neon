@@ -286,6 +286,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "postgres_connection",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
