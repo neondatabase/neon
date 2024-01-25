@@ -66,6 +66,7 @@ struct ServiceState {
 
 impl ServiceState {
     fn new(
+        config: Config,
         result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
         nodes: HashMap<NodeId, Node>,
         tenants: BTreeMap<TenantShardId, TenantState>,
@@ -73,7 +74,7 @@ impl ServiceState {
         Self {
             tenants,
             nodes: Arc::new(nodes),
-            compute_hook: Arc::new(ComputeHook::new()),
+            compute_hook: Arc::new(ComputeHook::new(config)),
             result_tx,
         }
     }
@@ -82,8 +83,17 @@ impl ServiceState {
 #[derive(Clone)]
 pub struct Config {
     // All pageservers managed by one instance of this service must have
-    // the same public key.
+    // the same public key.  This JWT token will be used to authenticate
+    // this service to the pageservers it manages.
     pub jwt_token: Option<String>,
+
+    // This JWT token will be used to authenticate this service to the control plane.
+    pub control_plane_jwt_token: Option<String>,
+
+    /// Where the compute hook should send notifications of pageserver attachment locations
+    /// (this URL points to the control plane in prod). If this is None, the compute hook will
+    /// assume it is running in a test environment and try to update neon_local.
+    pub compute_hook_url: Option<String>,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -304,7 +314,10 @@ impl Service {
 
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
-                result_tx, nodes, tenants,
+                config.clone(),
+                result_tx,
+                nodes,
+                tenants,
             ))),
             config,
             persistence,

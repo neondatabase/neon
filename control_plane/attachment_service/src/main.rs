@@ -34,8 +34,17 @@ struct Cli {
     public_key: Option<camino::Utf8PathBuf>,
 
     /// Token for authenticating this service with the pageservers it controls
-    #[arg(short, long)]
+    #[arg(long)]
     jwt_token: Option<String>,
+
+    /// Token for authenticating this service with the control plane, when calling
+    /// the compute notification endpoint
+    #[arg(long)]
+    control_plane_jwt_token: Option<String>,
+
+    /// URL to control plane compute notification endpoint
+    #[arg(long)]
+    compute_hook_url: Option<String>,
 
     /// Path to the .json file to store state (will be created if it doesn't exist)
     #[arg(short, long)]
@@ -68,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config {
         jwt_token: args.jwt_token,
+        control_plane_jwt_token: args.control_plane_jwt_token,
+        compute_hook_url: args.compute_hook_url,
     };
 
     let json_path = args.path;
