@@ -230,12 +230,12 @@ AssignPageserverConnstring(const char *newval, void *extra)
  * last call, terminates all existing connections to all pageservers.
  */
 static void
-load_shard_map(shardno_t shard_no, char *connstr_p, size_t *num_shards_p)
+load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 {
 	uint64		begin_update_counter;
 	uint64		end_update_counter;
 	ShardMap   *shard_map = &pagestore_shared->shard_map;
-	size_t		num_shards;
+	shardno_t	num_shards;
 
 	/*
 	 * Postmaster can update the shared memory values concurrently, in which
@@ -284,7 +284,7 @@ load_shard_map(shardno_t shard_no, char *connstr_p, size_t *num_shards_p)
 shardno_t
 get_shard_number(BufferTag *tag)
 {
-	size_t		n_shards;
+	shardno_t	n_shards;
 	uint32		hash;
 
 	load_shard_map(0, NULL, &n_shards);
