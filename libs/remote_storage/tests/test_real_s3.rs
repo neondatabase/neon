@@ -107,7 +107,9 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     // No changes after recovery to t2 (no-op)
     let t_final = time_point().await;
-    ctx.client.time_travel_recover(None, t2, t_final, CancellationToken::new()).await?;
+    ctx.client
+        .time_travel_recover(None, t2, t_final, CancellationToken::new())
+        .await?;
     let t2_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t2: {t2_files_recovered:?}");
     assert_eq!(t2_files, t2_files_recovered);
@@ -116,7 +118,9 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     // after recovery to t1: path1 is back, path2 has the old content
     let t_final = time_point().await;
-    ctx.client.time_travel_recover(None, t1, t_final, CancellationToken::new()).await?;
+    ctx.client
+        .time_travel_recover(None, t1, t_final, CancellationToken::new())
+        .await?;
     let t1_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t1: {t1_files_recovered:?}");
     assert_eq!(t1_files, t1_files_recovered);
@@ -125,7 +129,9 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     // after recovery to t0: everything is gone except for path1
     let t_final = time_point().await;
-    ctx.client.time_travel_recover(None, t0, t_final, CancellationToken::new()).await?;
+    ctx.client
+        .time_travel_recover(None, t0, t_final, CancellationToken::new())
+        .await?;
     let t0_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t0: {t0_files_recovered:?}");
     assert_eq!(t0_files, t0_files_recovered);
