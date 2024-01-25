@@ -134,10 +134,7 @@ impl<Value: Clone> LayerCoverage<Value> {
     pub fn range_overlaps(
         &self,
         key_range: &Range<i128>,
-    ) -> itertools::Either<
-        impl Iterator<Item = (i128, Option<Value>)> + '_,
-        impl Iterator<Item = (i128, Option<Value>)> + '_,
-    >
+    ) -> impl Iterator<Item = (i128, Option<Value>)> + '_
     where
         Value: Eq,
     {
