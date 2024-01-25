@@ -77,6 +77,13 @@ pub async fn task_main(
         let cancel_map = Arc::clone(&cancel_map);
         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
+        let session_span = info_span!(
+            "handle_client",
+            ?session_id,
+            peer_addr = tracing::field::Empty,
+            ep = tracing::field::Empty,
+        );
+
         connections.spawn(
             async move {
                 info!("accepted postgres client connection");
@@ -107,15 +114,11 @@ pub async fn task_main(
                 )
                 .await
             }
-            .instrument(info_span!(
-                "handle_client",
-                ?session_id,
-                peer_addr = tracing::field::Empty
-            ))
             .unwrap_or_else(move |e| {
                 // Acknowledge that the task has finished with an error.
-                error!(?session_id, "per-client task finished with an error: {e:#}");
-            }),
+                error!("per-client task finished with an error: {e:#}");
+            })
+            .instrument(session_span),
         );
     }
 
@@ -211,8 +214,6 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         Ok(user_info) => user_info,
         Err(e) => stream.throw_error(e).await?,
     };
-
-    ctx.set_endpoint_id(user_info.get_endpoint());
 
     // check rate limit
     if let Some(ep) = user_info.get_endpoint() {

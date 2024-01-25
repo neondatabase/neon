@@ -189,7 +189,7 @@ fn get_conn_info(
     }
 
     let endpoint = endpoint_sni(hostname, &tls.common_names)?.context("malformed endpoint")?;
-    ctx.set_endpoint_id(Some(endpoint.clone()));
+    ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
 

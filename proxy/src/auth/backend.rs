@@ -190,7 +190,10 @@ async fn auth_quirks(
         Err(info) => {
             let res = hacks::password_hack_no_authentication(info, client, &mut ctx.latency_timer)
                 .await?;
-            ctx.set_endpoint_id(Some(res.info.endpoint.clone()));
+
+            ctx.set_endpoint_id(res.info.endpoint.clone());
+            tracing::Span::current().record("ep", &tracing::field::display(&res.info.endpoint));
+
             (res.info, Some(res.keys))
         }
         Ok(info) => (info, None),

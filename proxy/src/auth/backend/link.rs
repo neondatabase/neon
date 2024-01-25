@@ -98,6 +98,7 @@ pub(super) async fn authenticate(
 
     ctx.set_user(db_info.user.into());
     ctx.set_project(db_info.aux.clone());
+    tracing::Span::current().record("ep", &tracing::field::display(&db_info.aux.endpoint_id));
 
     // Backwards compatibility. pg_sni_proxy uses "--" in domain names
     // while direct connections do not. Once we migrate to pg_sni_proxy
