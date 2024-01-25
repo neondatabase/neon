@@ -22,6 +22,8 @@ env:
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
   NEXTEST_RETRIES: 3
+  # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
+  E2E_CONCURRENCY_GROUP: ${{ github.repository }}-${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
 
 jobs:
   check-permissions:
@@ -44,6 +46,20 @@ jobs:
         echo >&2 "${MESSAGE}"
 
         exit 1
+
+  cancel-previous-e2e-tests:
+    needs: [ check-permissions ]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cancel previous e2e-tests runs for this PR
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          gh workflow --repo neondatabase/cloud \
+            run cancel-previous-in-concurrency-group.yml \
+              --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
   tag:
     needs: [ check-permissions ]
@@ -696,7 +712,8 @@ jobs:
                 \"commit_hash\": \"$COMMIT_SHA\",
                 \"remote_repo\": \"${{ github.repository }}\",
                 \"storage_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
-                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\"
+                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
               }
             }"
 
