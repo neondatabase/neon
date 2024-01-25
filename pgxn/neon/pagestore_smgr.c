@@ -242,9 +242,14 @@ typedef struct PrefetchState
 	/* the buffers */
 	prfh_hash	*prf_hash;
 	int			max_shard_no;
+	/* Mark shards involved in prefetch */
 	uint8		shard_bitmap[(MAX_SHARDS + 7)/8];
 	PrefetchRequest prf_buffer[];	/* prefetch buffers */
 } PrefetchState;
+
+#define BITMAP_ISSET(bm, bit) ((bm)[(bit) >> 3] & (1 << ((bit) & 7)))
+#define BITMAP_SET(bm, bit) (bm)[(bit) >> 3] |= (1 << ((bit) & 7))
+#define BITMAP_CLR(bm, bit) (bm)[(bit) >> 3] &= ~(1 << ((bit) & 7))
 
 static PrefetchState *MyPState;
 
@@ -504,11 +509,11 @@ prefetch_flush_requests(void)
 {
 	for (shardno_t shard_no = 0; shard_no < MyPState->max_shard_no; shard_no++)
 	{
-		if (MyPState->shard_bitmap[shard_no >> 3] & (1 << (shard_no & 7)))
+		if (BITMAP_ISSET(MyPState->shard_bitmap, shard_no))
 		{
 			if (!page_server->flush(shard_no))
 				return false;
-			MyPState->shard_bitmap[shard_no >> 3] &= ~(1 << (shard_no & 7));
+			BITMAP_CLR(MyPState->shard_bitmap, shard_no);
 		}
 	}
 	MyPState->max_shard_no = 0;
@@ -731,7 +736,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	MyPState->n_requests_inflight += 1;
 	MyPState->n_unused -= 1;
 	MyPState->ring_unused += 1;
-	MyPState->shard_bitmap[slot->shard_no >> 3] |= 1 << (slot->shard_no & 7);
+	BITMAP_SET(MyPState->shard_bitmap, slot->shard_no);
 	MyPState->max_shard_no = Max(slot->shard_no+1, MyPState->max_shard_no);
 
 	/* update slot state */
