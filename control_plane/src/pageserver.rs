@@ -236,12 +236,7 @@ impl PageServerNode {
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
-                match self
-                    .http_client
-                    // if we hit the timeout, start_process will call us again
-                    .list_tenants_timeout(mgmt_api::OptionalTimeout::Yes(Duration::from_secs(1)))
-                    .await
-                {
+                match self.http_client.list_tenants().await {
                     Ok(_) => Ok(true),
                     Err(e) => match e {
                         mgmt_api::Error::ReceiveBody(e) => {

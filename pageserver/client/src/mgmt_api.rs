@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method, StatusCode};
 use utils::{
@@ -56,22 +54,6 @@ pub enum ForceAwaitLogicalSize {
     No,
 }
 
-pub enum OptionalTimeout {
-    Yes(Duration),
-    None,
-}
-
-use OptionalTimeout::None as NoTimeout;
-
-impl OptionalTimeout {
-    fn yes(self) -> Option<Duration> {
-        match self {
-            OptionalTimeout::Yes(t) => Some(t),
-            OptionalTimeout::None => None,
-        }
-    }
-}
-
 impl Client {
     pub fn new(mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
         Self {
@@ -83,16 +65,7 @@ impl Client {
 
     pub async fn list_tenants(&self) -> Result<Vec<pageserver_api::models::TenantInfo>> {
         let uri = format!("{}/v1/tenant", self.mgmt_api_endpoint);
-        let resp = self.get(&uri, NoTimeout).await?;
-        resp.json().await.map_err(Error::ReceiveBody)
-    }
-
-    pub async fn list_tenants_timeout(
-        &self,
-        timeout: OptionalTimeout,
-    ) -> Result<Vec<pageserver_api::models::TenantInfo>> {
-        let uri = format!("{}/v1/tenant", self.mgmt_api_endpoint);
-        let resp = self.get(&uri, timeout).await?;
+        let resp = self.get(&uri).await?;
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
@@ -101,7 +74,7 @@ impl Client {
         tenant_shard_id: TenantShardId,
     ) -> Result<pageserver_api::models::TenantDetails> {
         let uri = format!("{}/v1/tenant/{tenant_shard_id}", self.mgmt_api_endpoint);
-        self.get(uri, NoTimeout)
+        self.get(uri)
             .await?
             .json()
             .await
@@ -116,7 +89,7 @@ impl Client {
             "{}/v1/tenant/{tenant_shard_id}/timeline",
             self.mgmt_api_endpoint
         );
-        self.get(&uri, NoTimeout)
+        self.get(&uri)
             .await?
             .json()
             .await
@@ -139,7 +112,7 @@ impl Client {
             ForceAwaitLogicalSize::No => uri,
         };
 
-        self.get(&uri, NoTimeout)
+        self.get(&uri)
             .await?
             .json()
             .await
@@ -155,15 +128,15 @@ impl Client {
             "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/keyspace",
             self.mgmt_api_endpoint
         );
-        self.get(&uri, NoTimeout)
+        self.get(&uri)
             .await?
             .json()
             .await
             .map_err(Error::ReceiveBody)
     }
 
-    async fn get<U: IntoUrl>(&self, uri: U, timeout: OptionalTimeout) -> Result<reqwest::Response> {
-        self.request(Method::GET, uri, (), timeout).await
+    async fn get<U: IntoUrl>(&self, uri: U) -> Result<reqwest::Response> {
+        self.request(Method::GET, uri, ()).await
     }
 
     async fn request<B: serde::Serialize, U: reqwest::IntoUrl>(
@@ -171,14 +144,8 @@ impl Client {
         method: Method,
         uri: U,
         body: B,
-        timeout: OptionalTimeout,
     ) -> Result<reqwest::Response> {
         let req = self.client.request(method, uri);
-        let req = if let Some(timeout) = timeout.yes() {
-            req.timeout(timeout)
-        } else {
-            req
-        };
         let req = if let Some(value) = &self.authorization_header {
             req.header(reqwest::header::AUTHORIZATION, value)
         } else {
@@ -191,13 +158,13 @@ impl Client {
 
     pub async fn status(&self) -> Result<()> {
         let uri = format!("{}/v1/status", self.mgmt_api_endpoint);
-        self.get(&uri, NoTimeout).await?;
+        self.get(&uri).await?;
         Ok(())
     }
 
     pub async fn tenant_create(&self, req: &TenantCreateRequest) -> Result<TenantId> {
         let uri = format!("{}/v1/tenant", self.mgmt_api_endpoint);
-        self.request(Method::POST, &uri, req, NoTimeout)
+        self.request(Method::POST, &uri, req)
             .await?
             .json()
             .await
@@ -206,7 +173,7 @@ impl Client {
 
     pub async fn tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
-        self.request(Method::PUT, &uri, req, NoTimeout).await?;
+        self.request(Method::PUT, &uri, req).await?;
         Ok(())
     }
 
@@ -215,7 +182,7 @@ impl Client {
             "{}/v1/tenant/{}/secondary/download",
             self.mgmt_api_endpoint, tenant_id
         );
-        self.request(Method::POST, &uri, (), NoTimeout).await?;
+        self.request(Method::POST, &uri, ()).await?;
         Ok(())
     }
 
@@ -238,14 +205,13 @@ impl Client {
         } else {
             path
         };
-        self.request(Method::PUT, &path, &req_body, NoTimeout)
-            .await?;
+        self.request(Method::PUT, &path, &req_body).await?;
         Ok(())
     }
 
     pub async fn list_location_config(&self) -> Result<LocationConfigListResponse> {
         let path = format!("{}/v1/location_config", self.mgmt_api_endpoint);
-        self.request(Method::GET, &path, (), NoTimeout)
+        self.request(Method::GET, &path, ())
             .await?
             .json()
             .await
@@ -261,7 +227,7 @@ impl Client {
             "{}/v1/tenant/{}/timeline",
             self.mgmt_api_endpoint, tenant_shard_id
         );
-        self.request(Method::POST, &uri, req, NoTimeout)
+        self.request(Method::POST, &uri, req)
             .await?
             .json()
             .await
@@ -273,7 +239,7 @@ impl Client {
             "{}/v1/tenant/{}/reset",
             self.mgmt_api_endpoint, tenant_shard_id
         );
-        self.request(Method::POST, &uri, (), NoTimeout)
+        self.request(Method::POST, &uri, ())
             .await?
             .json()
             .await
@@ -288,7 +254,7 @@ impl Client {
             "{}/v1/tenant/{}/timeline",
             self.mgmt_api_endpoint, tenant_shard_id
         );
-        self.get(&uri, NoTimeout)
+        self.get(&uri)
             .await?
             .json()
             .await
@@ -303,7 +269,7 @@ impl Client {
             "{}/v1/tenant/{}/synthetic_size",
             self.mgmt_api_endpoint, tenant_shard_id
         );
-        self.get(&uri, NoTimeout)
+        self.get(&uri)
             .await?
             .json()
             .await
