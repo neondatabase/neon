@@ -434,7 +434,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup cgroup for use by test suite
-        run: sudo mkdir /sys/fs/cgroup/neon_testsuite && sudo chown nonroot:nonroot /sys/fs/cgroup/neon_testsuite
+        run: sudo mkdir /sys/fs/cgroup/neon_testsuite && sudo chown -R nonroot:nonroot /sys/fs/cgroup/neon_testsuite
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
