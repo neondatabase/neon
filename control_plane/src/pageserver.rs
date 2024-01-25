@@ -11,7 +11,7 @@ use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -161,7 +161,7 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
+    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         self.start_node(config_overrides, false).await
     }
 
@@ -207,7 +207,7 @@ impl PageServerNode {
         &self,
         config_overrides: &[&str],
         update_config: bool,
-    ) -> anyhow::Result<Child> {
+    ) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(

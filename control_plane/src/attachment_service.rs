@@ -9,7 +9,7 @@ use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{path::PathBuf, process::Child, str::FromStr};
+use std::{path::PathBuf, str::FromStr};
 use tracing::instrument;
 use utils::{
     auth::{Claims, Scope},
@@ -220,7 +220,7 @@ impl AttachmentService {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self) -> anyhow::Result<Child> {
+    pub async fn start(&self) -> anyhow::Result<()> {
         let path_str = self.path.to_string_lossy();
 
         let mut args = vec!["-l", &self.listen, "-p", &path_str]
@@ -254,6 +254,7 @@ impl AttachmentService {
         )
         .await;
 
+        // TODO: shouldn't we bail if we fail to spawn the process?
         for ps_conf in &self.env.pageservers {
             let (pg_host, pg_port) =
                 parse_host_port(&ps_conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
