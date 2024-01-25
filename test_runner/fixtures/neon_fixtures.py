@@ -1278,6 +1278,7 @@ def _shared_simple_env(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
+    test_cgroup_dir: Optional[Path],
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1307,6 +1308,7 @@ def _shared_simple_env(
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
+        test_cgroup_dir=test_cgroup_dir,
     ) as builder:
         env = builder.init_start()
 
