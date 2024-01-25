@@ -239,19 +239,9 @@ impl PageServerNode {
                 let res =
                     tokio::time::timeout(Duration::from_secs(1), self.http_client.status()).await;
                 match res {
-                    Ok(res) => match res {
-                        Ok(_) => Ok(true),
-                        Err(e) => match e {
-                            mgmt_api::Error::ReceiveBody(e) => {
-                                if e.is_connect() {
-                                    Ok(false)
-                                } else {
-                                    anyhow::bail!(e)
-                                }
-                            }
-                            e => anyhow::bail!(e),
-                        },
-                    },
+                    Ok(Ok(_)) => Ok(true),
+                    Ok(Err(mgmt_api::Error::ReceiveBody(e))) if e.is_connect() => Ok(false),
+                    Ok(Err(e)) => anyhow::bail!(e),
                     Err(_timeout) => Ok(false),
                 }
             },
