@@ -36,6 +36,7 @@ RUN set -e \
         libxml2-dev \
         libxmlsec1-dev \
         libxxhash-dev \
+        libasan8 \
         lsof \
         make \
         netcat \

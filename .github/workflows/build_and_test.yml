@@ -284,7 +284,6 @@ jobs:
       # ASAN_OPTIONS and UBSAN_OPTIONS are flags to enable sanitizers on build that will test for memory leaks and undefined behaviour
       - name: Set env variables
         run: |
-          apt install -y libasan8
           CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
