@@ -194,6 +194,7 @@ runs:
           --alluredir=$TEST_OUTPUT/allure/results \
           --tb=short \
           --verbose \
+          -x \
           -rA $TEST_SELECTION $EXTRA_PARAMS
 
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
