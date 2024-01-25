@@ -237,14 +237,13 @@ impl PageServerNode {
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
                 let res =
-                    tokio::time::timeout(Duration::from_secs(1), self.http_client.list_tenants())
-                        .await;
+                    tokio::time::timeout(Duration::from_secs(1), self.http_client.status()).await;
                 match res {
                     Ok(res) => match res {
                         Ok(_) => Ok(true),
                         Err(e) => match e {
                             mgmt_api::Error::ReceiveBody(e) => {
-                                if e.is_connect() || e.is_timeout() {
+                                if e.is_connect() {
                                     Ok(false)
                                 } else {
                                     Ok(true)
