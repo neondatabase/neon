@@ -20,6 +20,7 @@ from fixtures.utils import Fn
 class PageserverApiException(Exception):
     def __init__(self, message, status_code: int):
         super().__init__(message)
+        self.message = message
         self.status_code = status_code
 
 
@@ -261,12 +262,18 @@ class PageserverHttpClient(requests.Session):
         )
         self.verbose_error(res)
 
-    def tenant_detach(self, tenant_id: TenantId, detach_ignored=False):
+    def tenant_detach(self, tenant_id: TenantId, detach_ignored=False, timeout_secs=None):
         params = {}
         if detach_ignored:
             params["detach_ignored"] = "true"
 
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params)
+        kwargs = {}
+        if timeout_secs is not None:
+            kwargs["timeout"] = timeout_secs
+
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params, **kwargs
+        )
         self.verbose_error(res)
 
     def tenant_reset(self, tenant_id: Union[TenantId, TenantShardId], drop_cache: bool):

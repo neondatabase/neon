@@ -187,6 +187,7 @@ impl From<TenantSlotUpsertError> for ApiError {
         match e {
             InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
             MapState(e) => e.into(),
+            ShuttingDown(_) => ApiError::ShuttingDown,
         }
     }
 }
@@ -494,6 +495,10 @@ async fn timeline_create_handler(
                     .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
+            }
+            Err(_) if tenant.cancel.is_cancelled() => {
+                // In case we get some ugly error type during shutdown, cast it into a clean 503.
+                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg("Tenant shutting down".to_string()))
             }
             Err(tenant::CreateTimelineError::Conflict | tenant::CreateTimelineError::AlreadyCreating) => {
                 json_response(StatusCode::CONFLICT, ())
@@ -1257,19 +1262,9 @@ async fn tenant_create_handler(
     };
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
-    if let res @ Err(_) = new_tenant
+    new_tenant
         .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
-        .await
-    {
-        // This shouldn't happen because we just created the tenant directory
-        // in upsert_location, and there aren't any remote timelines
-        // to load, so, nothing can really fail during load.
-        // Don't do cleanup because we don't know how we got here.
-        // The tenant will likely be in `Broken` state and subsequent
-        // calls will fail.
-        res.context("created tenant failed to become active")
-            .map_err(ApiError::InternalServerError)?;
-    }
+        .await?;
 
     json_response(
         StatusCode::CREATED,

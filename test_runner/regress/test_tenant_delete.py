@@ -411,9 +411,7 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
     pageserver_http.configure_failpoints((failpoint, "pause"))
 
     def hit_pausable_failpoint_and_later_fail():
-        with pytest.raises(
-            PageserverApiException, match="new timeline \\S+ has invalid disk_consistent_lsn"
-        ):
+        with pytest.raises(PageserverApiException, match="NotFound: tenant"):
             pageserver_http.timeline_create(
                 env.pg_version, env.initial_tenant, env.initial_timeline
             )
@@ -443,8 +441,8 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
     try:
         wait_until(10, 1, has_hit_failpoint)
 
-        # it should start ok, sync up with the stuck creation, then fail because disk_consistent_lsn was not updated
-        # then deletion should fail and set the tenant broken
+        # it should start ok, sync up with the stuck creation, then hang waiting for the timeline
+        # to shut down.
         deletion = Thread(target=start_deletion)
         deletion.start()
 
@@ -573,9 +571,11 @@ def test_tenant_delete_races_timeline_creation(
     ps_http = env.pageserver.http_client()
     tenant_id = env.initial_tenant
 
-    # Sometimes it ends with "InternalServerError(Cancelled", sometimes with "InternalServerError(Operation was cancelled"
+    # When timeline creation is cancelled by tenant deletion, it is during Tenant::shutdown(), and
+    # acting on a shutdown tenant generates a 503 response (if caller retried they would later) get
+    # a 404 after the tenant is fully deleted.
     CANCELLED_ERROR = (
-        ".*POST.*Cancelled request finished with an error: InternalServerError\\(.*ancelled"
+        ".*POST.*Cancelled request finished successfully status=503 Service Unavailable"
     )
 
     # This can occur sometimes.

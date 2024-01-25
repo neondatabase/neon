@@ -627,9 +627,15 @@ impl Tenant {
             deletion_queue_client,
         ));
 
+        // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
+        // we shut down while attaching.
+        let Ok(attach_gate_guard) = tenant.gate.enter() else {
+            // We just created the Tenant: nothing else can have shut it down yet
+            unreachable!();
+        };
+
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
-
         let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
@@ -639,6 +645,8 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                let _gate_guard = attach_gate_guard;
+
                 // Is this tenant being spawned as part of process startup?
                 let starting_up = init_order.is_some();
                 scopeguard::defer! {
@@ -813,7 +821,7 @@ impl Tenant {
                     SpawnMode::Create => None,
                     SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
                 };
-                match tenant_clone.attach(preload, &ctx).await {
+                match tenant_clone.attach(preload, mode, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         if let Some(t)=  attach_timer {t.observe_duration();}
@@ -900,15 +908,20 @@ impl Tenant {
     async fn attach(
         self: &Arc<Tenant>,
         preload: Option<TenantPreload>,
+        mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
-        let preload = match preload {
-            Some(p) => p,
-            None => {
+        let preload = match (preload, mode) {
+            (Some(p), _) => p,
+            (None, SpawnMode::Create) => TenantPreload {
+                deleting: false,
+                timelines: HashMap::new(),
+            },
+            (None, SpawnMode::Normal) => {
                 // Deprecated dev mode: load from local disk state instead of remote storage
                 // https://github.com/neondatabase/neon/issues/5624
                 return self.load_local(ctx).await;
@@ -1683,9 +1696,13 @@ impl Tenant {
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         if !self.is_active() {
-            return Err(CreateTimelineError::Other(anyhow::anyhow!(
-                "Cannot create timelines on inactive tenant"
-            )));
+            if matches!(self.current_state(), TenantState::Stopping { .. }) {
+                return Err(CreateTimelineError::ShuttingDown);
+            } else {
+                return Err(CreateTimelineError::Other(anyhow::anyhow!(
+                    "Cannot create timelines on inactive tenant"
+                )));
+            }
         }
 
         let _gate = self
@@ -4035,7 +4052,7 @@ pub(crate) mod harness {
                         .instrument(info_span!("try_load_preload", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                     tenant
-                        .attach(Some(preload), ctx)
+                        .attach(Some(preload), SpawnMode::Normal, ctx)
                         .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                 }
