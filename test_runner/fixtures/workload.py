@@ -21,11 +21,22 @@ class Workload:
     - reads, checking we get the right data (`validate`)
     """
 
-    def __init__(self, env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId):
+    def __init__(
+        self,
+        env: NeonEnv,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        branch_name: Optional[str] = None,
+    ):
         self.env = env
         self.tenant_id = tenant_id
         self.timeline_id = timeline_id
         self.table = "foo"
+
+        if branch_name is None:
+            # Default branch for initial tenant in NeonEnv
+            branch_name = "main"
+        self.branch_name = branch_name
 
         self.expect_rows = 0
         self.churn_cursor = 0
@@ -35,7 +46,7 @@ class Workload:
     def endpoint(self, pageserver_id: Optional[int] = None) -> Endpoint:
         if self._endpoint is None:
             self._endpoint = self.env.endpoints.create(
-                "main",
+                self.branch_name,
                 tenant_id=self.tenant_id,
                 pageserver_id=pageserver_id,
                 endpoint_id="ep-workload",
