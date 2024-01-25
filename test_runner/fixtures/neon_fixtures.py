@@ -1174,7 +1174,7 @@ class NeonEnv:
             if ps_assert_metric_no_errors:
                 pageserver.assert_no_metric_errors()
             pageserver.stop(immediate=immediate)
-        # self.attachment_service.stop(immediate=immediate)
+        self.attachment_service.stop(immediate=immediate)
         self.broker.stop(immediate=immediate)
 
     @property
