@@ -855,54 +855,12 @@ async fn collect_eviction_candidates(
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
 
-        // keeping the -1 or not decides if every tenant should lose their least recently accessed
-        // layer OR if this should happen in the order of having highest layer count:
-        let fudge = if eviction_order.highest_layer_count_loses_first() {
-            // relative_age vs. tenant layer count:
-            // - 0.1..=1.0 (10 layers)
-            // - 0.01..=1.0 (100 layers)
-            // - 0.001..=1.0 (1000 layers)
-            //
-            // leading to evicting less of the smallest tenants.
-            0
-        } else {
-            // use full 0.0..=1.0 range, which means even the smallest tenants could always lose a
-            // layer. the actual ordering is unspecified: for 10k tenants on a pageserver it could
-            // be that less than 10k layer evictions is enough, so we would not need to evict from
-            // all tenants.
-            //
-            // as the tenant ordering is now deterministic this could hit the same tenants
-            // disproportionetly on multiple invocations. alternative could be to remember how many
-            // layers did we evict last time from this tenant, and inject that as an additional
-            // fudge here.
-            1
-        };
-
-        let total = tenant_candidates
-            .len()
-            .checked_sub(fudge)
-            .filter(|&x| x > 0)
-            // support 0 or 1 resident layer tenants as well
-            .unwrap_or(1);
-        let divider = total as f32;
+        let total = tenant_candidates.len();
 
         for (i, mut candidate) in tenant_candidates.into_iter().enumerate() {
             // as we iterate this reverse sorted list, the most recently accessed layer will always
             // be 1.0; this is for us to evict it last.
-            candidate.relative_last_activity = if matches!(
-                eviction_order,
-                EvictionOrder::RelativeAccessed { .. }
-            ) {
-                // another possibility: use buckets, like (256.0 * relative_last_activity) as u8 or
-                // similarly for u16. unsure how it would help.
-                finite_f32::FiniteF32::try_from_normalized((total - i) as f32 / divider)
-                    .unwrap_or_else(|val| {
-                        tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={i}, total={total}: {val}");
-                        finite_f32::FiniteF32::ZERO
-                    })
-            } else {
-                finite_f32::FiniteF32::ZERO
-            };
+            candidate.relative_last_activity = eviction_order.relative_last_activity(total, i);
 
             let partition = if cumsum > min_resident_size as i128 {
                 MinResidentSizePartition::Above
