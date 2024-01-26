@@ -373,8 +373,7 @@ jobs:
         run: mold -run make neon-pg-ext -j$(nproc)
 
       - name: Build walproposer-lib
-        run: |
-          mold -run make walproposer-lib -j$(nproc)
+        run: mold -run make walproposer-lib -j$(nproc)
 
       - name: Run cargo build
         run: |

@@ -18,9 +18,9 @@ ifeq ($(BUILD_TYPE),release)
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
-	CPPFLAGS = -fsanitize=address -fno-sanitize-recover -fno-omit-frame-pointer -fno-sanitize=alignment -Wno-cast-function-type-strict -fpie
-	LDFLAGS = -fsanitize=address -pie
-	LD_PRELOAD=$(gcc -print-file-name=libasan.so)
+	CPPFLAGS = -fsanitize=address -fsanitize=undefined -fno-sanitize-recover -fno-omit-frame-pointer -fno-sanitize=alignment -Wno-cast-function-type-strict
+	LDFLAGS = -fsanitize=address -fsanitize=undefined
+	LD_PRELOAD=$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libubsan.so)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -182,10 +182,10 @@ neon-pg-ext-clean-%:
 
 # Build walproposer as a static library. walproposer source code is located
 # in the pgxn/neon directory.
-# 
+#
 # We also need to include libpgport.a and libpgcommon.a, because walproposer
 # uses some functions from those libraries.
-# 
+#
 # Some object files are removed from libpgport.a and libpgcommon.a because
 # they depend on openssl and other libraries that are not included in our
 # Rust build.
