@@ -1033,7 +1033,23 @@ impl WalIngest {
             // Copy content
             debug!("copying rel {} to {}, {} blocks", src_rel, dst_rel, nblocks);
             for blknum in 0..nblocks {
-                debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
+                // Sharding:
+                //  - src and dst are always on the same shard, because they differ only by dbNode, and
+                //    dbNode is not included in the hash inputs for sharding.
+                //  - This WAL command is replayed on all shards, but each shard only copies the blocks
+                //    that belong to it.
+                let src_key = rel_block_to_key(src_rel, blknum);
+                if !self.shard.is_key_local(&src_key) {
+                    debug!(
+                        "Skipping non-local key {} during XLOG_DBASE_CREATE",
+                        src_key
+                    );
+                    continue;
+                }
+                debug!(
+                    "copying block {} from {} ({}) to {}",
+                    blknum, src_rel, src_key, dst_rel
+                );
 
                 let content = modification
                     .tline
