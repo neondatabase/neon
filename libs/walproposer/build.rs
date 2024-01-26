@@ -59,10 +59,22 @@ fn main() -> anyhow::Result<()> {
 
         let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
         let libubsan_path = String::from_utf8(libubsan_path.stdout).unwrap();
-        println!(
-            "cargo:rustc-env=LD_PRELOAD={}:{}",
-            libasan_path,libubsan_path
-        );
+        // println!(
+        //     "cargo:rustc-env=LD_PRELOAD={}:{}",
+        //     libasan_path,libubsan_path
+        // );
+        let ld_preload_str = format!("LD_PRELOAD={}:{}", libasan_path, libubsan_path);
+
+        let ld_preload_export = Command::new("export")
+            .arg(ld_preload_str)
+            .output()
+            .context("failed to execute `export LD_PRELOAD=<libasan.so path>:<libubsan.so path>`")?;
+
+        if !ld_preload_export.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&ld_preload_export.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&ld_preload_export.stderr));
+            panic!("`export LD_PRELOAD=<libasan.so path>:<libubsan.so path>` failed")
+        }
     }
 
     println!("cargo:rustc-link-lib=static=pgport");
