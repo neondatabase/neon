@@ -8,7 +8,7 @@ def test_migrations(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch("test_migrations", "empty")
 
     endpoint = env.endpoints.create("test_migrations")
-    log_path = endpoint.endpoint_path() / "compute.log"
+    log_path = endpoint.endpoint_path() / "compute_ctl.log"
 
     endpoint.respec(skip_pg_catalog_updates=False, features=["migrations"])
     endpoint.start()
