@@ -18,9 +18,6 @@ pub enum HandshakeError {
     #[error("protocol violation")]
     ProtocolViolation,
 
-    #[error("connection is insecure (try using `sslmode=require`)")]
-    InsecureConnection,
-
     #[error("missing certificate")]
     MissingCertificate,
 
@@ -29,6 +26,9 @@ pub enum HandshakeError {
 
     #[error("{0}")]
     Io(#[from] std::io::Error),
+
+    #[error("{0}")]
+    ReportedError(#[from] crate::stream::ReportedError),
 }
 
 impl ReportableError for HandshakeError {
@@ -36,13 +36,16 @@ impl ReportableError for HandshakeError {
         match self {
             HandshakeError::EarlyData => crate::error::ErrorKind::User,
             HandshakeError::ProtocolViolation => crate::error::ErrorKind::User,
-            HandshakeError::InsecureConnection => crate::error::ErrorKind::User,
-            HandshakeError::MissingCertificate => todo!(),
+            // This error should not happen, but will if we have no default certificate and
+            // the client sends no SNI extension.
+            // If they provide SNI then we can be sure there is a certificate that matches.
+            HandshakeError::MissingCertificate => crate::error::ErrorKind::Service,
             HandshakeError::StreamUpgradeError(upgrade) => match upgrade {
                 StreamUpgradeError::AlreadyTls => crate::error::ErrorKind::Service,
                 StreamUpgradeError::Io(_) => crate::error::ErrorKind::Disconnect,
             },
             HandshakeError::Io(_) => crate::error::ErrorKind::Disconnect,
+            HandshakeError::ReportedError(e) => e.get_error_type(),
         }
     }
 }
@@ -120,10 +123,9 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 // Check that the config has been consumed during upgrade
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
-                    stream
-                        .write_message(&Be::ErrorResponse(ERR_INSECURE_CONNECTION, None))
+                    return stream
+                        .throw_error_str(ERR_INSECURE_CONNECTION, crate::error::ErrorKind::User)
                         .await?;
-                    return Err(HandshakeError::InsecureConnection);
                 }
 
                 info!(session_type = "normal", "successful handshake");

@@ -1,24 +1,48 @@
-use anyhow::Context;
 use dashmap::DashMap;
 use pq_proto::CancelKeyData;
 use std::{net::SocketAddr, sync::Arc};
+use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::{CancelToken, NoTls};
 use tracing::info;
+
+use crate::error::ReportableError;
 
 /// Enables serving `CancelRequest`s.
 #[derive(Default)]
 pub struct CancelMap(DashMap<CancelKeyData, Option<CancelClosure>>);
 
+#[derive(Debug, Error)]
+pub enum CancelError {
+    #[error("query cancellation key not found: {0}")]
+    KeyNotFound(CancelKeyData),
+    #[error("{0}")]
+    IO(#[from] std::io::Error),
+    #[error("{0}")]
+    Postgres(#[from] tokio_postgres::Error),
+}
+
+impl ReportableError for CancelError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        match self {
+            // not really user error, but :shrug:
+            // not really an error either... need to handle at some point to forward to other proxies
+            CancelError::KeyNotFound(_) => crate::error::ErrorKind::User,
+            CancelError::IO(_) => crate::error::ErrorKind::Compute,
+            CancelError::Postgres(_) => crate::error::ErrorKind::Compute,
+        }
+    }
+}
+
 impl CancelMap {
     /// Cancel a running query for the corresponding connection.
-    pub async fn cancel_session(&self, key: CancelKeyData) -> anyhow::Result<()> {
+    pub async fn cancel_session(&self, key: CancelKeyData) -> Result<(), CancelError> {
         // NB: we should immediately release the lock after cloning the token.
         let cancel_closure = self
             .0
             .get(&key)
             .and_then(|x| x.clone())
-            .with_context(|| format!("query cancellation key not found: {key}"))?;
+            .ok_or(CancelError::KeyNotFound(key))?;
 
         info!("cancelling query per user's request using key {key}");
         cancel_closure.try_cancel_query().await
@@ -81,7 +105,7 @@ impl CancelClosure {
     }
 
     /// Cancels the query running on user's compute node.
-    pub async fn try_cancel_query(self) -> anyhow::Result<()> {
+    async fn try_cancel_query(self) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
         self.cancel_token.cancel_query_raw(socket, NoTls).await?;
 

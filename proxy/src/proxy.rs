@@ -13,6 +13,7 @@ use crate::{
     compute,
     config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
+    error::ReportableError,
     metrics::{NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE},
     protocol2::WithClientIp,
     proxy::handshake::{handshake, HandshakeData},
@@ -28,6 +29,7 @@ use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
 use smol_str::{format_smolstr, SmolStr};
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, Instrument};
@@ -120,9 +122,9 @@ pub async fn task_main(
                 match res {
                     Err(e) => {
                         // todo: log and push to ctx the error kind
-                        // ctx.set_error_kind(e.get_error_type())
+                        ctx.set_error_kind(e.get_error_type());
                         ctx.log();
-                        Err(e)
+                        Err(e.into())
                     }
                     Ok(None) => {
                         ctx.set_success();
@@ -190,6 +192,37 @@ impl ClientMode {
     }
 }
 
+#[derive(Debug, Error)]
+// almost all errors should be reported to the user, but there's a few cases where we cannot
+// 1. Cancellation: we are not allowed to tell the client any cancellation statuses for security reasons
+// 2. Handshake: handshake reports errors if it can, otherwise if the handshake fails due to protocol violation,
+//    we cannot be sure the client even understands our error message
+// 3. PrepareClient: The client disconnected, so we can't tell them anyway...
+pub enum ClientRequestError {
+    #[error("{0}")]
+    Cancellation(#[from] cancellation::CancelError),
+    #[error("{0}")]
+    Handshake(#[from] handshake::HandshakeError),
+    #[error("{0}")]
+    HandshakeTimeout(#[from] tokio::time::error::Elapsed),
+    #[error("{0}")]
+    PrepareClient(#[from] std::io::Error),
+    #[error("{0}")]
+    ReportedError(#[from] crate::stream::ReportedError),
+}
+
+impl ReportableError for ClientRequestError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        match self {
+            ClientRequestError::Cancellation(e) => e.get_error_type(),
+            ClientRequestError::Handshake(e) => e.get_error_type(),
+            ClientRequestError::HandshakeTimeout(_) => crate::error::ErrorKind::RateLimit,
+            ClientRequestError::ReportedError(e) => e.get_error_type(),
+            ClientRequestError::PrepareClient(_) => crate::error::ErrorKind::Disconnect,
+        }
+    }
+}
+
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
@@ -197,7 +230,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> anyhow::Result<Option<ProxyPassthrough<S>>> {
+) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
     info!(
         protocol = ctx.protocol,
         "handling interactive connection from client"
@@ -219,10 +252,10 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
-                return cancel_map
+                return Ok(cancel_map
                     .cancel_session(cancel_key_data)
                     .await
-                    .map(|()| None)
+                    .map(|()| None)?)
             }
         };
     drop(pause);
@@ -248,7 +281,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         if !endpoint_rate_limiter.check(ep) {
             return stream
                 .throw_error(auth::AuthError::too_many_connections())
-                .await;
+                .await?;
         }
     }
 
@@ -268,7 +301,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             let app = params.get("application_name");
             let params_span = tracing::info_span!("", ?user, ?db, ?app);
 
-            return stream.throw_error(e).instrument(params_span).await;
+            return stream.throw_error(e).instrument(params_span).await?;
         }
     };
 
@@ -309,7 +342,7 @@ async fn prepare_client_connection(
     node: &compute::PostgresConnection,
     session: &cancellation::Session,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> anyhow::Result<()> {
+) -> Result<(), std::io::Error> {
     // Register compute's query cancellation token and produce a new, unique one.
     // The new token (cancel_key_data) will be sent to the client.
     let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());

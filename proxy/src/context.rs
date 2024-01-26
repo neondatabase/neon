@@ -8,8 +8,10 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::{
-    console::messages::MetricsAuxInfo, error::ErrorKind, metrics::LatencyTimer, BranchId,
-    EndpointId, ProjectId, RoleName,
+    console::messages::MetricsAuxInfo,
+    error::ErrorKind,
+    metrics::{LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND},
+    BranchId, EndpointId, ProjectId, RoleName,
 };
 
 pub mod parquet;
@@ -109,6 +111,14 @@ impl RequestMonitoring {
     }
 
     pub fn set_error_kind(&mut self, error: ErrorKind) {
+        ERROR_BY_KIND
+            .with_label_values(&[error.to_metric_label()])
+            .inc();
+        if let Some(ep) = &self.endpoint_id {
+            ENDPOINT_ERRORS_BY_KIND
+                .with_label_values(&[error.to_metric_label()])
+                .measure(ep);
+        }
         self.error_kind = Some(error);
     }
 

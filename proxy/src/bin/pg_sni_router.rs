@@ -240,7 +240,9 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 ?unexpected,
                 "unexpected startup packet, rejecting connection"
             );
-            stream.throw_error_str(ERR_INSECURE_CONNECTION).await?
+            stream
+                .throw_error_str(ERR_INSECURE_CONNECTION, proxy::error::ErrorKind::User)
+                .await?
         }
     }
 }

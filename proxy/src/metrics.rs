@@ -274,3 +274,22 @@ pub static CONNECTING_ENDPOINTS: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub static ERROR_BY_KIND: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_errors_total",
+        "Number of errors by a given classification",
+        &["type"],
+    )
+    .unwrap()
+});
+
+pub static ENDPOINT_ERRORS_BY_KIND: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
+    register_hll_vec!(
+        32,
+        "proxy_endpoints_affected_by_errors",
+        "Number of endpoints affected by errors of a given classification",
+        &["type"],
+    )
+    .unwrap()
+});

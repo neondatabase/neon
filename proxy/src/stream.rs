@@ -1,6 +1,5 @@
 use crate::config::TlsServerEndPoint;
-use crate::error::UserFacingError;
-use anyhow::bail;
+use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use bytes::BytesMut;
 
 use pq_proto::framed::{ConnectionError, Framed};
@@ -73,6 +72,30 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     }
 }
 
+#[derive(Debug)]
+pub struct ReportedError {
+    source: anyhow::Error,
+    error_kind: ErrorKind,
+}
+
+impl std::fmt::Display for ReportedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl std::error::Error for ReportedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.source()
+    }
+}
+
+impl ReportableError for ReportedError {
+    fn get_error_type(&self) -> ErrorKind {
+        self.error_kind
+    }
+}
+
 impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Write the message into an internal buffer, but don't flush the underlying stream.
     pub fn write_message_noflush(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self> {
@@ -98,24 +121,52 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Write the error message using [`Self::write_message`], then re-throw it.
     /// Allowing string literals is safe under the assumption they might not contain any runtime info.
     /// This method exists due to `&str` not implementing `Into<anyhow::Error>`.
-    pub async fn throw_error_str<T>(&mut self, error: &'static str) -> anyhow::Result<T> {
-        tracing::info!("forwarding error to user: {error}");
-        self.write_message(&BeMessage::ErrorResponse(error, None))
-            .await?;
-        bail!(error)
+    pub async fn throw_error_str<T>(
+        &mut self,
+        msg: &'static str,
+        error_kind: ErrorKind,
+    ) -> Result<T, ReportedError> {
+        tracing::info!(
+            kind = error_kind.to_metric_label(),
+            msg,
+            "forwarding error to user"
+        );
+
+        // already error case, ignore client IO error
+        let _: Result<_, std::io::Error> = self
+            .write_message(&BeMessage::ErrorResponse(msg, None))
+            .await;
+
+        Err(ReportedError {
+            source: anyhow::anyhow!(msg),
+            error_kind,
+        })
     }
 
     /// Write the error message using [`Self::write_message`], then re-throw it.
     /// Trait [`UserFacingError`] acts as an allowlist for error types.
-    pub async fn throw_error<T, E>(&mut self, error: E) -> anyhow::Result<T>
+    pub async fn throw_error<T, E>(&mut self, error: E) -> Result<T, ReportedError>
     where
         E: UserFacingError + Into<anyhow::Error>,
     {
+        let error_kind = error.get_error_type();
         let msg = error.to_string_client();
-        tracing::info!("forwarding error to user: {msg}");
-        self.write_message(&BeMessage::ErrorResponse(&msg, None))
-            .await?;
-        bail!(error)
+        tracing::info!(
+            kind=error_kind.to_metric_label(),
+            error=%error,
+            msg,
+            "forwarding error to user"
+        );
+
+        // already error case, ignore client IO error
+        let _: Result<_, std::io::Error> = self
+            .write_message(&BeMessage::ErrorResponse(&msg, None))
+            .await;
+
+        Err(ReportedError {
+            source: anyhow::anyhow!(error),
+            error_kind,
+        })
     }
 }
 

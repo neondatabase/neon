@@ -29,7 +29,7 @@ pub trait UserFacingError: ReportableError {
     }
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum ErrorKind {
     /// Wrong password, unknown endpoint, protocol violation, etc...
     User,
@@ -59,6 +59,17 @@ impl ErrorKind {
             ErrorKind::Service => "internal service error",
             ErrorKind::ControlPlane => "non-retryable control plane error",
             ErrorKind::Compute => "non-retryable compute error (or exhausted retry capacity)",
+        }
+    }
+
+    pub fn to_metric_label(&self) -> &'static str {
+        match self {
+            ErrorKind::User => "user",
+            ErrorKind::Disconnect => "disconnect",
+            ErrorKind::RateLimit => "ratelimit",
+            ErrorKind::Service => "service",
+            ErrorKind::ControlPlane => "controlplane",
+            ErrorKind::Compute => "compute",
         }
     }
 }

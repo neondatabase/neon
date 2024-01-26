@@ -2,7 +2,7 @@ use crate::{
     cancellation::CancelMap,
     config::ProxyConfig,
     context::RequestMonitoring,
-    error::io_error,
+    error::{io_error, ReportableError},
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
@@ -151,9 +151,9 @@ pub async fn serve_websocket(
     match res {
         Err(e) => {
             // todo: log and push to ctx the error kind
-            // ctx.set_error_kind(e.get_error_type())
+            ctx.set_error_kind(e.get_error_type());
             ctx.log();
-            Err(e)
+            Err(e.into())
         }
         Ok(None) => {
             ctx.set_success();
