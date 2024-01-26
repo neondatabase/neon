@@ -623,6 +623,7 @@ impl std::fmt::Display for EvictionLayer {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct DiskUsageEvictionInfo {
     /// Timeline's largest layer (remote or resident)
     pub max_layer_size: Option<u64>,
@@ -882,21 +883,28 @@ async fn collect_eviction_candidates(
     );
 
     for secondary_tenant in secondary_tenants {
-        let mut layer_info = secondary_tenant.get_layers_for_eviction();
+        // for secondary tenants we use a sum of on_disk layers and already evicted layers. this is
+        // to prevent repeated disk usage based evictions from completely draining less often
+        // updating secondaries.
+        let (mut layer_info, total_layers) = secondary_tenant.get_layers_for_eviction();
 
         layer_info
             .resident_layers
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
 
-        candidates.extend(layer_info.resident_layers.into_iter().map(|candidate| {
-            (
-                // Secondary locations' layers are always considered above the min resident size,
-                // i.e. secondary locations are permitted to be trimmed to zero layers if all
-                // the layers have sufficiently old access times.
-                MinResidentSizePartition::Above,
-                candidate,
-            )
-        }));
+        candidates.extend(layer_info.resident_layers.into_iter().enumerate().map(
+            |(i, mut candidate)| {
+                candidate.relative_last_activity =
+                    eviction_order.relative_last_activity(total_layers, i);
+                (
+                    // Secondary locations' layers are always considered above the min resident size,
+                    // i.e. secondary locations are permitted to be trimmed to zero layers if all
+                    // the layers have sufficiently old access times.
+                    MinResidentSizePartition::Above,
+                    candidate,
+                )
+            },
+        ));
     }
 
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,

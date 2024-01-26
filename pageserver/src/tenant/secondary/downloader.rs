@@ -146,14 +146,15 @@ impl SecondaryDetail {
         }
     }
 
+    /// Additionally returns the total number of layers, used for more stable relative access time
+    /// based eviction.
     pub(super) fn get_layers_for_eviction(
         &self,
         parent: &Arc<SecondaryTenant>,
-    ) -> DiskUsageEvictionInfo {
-        let mut result = DiskUsageEvictionInfo {
-            max_layer_size: None,
-            resident_layers: Vec::new(),
-        };
+    ) -> (DiskUsageEvictionInfo, usize) {
+        let mut result = DiskUsageEvictionInfo::default();
+        let mut total_layers = 0;
+
         for (timeline_id, timeline_detail) in &self.timelines {
             result
                 .resident_layers
@@ -169,6 +170,10 @@ impl SecondaryDetail {
                         relative_last_activity: finite_f32::FiniteF32::ZERO,
                     }
                 }));
+
+            // total might be missing currently downloading layers, but as a lower than actual
+            // value it is good enough approximation.
+            total_layers += timeline_detail.on_disk_layers.len() + timeline_detail.evicted_at.len();
         }
         result.max_layer_size = result
             .resident_layers
@@ -183,7 +188,7 @@ impl SecondaryDetail {
             result.resident_layers.len()
         );
 
-        result
+        (result, total_layers)
     }
 }
 
