@@ -106,17 +106,6 @@ pub enum EvictionOrder {
 }
 
 impl EvictionOrder {
-    /// Return true, if with [`Self::RelativeAccessed`] order the tenants with the highest layer
-    /// counts should be the first ones to have their layers evicted.
-    fn highest_layer_count_loses_first(&self) -> bool {
-        match self {
-            EvictionOrder::AbsoluteAccessed => false,
-            EvictionOrder::RelativeAccessed {
-                highest_layer_count_loses_first,
-            } => *highest_layer_count_loses_first,
-        }
-    }
-
     fn sort(&self, candidates: &mut [(MinResidentSizePartition, EvictionCandidate)]) {
         use EvictionOrder::*;
 
