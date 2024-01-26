@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     fs::{self, File},
-    io::{self, Write},
+    io,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -110,48 +110,6 @@ pub fn fsync(path: &Utf8Path) -> io::Result<()> {
 
 pub async fn fsync_async(path: impl AsRef<Utf8Path>) -> Result<(), std::io::Error> {
     tokio::fs::File::open(path.as_ref()).await?.sync_all().await
-}
-
-/// Writes a file to the specified `final_path` in a crash safe fasion
-///
-/// The file is first written to the specified tmp_path, and in a second
-/// step, the tmp path is renamed to the final path. As renames are
-/// atomic, a crash during the write operation will never leave behind a
-/// partially written file.
-///
-/// NB: an async variant of this code exists in Pageserver's VirtualFile.
-pub fn overwrite(
-    final_path: &Utf8Path,
-    tmp_path: &Utf8Path,
-    content: &[u8],
-) -> std::io::Result<()> {
-    let Some(final_path_parent) = final_path.parent() else {
-        return Err(std::io::Error::from_raw_os_error(
-            nix::errno::Errno::EINVAL as i32,
-        ));
-    };
-    std::fs::remove_file(tmp_path).or_else(crate::fs_ext::ignore_not_found)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        // Use `create_new` so that, if we race with ourselves or something else,
-        // we bail out instead of causing damage.
-        .create_new(true)
-        .open(tmp_path)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    drop(file); // before the rename, that's important!
-                // renames are atomic
-    std::fs::rename(tmp_path, final_path)?;
-    // Only open final path parent dirfd now, so that this operation only
-    // ever holds one VirtualFile fd at a time.  That's important because
-    // the current `find_victim_slot` impl might pick the same slot for both
-    // VirtualFile., and it eventually does a blocking write lock instead of
-    // try_lock.
-    let final_parent_dirfd = std::fs::OpenOptions::new()
-        .read(true)
-        .open(final_path_parent)?;
-    final_parent_dirfd.sync_all()?;
-    Ok(())
 }
 
 #[cfg(test)]

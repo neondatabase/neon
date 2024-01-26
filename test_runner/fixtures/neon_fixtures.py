@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import concurrent.futures
 import filecmp
 import json
 import os
@@ -993,6 +994,11 @@ class NeonEnv:
         self.initial_timeline = config.initial_timeline
 
         attachment_service_port = self.port_distributor.get_port()
+        # Reserve the next port after attachment service for use by its postgres: this
+        # will assert out if the next port wasn't free.
+        attachment_service_pg_port = self.port_distributor.get_port()
+        assert attachment_service_pg_port == attachment_service_port + 1
+
         self.control_plane_api: str = f"http://127.0.0.1:{attachment_service_port}"
         self.attachment_service: NeonAttachmentService = NeonAttachmentService(
             self, config.auth_enabled
@@ -1071,16 +1077,27 @@ class NeonEnv:
         self.neon_cli.init(cfg, force=config.config_init_force)
 
     def start(self):
-        # Start up broker, pageserver and all safekeepers
-        self.broker.try_start()
-
+        # Attachment service starts first, so that pageserver /re-attach calls don't
+        # bounce through retries on startup
         self.attachment_service.start()
 
-        for pageserver in self.pageservers:
-            pageserver.start()
+        # Start up broker, pageserver and all safekeepers
+        futs = []
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2 + len(self.pageservers) + len(self.safekeepers)
+        ) as executor:
+            futs.append(
+                executor.submit(lambda: self.broker.try_start() or None)
+            )  # The `or None` is for the linter
 
-        for safekeeper in self.safekeepers:
-            safekeeper.start()
+            for pageserver in self.pageservers:
+                futs.append(executor.submit(lambda ps=pageserver: ps.start()))
+
+            for safekeeper in self.safekeepers:
+                futs.append(executor.submit(lambda sk=safekeeper: sk.start()))
+
+        for f in futs:
+            f.result()
 
     def stop(self, immediate=False, ps_assert_metric_no_errors=False):
         """
@@ -1652,8 +1669,10 @@ class NeonCli(AbstractNeonCli):
         id: int,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        register: bool = True,
     ) -> "subprocess.CompletedProcess[str]":
-        start_args = ["pageserver", "start", f"--id={id}", *overrides]
+        register_str = "true" if register else "false"
+        start_args = ["pageserver", "start", f"--id={id}", *overrides, f"--register={register_str}"]
         storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -2080,6 +2099,7 @@ class NeonPageserver(PgProtocol):
         self,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        register: bool = True,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -2089,7 +2109,7 @@ class NeonPageserver(PgProtocol):
         assert self.running is False
 
         self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars
+            self.id, overrides=overrides, extra_env_vars=extra_env_vars, register=register
         )
         self.running = True
         return self

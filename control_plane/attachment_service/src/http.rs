@@ -1,5 +1,5 @@
 use crate::reconciler::ReconcileError;
-use crate::service::Service;
+use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{TenantCreateRequest, TimelineCreateRequest};
@@ -104,34 +104,34 @@ async fn handle_inspect(mut req: Request<Body>) -> Result<Response<Body>, ApiErr
     json_response(StatusCode::OK, state.service.inspect(inspect_req))
 }
 
-async fn handle_tenant_create(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_tenant_create(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
-    let state = get_state(&req);
-    json_response(
-        StatusCode::OK,
-        state.service.tenant_create(create_req).await?,
-    )
+    json_response(StatusCode::OK, service.tenant_create(create_req).await?)
 }
 
-async fn handle_tenant_timeline_create(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_tenant_timeline_create(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let create_req = json_request::<TimelineCreateRequest>(&mut req).await?;
-
-    let state = get_state(&req);
     json_response(
         StatusCode::OK,
-        state
-            .service
+        service
             .tenant_timeline_create(tenant_id, create_req)
             .await?,
     )
 }
 
-async fn handle_tenant_locate(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_tenant_locate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
-    let state = get_state(&req);
-
-    json_response(StatusCode::OK, state.service.tenant_locate(tenant_id)?)
+    json_response(StatusCode::OK, service.tenant_locate(tenant_id)?)
 }
 
 async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -154,14 +154,15 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, state.service.node_configure(config_req)?)
 }
 
-async fn handle_tenant_shard_migrate(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_tenant_shard_migrate(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     let migrate_req = json_request::<TenantShardMigrateRequest>(&mut req).await?;
-    let state = get_state(&req);
     json_response(
         StatusCode::OK,
-        state
-            .service
+        service
             .tenant_shard_migrate(tenant_shard_id, migrate_req)
             .await?,
     )
@@ -176,6 +177,35 @@ impl From<ReconcileError> for ApiError {
     fn from(value: ReconcileError) -> Self {
         ApiError::Conflict(format!("Reconciliation error: {}", value))
     }
+}
+
+/// Common wrapper for request handlers that call into Service and will operate on tenants: they must only
+/// be allowed to run if Service has finished its initial reconciliation.
+async fn tenant_service_handler<R, H>(request: Request<Body>, handler: H) -> R::Output
+where
+    R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
+    H: FnOnce(Arc<Service>, Request<Body>) -> R + Send + Sync + 'static,
+{
+    let state = get_state(&request);
+    let service = state.service.clone();
+
+    let startup_complete = service.startup_complete.clone();
+    if tokio::time::timeout(STARTUP_RECONCILE_TIMEOUT, startup_complete.wait())
+        .await
+        .is_err()
+    {
+        // This shouldn't happen: it is the responsibilty of [`Service::startup_reconcile`] to use appropriate
+        // timeouts around its remote calls, to bound its runtime.
+        return Err(ApiError::Timeout(
+            "Timed out waiting for service readiness".into(),
+        ));
+    }
+
+    request_span(
+        request,
+        |request| async move { handler(service, request).await },
+    )
+    .await
 }
 
 pub fn make_router(
@@ -205,14 +235,20 @@ pub fn make_router(
         .put("/node/:node_id/config", |r| {
             request_span(r, handle_node_configure)
         })
-        .post("/tenant", |r| request_span(r, handle_tenant_create))
-        .post("/tenant/:tenant_id/timeline", |r| {
-            request_span(r, handle_tenant_timeline_create)
+        .post("/v1/tenant", |r| {
+            tenant_service_handler(r, handle_tenant_create)
+        })
+        .post("/v1/tenant/:tenant_id/timeline", |r| {
+            tenant_service_handler(r, handle_tenant_timeline_create)
         })
         .get("/tenant/:tenant_id/locate", |r| {
-            request_span(r, handle_tenant_locate)
+            tenant_service_handler(r, handle_tenant_locate)
         })
         .put("/tenant/:tenant_shard_id/migrate", |r| {
-            request_span(r, handle_tenant_shard_migrate)
+            tenant_service_handler(r, handle_tenant_shard_migrate)
         })
+        // Path aliases for tests_forward_compatibility
+        // TODO: remove these in future PR
+        .post("/re-attach", |r| request_span(r, handle_re_attach))
+        .post("/validate", |r| request_span(r, handle_validate))
 }
