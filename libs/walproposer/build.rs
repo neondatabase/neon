@@ -59,10 +59,7 @@ fn main() -> anyhow::Result<()> {
 
         let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
         let libubsan_path = String::from_utf8(libubsan_path.stdout).unwrap();
-        // println!(
-        //     "cargo:rustc-env=LD_PRELOAD={}:{}",
-        //     libasan_path,libubsan_path
-        // );
+
         let ld_preload_str = format!("LD_PRELOAD={}:{}", libasan_path, libubsan_path);
 
         let ld_preload_export = Command::new("export")

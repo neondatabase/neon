@@ -62,34 +62,31 @@ fn main() -> anyhow::Result<()> {
         // println!("cargo:rustc-link-arg=-fsanitize=undefined");
         //
         //setting dynamically the symbols
-        let libasan_path = Command::new("gcc")
-            .arg("-print-file-name=libasan.so")
-            .output()
-            .context("failed to execute `gcc -print-file-name=libasan.so`")?;
+        // let libasan_path = Command::new("gcc")
+        //     .arg("-print-file-name=libasan.so")
+        //     .output()
+        //     .context("failed to execute `gcc -print-file-name=libasan.so`")?;
+        //
+        // if !libasan_path.status.success() {
+        //     println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
+        //     println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
+        //     panic!("`gcc -print-file-name=libasan.so` failed")
+        // }
+        //
+        // let libubsan_path = Command::new("gcc")
+        //     .arg("-print-file-name=libubsan.so")
+        //     .output()
+        //     .context("failed to execute `gcc -print-file-name=libubsan.so`")?;
+        //
+        // if !libasan_path.status.success() {
+        //     println!("stdout: {}", String::from_utf8_lossy(&libubsan_path.stdout));
+        //     println!("stderr: {}", String::from_utf8_lossy(&libubsan_path.stderr));
+        //     panic!("`gcc -print-file-name=libubsan.so` failed")
+        // }
+        //
+        // let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
+        // let libubsan_path = String::from_utf8(libubsan_path.stdout).unwrap();
 
-        if !libasan_path.status.success() {
-            println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
-            println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
-            panic!("`gcc -print-file-name=libasan.so` failed")
-        }
-
-        let libubsan_path = Command::new("gcc")
-            .arg("-print-file-name=libubsan.so")
-            .output()
-            .context("failed to execute `gcc -print-file-name=libubsan.so`")?;
-
-        if !libasan_path.status.success() {
-            println!("stdout: {}", String::from_utf8_lossy(&libubsan_path.stdout));
-            println!("stderr: {}", String::from_utf8_lossy(&libubsan_path.stderr));
-            panic!("`gcc -print-file-name=libubsan.so` failed")
-        }
-
-        let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
-        let libubsan_path = String::from_utf8(libubsan_path.stdout).unwrap();
-        println!(
-            "cargo:rustc-env=LD_PRELOAD={}:{}",
-            libasan_path,libubsan_path
-        );
         // let ld_preload_str = format!("LD_PRELOAD={}:{}", libasan_path, libubsan_path);
         //
         // let ld_preload_export = Command::new("export")
