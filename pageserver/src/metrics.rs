@@ -178,7 +178,7 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
             let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
 
             if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
-                let task_kind: &'static str = task_kind.into();
+                let task_kind = task_kind.into();
                 Some(inner.with_label_values(&[task_kind]))
             } else {
                 None
