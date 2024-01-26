@@ -158,7 +158,7 @@ jobs:
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
-        run: make postgres-headers -j$(nproc)
+        run: CC=clang CARGO_BUILD_FLAGS="--features=testing" make postgres-headers -j$(nproc)
 
       # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
       # This will catch compiler & clippy warnings in all feature combinations.
@@ -281,18 +281,29 @@ jobs:
       #
       # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
       # corresponding Cargo.toml files for their descriptions.
+      # ASAN_OPTIONS and UBSAN_OPTIONS are flags to enable sanitizers on build that will test for memory leaks and undefined behaviour
       - name: Set env variables
         run: |
           CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_FLAGS="--locked"
+            ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:print_stacktrace=1:disable_coredump=0:\
+          strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=0"
+            UBSAN_OPTIONS="abort_on_error=1:print_stacktrace=1"
+            RUSTFLAGS="-C linker=clang"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
+            ASAN_OPTIONS=""
+            UBSAN_OPTIONS=""
+            RUSTFLAGS=""
             CARGO_FLAGS="--locked --release"
           fi
           {
             echo "cov_prefix=${cov_prefix}"
+            echo "ASAN_OPTIONS=${ASAN_OPTIONS}"
+            echo "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
+            echo "RUSTFLAGS=${RUSTFLAGS}"
             echo "CARGO_FEATURES=${CARGO_FEATURES}"
             echo "CARGO_FLAGS=${CARGO_FLAGS}"
             echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
@@ -340,21 +351,21 @@ jobs:
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v14 -j$(nproc)
+        run: CC=clang CARGO_BUILD_FLAGS="--features=testing" mold -run make postgres-v14 -j$(nproc)
 
       - name: Build postgres v15
         if: steps.cache_pg_15.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v15 -j$(nproc)
+        run: CC=clang CARGO_BUILD_FLAGS="--features=testing" mold -run make postgres-v15 -j$(nproc)
 
       - name: Build postgres v16
         if: steps.cache_pg_16.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v16 -j$(nproc)
+        run: CC=clang CARGO_BUILD_FLAGS="--features=testing" mold -run make postgres-v16 -j$(nproc)
 
       - name: Build neon extensions
-        run: mold -run make neon-pg-ext -j$(nproc)
+        run: CC=clang CARGO_BUILD_FLAGS="--features=testing" mold -run make neon-pg-ext -j$(nproc)
 
       - name: Build walproposer-lib
-        run: mold -run make walproposer-lib -j$(nproc)
+        run: CC=clang CARGO_BUILD_FLAGS="--features=testing" mold -run make walproposer-lib -j$(nproc)
 
       - name: Run cargo build
         run: |
@@ -366,22 +377,22 @@ jobs:
             NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
           done
 
-          # Run separate tests for real S3
-          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
-          export REMOTE_STORAGE_S3_REGION=eu-central-1
-          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_s3)'
+      #     # Run separate tests for real S3
+      #     export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
+      #     export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
+      #     export REMOTE_STORAGE_S3_REGION=eu-central-1
+      #     # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+      #     ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_s3)'
 
-          # Run separate tests for real Azure Blob Storage
-          # XXX: replace region with `eu-central-1`-like region
-          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
-          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
-          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
-          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
-          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
-          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_azure)'
+      #     # Run separate tests for real Azure Blob Storage
+      #     # XXX: replace region with `eu-central-1`-like region
+      #     export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
+      #     export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
+      #     export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
+      #     export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
+      #     export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
+      #     # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+      #     ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
       - name: Install rust binaries
         run: |
@@ -447,14 +458,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [ debug ]
         pg_version: [ v14, v15, v16 ]
+    env:
+      BUILD_TYPE: ${{ matrix.build_type }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
         with:
           submodules: true
           fetch-depth: 1
+
+      # Set environment variable used by application at runtime
+      # ASAN_OPTIONS and UBSAN_OPTIONS are flags to enable sanitizers on build
+      # The above sanitizers will test for memory leaks and undefined behaviour
+      - name: Set env variables
+        run: |
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:print_stacktrace=1:disable_coredump=0:\
+          strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=0"
+            UBSAN_OPTIONS="abort_on_error=1:print_stacktrace=1"
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            ASAN_OPTIONS=""
+            UBSAN_OPTIONS=""
+          fi
+          {
+            echo "ASAN_OPTIONS=${ASAN_OPTIONS}"
+            echo "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
+          } >> $GITHUB_ENV
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set

@@ -35,7 +35,9 @@ def test_pg_regress(
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
     # Connect to postgres and create a database called "regression".
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start(
+        "main", config_lines=["max_stack_depth = 4096kB"]
+    )  # stack should be increased for tests to pass with asan
     endpoint.safe_psql("CREATE DATABASE regression")
 
     # Create some local directories for pg_regress to run in.
@@ -94,7 +96,13 @@ def test_isolation(
 
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
+<<<<<<< HEAD
     endpoint = env.endpoints.create_start("main", config_lines=["max_prepared_transactions=100"])
+=======
+    endpoint = env.endpoints.create_start(
+        "test_isolation", config_lines=["max_prepared_transactions=100", "max_stack_depth = 4096kB"]
+    )
+>>>>>>> e74e00e6f (resolved merge conflicts)
     endpoint.safe_psql("CREATE DATABASE isolation_regression")
 
     # Create some local directories for pg_isolation_regress to run in.

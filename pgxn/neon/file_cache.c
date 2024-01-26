@@ -405,7 +405,7 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	if (LFC_ENABLED())
 	{
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-		found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) != 0;
+		found = entry != NULL && (entry->bitmap[chunk_offs >> 5] & ((uint32)1 << (chunk_offs & 31))) != 0;
 	}
 	LWLockRelease(lfc_lock);
 	return found;
@@ -450,7 +450,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	}
 
 	/* remove the page from the cache */
-	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
+	entry->bitmap[chunk_offs >> 5] &= ~((uint32)1 << (chunk_offs & (32 - 1)));
 
 	/*
 	 * If the chunk has no live entries, we can position the chunk to be
@@ -526,7 +526,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
+	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & ((uint32)1 << (chunk_offs & 31))) == 0)
 	{
 		/* Page is not cached */
 		lfc_ctl->misses += 1;
@@ -678,7 +678,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 			if (--entry->access_count == 0)
 				dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
 
-			entry->bitmap[chunk_offs >> 5] |= (1 << (chunk_offs & 31));
+			entry->bitmap[chunk_offs >> 5] |= ((uint32)1 << (chunk_offs & 31));
 		}
 
 		LWLockRelease(lfc_lock);
@@ -913,7 +913,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
 			{
 				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				{
-					if (entry->bitmap[i >> 5] & (1 << (i & 31)))
+					if (entry->bitmap[i >> 5] & ((uint32)1 << (i & 31)))
 					{
 						fctx->record[n].pageoffs = entry->offset * BLOCKS_PER_CHUNK + i;
 						fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
