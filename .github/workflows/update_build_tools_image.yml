@@ -51,22 +51,18 @@ jobs:
           username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      - name: Pull image
-        run: |
-          docker pull "${ECR_IMAGE}:${FROM_TAG}"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
 
-      - name: Tag image
+      - name: Install crane
         run: |
-          docker tag "${ECR_IMAGE}:${FROM_TAG}" "${ECR_IMAGE}:${TO_TAG}"
-          docker tag "${ECR_IMAGE}:${FROM_TAG}" "${DOCKER_HUB_IMAGE}:${TO_TAG}"
+          go install github.com/google/go-containerregistry/cmd/crane@a0658aa1d0cc7a7f1bcc4a3af9155335b6943f40 # v0.18.0
 
-      - name: Push image to ECR
+      - name: Copy images
         run: |
-          docker push "${ECR_IMAGE}:${TO_TAG}"
-
-      - name: Push image to Docker Hub
-        run: |
-          docker push "${DOCKER_HUB_IMAGE}:${TO_TAG}"
+          crane copy "${ECR_IMAGE}:${FROM_TAG}" "${ECR_IMAGE}:${TO_TAG}"
+          crane copy "${ECR_IMAGE}:${FROM_TAG}" "${DOCKER_HUB_IMAGE}:${TO_TAG}"
 
       - name: Remove custom docker config directory
         if: always()
