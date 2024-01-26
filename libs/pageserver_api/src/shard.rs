@@ -94,6 +94,26 @@ impl TenantShardId {
             shard_count: self.shard_count,
         }
     }
+
+    /// Calculate the children of this TenantShardId when splitting the overall tenant into
+    /// the given number of shards.
+    pub fn split(&self, new_shard_count: ShardCount) -> Vec<TenantShardId> {
+        let effective_old_shard_count = std::cmp::max(self.shard_count.0, 1);
+        let mut child_shards = Vec::new();
+        for shard_number in 0..ShardNumber(new_shard_count.0).0 {
+            // Key mapping is based on a round robin mapping of key hash modulo shard count,
+            // so our child shards are the ones which the same keys would map to.
+            if shard_number % effective_old_shard_count == self.shard_number.0 {
+                child_shards.push(TenantShardId {
+                    tenant_id: self.tenant_id,
+                    shard_number: ShardNumber(shard_number),
+                    shard_count: new_shard_count,
+                })
+            }
+        }
+
+        child_shards
+    }
 }
 
 /// Formatting helper
@@ -792,5 +812,109 @@ mod tests {
 
         let shard = key_to_shard_number(ShardCount(10), DEFAULT_STRIPE_SIZE, &key);
         assert_eq!(shard, ShardNumber(8));
+    }
+
+    #[test]
+    fn shard_id_split() {
+        let tenant_id = TenantId::generate();
+        let parent = TenantShardId::unsharded(tenant_id);
+
+        // Unsharded into 2
+        assert_eq!(
+            parent.split(ShardCount(2)),
+            vec![
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(2),
+                    shard_number: ShardNumber(0)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(2),
+                    shard_number: ShardNumber(1)
+                }
+            ]
+        );
+
+        // Unsharded into 4
+        assert_eq!(
+            parent.split(ShardCount(4)),
+            vec![
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(4),
+                    shard_number: ShardNumber(0)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(4),
+                    shard_number: ShardNumber(1)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(4),
+                    shard_number: ShardNumber(2)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(4),
+                    shard_number: ShardNumber(3)
+                }
+            ]
+        );
+
+        // count=1 into 2 (check this works the same as unsharded.)
+        let parent = TenantShardId {
+            tenant_id,
+            shard_count: ShardCount(1),
+            shard_number: ShardNumber(0),
+        };
+        assert_eq!(
+            parent.split(ShardCount(2)),
+            vec![
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(2),
+                    shard_number: ShardNumber(0)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(2),
+                    shard_number: ShardNumber(1)
+                }
+            ]
+        );
+
+        // count=2 into count=8
+        let parent = TenantShardId {
+            tenant_id,
+            shard_count: ShardCount(2),
+            shard_number: ShardNumber(1),
+        };
+        assert_eq!(
+            parent.split(ShardCount(8)),
+            vec![
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(8),
+                    shard_number: ShardNumber(1)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(8),
+                    shard_number: ShardNumber(3)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(8),
+                    shard_number: ShardNumber(5)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(8),
+                    shard_number: ShardNumber(7)
+                },
+            ]
+        );
     }
 }
