@@ -56,27 +56,53 @@ fn main() -> anyhow::Result<()> {
         PathBuf::from("pg_install")
     };
 
-    // #[cfg(debug_assertions)]
-    // {
+    #[cfg(debug_assertions)]
+    {
         // println!("cargo:rustc-link-arg=-fsanitize=address");
         // println!("cargo:rustc-link-arg=-fsanitize=undefined");
+        //
+        //setting dynamically the symbols
+        let libasan_path = Command::new("gcc")
+            .arg("-print-file-name=libasan.so")
+            .output()
+            .context("failed to execute `gcc -print-file-name=libasan.so`")?;
 
-        // //setting dynamically the symbols
-        // let libasan_path = Command::new("gcc")
-        //     .arg("-print-file-name=libasan.so")
-        //     .output()
-        //     .context("failed to execute `gcc -print-file-name=libasan.so`")?;
-        //
-        // if !libasan_path.status.success() {
-        //     println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
-        //     println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
-        //     panic!("`gcc -print-file-name=libasan.so` failed")
-        // }
-        //
-        // let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
-        // println!("{}", libasan_path);
-        // println!("cargo:rustc-env=LD_PRELOAD={}", libasan_path);
-    // }
+        if !libasan_path.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
+            panic!("`gcc -print-file-name=libasan.so` failed")
+        }
+
+        let libubsan_path = Command::new("gcc")
+            .arg("-print-file-name=libubsan.so")
+            .output()
+            .context("failed to execute `gcc -print-file-name=libubsan.so`")?;
+
+        if !libasan_path.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&libubsan_path.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&libubsan_path.stderr));
+            panic!("`gcc -print-file-name=libubsan.so` failed")
+        }
+
+        let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
+        let libubsan_path = String::from_utf8(libubsan_path.stdout).unwrap();
+        // println!(
+        //     "cargo:rustc-env=LD_PRELOAD={}:{}",
+        //     libasan_path,libubsan_path
+        // );
+        let ld_preload_str = format!("LD_PRELOAD={}:{}", libasan_path, libubsan_path);
+
+        let ld_preload_export = Command::new("export")
+            .arg(ld_preload_str)
+            .output()
+            .context("failed to execute `export LD_PRELOAD=<libasan.so path>:<libubsan.so path>`")?;
+
+        if !ld_preload_export.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&ld_preload_export.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&ld_preload_export.stderr));
+            panic!("`export LD_PRELOAD=<libasan.so path>:<libubsan.so path>` failed")
+        }
+    }
 
     for pg_version in &["v14", "v15", "v16"] {
         let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
