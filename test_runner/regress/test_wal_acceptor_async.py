@@ -515,6 +515,42 @@ def test_recovery_uncommitted(neon_env_builder: NeonEnvBuilder):
     asyncio.run(run_recovery_uncommitted(env))
 
 
+async def run_segment_init_failure(env: NeonEnv):
+    env.neon_cli.create_branch("test_segment_init_failure")
+    ep = env.endpoints.create_start("test_segment_init_failure")
+    ep.safe_psql("create table t(key int, value text)")
+    ep.safe_psql("insert into t select generate_series(1, 100), 'payload'")
+
+    sk = env.safekeepers[0]
+    sk_http = sk.http_client()
+    sk_http.configure_failpoints([("sk-write-zeroes", "return")])
+    conn = await ep.connect_async()
+    ep.safe_psql("select pg_switch_wal()")  # jump to the segment boundary
+    # next insertion should hang until failpoint is disabled.
+    asyncio.create_task(conn.execute("insert into t select generate_series(1,1), 'payload'"))
+    sleep_sec = 2
+    await asyncio.sleep(sleep_sec)
+    # also restart ep at segment boundary to make test more interesting
+    ep.stop()
+    # it must still be not finished
+    # assert not bg_query.done()
+    # Without segment rename during init (#6402) previous statement created
+    # partially initialized 16MB segment, so sk restart also triggers #6401.
+    sk.stop().start()
+    ep = env.endpoints.create_start("test_segment_init_failure")
+    ep.safe_psql("insert into t select generate_series(1,1), 'payload'")  # should be ok now
+
+
+# Test (injected) failure during WAL segment init.
+# https://github.com/neondatabase/neon/issues/6401
+# https://github.com/neondatabase/neon/issues/6402
+def test_segment_init_failure(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    asyncio.run(run_segment_init_failure(env))
+
+
 @dataclass
 class RaceConditionTest:
     iteration: int
