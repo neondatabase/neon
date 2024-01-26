@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::str::FromStr;
 
 use camino::Utf8Path;
@@ -73,8 +72,7 @@ pub(crate) enum DatabaseError {
 pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 
 impl Persistence {
-    pub fn new(json_path: Option<Utf8PathBuf>) -> Self {
-        let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    pub fn new(database_url: String, json_path: Option<Utf8PathBuf>) -> Self {
         Self {
             database_url,
             json_path,

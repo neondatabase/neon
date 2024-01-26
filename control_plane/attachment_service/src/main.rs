@@ -40,6 +40,10 @@ struct Cli {
     /// Path to the .json file to store state (will be created if it doesn't exist)
     #[arg(short, long)]
     path: Utf8PathBuf,
+
+    /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
+    #[arg(long)]
+    database_url: String,
 }
 
 #[tokio::main]
@@ -71,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Some(args.path)
     };
-    let persistence = Arc::new(Persistence::new(json_path.clone()));
+    let persistence = Arc::new(Persistence::new(args.database_url, json_path.clone()));
 
     let service = Service::spawn(config, persistence.clone()).await?;
 

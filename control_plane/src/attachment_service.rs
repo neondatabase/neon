@@ -317,7 +317,7 @@ impl AttachmentService {
     /// the same steps by hand to avoid imposing a dependency on installing diesel-cli for developers
     /// who just want to run `cargo neon_local` without knowing about diesel.
     ///
-    /// Returns value for DATABASE_URL environment variable.
+    /// Returns the database url
     pub async fn setup_database(&self) -> anyhow::Result<String> {
         let database_url = format!(
             "postgresql://localhost:{}/attachment_service",
@@ -436,10 +436,17 @@ impl AttachmentService {
         // Run migrations on every startup, in case something changed.
         let database_url = self.setup_database().await?;
 
-        let mut args = vec!["-l", &self.listen, "-p", self.path.as_ref()]
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let mut args = vec![
+            "-l",
+            &self.listen,
+            "-p",
+            self.path.as_ref(),
+            "--database-url",
+            &database_url,
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
         if let Some(jwt_token) = &self.jwt_token {
             args.push(format!("--jwt-token={jwt_token}"));
         }
@@ -453,13 +460,10 @@ impl AttachmentService {
             &self.env.base_data_dir,
             &self.env.attachment_service_bin(),
             args,
-            [
-                (
-                    "NEON_REPO_DIR".to_string(),
-                    self.env.base_data_dir.to_string_lossy().to_string(),
-                ),
-                ("DATABASE_URL".to_string(), database_url),
-            ],
+            [(
+                "NEON_REPO_DIR".to_string(),
+                self.env.base_data_dir.to_string_lossy().to_string(),
+            )],
             background_process::InitialPidFile::Create(self.pid_file()),
             || async {
                 match self.status().await {
