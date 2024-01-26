@@ -214,7 +214,7 @@ impl Persistence {
             // Backward compat: an old attachments.json from before PR #6251, replace
             // empty strings with proper defaults.
             if tenant.tenant_id.is_empty() {
-                tenant.tenant_id = format!("{}", tenant_id);
+                tenant.tenant_id = tenant_id.to_string();
                 tenant.config = serde_json::to_string(&TenantConfig::default())
                     .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
                 tenant.placement_policy = serde_json::to_string(&PlacementPolicy::default())

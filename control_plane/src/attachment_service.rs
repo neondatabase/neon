@@ -1,5 +1,5 @@
 use crate::{background_process, local_env::LocalEnv};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use diesel::{
     backend::Backend,
     query_builder::{AstPass, QueryFragment, QueryId},
@@ -14,11 +14,7 @@ use pageserver_api::{
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{
-    env,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{env, str::FromStr};
 use tokio::process::Command;
 use tracing::instrument;
 use utils::{
@@ -29,7 +25,7 @@ use utils::{
 pub struct AttachmentService {
     env: LocalEnv,
     listen: String,
-    path: PathBuf,
+    path: Utf8PathBuf,
     jwt_token: Option<String>,
     public_key_path: Option<Utf8PathBuf>,
     postgres_port: u16,
@@ -182,7 +178,9 @@ pub struct TenantShardMigrateResponse {}
 
 impl AttachmentService {
     pub fn from_env(env: &LocalEnv) -> Self {
-        let path = env.base_data_dir.join("attachments.json");
+        let path = Utf8PathBuf::from_path_buf(env.base_data_dir.clone())
+            .unwrap()
+            .join("attachments.json");
 
         // Makes no sense to construct this if pageservers aren't going to use it: assume
         // pageservers have control plane API set
@@ -256,33 +254,22 @@ impl AttachmentService {
         // We assume that either prd or our binary is in the source tree. The former is usually
         // true for automated test runners, the latter is usually true for developer workstations. Often
         // both are true, which is fine.
-        let candidate_start_points: Vec<Utf8PathBuf> = vec![
+        let candidate_start_points = [
             // Current working directory
             Utf8PathBuf::from_path_buf(std::env::current_dir()?).unwrap(),
             // Directory containing the binary we're running inside
             Utf8PathBuf::from_path_buf(env::current_exe()?.parent().unwrap().to_owned()).unwrap(),
-            // Source dir on github action workers
-            Utf8PathBuf::from_str("/__w/neon").unwrap(),
         ];
 
         // For each candidate start point, search through ancestors looking for a neon.git source tree root
         for start_point in &candidate_start_points {
             // Start from the build dir: assumes we are running out of a built neon source tree
-            let mut cursor = start_point.clone();
-            loop {
+            for path in start_point.ancestors() {
                 // A crude approximation: the root of the source tree is whatever contains a "control_plane"
                 // subdirectory.
-                let control_plane = cursor.join("control_plane");
+                let control_plane = path.join("control_plane");
                 if tokio::fs::try_exists(&control_plane).await? {
-                    return Ok(cursor);
-                } else {
-                    cursor = match cursor.parent() {
-                        Some(d) => d.to_owned(),
-                        None => {
-                            // Give up searching from this starting point, try the next one
-                            break;
-                        }
-                    };
+                    return Ok(path.to_owned());
                 }
             }
         }
@@ -298,11 +285,11 @@ impl AttachmentService {
     /// This usually uses ATTACHMENT_SERVICE_POSTGRES_VERSION of postgres, but will fall back
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
-    pub async fn get_pg_bin_path(&self) -> anyhow::Result<PathBuf> {
-        let prefer_versions = vec![ATTACHMENT_SERVICE_POSTGRES_VERSION, 15, 14];
+    pub async fn get_pg_bin_dir(&self) -> anyhow::Result<Utf8PathBuf> {
+        let prefer_versions = [ATTACHMENT_SERVICE_POSTGRES_VERSION, 15, 14];
 
         for v in prefer_versions {
-            let path = self.env.pg_bin_dir(v)?;
+            let path = Utf8PathBuf::from_path_buf(self.env.pg_bin_dir(v)?).unwrap();
             if tokio::fs::try_exists(&path).await? {
                 return Ok(path);
             }
@@ -316,8 +303,8 @@ impl AttachmentService {
     }
 
     /// Readiness check for our postgres process
-    async fn pg_isready(&self, pg_bin_path: &Path) -> anyhow::Result<bool> {
-        let bin_path = pg_bin_path.join("pg_isready");
+    async fn pg_isready(&self, pg_bin_dir: &Utf8Path) -> anyhow::Result<bool> {
+        let bin_path = pg_bin_dir.join("pg_isready");
         let args = ["-h", "localhost", "-p", &format!("{}", self.postgres_port)];
         let exitcode = Command::new(bin_path).args(args).spawn()?.wait().await?;
 
@@ -400,15 +387,17 @@ impl AttachmentService {
 
     pub async fn start(&self) -> anyhow::Result<()> {
         // Start a vanilla Postgres process used by the attachment service for persistence.
-        let pg_data_path = self.env.base_data_dir.join("attachment_service_db");
-        let pg_bin_path = self.get_pg_bin_path().await?;
+        let pg_data_path = Utf8PathBuf::from_path_buf(self.env.base_data_dir.clone())
+            .unwrap()
+            .join("attachment_service_db");
+        let pg_bin_dir = self.get_pg_bin_dir().await?;
         let pg_log_path = pg_data_path.join("postgres.log");
 
         if !tokio::fs::try_exists(&pg_data_path).await? {
             // Initialize empty database
-            let initdb_path = pg_bin_path.join("initdb");
+            let initdb_path = pg_bin_dir.join("initdb");
             let mut child = Command::new(&initdb_path)
-                .args(["-D", &pg_data_path.to_string_lossy()])
+                .args(["-D", pg_data_path.as_ref()])
                 .spawn()
                 .expect("Failed to spawn initdb");
             let status = child.wait().await?;
@@ -427,28 +416,27 @@ impl AttachmentService {
         let db_start_args = [
             "-w",
             "-D",
-            &pg_data_path.to_string_lossy(),
+            pg_data_path.as_ref(),
             "-l",
-            &pg_log_path.to_string_lossy(),
+            pg_log_path.as_ref(),
             "start",
         ];
 
         background_process::start_process(
             "attachment_service_db",
             &self.env.base_data_dir,
-            &pg_bin_path.join("pg_ctl"),
+            pg_bin_dir.join("pg_ctl").as_std_path(),
             db_start_args,
             [],
             background_process::InitialPidFile::Create(self.postgres_pid_file()),
-            || self.pg_isready(&pg_bin_path),
+            || self.pg_isready(&pg_bin_dir),
         )
         .await?;
 
         // Run migrations on every startup, in case something changed.
         let database_url = self.setup_database().await?;
 
-        let path_str = self.path.to_string_lossy();
-        let mut args = vec!["-l", &self.listen, "-p", &path_str]
+        let mut args = vec!["-l", &self.listen, "-p", self.path.as_ref()]
             .into_iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
@@ -489,26 +477,27 @@ impl AttachmentService {
         background_process::stop_process(immediate, COMMAND, &self.pid_file())?;
 
         let pg_data_path = self.env.base_data_dir.join("attachment_service_db");
-        let pg_bin_path = self.get_pg_bin_path().await?;
+        let pg_bin_dir = self.get_pg_bin_dir().await?;
 
         println!("Stopping attachment service database...");
         let pg_stop_args = ["-D", &pg_data_path.to_string_lossy(), "stop"];
-        let stop_status = Command::new(pg_bin_path.join("pg_ctl"))
+        let stop_status = Command::new(pg_bin_dir.join("pg_ctl"))
             .args(pg_stop_args)
             .spawn()?
             .wait()
             .await?;
         if !stop_status.success() {
             let pg_status_args = ["-D", &pg_data_path.to_string_lossy(), "status"];
-            let status_exitcode = Command::new(pg_bin_path.join("pg_ctl"))
+            let status_exitcode = Command::new(pg_bin_dir.join("pg_ctl"))
                 .args(pg_status_args)
                 .spawn()?
                 .wait()
                 .await?;
 
-            // pg_ctl status returns the magic number 3 if postgres is not running: in this case it is
+            // pg_ctl status returns this exit code if postgres is not running: in this case it is
             // fine that stop failed.  Otherwise it is an error that stop failed.
-            if Some(3) == status_exitcode.code() {
+            const PG_STATUS_NOT_RUNNING: i32 = 3;
+            if Some(PG_STATUS_NOT_RUNNING) == status_exitcode.code() {
                 println!("Attachment service data base is already stopped");
                 return Ok(());
             } else {
