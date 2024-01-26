@@ -124,7 +124,7 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
       CARGO_FEATURES: --features testing
-      CARGO_FLAGS: --locked --release
+      CARGO_FLAGS: --release
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
@@ -210,7 +210,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          mold -run cargo build --locked $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run cargo test
         env:
