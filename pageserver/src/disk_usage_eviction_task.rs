@@ -1036,6 +1036,12 @@ pub(crate) mod finite_f32 {
         }
     }
 
+    impl From<FiniteF32> for f32 {
+        fn from(value: FiniteF32) -> f32 {
+            value.0
+        }
+    }
+
     impl FiniteF32 {
         pub const ZERO: FiniteF32 = FiniteF32(0.0);
 
@@ -1047,6 +1053,10 @@ pub(crate) mod finite_f32 {
             } else {
                 Err(value)
             }
+        }
+
+        pub fn into_inner(self) -> f32 {
+            self.into()
         }
     }
 }
@@ -1169,5 +1179,42 @@ mod filesystem_level_usage {
 
         usage.add_available_bytes(16_000);
         assert!(!usage.has_pressure());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_equal_bounds() {
+        let order = EvictionOrder::RelativeAccessed {
+            highest_layer_count_loses_first: false,
+        };
+
+        let len = 10;
+        let v = (0..len)
+            .map(|i| order.relative_last_activity(len, i).into_inner())
+            .collect::<Vec<_>>();
+
+        assert_eq!(v.first(), Some(&1.0));
+        assert_eq!(v.last(), Some(&0.0));
+        assert!(v.windows(2).all(|slice| slice[0] > slice[1]));
+    }
+
+    #[test]
+    fn relative_spare_bounds() {
+        let order = EvictionOrder::RelativeAccessed {
+            highest_layer_count_loses_first: true,
+        };
+
+        let len = 10;
+        let v = (0..len)
+            .map(|i| order.relative_last_activity(len, i).into_inner())
+            .collect::<Vec<_>>();
+
+        assert_eq!(v.first(), Some(&1.0));
+        assert_eq!(v.last(), Some(&0.1));
+        assert!(v.windows(2).all(|slice| slice[0] > slice[1]));
     }
 }
