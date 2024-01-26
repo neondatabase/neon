@@ -129,7 +129,7 @@ impl Persistence {
             })
             .await?;
 
-        if nodes.is_empty() {
+        if nodes.is_empty() && std::env::var("NEON_COMPAT_TEST").is_ok() {
             return self.list_nodes_local_env().await;
         }
 
