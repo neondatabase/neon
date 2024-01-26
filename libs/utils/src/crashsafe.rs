@@ -5,6 +5,7 @@ use std::{
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
+use tracing::info;
 
 /// Similar to [`std::fs::create_dir`], except we fsync the
 /// created directory and its parent.
@@ -81,6 +82,22 @@ pub fn path_with_suffix_extension(
     original_path.as_ref().with_extension(new_extension)
 }
 
+#[tracing::instrument(skip_all)]
+pub fn fsync_file_and_parent_log(file_path: &Utf8Path) -> io::Result<()> {
+    let parent = file_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("File {file_path:?} has no parent"),
+        )
+    })?;
+    info!("fsync file");
+    fsync(file_path)?;
+    info!("fsync parent");
+    fsync(parent)?;
+    info!("done");
+    Ok(())
+}
+
 pub fn fsync_file_and_parent(file_path: &Utf8Path) -> io::Result<()> {
     let parent = file_path.parent().ok_or_else(|| {
         io::Error::new(
@@ -88,7 +105,6 @@ pub fn fsync_file_and_parent(file_path: &Utf8Path) -> io::Result<()> {
             format!("File {file_path:?} has no parent"),
         )
     })?;
-
     fsync(file_path)?;
     fsync(parent)?;
     Ok(())

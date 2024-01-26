@@ -16,6 +16,7 @@ use std::{
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use nix::{errno::Errno::EAGAIN, fcntl};
+use tracing::info;
 
 use crate::crashsafe;
 
@@ -41,14 +42,19 @@ impl Deref for LockFileGuard {
 
 impl UnwrittenLockFile {
     /// Replace the content of this lock file with the byte representation of `contents`.
+    #[tracing::instrument(skip_all)]
     pub fn write_content(mut self, contents: String) -> anyhow::Result<LockFileGuard> {
+        info!("truncate");
         self.file
             .set_len(0)
             .context("Failed to truncate lockfile")?;
+        info!("write_all");
         self.file
             .write_all(contents.as_bytes())
             .with_context(|| format!("Failed to write '{contents}' contents into lockfile"))?;
-        crashsafe::fsync_file_and_parent(&self.path).context("fsync lockfile")?;
+        info!("fsync file and parent");
+        crashsafe::fsync_file_and_parent_log(&self.path).context("fsync lockfile")?;
+        info!("done");
         Ok(LockFileGuard(self.file))
     }
 }
