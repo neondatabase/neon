@@ -896,6 +896,12 @@ async fn collect_eviction_candidates(
         // updating secondaries.
         let (mut layer_info, total_layers) = secondary_tenant.get_layers_for_eviction();
 
+        debug_assert!(
+            total_layers >= layer_info.resident_layers.len(),
+            "total_layers ({total_layers}) must be at least the resident_layers.len() ({})",
+            layer_info.resident_layers.len()
+        );
+
         layer_info
             .resident_layers
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
