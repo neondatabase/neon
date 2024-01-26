@@ -58,7 +58,7 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(debug_assertions)]
     {
-        println!("cargo:rustc-link-arg=-fsanitize=address");
+        // println!("cargo:rustc-link-arg=-fsanitize=address");
         // println!("cargo:rustc-link-arg=-fsanitize=undefined");
 
         // //setting dynamically the symbols
