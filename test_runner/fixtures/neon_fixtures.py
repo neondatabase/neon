@@ -969,6 +969,10 @@ class NeonEnvBuilder:
                 cleanup_error = e
 
         if self.test_cgroup_dir is not None:
+            # TODO: ensure that we're the only python thread running;
+            # otherwise, if a test leaks a thread,
+            # our checking here would race with that other thread.
+            # => https://github.com/neondatabase/neon/issues/6486
             log.info(f"check test runner cgroup for leaked processes: {self.test_cgroup_dir}")
             procs_file = self.test_cgroup_dir / "cgroup.procs"
             mypid = os.getpid()
