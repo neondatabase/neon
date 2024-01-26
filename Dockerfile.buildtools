@@ -51,7 +51,13 @@ RUN set -e \
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
 SHELL ["/bin/bash", "-c"]
-RUN echo "ALL   ALL = (ALL) NOPASSWD: ALL" >> /etc/sudoers
+RUN echo "#!/usr/bin/env bash \
+set -exuo pipefail \
+mkdir /sys/fs/cgroup/neon_testsuite \
+chown -R nonroot:nonroot /sys/fs/cgroup/neon_testsuite \
+echo SUCCESS: cgroup set up for user nonroot at /sys/fs/cgroup/neon_testsuite \
+" > /setup_neon_testsuite_cgroup.bash && chmod +x /setup_neon_testsuite_cgroup.bash
+RUN echo "ALL   ALL = (ALL) NOPASSWD: /setup_neon_testsuite_cgroup.bash" >> /etc/sudoers
 
 # protobuf-compiler (protoc)
 ENV PROTOC_VERSION 25.1

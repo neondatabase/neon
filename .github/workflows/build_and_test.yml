@@ -443,7 +443,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # for changed limits, see comments on `options:` earlier in this file
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --cgroupns=private --privileged
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --cgroupns=private --security-opt umask=/sys/fs/cgroup
     strategy:
       fail-fast: false
       matrix:
@@ -457,7 +457,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup cgroup for use by test suite
-        run: sudo mkdir /sys/fs/cgroup/neon_testsuite && sudo chown -R nonroot:nonroot /sys/fs/cgroup/neon_testsuite
+        run: sudo bash -x /setup_neon_testsuite_cgroup.bash
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
