@@ -32,8 +32,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(debug_assertions)]
     {
         println!("cargo:rustc-link-arg=-fsanitize=address");
-        // println!("cargo:rustc-link-arg=-fsanitize=undefined");
-        println!("cargo:rustc-link-arg=-lasan");
+        println!("cargo:rustc-link-arg=-fsanitize=undefined");
 
         // //setting dynamically the symbols
         // let libasan_path = Command::new("gcc")

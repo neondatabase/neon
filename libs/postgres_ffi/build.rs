@@ -60,7 +60,6 @@ fn main() -> anyhow::Result<()> {
     {
         println!("cargo:rustc-link-arg=-fsanitize=address");
         // println!("cargo:rustc-link-arg=-fsanitize=undefined");
-        println!("cargo:rustc-link-arg=-lasan");
 
         // //setting dynamically the symbols
         // let libasan_path = Command::new("gcc")
