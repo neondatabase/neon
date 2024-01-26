@@ -96,13 +96,9 @@ def test_isolation(
 
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-<<<<<<< HEAD
-    endpoint = env.endpoints.create_start("main", config_lines=["max_prepared_transactions=100"])
-=======
     endpoint = env.endpoints.create_start(
-        "test_isolation", config_lines=["max_prepared_transactions=100", "max_stack_depth = 4096kB"]
+        "main", config_lines=["max_prepared_transactions=100", "max_stack_depth = 4096kB"]
     )
->>>>>>> e74e00e6f (resolved merge conflicts)
     endpoint.safe_psql("CREATE DATABASE isolation_regression")
 
     # Create some local directories for pg_isolation_regress to run in.
