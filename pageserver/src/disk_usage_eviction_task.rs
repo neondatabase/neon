@@ -902,8 +902,6 @@ async fn collect_eviction_candidates(
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
         "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
 
-    // always behave as if AbsoluteAccessed was selected. if RelativeAccessed is in use, we
-    // will sort later by candidate.relative_last_activity to get compare evictions.
     eviction_order.sort(&mut candidates);
 
     Ok(EvictionCandidates::Finished(candidates))
