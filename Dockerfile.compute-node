@@ -546,6 +546,7 @@ RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_3.tar.
         -D PostgreSQL_TYPE_INCLUDE_DIR=`pg_config --includedir-server` \
         -D PostgreSQL_LIBRARY_DIR=`pg_config --libdir` \
         -D RDK_INSTALL_INTREE=OFF \
+        -D RDK_INSTALL_COMIC_FONTS=OFF \
         -D CMAKE_BUILD_TYPE=Release \
         . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
