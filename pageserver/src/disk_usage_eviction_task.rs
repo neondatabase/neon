@@ -97,12 +97,20 @@ pub enum EvictionOrder {
 
     /// Order the layers to be evicted by how recently they have been accessed relatively within
     /// the set of resident layers of a tenant.
-    ///
-    /// This strategy will evict layers more fairly but is untested.
     RelativeAccessed {
-        #[serde(default)]
+        /// Determines if the tenant with most layers should lose first.
+        ///
+        /// Having this enabled is currently the only reasonable option, because the order in which
+        /// we read tenants is deterministic. If we find the need to use this as `false`, we need
+        /// to ensure nondeterminism by adding in a random number to break the
+        /// `relative_last_activity==0.0` ties.
+        #[serde(default = "default_highest_layer_count_loses_first")]
         highest_layer_count_loses_first: bool,
     },
+}
+
+fn default_highest_layer_count_loses_first() -> bool {
+    true
 }
 
 impl EvictionOrder {
