@@ -317,9 +317,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             .tenant_manager
             .get_secondary_tenant_shard(*tenant_shard_id);
         let Some(tenant) = tenant else {
-            {
-                return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
-            }
+            return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
         };
 
         Ok(PendingDownload {
@@ -394,9 +392,9 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             }
 
             CompleteDownload {
-                    secondary_state,
-                    completed_at: Instant::now(),
-                }
+                secondary_state,
+                completed_at: Instant::now(),
+            }
         }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 }
