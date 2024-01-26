@@ -471,7 +471,7 @@ jobs:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
-          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
