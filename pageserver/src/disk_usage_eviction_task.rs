@@ -924,6 +924,8 @@ async fn collect_eviction_candidates(
                 });
 
         candidates.extend(tenant_candidates);
+
+        tokio::task::yield_now().await;
     }
 
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
