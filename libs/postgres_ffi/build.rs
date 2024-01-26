@@ -56,8 +56,8 @@ fn main() -> anyhow::Result<()> {
         PathBuf::from("pg_install")
     };
 
-    #[cfg(debug_assertions)]
-    {
+    // #[cfg(debug_assertions)]
+    // {
         // println!("cargo:rustc-link-arg=-fsanitize=address");
         // println!("cargo:rustc-link-arg=-fsanitize=undefined");
 
@@ -76,7 +76,7 @@ fn main() -> anyhow::Result<()> {
         // let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
         // println!("{}", libasan_path);
         // println!("cargo:rustc-env=LD_PRELOAD={}", libasan_path);
-    }
+    // }
 
     for pg_version in &["v14", "v15", "v16"] {
         let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);

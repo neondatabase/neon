@@ -351,7 +351,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          # export LD_PRELOAD=$LIBPATH
+          unset ASAN_OPTIONS UBSAN_OPTIONS
           mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests -v
 
       - name: Run rust tests
