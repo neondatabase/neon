@@ -24,7 +24,8 @@ from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 
 
-def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
+# fixture order matters here: neon_env_builder leaked process assertions
+def test_import_from_vanilla(test_output_dir, pg_bin, neon_env_builder, vanilla_pg):
     # Put data in vanilla pg
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
