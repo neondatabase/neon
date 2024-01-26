@@ -237,7 +237,7 @@ where
         Self {
             delta_coverage: delta_coverage.peekable(),
             image_coverage: image_coverage.peekable(),
-            key_range: key_range.clone(),
+            key_range,
             end_lsn,
             current_delta: None,
             current_image: None,
@@ -247,7 +247,7 @@ where
 
     /// Run the collector. Collection is implemented via a two pointer algorithm.
     /// One pointer tracks the start of the current range and the other tracks
-    /// the beggining of the next range which will overlap with the next change
+    /// the beginning of the next range which will overlap with the next change
     /// in coverage across both image and delta.
     fn collect(mut self) -> RangeSearchResult {
         let next_layer_type = self.choose_next_layer_type();
@@ -957,7 +957,7 @@ mod tests {
             },
             LayerDesc {
                 key_range: Key::from_i128(10)..Key::from_i128(20),
-                lsn_range: Lsn(10)..Lsn(20),
+                lsn_range: Lsn(5)..Lsn(20),
                 is_delta: true,
             },
             LayerDesc {

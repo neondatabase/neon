@@ -150,7 +150,7 @@ impl<Value: Clone> LayerCoverage<Value> {
                 let mut range_coverage = self.range(range).peekable();
                 if range_coverage
                     .peek()
-                    .is_some_and(|c| c.1 == Some(change.clone()))
+                    .is_some_and(|c| c.1.as_ref() == Some(&change))
                 {
                     range_coverage.next();
                 }
