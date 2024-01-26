@@ -54,6 +54,7 @@ use std::ops::Deref;
 use anyhow::Context;
 use camino::Utf8Path;
 use nix::unistd::Pid;
+use tracing::info;
 
 use crate::lock_file::{self, LockFileRead};
 
@@ -85,12 +86,16 @@ impl Deref for PidFileGuard {
 /// The claim ends as soon as the returned guard object is dropped.
 /// To maintain the claim for the remaining lifetime of the current process,
 /// use [`std::mem::forget`] or similar.
+#[tracing::instrument(skip_all)]
 pub fn claim_for_current_process(path: &Utf8Path) -> anyhow::Result<PidFileGuard> {
+    info!("create_exclusive");
     let unwritten_lock_file = lock_file::create_exclusive(path).context("lock file")?;
     // if any of the next steps fail, we drop the file descriptor and thereby release the lock
+    info!("write_content");
     let guard = unwritten_lock_file
         .write_content(Pid::this().to_string())
         .context("write pid to lock file")?;
+    info!("done");
     Ok(PidFileGuard(guard))
 }
 
