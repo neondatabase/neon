@@ -144,30 +144,23 @@ RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouti
 FROM build-deps AS plv8-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ARG PG_VERSION
 RUN apt update && \
     apt install -y ninja-build python3-dev libncurses5 binutils clang
 
-RUN case "${PG_VERSION}" in \
-      "v14" | "v15") \
-        export PLV8_VERSION=3.1.5 \
-        export PLV8_CHECKSUM=1e108d5df639e4c189e1c5bdfa2432a521c126ca89e7e5a969d46899ca7bf106 \
-        ;; \
-      "v16") \
-        export PLV8_VERSION=3.1.8 \
-        export PLV8_CHECKSUM=92b10c7db39afdae97ff748c9ec54713826af222c459084ad002571b79eb3f49 \
-        ;; \
-      *) \
-        echo "Export the valid PG_VERSION variable" && exit 1 \
-        ;; \
-    esac && \
-    wget https://github.com/plv8/plv8/archive/refs/tags/v${PLV8_VERSION}.tar.gz -O plv8.tar.gz && \
-    echo "${PLV8_CHECKSUM} plv8.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.tar.gz && \
+    echo "7096c3290928561f0d4901b7a52794295dc47f6303102fae3f8e42dd575ad97d plv8.tar.gz" | sha256sum --check && \
     mkdir plv8-src && cd plv8-src && tar xvzf ../plv8.tar.gz --strip-components=1 -C . && \
+    # generate and copy upgrade scripts
+    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
+    cp upgrade/* /usr/local/pgsql/share/extension/ && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /plv8-* && \
     find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
+    # don't break computes with installed old version of plv8
+    cd /usr/local/pgsql/lib/ && \
+    ln -s plv8-3.1.10.so plv8-3.1.5.so && \
+    ln -s plv8-3.1.10.so plv8-3.1.8.so && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control

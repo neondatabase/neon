@@ -9,6 +9,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -181,8 +182,11 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     );
                     error_run_count += 1;
                     let wait_duration = Duration::from_secs_f64(wait_duration);
-                    error!(
-                        "Compaction failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
+                    log_compaction_error(
+                        &e,
+                        error_run_count,
+                        &wait_duration,
+                        cancel.is_cancelled(),
                     );
                     wait_duration
                 } else {
@@ -208,6 +212,58 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     }
     .await;
     TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
+}
+
+fn log_compaction_error(
+    e: &CompactionError,
+    error_run_count: u32,
+    sleep_duration: &std::time::Duration,
+    task_cancelled: bool,
+) {
+    use crate::tenant::upload_queue::NotInitialized;
+    use crate::tenant::PageReconstructError;
+    use CompactionError::*;
+
+    enum LooksLike {
+        Info,
+        Error,
+    }
+
+    let decision = match e {
+        ShuttingDown => None,
+        _ if task_cancelled => Some(LooksLike::Info),
+        Other(e) => {
+            let root_cause = e.root_cause();
+
+            let is_stopping = {
+                let upload_queue = root_cause
+                    .downcast_ref::<NotInitialized>()
+                    .is_some_and(|e| e.is_stopping());
+
+                let timeline = root_cause
+                    .downcast_ref::<PageReconstructError>()
+                    .is_some_and(|e| e.is_stopping());
+
+                upload_queue || timeline
+            };
+
+            if is_stopping {
+                Some(LooksLike::Info)
+            } else {
+                Some(LooksLike::Error)
+            }
+        }
+    };
+
+    match decision {
+        Some(LooksLike::Info) => info!(
+            "Compaction failed {error_run_count} times, retrying in {sleep_duration:?}: {e:#}",
+        ),
+        Some(LooksLike::Error) => error!(
+            "Compaction failed {error_run_count} times, retrying in {sleep_duration:?}: {e:?}",
+        ),
+        None => {}
+    }
 }
 
 ///

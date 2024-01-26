@@ -477,6 +477,7 @@ class NeonEnvBuilder:
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
+        pageserver_virtual_file_io_engine: Optional[str] = None,
         test_cgroup_dir: Optional[Path] = None,
     ):
         self.repo_dir = repo_dir
@@ -512,6 +513,8 @@ class NeonEnvBuilder:
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
+
+        self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
         self.test_cgroup_dir = test_cgroup_dir
 
         assert test_name.startswith(
@@ -1088,6 +1091,8 @@ class NeonEnv:
             self, config.auth_enabled
         )
 
+        self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
+
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
             "default_tenant_id": str(self.initial_tenant),
@@ -1119,6 +1124,9 @@ class NeonEnv:
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
             }
+            if self.pageserver_virtual_file_io_engine is not None:
+                ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
                 NeonPageserver(
@@ -1188,7 +1196,9 @@ class NeonEnv:
         assert that there is only one. Tests with multiple pageservers should always use
         get_pageserver with an explicit ID.
         """
-        assert len(self.pageservers) == 1
+        assert (
+            len(self.pageservers) == 1
+        ), "env.pageserver must only be used with single pageserver NeonEnv"
         return self.pageservers[0]
 
     def get_pageserver(self, id: Optional[int]) -> NeonPageserver:
@@ -1282,6 +1292,7 @@ def _shared_simple_env(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
+    pageserver_virtual_file_io_engine: str,
     test_cgroup_dir: Optional[Path],
 ) -> Iterator[NeonEnv]:
     """
@@ -1312,6 +1323,7 @@ def _shared_simple_env(
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_cgroup_dir=test_cgroup_dir,
     ) as builder:
         env = builder.init_start()
@@ -1351,6 +1363,7 @@ def neon_env_builder(
     request: FixtureRequest,
     test_overlay_dir: Path,
     top_output_dir: Path,
+    pageserver_virtual_file_io_engine: str,
     test_cgroup_dir: Optional[Path],
 ) -> Iterator[NeonEnvBuilder]:
     """
@@ -1381,6 +1394,7 @@ def neon_env_builder(
         broker=default_broker,
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
