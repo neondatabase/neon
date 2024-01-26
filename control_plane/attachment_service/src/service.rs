@@ -11,6 +11,7 @@ use control_plane::attachment_service::{
     TenantCreateResponseShard, TenantLocateResponse, TenantLocateResponseShard,
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
+use diesel::result::DatabaseErrorKind;
 use hyper::StatusCode;
 use pageserver_api::{
     control_api::{
@@ -386,7 +387,6 @@ impl Service {
             let locked = self.inner.write().unwrap();
             !locked.tenants.contains_key(&attach_req.tenant_shard_id)
         };
-
         if insert {
             let tsp = TenantShardPersistence {
                 tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
@@ -399,17 +399,34 @@ impl Service {
                 config: serde_json::to_string(&TenantConfig::default()).unwrap(),
             };
 
-            self.persistence.insert_tenant_shards(vec![tsp]).await?;
+            match self.persistence.insert_tenant_shards(vec![tsp]).await {
+                Err(e) => match e {
+                    DatabaseError::Query(diesel::result::Error::DatabaseError(
+                        DatabaseErrorKind::UniqueViolation,
+                        _,
+                    )) => {
+                        tracing::info!(
+                            "Raced with another request to insert tenant {}",
+                            attach_req.tenant_shard_id
+                        )
+                    }
+                    _ => return Err(e.into()),
+                },
+                Ok(()) => {
+                    tracing::info!("Inserted shard {} in database", attach_req.tenant_shard_id);
 
-            let mut locked = self.inner.write().unwrap();
-            locked.tenants.insert(
-                attach_req.tenant_shard_id,
-                TenantState::new(
-                    attach_req.tenant_shard_id,
-                    ShardIdentity::unsharded(),
-                    PlacementPolicy::Single,
-                ),
-            );
+                    let mut locked = self.inner.write().unwrap();
+                    locked.tenants.insert(
+                        attach_req.tenant_shard_id,
+                        TenantState::new(
+                            attach_req.tenant_shard_id,
+                            ShardIdentity::unsharded(),
+                            PlacementPolicy::Single,
+                        ),
+                    );
+                    tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
+                }
+            }
         }
 
         let new_generation = if let Some(req_node_id) = attach_req.node_id {
