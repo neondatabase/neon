@@ -584,7 +584,7 @@ impl Endpoint {
 
         let child = cmd.spawn()?;
         // set up a scopeguard to kill & wait for the child in case we panic or bail below
-        let child = scopeguard::guard(spawned_process, |mut child| {
+        let child = scopeguard::guard(child, |mut child| {
             println!("SIGKILL & wait the started process");
             (|| {
                 // TODO: use another signal that can be caught by the child so it can clean up any children it spawned
@@ -592,7 +592,7 @@ impl Endpoint {
                 child.wait().context("wait() for child process")?;
                 anyhow::Ok(())
             })()
-            .with_context(|| format!("scopeguard kill&wait child {process_name:?}"))
+            .with_context(|| format!("scopeguard kill&wait child {child:?}"))
             .unwrap();
         });
 
