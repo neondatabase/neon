@@ -5,11 +5,11 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
 use std::cmp::min;
-use std::fs::OpenOptions;
+
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
 use std::sync::atomic::AtomicU64;
@@ -47,7 +47,10 @@ impl EphemeralFile {
 
         let file = VirtualFile::open_with_options(
             &filename,
-            OpenOptions::new().read(true).write(true).create(true),
+            virtual_file::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true),
         )
         .await?;
 
@@ -89,11 +92,10 @@ impl EphemeralFile {
                 page_cache::ReadBufResult::Found(guard) => {
                     return Ok(BlockLease::PageReadGuard(guard))
                 }
-                page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                    let buf: &mut [u8] = write_guard.deref_mut();
-                    debug_assert_eq!(buf.len(), PAGE_SZ);
-                    self.file
-                        .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
+                page_cache::ReadBufResult::NotFound(write_guard) => {
+                    let write_guard = self
+                        .file
+                        .read_exact_at_page(write_guard, blknum as u64 * PAGE_SZ as u64)
                         .await?;
                     let read_guard = write_guard.mark_valid();
                     return Ok(BlockLease::PageReadGuard(read_guard));

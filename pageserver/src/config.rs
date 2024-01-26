@@ -36,12 +36,15 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
+use crate::virtual_file;
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
     TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
 use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
+
+use self::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE;
 
 pub mod defaults {
     use crate::tenant::config::defaults::*;
@@ -79,6 +82,8 @@ pub mod defaults {
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 
+    pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
+
     ///
     /// Default built-in configuration file.
     ///
@@ -113,6 +118,8 @@ pub mod defaults {
 #background_task_maximum_delay = '{DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY}'
 
 #ingest_batch_size = {DEFAULT_INGEST_BATCH_SIZE}
+
+#virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
 
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -247,6 +254,8 @@ pub struct PageServerConf {
 
     /// Maximum number of WAL records to be ingested and committed at the same time
     pub ingest_batch_size: u64,
+
+    pub virtual_file_io_engine: virtual_file::IoEngineKind,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -331,6 +340,8 @@ struct PageServerConfigBuilder {
     secondary_download_concurrency: BuilderValue<usize>,
 
     ingest_batch_size: BuilderValue<u64>,
+
+    virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -406,6 +417,8 @@ impl Default for PageServerConfigBuilder {
             secondary_download_concurrency: Set(DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),
 
             ingest_batch_size: Set(DEFAULT_INGEST_BATCH_SIZE),
+
+            virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
         }
     }
 }
@@ -562,6 +575,10 @@ impl PageServerConfigBuilder {
         self.ingest_batch_size = BuilderValue::Set(ingest_batch_size)
     }
 
+    pub fn virtual_file_io_engine(&mut self, value: virtual_file::IoEngineKind) {
+        self.virtual_file_io_engine = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_warmup = self
             .concurrent_tenant_warmup
@@ -669,6 +686,9 @@ impl PageServerConfigBuilder {
             ingest_batch_size: self
                 .ingest_batch_size
                 .ok_or(anyhow!("missing ingest_batch_size"))?,
+            virtual_file_io_engine: self
+                .virtual_file_io_engine
+                .ok_or(anyhow!("missing virtual_file_io_engine"))?,
         })
     }
 }
@@ -920,6 +940,9 @@ impl PageServerConf {
                     builder.secondary_download_concurrency(parse_toml_u64(key, item)? as usize)
                 },
                 "ingest_batch_size" => builder.ingest_batch_size(parse_toml_u64(key, item)?),
+                "virtual_file_io_engine" => {
+                    builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -993,6 +1016,7 @@ impl PageServerConf {
             heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
             secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
+            virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
         }
     }
 }
@@ -1225,6 +1249,7 @@ background_task_maximum_delay = '334 s'
                 heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
+                virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1288,6 +1313,7 @@ background_task_maximum_delay = '334 s'
                 heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: 100,
+                virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             },
             "Should be able to parse all basic config values correctly"
         );

@@ -8,7 +8,7 @@ from _pytest.python import Metafunc
 from fixtures.pg_version import PgVersion
 
 """
-Dynamically parametrize tests by Postgres version and build type (debug/release/remote)
+Dynamically parametrize tests by Postgres version, build type (debug/release/remote), and possibly by other parameters
 """
 
 
@@ -31,11 +31,12 @@ def build_type(request: FixtureRequest) -> Optional[str]:
     return None
 
 
-def pytest_generate_tests(metafunc: Metafunc):
-    # Do not parametrize performance tests yet, we need to prepare grafana charts first
-    if "test_runner/performance" in metafunc.definition._nodeid:
-        return
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_virtual_file_io_engine(request: FixtureRequest) -> Optional[str]:
+    return None
 
+
+def pytest_generate_tests(metafunc: Metafunc):
     if (v := os.environ.get("DEFAULT_PG_VERSION")) is None:
         pg_versions = [version for version in PgVersion if version != PgVersion.NOT_SET]
     else:
@@ -46,5 +47,12 @@ def pytest_generate_tests(metafunc: Metafunc):
     else:
         build_types = [bt.lower()]
 
-    metafunc.parametrize("build_type", build_types)
-    metafunc.parametrize("pg_version", pg_versions, ids=map(lambda v: f"pg{v}", pg_versions))
+    # Do not parametrize performance tests yet by Postgres version or build type, we need to prepare grafana charts first
+    if "test_runner/performance" not in metafunc.definition._nodeid:
+        metafunc.parametrize("build_type", build_types)
+        metafunc.parametrize("pg_version", pg_versions, ids=map(lambda v: f"pg{v}", pg_versions))
+
+    # A hacky way to parametrize tests only for `pageserver_virtual_file_io_engine=tokio-epoll-uring`
+    # And do not change test name for default `pageserver_virtual_file_io_engine=std-fs` to keep tests statistics
+    if (io_engine := os.environ.get("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in ("", "std-fs"):
+        metafunc.parametrize("pageserver_virtual_file_io_engine", [io_engine])

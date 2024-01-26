@@ -2565,6 +2565,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-uring"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460648e47a07a43110fbfa2e0b14afb2be920093c31e5dccc50e49568e099762"
+dependencies = [
+ "bitflags 1.3.2",
+ "libc",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3362,6 +3372,7 @@ dependencies = [
  "tenant_size_model",
  "thiserror",
  "tokio",
+ "tokio-epoll-uring",
  "tokio-io-timeout",
  "tokio-postgres",
  "tokio-stream",
@@ -5383,18 +5394,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.40"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978c9a314bd8dc99be594bc3c175faaa9794be04a5a5e153caba6915336cebac"
+checksum = "97a802ec30afc17eee47b2855fc72e0c4cd62be9b4efe6591edde0ec5bd68d8f"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.40"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9456a42c5b0d803c8cd86e73dd7cc9edd429499f37a3550d286d5e86720569f"
+checksum = "6bb623b56e39ab7dcd4b1b98bb6c8f8d907ed255b18de254088016b27a8ee19b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5516,6 +5527,21 @@ dependencies = [
  "socket2 0.5.5",
  "tokio-macros",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "tokio-epoll-uring"
+version = "0.1.0"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#0dd3a2f8bf3239d34a19719ef1a74146c093126f"
+dependencies = [
+ "futures",
+ "once_cell",
+ "scopeguard",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uring-common",
 ]
 
 [[package]]
@@ -6025,6 +6051,15 @@ dependencies = [
  "rustls-webpki 0.100.2",
  "url",
  "webpki-roots 0.23.1",
+]
+
+[[package]]
+name = "uring-common"
+version = "0.1.0"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#0dd3a2f8bf3239d34a19719ef1a74146c093126f"
+dependencies = [
+ "io-uring",
+ "libc",
 ]
 
 [[package]]

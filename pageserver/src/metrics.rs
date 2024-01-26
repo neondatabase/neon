@@ -932,6 +932,7 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+#[cfg(not(test))]
 pub(crate) mod virtual_file_descriptor_cache {
     use super::*;
 
@@ -949,6 +950,20 @@ pub(crate) mod virtual_file_descriptor_cache {
     // -ignoring(operation)
     // sum(pageserver_io_operations_seconds_count{operation=~"^(close|close-by-replace)$"}
     // ```
+}
+
+#[cfg(not(test))]
+pub(crate) mod virtual_file_io_engine {
+    use super::*;
+
+    pub(crate) static KIND: Lazy<UIntGaugeVec> = Lazy::new(|| {
+        register_uint_gauge_vec!(
+            "pageserver_virtual_file_io_engine_kind",
+            "The configured io engine for VirtualFile",
+            &["kind"],
+        )
+        .unwrap()
+    });
 }
 
 #[derive(Debug)]

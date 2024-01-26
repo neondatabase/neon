@@ -446,6 +446,7 @@ class NeonEnvBuilder:
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
+        pageserver_virtual_file_io_engine: Optional[str] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -480,6 +481,8 @@ class NeonEnvBuilder:
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
+
+        self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
         assert test_name.startswith(
             "test_"
@@ -995,6 +998,8 @@ class NeonEnv:
             self, config.auth_enabled
         )
 
+        self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
+
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
             "default_tenant_id": str(self.initial_tenant),
@@ -1026,6 +1031,9 @@ class NeonEnv:
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
             }
+            if self.pageserver_virtual_file_io_engine is not None:
+                ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
                 NeonPageserver(
@@ -1191,6 +1199,7 @@ def _shared_simple_env(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
+    pageserver_virtual_file_io_engine: str,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1220,6 +1229,7 @@ def _shared_simple_env(
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
     ) as builder:
         env = builder.init_start()
 
@@ -1258,6 +1268,7 @@ def neon_env_builder(
     request: FixtureRequest,
     test_overlay_dir: Path,
     top_output_dir: Path,
+    pageserver_virtual_file_io_engine: str,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1287,6 +1298,7 @@ def neon_env_builder(
         broker=default_broker,
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
