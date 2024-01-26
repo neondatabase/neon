@@ -68,11 +68,19 @@ fn main() -> anyhow::Result<()> {
         let ld_preload_export = Command::new("export")
             .arg(ld_preload_str)
             .output()
-            .context("failed to execute `export LD_PRELOAD=<libasan.so path>:<libubsan.so path>`")?;
+            .context(
+                "failed to execute `export LD_PRELOAD=<libasan.so path>:<libubsan.so path>`"
+            )?;
 
         if !ld_preload_export.status.success() {
-            println!("stdout: {}", String::from_utf8_lossy(&ld_preload_export.stdout));
-            println!("stderr: {}", String::from_utf8_lossy(&ld_preload_export.stderr));
+            println!(
+                "stdout: {}",
+                String::from_utf8_lossy(&ld_preload_export.stdout)
+            );
+            println!(
+                "stderr: {}",
+                String::from_utf8_lossy(&ld_preload_export.stderr)
+            );
             panic!("`export LD_PRELOAD=<libasan.so path>:<libubsan.so path>` failed")
         }
     }
