@@ -20,10 +20,10 @@ fi
 
 # do all the on-disk initialization work now instead of a background kernel thread
 # so that we're ready for benchmarking right after this line
-sudo mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0  /dev/nvme1n1
+#sudo mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0  /dev/nvme1n1
 
 MOUNTPOINT=/instance_store
-sudo mkdir "$MOUNTPOINT"
+sudo rmdir "$MOUNTPOINT" ||  sudo mkdir "$MOUNTPOINT"
 sudo mount /dev/nvme1n1 "$MOUNTPOINT"
 sudo chown -R "$(id -u)":"$(id -g)" "$MOUNTPOINT"
 
@@ -40,7 +40,7 @@ To run your local neon.git build on the instance store volume,
 run the following commands from the top of the neon.git checkout
 
     # raise file descriptor limit of your shell and its child processes
-    sudo prlimit -p $$ --nofile=800000:800000
+    sudo prlimit -p \$\$ --nofile=800000:800000
 
     # test suite run
     export TEST_OUTPUT="$TEST_OUTPUT"

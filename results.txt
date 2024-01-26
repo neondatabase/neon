@@ -1,0 +1,36 @@
+run on i3en.3xlarge
+
+admin@ip-172-31-13-23:[~/neon-main]: du -hs /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-1000-6/snapshot/local_fs_remote_storage/pageserver/tenants
+225G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-1000-6/snapshot/local_fs_remote_storage/pageserver/tenants
+
+=> ~2.25x main memory
+
+admin@ip-172-31-13-23:[~/neon-main]: NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest test_runner/performance/pageserver/pagebench/test_pageserver_max_throughput_getpage_at_latest_lsn.py
+
+--------------------------------------------------------------------------------- Benchmark results ---------------------------------------------------------------------------------
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.n_tenants: 1000
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.pgbench_scale: 6
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.duration: 30 s
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.pageserver_config_override.page_cache_size: 134217728 byte
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.pageserver_config_override.max_file_descriptors: 500000
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.pageserver_config.override.virtual_file_io_engine: IoEngine.STD_FS
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.request_count: 2321
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.latency_mean: 8,785.440 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.latency_percentiles.p95: 20,234.239 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.latency_percentiles.p99: 20,234.239 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.latency_percentiles.p99.9: 20,234.239 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-std-fs].pageserver_max_throughput_getpage_at_latest_lsn.latency_percentiles.p99.99: 20,234.239 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.n_tenants: 1000
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.pgbench_scale: 6
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.duration: 30 s
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.pageserver_config_override.page_cache_size: 134217728 byte
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.pageserver_config_override.max_file_descriptors: 500000
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.pageserver_config.override.virtual_file_io_engine: IoEngine.TOKIO_EPOLL_URING
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.request_count: 2200
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.latency_mean: 9,046.271 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.latency_percentiles.p95: 16,457.727 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.latency_percentiles.p99: 16,457.727 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.latency_percentiles.p99.9: 16,457.727 ms
+test_pageserver_max_throughput_getpage_at_latest_lsn[1000-6-30-tokio-epoll-uring].pageserver_max_throughput_getpage_at_latest_lsn.latency_percentiles.p99.99: 16,457.727 ms
+
+=========================================================================== 2 passed in 142.33s (0:02:22) ===========================================================================

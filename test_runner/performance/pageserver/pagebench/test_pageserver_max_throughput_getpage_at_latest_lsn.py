@@ -1,6 +1,9 @@
+import enum
 import json
 from pathlib import Path
 from typing import Any, Dict, Tuple
+
+import toml
 
 import fixtures.pageserver.many_tenants as many_tenants
 import pytest
@@ -17,6 +20,10 @@ from fixtures.utils import get_scale_for_db, humantime_to_ms
 from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 
 
+class IoEngine(str, enum.Enum):
+    STD_FS = "std-fs"
+    TOKIO_EPOLL_URING = "tokio-epoll-uring"
+
 # For reference, the space usage of the snapshots:
 # admin@ip-172-31-13-23:[~/neon-main]: sudo du -hs /instance_store/test_output/shared-snapshots
 # 137G    /instance_store/test_output/shared-snapshots
@@ -27,9 +34,10 @@ from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 # 5.1G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-10-6
 # 76G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-13
 # 46G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-6
+@pytest.mark.parametrize("ioengine", [IoEngine.STD_FS, IoEngine.TOKIO_EPOLL_URING])
 @pytest.mark.parametrize("duration", [30])
-@pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(s) for s in [100, 200]])
-@pytest.mark.parametrize("n_tenants", [1, 10])
+@pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(s) for s in [100]])
+@pytest.mark.parametrize("n_tenants", [1000])
 @pytest.mark.timeout(
     10000
 )  # TODO: this value is just "a really high number"; have this per instance type
@@ -40,6 +48,7 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
     n_tenants: int,
     pgbench_scale: int,
     duration: int,
+    ioengine: IoEngine,
 ):
     def record(metric, **kwargs):
         zenbenchmark.record(
@@ -60,9 +69,12 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
     # configure cache sizes like in prod
     page_cache_size = 16384
     max_file_descriptors = 500000
-    neon_env_builder.pageserver_config_override = (
-        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
-    )
+    pageserver_config_override = {
+        "page_cache_size": f"{page_cache_size}",
+        "max_file_descriptors": f"{max_file_descriptors}",
+        "virtual_file_io_engine": f"\"{ioengine}\"",
+    }
+    neon_env_builder.pageserver_config_override = ";".join([f"{k}={v}" for k, v in pageserver_config_override.items()])
     params.update(
         {
             "pageserver_config_override.page_cache_size": (
@@ -70,6 +82,7 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
                 {"unit": "byte"},
             ),
             "pageserver_config_override.max_file_descriptors": (max_file_descriptors, {"unit": ""}),
+            "pageserver_config.override.virtual_file_io_engine": (ioengine, {"unit": ""}),
         }
     )
 
