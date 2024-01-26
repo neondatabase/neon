@@ -131,23 +131,41 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    mut ctx: RequestMonitoring,
     websocket: HyperWebsocket,
     cancel_map: Arc<CancelMap>,
     hostname: Option<String>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    handle_client(
+    let res = handle_client(
         config,
-        ctx,
+        &mut ctx,
         cancel_map,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
     )
-    .await?;
-    Ok(())
+    .await;
+
+    match res {
+        Err(e) => {
+            // todo: log and push to ctx the error kind
+            // ctx.set_error_kind(e.get_error_type())
+            ctx.log();
+            Err(e)
+        }
+        Ok(None) => {
+            ctx.set_success();
+            ctx.log();
+            Ok(())
+        }
+        Ok(Some(p)) => {
+            ctx.set_success();
+            ctx.log();
+            p.proxy_pass().await
+        }
+    }
 }
 
 #[cfg(test)]

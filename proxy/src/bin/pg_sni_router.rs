@@ -272,5 +272,10 @@ async fn handle_client(
     let client = tokio::net::TcpStream::connect(destination).await?;
 
     let metrics_aux: MetricsAuxInfo = Default::default();
-    proxy::proxy::passthrough::proxy_pass(ctx, tls_stream, client, metrics_aux).await
+
+    // doesn't yet matter as pg-sni-router doesn't report analytics logs
+    ctx.set_success();
+    ctx.log();
+
+    proxy::proxy::passthrough::proxy_pass(tls_stream, client, metrics_aux).await
 }

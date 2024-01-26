@@ -39,7 +39,7 @@ impl ReportableError for HandshakeError {
             HandshakeError::InsecureConnection => crate::error::ErrorKind::User,
             HandshakeError::MissingCertificate => todo!(),
             HandshakeError::StreamUpgradeError(upgrade) => match upgrade {
-                StreamUpgradeError::AlreadyTls => crate::error::ErrorKind::User,
+                StreamUpgradeError::AlreadyTls => crate::error::ErrorKind::Service,
                 StreamUpgradeError::Io(_) => crate::error::ErrorKind::Disconnect,
             },
             HandshakeError::Io(_) => crate::error::ErrorKind::Disconnect,

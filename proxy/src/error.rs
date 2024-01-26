@@ -66,3 +66,9 @@ impl ErrorKind {
 pub trait ReportableError: fmt::Display + Send + 'static {
     fn get_error_type(&self) -> ErrorKind;
 }
+
+impl ReportableError for tokio::time::error::Elapsed {
+    fn get_error_type(&self) -> ErrorKind {
+        ErrorKind::RateLimit
+    }
+}

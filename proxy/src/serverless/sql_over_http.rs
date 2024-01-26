@@ -32,6 +32,7 @@ use crate::auth::endpoint_sni;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
@@ -186,20 +187,25 @@ fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Err
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    mut ctx: RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.http_config.request_timeout,
-        handle_inner(config, ctx, request, sni_hostname, backend),
+        handle_inner(config, &mut ctx, request, sni_hostname, backend),
     )
     .await;
     let mut response = match result {
         Ok(r) => match r {
-            Ok(r) => r,
+            Ok(r) => {
+                ctx.set_success();
+                r
+            }
             Err(e) => {
+                // ctx.set_error_kind(e.get_error_type());
+
                 let mut message = format!("{:?}", e);
                 let db_error = e
                     .downcast_ref::<tokio_postgres::Error>()
@@ -275,7 +281,9 @@ pub async fn handle(
                 )?
             }
         },
-        Err(_) => {
+        Err(e) => {
+            ctx.set_error_kind(e.get_error_type());
+
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
                 config.http_config.request_timeout.as_secs()
@@ -287,6 +295,9 @@ pub async fn handle(
             )?
         }
     };
+
+    ctx.log();
+
     response.headers_mut().insert(
         "Access-Control-Allow-Origin",
         hyper::http::HeaderValue::from_static("*"),
@@ -480,8 +491,6 @@ async fn handle_inner(
             }
         };
 
-    ctx.set_success();
-    ctx.log();
     let metrics = client.metrics();
 
     // how could this possibly fail

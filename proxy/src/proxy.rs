@@ -15,10 +15,7 @@ use crate::{
     context::RequestMonitoring,
     metrics::{NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE},
     protocol2::WithClientIp,
-    proxy::{
-        handshake::{handshake, HandshakeData},
-        passthrough::proxy_pass,
-    },
+    proxy::handshake::{handshake, HandshakeData},
     rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
     EndpointCacheKey,
@@ -35,7 +32,10 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, Instrument};
 
-use self::connect_compute::{connect_to_compute, TcpMechanism};
+use self::{
+    connect_compute::{connect_to_compute, TcpMechanism},
+    passthrough::ProxyPassthrough,
+};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
@@ -100,14 +100,14 @@ pub async fn task_main(
                     bail!("missing required client IP");
                 }
 
-                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
-
                 socket
                     .inner
                     .set_nodelay(true)
                     .context("failed to set socket option")?;
 
-                handle_client(
+                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+
+                let res = handle_client(
                     config,
                     &mut ctx,
                     cancel_map,
@@ -115,7 +115,26 @@ pub async fn task_main(
                     ClientMode::Tcp,
                     endpoint_rate_limiter,
                 )
-                .await
+                .await;
+
+                match res {
+                    Err(e) => {
+                        // todo: log and push to ctx the error kind
+                        // ctx.set_error_kind(e.get_error_type())
+                        ctx.log();
+                        Err(e)
+                    }
+                    Ok(None) => {
+                        ctx.set_success();
+                        ctx.log();
+                        Ok(())
+                    }
+                    Ok(Some(p)) => {
+                        ctx.set_success();
+                        ctx.log();
+                        p.proxy_pass().await
+                    }
+                }
             }
             .unwrap_or_else(move |e| {
                 // Acknowledge that the task has finished with an error.
@@ -178,7 +197,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<ProxyPassthrough<S>>> {
     info!(
         protocol = ctx.protocol,
         "handling interactive connection from client"
@@ -200,7 +219,10 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
-                return cancel_map.cancel_session(cancel_key_data).await
+                return cancel_map
+                    .cancel_session(cancel_key_data)
+                    .await
+                    .map(|()| None)
             }
         };
     drop(pause);
@@ -272,7 +294,13 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let (stream, read_buf) = stream.into_inner();
     node.stream.write_all(&read_buf).await?;
 
-    proxy_pass(ctx, stream, node.stream, aux).await
+    Ok(Some(ProxyPassthrough {
+        client: stream,
+        compute: node,
+        aux,
+        req: _request_gauge,
+        conn: _client_gauge,
+    }))
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
