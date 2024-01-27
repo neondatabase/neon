@@ -216,7 +216,7 @@ jobs:
         env:
           NEXTEST_RETRIES: 3
         run: |
-          cargo nextest $CARGO_FLAGS $CARGO_FEATURES
+          cargo nextest run $CARGO_FEATURES
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
