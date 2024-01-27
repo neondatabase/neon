@@ -884,7 +884,7 @@ impl DeltaLayerInner {
 
         let keys = self.load_keys(ctx).await?;
 
-        async fn dump_blob(val: ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
+        async fn dump_blob(val: &ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
             let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
             let val = Value::des(&buf)?;
             let desc = match val {
@@ -905,14 +905,30 @@ impl DeltaLayerInner {
         }
 
         for entry in keys {
-            let DeltaEntry { key, lsn, val, .. } = entry;
-            let desc = match dump_blob(val, ctx).await {
+            let DeltaEntry { key, lsn, val, .. } = entry;            
+            let desc = match dump_blob(&val, ctx).await {
                 Ok(desc) => desc,
                 Err(err) => {
                     format!("ERROR: {err}")
                 }
             };
             println!("  key {key} at {lsn}: {desc}");
+            use crate::pgdatadir_mapping::CHECKPOINT_KEY;
+            use postgres_ffi::CheckPoint;
+            if key == CHECKPOINT_KEY
+            {
+                let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
+                let val = Value::des(&buf)?;
+                match val {
+                    Value::Image(img) => {
+                        let checkpoint = CheckPoint::decode(&img)?;
+                        println!("   CHECKPOINT: {:?}", checkpoint);
+                    }
+                    Value::WalRecord(_rec) => {
+                        format!(" unexpected walrecord for checkpoint key");
+                    }
+                }
+            }
         }
 
         Ok(())

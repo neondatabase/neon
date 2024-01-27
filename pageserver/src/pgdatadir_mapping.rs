@@ -1832,7 +1832,7 @@ const CONTROLFILE_KEY: Key = Key {
     field6: 0,
 };
 
-const CHECKPOINT_KEY: Key = Key {
+pub const CHECKPOINT_KEY: Key = Key {
     field1: 0x03,
     field2: 0,
     field3: 0,
