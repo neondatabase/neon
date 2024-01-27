@@ -149,7 +149,7 @@ impl WalIngest {
 
         if self.checkpoint.nextXid.value == 4294968320 && // 1::1024, the incorrect value
             modification.tline.tenant_shard_id.tenant_id == TenantId::from_hex("df254570a4f603805528b46b0d45a76c").unwrap() &&
-            lsn < Lsn::from_str("367/C7409270").unwrap() &&
+            lsn < Lsn::from_str("367/C7409300").unwrap() &&
             !reintroduce_bug_failpoint_activated()
         {
             // This is the last nextXid value from the last RUNNING_XACTS record, at the
