@@ -671,7 +671,6 @@ impl RemoteStorage for S3Bucket {
                         .set_prefix(prefix.clone())
                         .set_key_marker(key_marker.clone())
                         .set_version_id_marker(version_id_marker.clone())
-                        .max_keys(2)
                         .send()
                         .await?)
                 },
