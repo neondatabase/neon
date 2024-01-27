@@ -66,12 +66,12 @@ impl serde::Serialize for LatencyPercentiles {
     {
         use serde::ser::SerializeMap;
         let mut ser = serializer.serialize_map(Some(LATENCY_PERCENTILES.len()))?;
-        for p in LATENCY_PERCENTILES {
+        for (i, p) in LATENCY_PERCENTILES.iter().enumerate() {
             ser.serialize_entry(
                 &format!("p{p}"),
                 &format!(
                     "{}",
-                    &humantime::format_duration(self.latency_percentiles[0])
+                    &humantime::format_duration(self.latency_percentiles[i])
                 ),
             )?;
         }
