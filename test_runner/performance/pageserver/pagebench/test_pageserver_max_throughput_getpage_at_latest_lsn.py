@@ -76,6 +76,10 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
     for param, (value, kwargs) in params.items():
         record(param, metric_value=value, report=MetricReport.TEST_PARAM, **kwargs)
     env = setup_pageserver_with_pgbench_tenants(neon_env_builder, pg_bin, n_tenants, pgbench_scale)
+    ps_http =env.pageserver.http_client()
+    for tenant_info in ps_http.tenant_list():
+        tenant_id = tenant_info["id"]
+        ps_http.patch_tenant_config_client_side(tenant_id, {"compaction_period": "10s"})
     run_benchmark_max_throughput_latest_lsn(env, pg_bin, record, duration)
 
 
