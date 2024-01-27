@@ -1363,16 +1363,22 @@ impl WalIngest {
             self.checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
             self.checkpoint_modified = true;
         }
-        let max_mbr_xid = xlrec.members.iter().fold(0u32, |acc, mbr| {
-            if mbr.xid.wrapping_sub(acc) as i32 > 0 {
-                mbr.xid
+        let max_mbr_xid = xlrec.members.iter().fold(None, |acc, mbr| {
+            if let Some(max_xid) = acc {
+                if mbr.xid.wrapping_sub(max_xid) as i32 > 0 {
+                    Some(mbr.xid)
+                } else {
+                    acc
+                }
             } else {
-                acc
+                Some(mbr.xid)
             }
         });
 
-        if self.checkpoint.update_next_xid(max_mbr_xid) {
-            self.checkpoint_modified = true;
+        if let Some(max_xid) = max_mbr_xid {
+            if self.checkpoint.update_next_xid(max_xid) {
+                self.checkpoint_modified = true;
+            }
         }
         Ok(())
     }
