@@ -55,8 +55,8 @@ impl ComputeUserInfoMaybeEndpoint {
     }
 }
 
-pub fn endpoint_sni<'a>(
-    sni: &'a str,
+pub fn endpoint_sni(
+    sni: &str,
     common_names: &HashSet<String>,
 ) -> Result<Option<EndpointId>, ComputeUserInfoParseError> {
     let Some((subdomain, common_name)) = sni.split_once('.') else {
