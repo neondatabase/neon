@@ -402,7 +402,7 @@ mod tests {
 
     use prometheus::{proto, Opts};
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use rand_distr::Zipf;
+    use rand_distr::{Distribution, Zipf};
 
     use crate::HyperLogLogVec;
 
@@ -436,11 +436,10 @@ mod tests {
             * 32.0
     }
 
-    fn test_cardinality(n: usize) -> ([usize; 3], [f64; 3]) {
+    fn test_cardinality(n: usize, dist: impl Distribution<f64>) -> ([usize; 3], [f64; 3]) {
         let hll = HyperLogLogVec::<32>::new(Opts::new("foo", "bar"), &["x"]).unwrap();
 
-        let zipf = Zipf::new(n as u64, 1.2f64).unwrap();
-        let mut iter = StdRng::seed_from_u64(0x2024_0112).sample_iter(zipf);
+        let mut iter = StdRng::seed_from_u64(0x2024_0112).sample_iter(dist);
         let mut set_a = HashSet::new();
         let mut set_b = HashSet::new();
 
@@ -464,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_cardinality_small() {
-        let (actual, estimate) = test_cardinality(100);
+        let (actual, estimate) = test_cardinality(100, Zipf::new(100, 1.2f64).unwrap());
 
         assert_eq!(actual, [46, 30, 32]);
         assert!(51.3 < estimate[0] && estimate[0] < 51.4);
@@ -474,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_cardinality_medium() {
-        let (actual, estimate) = test_cardinality(10000);
+        let (actual, estimate) = test_cardinality(10000, Zipf::new(10000, 1.2f64).unwrap());
 
         assert_eq!(actual, [2529, 1618, 1629]);
         assert!(2309.1 < estimate[0] && estimate[0] < 2309.2);
@@ -484,11 +483,41 @@ mod tests {
 
     #[test]
     fn test_cardinality_large() {
-        let (actual, estimate) = test_cardinality(1_000_000);
+        let (actual, estimate) = test_cardinality(1_000_000, Zipf::new(1_000_000, 1.2f64).unwrap());
 
         assert_eq!(actual, [129077, 79579, 79630]);
         assert!(126067.2 < estimate[0] && estimate[0] < 126067.3);
         assert!(83076.8 < estimate[1] && estimate[1] < 83076.9);
         assert!(64251.2 < estimate[2] && estimate[2] < 64251.3);
+    }
+
+    #[test]
+    fn test_cardinality_small2() {
+        let (actual, estimate) = test_cardinality(100, Zipf::new(200, 0.8f64).unwrap());
+
+        assert_eq!(actual, [92, 58, 60]);
+        assert!(116.1 < estimate[0] && estimate[0] < 116.2);
+        assert!(81.7 < estimate[1] && estimate[1] < 81.8);
+        assert!(69.3 < estimate[2] && estimate[2] < 69.4);
+    }
+
+    #[test]
+    fn test_cardinality_medium2() {
+        let (actual, estimate) = test_cardinality(10000, Zipf::new(20000, 0.8f64).unwrap());
+
+        assert_eq!(actual, [8201, 5131, 5051]);
+        assert!(6846.4 < estimate[0] && estimate[0] < 6846.5);
+        assert!(5239.1 < estimate[1] && estimate[1] < 5239.2);
+        assert!(4292.8 < estimate[2] && estimate[2] < 4292.9);
+    }
+
+    #[test]
+    fn test_cardinality_large2() {
+        let (actual, estimate) = test_cardinality(1_000_000, Zipf::new(2_000_000, 0.8f64).unwrap());
+
+        assert_eq!(actual, [777847, 482069, 482246]);
+        assert!(699437.4 < estimate[0] && estimate[0] < 699437.5);
+        assert!(374948.9 < estimate[1] && estimate[1] < 374949.0);
+        assert!(434609.7 < estimate[2] && estimate[2] < 434609.8);
     }
 }
