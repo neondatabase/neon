@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
             .arg(ld_preload_str)
             .output()
             .context(
-                "failed to execute `export LD_PRELOAD=<libasan.so path>:<libubsan.so path>`"
+                "failed to execute `export LD_PRELOAD=<libasan.so path>:<libubsan.so path>`",
             )?;
 
         if !ld_preload_export.status.success() {
