@@ -208,10 +208,10 @@ def test_import_at_2bil(
     conn2 = endpoint.connect()
     cur2 = conn2.cursor()
     cur.execute("INSERT INTO t VALUES ('x')")
-    cur.execute("BEGIN; select * from t WHERE t = 'x' FOR SHARE;");
-    cur2.execute("BEGIN; select * from t WHERE t = 'x' FOR SHARE;");
-    cur.execute("COMMIT");
-    cur2.execute("COMMIT");
+    cur.execute("BEGIN; select * from t WHERE t = 'x' FOR SHARE;")
+    cur2.execute("BEGIN; select * from t WHERE t = 'x' FOR SHARE;")
+    cur.execute("COMMIT")
+    cur2.execute("COMMIT")
 
     # A checkpoint writes a WAL record with xl_xid=0. Many other WAL
     # records would have the same effect.
