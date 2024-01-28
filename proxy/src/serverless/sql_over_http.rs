@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::bail;
+use anyhow::Context;
 use futures::pin_mut;
 use futures::StreamExt;
 use hyper::body::HttpBody;
@@ -187,8 +188,8 @@ fn get_conn_info(
         }
     }
 
-    let endpoint = endpoint_sni(hostname, &tls.common_names)?;
-    ctx.set_endpoint_id(endpoint.clone());
+    let endpoint = endpoint_sni(hostname, &tls.common_names)?.context("malformed endpoint")?;
+    ctx.set_endpoint_id(Some(endpoint.clone()));
 
     let pairs = connection_url.query_pairs();
 
@@ -202,7 +203,7 @@ fn get_conn_info(
     }
 
     let user_info = ComputeUserInfo {
-        endpoint: endpoint.ok_or_else(|| anyhow::anyhow!("malformed endpoint"))?,
+        endpoint,
         user: username,
         options: options.unwrap_or_default(),
     };
