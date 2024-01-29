@@ -3,8 +3,8 @@
 
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
+use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
-use crate::tenant::disk_btree::PAGE_SZ;
 use crate::virtual_file::{self, VirtualFile};
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
@@ -17,6 +17,8 @@ use tracing::*;
 use utils::id::TimelineId;
 
 pub struct EphemeralFile {
+    page_cache_file_id: page_cache::FileId,
+
     _tenant_shard_id: TenantShardId,
     _timeline_id: TimelineId,
     file: VirtualFile,
@@ -53,6 +55,7 @@ impl EphemeralFile {
         .await?;
 
         Ok(EphemeralFile {
+            page_cache_file_id: page_cache::next_file_id(),
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
             file,
@@ -68,22 +71,36 @@ impl EphemeralFile {
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> Result<BlockLease, io::Error> {
         let flushed_blknums = 0..self.len / PAGE_SZ as u64;
         if flushed_blknums.contains(&(blknum as u64)) {
-            let mut write_guard: crate::buffer_pool::Buffer = crate::buffer_pool::get();
-            let buf: &mut [u8] = write_guard.deref_mut();
-            debug_assert_eq!(buf.len(), PAGE_SZ);
-            let buf = self
-                .file
-                .read_exact_at(
-                    crate::buffer_pool::PageWriteGuardBuf::new(write_guard),
-                    blknum as u64 * PAGE_SZ as u64,
-                )
-                .await?
-                .assume_init();
-            Ok(BlockLease::PageReadGuard(buf))
+            let cache = page_cache::get();
+            match cache
+                .read_immutable_buf(self.page_cache_file_id, blknum, ctx)
+                .await
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        // order path before error because error is anyhow::Error => might have many contexts
+                        format!(
+                            "ephemeral file: read immutable page #{}: {}: {:#}",
+                            blknum, self.file.path, e,
+                        ),
+                    )
+                })? {
+                page_cache::ReadBufResult::Found(guard) => {
+                    return Ok(BlockLease::PageReadGuard(guard))
+                }
+                page_cache::ReadBufResult::NotFound(write_guard) => {
+                    let write_guard = self
+                        .file
+                        .read_exact_at_page(write_guard, blknum as u64 * PAGE_SZ as u64)
+                        .await?;
+                    let read_guard = write_guard.mark_valid();
+                    return Ok(BlockLease::PageReadGuard(read_guard));
+                }
+            };
         } else {
             debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
             Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
@@ -114,7 +131,7 @@ impl EphemeralFile {
             async fn push_bytes(
                 &mut self,
                 src: &[u8],
-                _ctx: &RequestContext,
+                ctx: &RequestContext,
             ) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
@@ -134,6 +151,33 @@ impl EphemeralFile {
                             .await
                         {
                             Ok(_) => {
+                                // Pre-warm the page cache with what we just wrote.
+                                // This isn't necessary for coherency/correctness, but it's how we've always done it.
+                                let cache = page_cache::get();
+                                match cache
+                                    .read_immutable_buf(
+                                        self.ephemeral_file.page_cache_file_id,
+                                        self.blknum,
+                                        ctx,
+                                    )
+                                    .await
+                                {
+                                    Ok(page_cache::ReadBufResult::Found(_guard)) => {
+                                        // This function takes &mut self, so, it shouldn't be possible to reach this point.
+                                        unreachable!("we just wrote blknum {} and this function takes &mut self, so, no concurrent read_blk is possible", self.blknum);
+                                    }
+                                    Ok(page_cache::ReadBufResult::NotFound(mut write_guard)) => {
+                                        let buf: &mut [u8] = write_guard.deref_mut();
+                                        debug_assert_eq!(buf.len(), PAGE_SZ);
+                                        buf.copy_from_slice(&self.ephemeral_file.mutable_tail);
+                                        let _ = write_guard.mark_valid();
+                                        // pre-warm successful
+                                    }
+                                    Err(e) => {
+                                        error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
+                                        // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
+                                    }
+                                }
                                 // Zero the buffer for re-use.
                                 // Zeroing is critical for correcntess because the write_blob code below
                                 // and similarly read_blk expect zeroed pages.

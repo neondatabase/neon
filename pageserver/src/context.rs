@@ -282,4 +282,8 @@ impl RequestContext {
     pub(crate) fn access_stats_behavior(&self) -> AccessStatsBehavior {
         self.access_stats_behavior
     }
+
+    pub(crate) fn page_content_kind(&self) -> PageContentKind {
+        self.page_content_kind
+    }
 }

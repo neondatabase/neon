@@ -187,6 +187,216 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
     }
 });
 
+pub(crate) struct PageCacheMetricsForTaskKind {
+    pub read_accesses_materialized_page: IntCounter,
+    pub read_accesses_immutable: IntCounter,
+
+    pub read_hits_immutable: IntCounter,
+    pub read_hits_materialized_page_exact: IntCounter,
+    pub read_hits_materialized_page_older_lsn: IntCounter,
+}
+
+pub(crate) struct PageCacheMetrics {
+    map: EnumMap<TaskKind, EnumMap<PageContentKind, PageCacheMetricsForTaskKind>>,
+}
+
+static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_cache_read_hits_total",
+        "Number of read accesses to the page cache that hit",
+        &["task_kind", "key_kind", "content_kind", "hit_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_cache_read_accesses_total",
+        "Number of read accesses to the page cache",
+        &["task_kind", "key_kind", "content_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
+    map: EnumMap::from_array(std::array::from_fn(|task_kind| {
+        let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
+        let task_kind: &'static str = task_kind.into();
+        EnumMap::from_array(std::array::from_fn(|content_kind| {
+            let content_kind = <PageContentKind as enum_map::Enum>::from_usize(content_kind);
+            let content_kind: &'static str = content_kind.into();
+            PageCacheMetricsForTaskKind {
+                read_accesses_materialized_page: {
+                    PAGE_CACHE_READ_ACCESSES
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                        ])
+                        .unwrap()
+                },
+
+                read_accesses_immutable: {
+                    PAGE_CACHE_READ_ACCESSES
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind])
+                        .unwrap()
+                },
+
+                read_hits_immutable: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
+                        .unwrap()
+                },
+
+                read_hits_materialized_page_exact: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                            "exact",
+                        ])
+                        .unwrap()
+                },
+
+                read_hits_materialized_page_older_lsn: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                            "older_lsn",
+                        ])
+                        .unwrap()
+                },
+            }
+        }))
+    })),
+});
+
+impl PageCacheMetrics {
+    pub(crate) fn for_ctx(&self, ctx: &RequestContext) -> &PageCacheMetricsForTaskKind {
+        &self.map[ctx.task_kind()][ctx.page_content_kind()]
+    }
+}
+
+pub(crate) struct PageCacheSizeMetrics {
+    pub max_bytes: UIntGauge,
+
+    pub current_bytes_immutable: UIntGauge,
+    pub current_bytes_materialized_page: UIntGauge,
+}
+
+static PAGE_CACHE_SIZE_CURRENT_BYTES: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_page_cache_size_current_bytes",
+        "Current size of the page cache in bytes, by key kind",
+        &["key_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> =
+    Lazy::new(|| PageCacheSizeMetrics {
+        max_bytes: {
+            register_uint_gauge!(
+                "pageserver_page_cache_size_max_bytes",
+                "Maximum size of the page cache in bytes"
+            )
+            .expect("failed to define a metric")
+        },
+        current_bytes_immutable: {
+            PAGE_CACHE_SIZE_CURRENT_BYTES
+                .get_metric_with_label_values(&["immutable"])
+                .unwrap()
+        },
+        current_bytes_materialized_page: {
+            PAGE_CACHE_SIZE_CURRENT_BYTES
+                .get_metric_with_label_values(&["materialized_page"])
+                .unwrap()
+        },
+    });
+
+pub(crate) mod page_cache_eviction_metrics {
+    use std::num::NonZeroUsize;
+
+    use metrics::{register_int_counter_vec, IntCounter, IntCounterVec};
+    use once_cell::sync::Lazy;
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Outcome {
+        FoundSlotUnused { iters: NonZeroUsize },
+        FoundSlotEvicted { iters: NonZeroUsize },
+        ItersExceeded { iters: NonZeroUsize },
+    }
+
+    static ITERS_TOTAL_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_page_cache_find_victim_iters_total",
+            "Counter for the number of iterations in the find_victim loop",
+            &["outcome"],
+        )
+        .expect("failed to define a metric")
+    });
+
+    static CALLS_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_page_cache_find_victim_calls",
+            "Incremented at the end of each find_victim() call.\
+             Filter by outcome to get e.g., eviction rate.",
+            &["outcome"]
+        )
+        .unwrap()
+    });
+
+    pub(crate) fn observe(outcome: Outcome) {
+        macro_rules! dry {
+            ($label:literal, $iters:expr) => {{
+                static LABEL: &'static str = $label;
+                static ITERS_TOTAL: Lazy<IntCounter> =
+                    Lazy::new(|| ITERS_TOTAL_VEC.with_label_values(&[LABEL]));
+                static CALLS: Lazy<IntCounter> =
+                    Lazy::new(|| CALLS_VEC.with_label_values(&[LABEL]));
+                ITERS_TOTAL.inc_by(($iters.get()) as u64);
+                CALLS.inc();
+            }};
+        }
+        match outcome {
+            Outcome::FoundSlotUnused { iters } => dry!("found_empty", iters),
+            Outcome::FoundSlotEvicted { iters } => {
+                dry!("found_evicted", iters)
+            }
+            Outcome::ItersExceeded { iters } => {
+                dry!("err_iters_exceeded", iters);
+                super::page_cache_errors_inc(super::PageCacheErrorKind::EvictIterLimit);
+            }
+        }
+    }
+}
+
+static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "page_cache_errors_total",
+        "Number of timeouts while acquiring a pinned slot in the page cache",
+        &["error_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+#[derive(IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum PageCacheErrorKind {
+    AcquirePinnedSlotTimeout,
+    EvictIterLimit,
+}
+
+pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
+    PAGE_CACHE_ERRORS
+        .get_metric_with_label_values(&[error_kind.into()])
+        .unwrap()
+        .inc();
+}
+
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wait_lsn_seconds",
@@ -1788,6 +1998,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
