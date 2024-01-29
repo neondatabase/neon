@@ -165,7 +165,17 @@ struct SlotInner {
     key: Option<CacheKey>,
     // for `coalesce_readers_permit`
     permit: std::sync::Mutex<Weak<PinnedSlotsPermit>>,
-    buf: &'static mut [u8; PAGE_SZ],
+    buf: &'static mut SlotContents,
+}
+
+#[derive(Clone)]
+#[repr(C, align(8192))]
+struct SlotContents([u8; PAGE_SZ]);
+
+impl SlotContents {
+    fn empty() -> Self {
+        Self(std::array::from_fn(|_| 0))
+    }
 }
 
 impl Slot {
@@ -253,13 +263,13 @@ impl std::ops::Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
-        self.slot_guard.buf
+        &self.slot_guard.buf.0
     }
 }
 
 impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
     fn as_ref(&self) -> &[u8; PAGE_SZ] {
-        self.slot_guard.buf
+        &self.slot_guard.buf.0
     }
 }
 
@@ -285,7 +295,7 @@ enum PageWriteGuardState<'i> {
 impl std::ops::DerefMut for PageWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match &mut self.state {
-            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Invalid { inner, _permit } => &mut inner.buf.0,
             PageWriteGuardState::Downgraded => unreachable!(),
         }
     }
@@ -296,7 +306,7 @@ impl std::ops::Deref for PageWriteGuard<'_> {
 
     fn deref(&self) -> &Self::Target {
         match &self.state {
-            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Invalid { inner, _permit } => &inner.buf.0,
             PageWriteGuardState::Downgraded => unreachable!(),
         }
     }
@@ -672,29 +682,22 @@ impl PageCache {
     fn new(num_pages: usize) -> Self {
         assert!(num_pages > 0, "page cache size must be > 0");
 
-        // We could use Vec::leak here, but that potentially also leaks
-        // uninitialized reserved capacity. With into_boxed_slice and Box::leak
-        // this is avoided.
-        let page_buffer = Box::leak(vec![0u8; num_pages * PAGE_SZ].into_boxed_slice());
+        let slot_contents = Box::leak(vec![SlotContents::empty(); num_pages].into_boxed_slice());
 
         let size_metrics = &crate::metrics::PAGE_CACHE_SIZE;
         size_metrics.max_bytes.set_page_sz(num_pages);
         size_metrics.current_bytes_immutable.set_page_sz(0);
         size_metrics.current_bytes_materialized_page.set_page_sz(0);
 
-        let slots = page_buffer
-            .chunks_exact_mut(PAGE_SZ)
-            .map(|chunk| {
-                let buf: &mut [u8; PAGE_SZ] = chunk.try_into().unwrap();
-
-                Slot {
-                    inner: tokio::sync::RwLock::new(SlotInner {
-                        key: None,
-                        buf,
-                        permit: std::sync::Mutex::new(Weak::new()),
-                    }),
-                    usage_count: AtomicU8::new(0),
-                }
+        let slots = slot_contents
+            .into_iter()
+            .map(|slot_contents| Slot {
+                inner: tokio::sync::RwLock::new(SlotInner {
+                    key: None,
+                    buf: slot_contents,
+                    permit: std::sync::Mutex::new(Weak::new()),
+                }),
+                usage_count: AtomicU8::new(0),
             })
             .collect();
 

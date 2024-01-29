@@ -1,7 +1,12 @@
 //! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
 
+use nix::libc;
+
 use super::IoEngineKind;
-use std::{os::fd::OwnedFd, path::Path};
+use std::{
+    os::{fd::OwnedFd, unix::fs::OpenOptionsExt},
+    path::Path,
+};
 
 #[derive(Debug, Clone)]
 pub enum OpenOptions {
@@ -87,6 +92,18 @@ impl OpenOptions {
             #[cfg(target_os = "linux")]
             OpenOptions::TokioEpollUring(x) => {
                 let _ = x.truncate(truncate);
+            }
+        }
+        self
+    }
+
+    pub fn custom_flags(&mut self, custom_flags: libc::c_int) -> &mut OpenOptions {
+        match self {
+            OpenOptions::StdFs(x) => {
+                let _ = x.custom_flags(custom_flags);
+            }
+            OpenOptions::TokioEpollUring(x) => {
+                let _ = x.custom_flags(custom_flags);
             }
         }
         self
