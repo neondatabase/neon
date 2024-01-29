@@ -553,7 +553,7 @@ jobs:
 
   create-test-report:
     needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-buildtools-image ]
-    if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }} || github.event.action != 'ready_for_review'
+    if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) && github.event.action != 'ready_for_review' }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -699,7 +699,7 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft }} && github.event.action == 'ready_for_review' && ${{ !cancelled() }}
+    if: ${{ !github.event.pull_request.draft && github.event.action == 'ready_for_review' && !cancelled()}}
     needs: [ check-permissions, promote-images, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
