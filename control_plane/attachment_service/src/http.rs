@@ -239,7 +239,7 @@ async fn handle_tenant_timeline_passthrough(
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
     let client = mgmt_api::Client::new(base_url, service.get_config().jwt_token.as_deref());
-    let resp = client.proxy_get(path).await.map_err(|_e|
+    let resp = client.get_raw(path).await.map_err(|_e|
         // FIXME: give APiError a proper Unavailable variant.  We return 503 here because
         // if we can't successfully send a request to the pageserver, we aren't available.
         ApiError::ShuttingDown)?;

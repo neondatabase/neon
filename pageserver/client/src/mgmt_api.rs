@@ -69,7 +69,13 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
-    pub async fn proxy_get(&self, path: String) -> Result<reqwest::Response> {
+    /// Get an arbitrary path and returning a streaming Response.  This function is suitable
+    /// for pass-through/proxy use cases where we don't care what the response content looks
+    /// like.
+    ///
+    /// Use/add one of the properly typed methods below if you know aren't proxying, and
+    /// know what kind of response you expect.
+    pub async fn get_raw(&self, path: String) -> Result<reqwest::Response> {
         debug_assert!(path.starts_with('/'));
         let uri = format!("{}{}", self.mgmt_api_endpoint, path);
 
