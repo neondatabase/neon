@@ -688,7 +688,14 @@ impl DeltaLayerInner {
         summary: Option<Summary>,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path).await {
+        let file = match VirtualFile::open_with_options(
+            path,
+            virtual_file::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_DIRECT),
+        )
+        .await
+        {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };

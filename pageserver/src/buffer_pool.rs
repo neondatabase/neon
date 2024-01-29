@@ -2,18 +2,27 @@ use std::cell::RefCell;
 
 use crate::tenant::disk_btree::PAGE_SZ;
 
-pub struct Buffer(Option<Box<[u8; PAGE_SZ]>>);
+#[repr(C, align(8192))]
+struct BufferContent([u8; PAGE_SZ]);
+
+impl BufferContent {
+    fn empty() -> Self {
+        BufferContent(std::array::from_fn(|_| 0))
+    }
+}
+
+pub struct Buffer(Option<Box<BufferContent>>);
 
 // Thread-local list of re-usable buffers.
 thread_local! {
-    static POOL: RefCell<Vec<Box<[u8; PAGE_SZ]>>> = RefCell::new(Vec::new());
+    static POOL: RefCell<Vec<Box<BufferContent>>> = RefCell::new(Vec::new());
 }
 
 pub(crate) fn get() -> Buffer {
     let maybe = POOL.with(|rc| rc.borrow_mut().pop());
     match maybe {
         Some(buf) => Buffer(Some(buf)),
-        None => Buffer(Some(Box::new([0; PAGE_SZ]))),
+        None => Buffer(Some(Box::new(BufferContent::empty()))),
     }
 }
 
@@ -28,13 +37,13 @@ impl std::ops::Deref for Buffer {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
-        self.0.as_ref().unwrap().as_ref()
+        &self.0.as_ref().unwrap().as_ref().0
     }
 }
 
 impl std::ops::DerefMut for Buffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().unwrap().as_mut()
+        &mut self.0.as_mut().unwrap().as_mut().0
     }
 }
 
