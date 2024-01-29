@@ -2795,6 +2795,11 @@ static int
 neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buffer)
 {
 	XLogRecPtr request_lsn;
+	/*
+	 * GetRedoStartLsn() returns LSN of basebackup.
+	 * We need to download SLRU segments only once after node startup,
+	 * then SLRUs are maintained locally.
+	 */
 	request_lsn = GetRedoStartLsn();
 	request_lsn = nm_adjust_lsn(request_lsn);
 	SlruKind kind;

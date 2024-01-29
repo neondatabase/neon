@@ -4,7 +4,9 @@ from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-# Just start and measure duration.
+# Start and measure duration with huge SLRU segments.
+# This test is similar to test_startup_simple, but it creates huge number of transactions
+# and records containing this XIDs. Autovacuum is disable for the table to prevent CLOG truncation.
 #
 # This test runs pretty quickly and can be informative when used in combination
 # with emulated network delay. Some useful delay commands:
@@ -75,7 +77,8 @@ def test_lazy_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchm
                 endpoint.start()
 
             with zenbenchmark.record_duration(f"{slru}_{i}_select"):
-                endpoint.safe_psql("select sum(x) from t")
+                sum = endpoint.safe_psql("select sum(x) from t")[0][0]
+                assert sum == 10000000
 
             # Get metrics
             metrics = requests.get(f"http://localhost:{endpoint.http_port}/metrics.json").json()
