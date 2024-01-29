@@ -768,8 +768,11 @@ impl Service {
     }
 
     /// This API is used by the cloud control plane to do coarse-grained control of tenants:
-    /// - Call with mode Attached* to upsert the tenant
-    /// - Call
+    /// - Call with mode Attached* to upsert the tenant.
+    /// - Call with mode Detached to switch to PolicyMode::Detached
+    ///
+    /// In future, calling with mode Secondary may switch to a detach-lite mode in which a tenant only has
+    /// secondary locations.
     pub(crate) async fn tenant_location_config(
         &self,
         tenant_id: TenantId,
