@@ -101,7 +101,7 @@ jobs:
     needs: [ check-permissions, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: neondatabase/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -134,7 +134,7 @@ jobs:
     needs: [ check-permissions, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: neondatabase/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -201,7 +201,7 @@ jobs:
     needs: [ check-permissions, tag, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: neondatabase/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # Raise locked memory limit for tokio-epoll-uring.
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
@@ -442,7 +442,7 @@ jobs:
     needs: [ check-permissions, build-neon, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: neondatabase/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
@@ -482,7 +482,7 @@ jobs:
     needs: [ check-permissions, build-neon, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: neondatabase/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -518,7 +518,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: neondatabase/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -562,7 +562,7 @@ jobs:
     needs: [ check-permissions, regress-tests, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: neondatabase/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
     strategy:
       fail-fast: false
@@ -731,9 +731,6 @@ jobs:
                 "https://index.docker.io/v1/": {
                   "auth": "${DOCKERHUB_AUTH}"
                 }
-              },
-              "credHelpers": {
-                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
               }
             }
           EOF
@@ -741,13 +738,12 @@ jobs:
       - name: Kaniko build neon
         run:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --cache-repo neondatabase/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tag }}
                            --build-arg TAG=${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+                           --build-arg REPOSITORY=neondatabase
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
@@ -777,9 +773,6 @@ jobs:
                 "https://index.docker.io/v1/": {
                   "auth": "${DOCKERHUB_AUTH}"
                 }
-              },
-              "credHelpers": {
-                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
               }
             }
           EOF
@@ -787,14 +780,13 @@ jobs:
       - name: Kaniko build compute tools
         run:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --cache-repo neondatabase/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+                           --build-arg REPOSITORY=neondatabase
                            --dockerfile Dockerfile.compute-tools
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
@@ -835,9 +827,6 @@ jobs:
                 "https://index.docker.io/v1/": {
                   "auth": "${DOCKERHUB_AUTH}"
                 }
-              },
-              "credHelpers": {
-                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
               }
             }
           EOF
@@ -845,15 +834,14 @@ jobs:
       - name: Kaniko build compute node with extensions
         run:
           /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --cache-repo neondatabase/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+                           --build-arg REPOSITORY=neondatabase
                            --dockerfile Dockerfile.compute-node
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --cleanup
 
@@ -861,6 +849,7 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
+  # TODO: merge with `compute-node-image` maybe?
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
     runs-on: [ self-hosted, gen3, large ]
@@ -875,6 +864,18 @@ jobs:
       VM_BUILDER_VERSION: v0.23.2
 
     steps:
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+
+      - uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
       - name: Checkout
         uses: actions/checkout@v1
         with:
@@ -889,18 +890,23 @@ jobs:
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
-          docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          docker pull neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Build vm image
         run: |
           ./vm-builder \
             -spec=vm-image-spec.yaml \
-            -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-            -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+            -src=neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
+            -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          docker push neondatabase/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
 
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image, compute-tools-image ]
@@ -922,7 +928,7 @@ jobs:
       - name: Verify image versions
         shell: bash # ensure no set -e for better error messages
         run: |
-          pageserver_version=$(docker run --rm 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
+          pageserver_version=$(docker run --rm neondatabase/neon:${{needs.tag.outputs.build-tag}} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
 
           echo "Pageserver version string: $pageserver_version"
 
@@ -937,7 +943,7 @@ jobs:
           fi
 
       - name: Verify docker-compose example
-        run: env REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
+        run: env REPOSITORY=neondatabase TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
 
       - name: Print logs and clean up
         if: always()
@@ -945,6 +951,8 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml logs || 0
           docker compose -f ./docker-compose/docker-compose.yml down
 
+  # DO NOT MERGE!
+  # TODO: update this job
   promote-images:
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: [ self-hosted, gen3, small ]
