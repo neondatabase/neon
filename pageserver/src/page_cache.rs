@@ -137,9 +137,9 @@ pub fn next_file_id() -> FileId {
 ///
 /// CacheKey uniquely identifies a "thing" to cache in the page cache.
 ///
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 #[allow(clippy::enum_variant_names)]
-enum CacheKey {
+pub(crate) enum CacheKey {
     ImmutableFilePage { file_id: FileId, blkno: u32 },
 }
 

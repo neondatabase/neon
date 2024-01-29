@@ -53,6 +53,8 @@ pub(crate) struct Args {
     keyspace_cache: Option<Utf8PathBuf>,
     #[clap(long)]
     set_io_engine: Option<String>,
+    #[clap(long)]
+    set_req_lru_size: Option<usize>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -107,6 +109,10 @@ async fn main_impl(
 
     if let Some(engine_str) = &args.set_io_engine {
         mgmt_api_client.set_io_engine(engine_str).await?;
+    }
+
+    if let Some(req_lru_size) = &args.set_req_lru_size {
+        mgmt_api_client.set_request_lru_size(*req_lru_size).await?;
     }
 
     // discover targets

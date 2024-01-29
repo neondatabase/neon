@@ -9,6 +9,7 @@ use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::Deref;
+use std::sync::Arc;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -36,7 +37,7 @@ where
 /// Reference to an in-memory copy of an immutable on-disk block.
 pub enum BlockLease<'a> {
     PageReadGuard(PageReadGuard<'static>),
-    BufferPool(crate::buffer_pool::Buffer),
+    BufferPool(Arc<crate::buffer_pool::Buffer>),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
@@ -219,6 +220,16 @@ impl FileBlockReader {
             }
             crate::context::PageContentKind::ImageLayerValue
             | crate::context::PageContentKind::DeltaLayerValue => {
+                let cache_key = page_cache::CacheKey::ImmutableFilePage {
+                    file_id: self.file_id,
+                    blkno: blknum,
+                };
+                if let Some(cache) = &ctx.buf_cache {
+                    let mut cache = cache.lock().unwrap();
+                    if let Some(cached) = cache.get(&cache_key) {
+                        return Ok(BlockLease::BufferPool(Arc::clone(cached)));
+                    };
+                }
                 let buf = crate::buffer_pool::get();
                 // Read the page from disk into the buffer
                 let buf = async move {
@@ -234,6 +245,10 @@ impl FileBlockReader {
                     )
                 }
                 .await?;
+                let buf = Arc::new(buf);
+                if let Some(cache) = &ctx.buf_cache {
+                    cache.lock().unwrap().put(cache_key, Arc::clone(&buf));
+                }
                 Ok(BlockLease::BufferPool(buf))
             }
         }

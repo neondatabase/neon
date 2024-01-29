@@ -86,6 +86,7 @@ enum-map.workspace = true
 enumset.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
+lru = "0.12.2"
 
 [dev-dependencies]
 criterion.workspace = true
