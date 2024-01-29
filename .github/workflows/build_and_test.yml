@@ -74,8 +74,10 @@ jobs:
           fetch-depth: 0
 
       - name: Get build tag
+        env: 
+          GITHUB_CONTEXT: ${{ toJson(github) }}
         run: |
-          echo run:$GITHUB_CONTEXT
+          echo "$GITHUB_CONTEXT"
           echo run:$GITHUB_RUN_ID
           echo ref:$GITHUB_REF_NAME
           echo rev:$(git rev-list --count HEAD)
