@@ -75,6 +75,7 @@ jobs:
 
       - name: Get build tag
         run: |
+          echo run:$GITHUB_CONTEXT
           echo run:$GITHUB_RUN_ID
           echo ref:$GITHUB_REF_NAME
           echo rev:$(git rev-list --count HEAD)
