@@ -76,7 +76,7 @@ use std::{
     convert::TryInto,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
-        Arc,
+        Arc, Weak,
     },
     time::Duration,
 };
@@ -164,7 +164,7 @@ struct Slot {
 struct SlotInner {
     key: Option<CacheKey>,
     // for `coalesce_readers_permit`
-    permit: std::sync::Mutex<permit_pool::PooledWeak>,
+    permit: std::sync::Mutex<Weak<PinnedSlotsPermit>>,
     buf: &'static mut SlotContents,
 }
 
@@ -217,19 +217,17 @@ impl Slot {
     }
 }
 
-mod permit_pool;
-
 impl SlotInner {
     /// If there is aready a reader, drop our permit and share its permit, just like we share read access.
-    fn coalesce_readers_permit(&self, permit: PinnedSlotsPermit) -> permit_pool::Pooled {
+    fn coalesce_readers_permit(&self, permit: PinnedSlotsPermit) -> Arc<PinnedSlotsPermit> {
         let mut guard = self.permit.lock().unwrap();
         if let Some(existing_permit) = guard.upgrade() {
             drop(guard);
             drop(permit);
             existing_permit
         } else {
-            let permit = permit_pool::get(permit);
-            *guard = permit_pool::Pooled::downgrade(&permit);
+            let permit = Arc::new(permit);
+            *guard = Arc::downgrade(&permit);
             permit
         }
     }
@@ -257,7 +255,7 @@ struct PinnedSlotsPermit(tokio::sync::OwnedSemaphorePermit);
 /// until the guard is dropped.
 ///
 pub struct PageReadGuard<'i> {
-    _permit: permit_pool::Pooled,
+    _permit: Arc<PinnedSlotsPermit>,
     slot_guard: tokio::sync::RwLockReadGuard<'i, SlotInner>,
 }
 
@@ -323,7 +321,7 @@ impl<'a> PageWriteGuard<'a> {
             PageWriteGuardState::Invalid { inner, _permit } => {
                 assert!(inner.key.is_some());
                 PageReadGuard {
-                    _permit: permit_pool::get(_permit),
+                    _permit: Arc::new(_permit),
                     slot_guard: inner.downgrade(),
                 }
             }
@@ -697,7 +695,7 @@ impl PageCache {
                 inner: tokio::sync::RwLock::new(SlotInner {
                     key: None,
                     buf: slot_contents,
-                    permit: std::sync::Mutex::new(permit_pool::PooledWeak::new()),
+                    permit: std::sync::Mutex::new(Weak::new()),
                 }),
                 usage_count: AtomicU8::new(0),
             })
