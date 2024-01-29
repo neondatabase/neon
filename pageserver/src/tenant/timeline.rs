@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::sync::gate::Gate;
 
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -40,23 +41,18 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use std::{
     cmp::{max, min, Ordering},
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     ops::ControlFlow,
 };
 
-use crate::tenant::disk_btree::PAGE_SZ;
-use crate::tenant::storage_layer::delta_layer::DeltaEntry;
-use crate::{
-    context::{AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder},
-    disk_usage_eviction_task::EvictionCandidate,
-};
-
-use crate::disk_usage_eviction_task::DiskUsageEvictionInfo;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
+};
+use crate::{
+    context::{AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder},
+    disk_usage_eviction_task::DiskUsageEvictionInfo,
 };
 use crate::{deletion_queue::DeletionQueueClient, tenant::remote_timeline_client::StopError};
 use crate::{
@@ -66,6 +62,9 @@ use crate::{
         LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
         ValueReconstructState,
     },
+};
+use crate::{
+    disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 
@@ -91,6 +90,7 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
+use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr;
@@ -2555,13 +2555,24 @@ impl Timeline {
         }
     }
 
+    /// # Cancel-safety
+    ///
+    /// This method is cancellation-safe.
     async fn lookup_cached_page(
         &self,
-        _key: &Key,
-        _lsn: Lsn,
-        _ctx: &RequestContext,
+        key: &Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Option<(Lsn, Bytes)> {
-        None
+        let cache = page_cache::get();
+
+        // FIXME: It's pointless to check the cache for things that are not 8kB pages.
+        // We should look at the key to determine if it's a cacheable object
+        let (lsn, read_guard) = cache
+            .lookup_materialized_page(self.tenant_shard_id, self.timeline_id, key, lsn, ctx)
+            .await?;
+        let img = Bytes::from(read_guard.to_vec());
+        Some((lsn, img))
     }
 
     fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
@@ -3607,7 +3618,7 @@ impl Timeline {
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
-        let min_hole_range = (target_file_size / PAGE_SZ as u64) as i128;
+        let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
 
         // min-heap (reserve space for one more element added before eviction)
@@ -3859,7 +3870,7 @@ impl Timeline {
             // Add two pages for potential overhead. This should in theory be already
             // accounted for in the target calculation, but for very small targets,
             // we still might easily hit the limit otherwise.
-            let warn_limit = target_file_size * 2 + PAGE_SZ as u64 * 2;
+            let warn_limit = target_file_size * 2 + page_cache::PAGE_SZ as u64 * 2;
             for layer in new_layers.iter() {
                 if layer.layer_desc().file_size > warn_limit {
                     warn!(
@@ -4387,6 +4398,8 @@ impl Timeline {
                     trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
                 };
 
+                let last_rec_lsn = data.records.last().unwrap().0;
+
                 let img = match self
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
@@ -4396,6 +4409,23 @@ impl Timeline {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::WalRedo(e)),
                 };
+
+                if img.len() == page_cache::PAGE_SZ {
+                    let cache = page_cache::get();
+                    if let Err(e) = cache
+                        .memorize_materialized_page(
+                            self.tenant_shard_id,
+                            self.timeline_id,
+                            key,
+                            last_rec_lsn,
+                            &img,
+                        )
+                        .await
+                        .context("Materialized page memoization failed")
+                    {
+                        return Err(PageReconstructError::from(e));
+                    }
+                }
 
                 Ok(img)
             }

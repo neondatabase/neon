@@ -12,9 +12,10 @@ use std::collections::BinaryHeap;
 use std::ops::Range;
 use std::{fs, str};
 
+use pageserver::page_cache::PAGE_SZ;
 use pageserver::repository::{Key, KEY_SIZE};
 use pageserver::tenant::block_io::FileBlockReader;
-use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection, PAGE_SZ};
+use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
 use pageserver::tenant::storage_layer::delta_layer::{Summary, DELTA_KEY_SIZE};
 use pageserver::tenant::storage_layer::range_overlaps;
 use pageserver::virtual_file::{self, VirtualFile};
@@ -142,6 +143,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
     pageserver::virtual_file::init(10, virtual_file::IoEngineKind::StdFs);
+    pageserver::page_cache::init(100);
 
     let mut total_delta_layers = 0usize;
     let mut total_image_layers = 0usize;
