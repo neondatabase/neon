@@ -694,7 +694,7 @@ impl RemoteStorage for S3Bucket {
             let new_versions_deletes = new_versions.chain(new_deletes);
             versions_deletes.extend(new_versions_deletes);
             fn none_if_empty(v: Option<String>) -> Option<String> {
-                v.and_then(|v| (!v.is_empty()).then_some(v))
+                v.filter(|v| !v.is_empty())
             }
             version_id_marker = none_if_empty(response.next_version_id_marker);
             key_marker = none_if_empty(response.next_key_marker);
