@@ -26,23 +26,31 @@ pub enum IoEngineKind {
     TokioEpollUring,
 }
 
-static IO_ENGINE: once_cell::sync::OnceCell<IoEngineKind> = once_cell::sync::OnceCell::new();
+static IO_ENGINE: std::sync::RwLock<Option<IoEngineKind>> = std::sync::RwLock::new(None);
+
+pub(crate) fn set(engine: IoEngineKind) {
+    let mut guard = IO_ENGINE.write().unwrap();
+    *guard = Some(engine);
+    let metric = &crate::metrics::virtual_file_io_engine::KIND;
+    metric.reset();
+    metric.with_label_values(&[&format!("{engine}")]).set(1);
+    drop(guard);
+}
 
 #[cfg(not(test))]
 pub(super) fn init(engine: IoEngineKind) {
-    if IO_ENGINE.set(engine).is_err() {
-        panic!("called twice");
-    }
-    crate::metrics::virtual_file_io_engine::KIND
-        .with_label_values(&[&format!("{engine}")])
-        .set(1);
+    set(engine);
 }
 
-pub(super) fn get() -> &'static IoEngineKind {
+pub(super) fn get() -> IoEngineKind {
     #[cfg(test)]
     {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE";
-        IO_ENGINE.get_or_init(|| match std::env::var(env_var_name) {
+        let guard = IO_ENGINE.read().unwrap();
+        if let Some(v) = guard.is_some() {
+            return v;
+        }
+        *guard = Some(match std::env::var(env_var_name) {
             Ok(v) => match v.parse::<IoEngineKind>() {
                 Ok(engine_kind) => engine_kind,
                 Err(e) => {
@@ -57,10 +65,13 @@ pub(super) fn get() -> &'static IoEngineKind {
             Err(std::env::VarError::NotUnicode(_)) => {
                 panic!("env var {env_var_name} is not unicode");
             }
-        })
+        });
     }
     #[cfg(not(test))]
-    IO_ENGINE.get().unwrap()
+    IO_ENGINE
+        .read()
+        .unwrap()
+        .expect("should have called set() or init() before")
 }
 
 use std::os::unix::prelude::FileExt;
