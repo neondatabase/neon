@@ -68,6 +68,7 @@ jobs:
 
   tag:
     needs: [ check-permissions ]
+    if: github.event.action != 'ready_for_review'
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
@@ -80,10 +81,7 @@ jobs:
           fetch-depth: 0
 
       - name: Get build tag
-        env: 
-          GITHUB_CONTEXT: ${{ toJson(github) }}
         run: |
-          echo "$GITHUB_CONTEXT"
           echo run:$GITHUB_RUN_ID
           echo ref:$GITHUB_REF_NAME
           echo rev:$(git rev-list --count HEAD)
@@ -701,7 +699,7 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft }}
+    if: !github.event.pull_request.draft
     needs: [ check-permissions, promote-images, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
