@@ -53,6 +53,7 @@ RUN set -e \
       --bin pagectl  \
       --bin safekeeper  \
       --bin storage_broker  \
+      --bin attachment_service  \
       --bin proxy  \
       --bin neon_local \
       --locked --release \
@@ -80,6 +81,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver     
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl             /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/attachment_service  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
 
