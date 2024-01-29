@@ -1946,3 +1946,51 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
             assert orig_digest == new_digest
 
     # TODO: test timelines can start after copy
+
+
+def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+    # initialize safekeeper
+    endpoint.safe_psql("create table t(key int, value text)")
+
+    # update control file
+    res = (
+        env.safekeepers[0]
+        .http_client()
+        .patch_control_file(
+            tenant_id,
+            timeline_id,
+            {
+                "timeline_start_lsn": "0/1",
+            },
+        )
+    )
+
+    timeline_start_lsn_before = res["old_control_file"]["timeline_start_lsn"]
+    timeline_start_lsn_after = res["new_control_file"]["timeline_start_lsn"]
+
+    log.info(f"patch_control_file response: {res}")
+    log.info(
+        f"updated control file timeline_start_lsn, before {timeline_start_lsn_before}, after {timeline_start_lsn_after}"
+    )
+
+    assert timeline_start_lsn_after == "0/1"
+    env.safekeepers[0].stop().start()
+
+    # wait/check that safekeeper is alive
+    endpoint.safe_psql("insert into t values (1, 'payload')")
+
+    # check that timeline_start_lsn is updated
+    res = (
+        env.safekeepers[0]
+        .http_client()
+        .debug_dump({"dump_control_file": "true", "timeline_id": str(timeline_id)})
+    )
+    log.info(f"dump_control_file response: {res}")
+    assert res["timelines"][0]["control_file"]["timeline_start_lsn"] == "0/1"
