@@ -694,7 +694,9 @@ impl RemoteStorage for S3Bucket {
                 .into_iter()
                 .map(VerOrDelete::from_delete_marker);
             let new_versions_and_deletes = new_versions.chain(new_deletes);
-            versions_and_deletes.extend(new_versions_and_deletes);
+            itertools::process_results(new_versions_and_deletes, |n_vds| {
+                versions_and_deletes.extend(n_vds)
+            })?;
             fn none_if_empty(v: Option<String>) -> Option<String> {
                 v.filter(|v| !v.is_empty())
             }
@@ -732,20 +734,8 @@ impl RemoteStorage for S3Bucket {
 
         for vd in &versions_and_deletes {
             let VerOrDelete {
-                last_modified,
-                version_id,
-                key,
-                ..
+                version_id, key, ..
             } = &vd;
-            let (Some(_last_modified), Some(version_id), Some(key)) =
-                (last_modified, version_id, key)
-            else {
-                anyhow::bail!(
-                    "One (or more) of last_modified, key, and id is None. \
-                    Is versioning enabled in the bucket? last_modified={:?} key={:?} version_id={:?}",
-                    last_modified, key, version_id,
-                );
-            };
             if version_id == "null" {
                 anyhow::bail!("Received ListVersions response for key={key} with version_id='null', \
                     indicating either disabled versioning, or legacy objects with null version id values");
@@ -759,18 +749,13 @@ impl RemoteStorage for S3Bucket {
         }
         for (key, versions) in vds_for_key {
             let last_vd = versions.last().unwrap();
-            if last_vd
-                .last_modified
-                .as_ref()
-                .expect("we checked this earlier")
-                > &&done_if_after
-            {
+            if &last_vd.last_modified > &done_if_after {
                 tracing::trace!("Key {key} has version later than done_if_after, skipping");
                 continue;
             }
             // the version we want to restore to.
             let version_to_restore_to =
-                match versions.binary_search_by_key(&timestamp, |tpl| *tpl.last_modified.as_ref().unwrap()) {
+                match versions.binary_search_by_key(&timestamp, |tpl| tpl.last_modified) {
                     Ok(v) => v,
                     Err(e) => e,
                 };
@@ -793,7 +778,6 @@ impl RemoteStorage for S3Bucket {
                         version_id,
                         ..
                     } => {
-                        let version_id = version_id.as_ref().expect("we checked this earlier");
                         tracing::trace!("Copying old version {version_id} for {key}...");
                         // Restore the state to the last version by copying
                         let source_id =
@@ -863,11 +847,13 @@ fn start_measuring_requests(
         )
     })
 }
+
+// Save RAM and only store the needed data instead of the entire ObjectVersion/DeleteMarkerEntry
 struct VerOrDelete {
     kind: VerOrDeleteKind,
-    last_modified: Option<DateTime>,
-    version_id: Option<String>,
-    key: Option<String>,
+    last_modified: DateTime,
+    version_id: String,
+    key: String,
 }
 
 #[derive(Debug)]
@@ -877,21 +863,44 @@ enum VerOrDeleteKind {
 }
 
 impl VerOrDelete {
-    fn from_version(v: ObjectVersion) -> Self {
-        Self {
-            kind: VerOrDeleteKind::Version,
-            last_modified: v.last_modified,
-            version_id: v.version_id,
-            key: v.key,
-        }
+    fn with_kind(
+        kind: VerOrDeleteKind,
+        last_modified: Option<DateTime>,
+        version_id: Option<String>,
+        key: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let lvk = (last_modified, version_id, key);
+        let (Some(last_modified), Some(version_id), Some(key)) = lvk else {
+            anyhow::bail!(
+                "One (or more) of last_modified, key, and id is None. \
+            Is versioning enabled in the bucket? last_modified={:?}, version_id={:?}, key={:?}",
+                lvk.0,
+                lvk.1,
+                lvk.2,
+            );
+        };
+        Ok(Self {
+            kind,
+            last_modified,
+            version_id,
+            key,
+        })
     }
-    fn from_delete_marker(v: DeleteMarkerEntry) -> Self {
-        Self {
-            kind: VerOrDeleteKind::DeleteMarker,
-            last_modified: v.last_modified,
-            version_id: v.version_id,
-            key: v.key,
-        }
+    fn from_version(v: ObjectVersion) -> anyhow::Result<Self> {
+        Self::with_kind(
+            VerOrDeleteKind::Version,
+            v.last_modified,
+            v.version_id,
+            v.key,
+        )
+    }
+    fn from_delete_marker(v: DeleteMarkerEntry) -> anyhow::Result<Self> {
+        Self::with_kind(
+            VerOrDeleteKind::DeleteMarker,
+            v.last_modified,
+            v.version_id,
+            v.key,
+        )
     }
 }
 
