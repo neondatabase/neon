@@ -3160,6 +3160,23 @@ class Endpoint(PgProtocol):
     ):
         self.stop()
 
+    def log_contains(self, pattern: str) -> Optional[str]:
+        """Check that the compute log contains a line that matches the given regex"""
+        logfile = self.endpoint_path() / "compute.log"
+        if not logfile.exists():
+            log.warning(f"Skipping log check: {logfile} does not exist")
+            return None
+
+        contains_re = re.compile(pattern)
+
+        with logfile.open("r") as f:
+            for line in f:
+                if contains_re.search(line):
+                    # found it!
+                    return line
+
+        return None
+
     # Checkpoints running endpoint and returns pg_wal size in MB.
     def get_pg_wal_size(self):
         log.info(f'checkpointing at LSN {self.safe_psql("select pg_current_wal_lsn()")[0][0]}')
