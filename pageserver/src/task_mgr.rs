@@ -104,29 +104,29 @@ use crate::shutdown_pageserver;
 // other operations, if the upload tasks e.g. get blocked on locks. It shouldn't
 // happen, but still.
 //
-pub static COMPUTE_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("compute request worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create compute request runtime")
-});
+// pub static COMPUTE_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+//     tokio::runtime::Builder::new_multi_thread()
+//         .thread_name("compute request worker")
+//         .enable_all()
+//         .build()
+//         .expect("Failed to create compute request runtime")
+// });
 
-pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("mgmt request worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create mgmt request runtime")
-});
+// pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+//     tokio::runtime::Builder::new_multi_thread()
+//         .thread_name("mgmt request worker")
+//         .enable_all()
+//         .build()
+//         .expect("Failed to create mgmt request runtime")
+// });
 
-pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("walreceiver worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create walreceiver runtime")
-});
+// pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+//     tokio::runtime::Builder::new_multi_thread()
+//         .thread_name("walreceiver worker")
+//         .enable_all()
+//         .build()
+//         .expect("Failed to create walreceiver runtime")
+// });
 
 pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -149,6 +149,10 @@ pub(crate) static BACKGROUND_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| 
         .map(|s| s.parse::<usize>().unwrap())
         .unwrap_or_else(|_e| usize::max(2, num_cpus::get()))
 });
+
+pub static COMPUTE_REQUEST_RUNTIME: &once_cell::sync::Lazy<Runtime> = &BACKGROUND_RUNTIME;
+pub static MGMT_REQUEST_RUNTIME: &once_cell::sync::Lazy<Runtime> = &BACKGROUND_RUNTIME;
+pub static WALRECEIVER_RUNTIME: &once_cell::sync::Lazy<Runtime> = &BACKGROUND_RUNTIME;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PageserverTaskId(u64);
