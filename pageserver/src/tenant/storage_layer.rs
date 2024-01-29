@@ -65,6 +65,7 @@ where
 pub struct ValueReconstructState {
     pub records: Vec<(Lsn, NeonWalRecord)>,
     pub img: Option<(Lsn, Bytes)>,
+    pub(crate) scratch: Vec<u8>,
 }
 
 /// Return value from [`Layer::get_value_reconstruct_data`]

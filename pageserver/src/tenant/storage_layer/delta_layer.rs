@@ -778,15 +778,14 @@ impl DeltaLayerInner {
 
         // Ok, 'offsets' now contains the offsets of all the entries we need to read
         let cursor = file.block_cursor();
-        let mut buf = Vec::new();
         for (entry_lsn, pos) in offsets {
             cursor
-                .read_blob_into_buf(pos, &mut buf, ctx)
+                .read_blob_into_buf(pos, &mut reconstruct_state.scratch, ctx)
                 .await
                 .with_context(|| {
                     format!("Failed to read blob from virtual file {}", file.file.path)
                 })?;
-            let val = Value::des(&buf).with_context(|| {
+            let val = Value::des(&reconstruct_state.scratch).with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
                     file.file.path

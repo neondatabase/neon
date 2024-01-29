@@ -601,6 +601,7 @@ impl Timeline {
         let mut reconstruct_state = ValueReconstructState {
             records: Vec::new(),
             img: None,
+            scratch: Vec::with_capacity(2 * 8192), // for good measure
         };
 
         let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
