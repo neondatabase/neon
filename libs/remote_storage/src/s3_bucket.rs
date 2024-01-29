@@ -659,7 +659,7 @@ impl RemoteStorage for S3Bucket {
 
         let mut key_marker = None;
         let mut version_id_marker = None;
-        let mut versions_deletes = Vec::new();
+        let mut versions_and_deletes = Vec::new();
 
         loop {
             let response = backoff::retry(
@@ -691,8 +691,8 @@ impl RemoteStorage for S3Bucket {
             let delete_markers = response.delete_markers.unwrap_or_default();
             let new_versions = versions.into_iter().map(VerOrDelete::Version);
             let new_deletes = delete_markers.into_iter().map(VerOrDelete::DeleteMarker);
-            let new_versions_deletes = new_versions.chain(new_deletes);
-            versions_deletes.extend(new_versions_deletes);
+            let new_versions_and_deletes = new_versions.chain(new_deletes);
+            versions_and_deletes.extend(new_versions_and_deletes);
             fn none_if_empty(v: Option<String>) -> Option<String> {
                 v.filter(|v| !v.is_empty())
             }
@@ -711,13 +711,13 @@ impl RemoteStorage for S3Bucket {
 
         // Work on the list of references instead of the objects directly,
         // otherwise we get lifetime errors in the sort_by_key call below.
-        let mut versions_deletes = versions_deletes.iter().collect::<Vec<_>>();
+        let mut versions_and_deletes = versions_and_deletes.iter().collect::<Vec<_>>();
 
-        versions_deletes.sort_by_key(|vd| (vd.key(), vd.last_modified()));
+        versions_and_deletes.sort_by_key(|vd| (vd.key(), vd.last_modified()));
 
         let mut vds_for_key = HashMap::<_, Vec<_>>::new();
 
-        for vd in &versions_deletes {
+        for vd in &versions_and_deletes {
             let last_modified = vd.last_modified();
             let version_id = vd.version_id();
             let key = vd.key();
