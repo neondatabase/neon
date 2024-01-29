@@ -689,8 +689,10 @@ impl RemoteStorage for S3Bucket {
             );
             let versions = response.versions.unwrap_or_default();
             let delete_markers = response.delete_markers.unwrap_or_default();
-            let new_versions = versions.into_iter().map(VerOrDelete::Version);
-            let new_deletes = delete_markers.into_iter().map(VerOrDelete::DeleteMarker);
+            let new_versions = versions.into_iter().map(VerOrDelete::from_version);
+            let new_deletes = delete_markers
+                .into_iter()
+                .map(VerOrDelete::from_delete_marker);
             let new_versions_and_deletes = new_versions.chain(new_deletes);
             versions_and_deletes.extend(new_versions_and_deletes);
             fn none_if_empty(v: Option<String>) -> Option<String> {
@@ -724,15 +726,18 @@ impl RemoteStorage for S3Bucket {
         // otherwise we get lifetime errors in the sort_by_key call below.
         let mut versions_and_deletes = versions_and_deletes.iter().collect::<Vec<_>>();
 
-        versions_and_deletes.sort_by_key(|vd| (vd.key(), vd.last_modified()));
+        versions_and_deletes.sort_by_key(|vd| (&vd.key, &vd.last_modified));
 
         let mut vds_for_key = HashMap::<_, Vec<_>>::new();
 
         for vd in &versions_and_deletes {
-            let last_modified = vd.last_modified();
-            let version_id = vd.version_id();
-            let key = vd.key();
-            let (Some(last_modified), Some(version_id), Some(key)) =
+            let VerOrDelete {
+                last_modified,
+                version_id,
+                key,
+                ..
+            } = &vd;
+            let (Some(_last_modified), Some(version_id), Some(key)) =
                 (last_modified, version_id, key)
             else {
                 anyhow::bail!(
@@ -746,24 +751,26 @@ impl RemoteStorage for S3Bucket {
                     indicating either disabled versioning, or legacy objects with null version id values");
             }
             tracing::trace!(
-                "Parsing version key={key} version_id={version_id} is_delete={}",
-                matches!(vd, VerOrDelete::DeleteMarker(_))
+                "Parsing version key={key} version_id={version_id} kind={:?}",
+                vd.kind
             );
 
-            vds_for_key
-                .entry(key)
-                .or_default()
-                .push((vd, last_modified, version_id));
+            vds_for_key.entry(key).or_default().push(vd);
         }
         for (key, versions) in vds_for_key {
-            let (last_vd, last_last_modified, _version_id) = versions.last().unwrap();
-            if last_last_modified > &&done_if_after {
+            let last_vd = versions.last().unwrap();
+            if last_vd
+                .last_modified
+                .as_ref()
+                .expect("we checked this earlier")
+                > &&done_if_after
+            {
                 tracing::trace!("Key {key} has version later than done_if_after, skipping");
                 continue;
             }
             // the version we want to restore to.
             let version_to_restore_to =
-                match versions.binary_search_by_key(&timestamp, |tpl| *tpl.1) {
+                match versions.binary_search_by_key(&timestamp, |tpl| *tpl.last_modified.as_ref().unwrap()) {
                     Ok(v) => v,
                     Err(e) => e,
                 };
@@ -781,7 +788,12 @@ impl RemoteStorage for S3Bucket {
                 do_delete = true;
             } else {
                 match &versions[version_to_restore_to - 1] {
-                    (VerOrDelete::Version(_), _last_modified, version_id) => {
+                    VerOrDelete {
+                        kind: VerOrDeleteKind::Version,
+                        version_id,
+                        ..
+                    } => {
+                        let version_id = version_id.as_ref().expect("we checked this earlier");
                         tracing::trace!("Copying old version {version_id} for {key}...");
                         // Restore the state to the last version by copying
                         let source_id =
@@ -806,13 +818,16 @@ impl RemoteStorage for S3Bucket {
                         )
                         .await?;
                     }
-                    (VerOrDelete::DeleteMarker(_), _last_modified, _version_id) => {
+                    VerOrDelete {
+                        kind: VerOrDeleteKind::DeleteMarker,
+                        ..
+                    } => {
                         do_delete = true;
                     }
                 }
             };
             if do_delete {
-                if matches!(last_vd, VerOrDelete::DeleteMarker(_)) {
+                if matches!(last_vd.kind, VerOrDeleteKind::DeleteMarker) {
                     // Key has since been deleted (but there was some history), no need to do anything
                     tracing::trace!("Key {key} already deleted, skipping.");
                 } else {
@@ -848,29 +863,34 @@ fn start_measuring_requests(
         )
     })
 }
+struct VerOrDelete {
+    kind: VerOrDeleteKind,
+    last_modified: Option<DateTime>,
+    version_id: Option<String>,
+    key: Option<String>,
+}
 
-enum VerOrDelete {
-    Version(ObjectVersion),
-    DeleteMarker(DeleteMarkerEntry),
+#[derive(Debug)]
+enum VerOrDeleteKind {
+    Version,
+    DeleteMarker,
 }
 
 impl VerOrDelete {
-    fn last_modified(&self) -> Option<&DateTime> {
-        match self {
-            VerOrDelete::Version(v) => v.last_modified(),
-            VerOrDelete::DeleteMarker(v) => v.last_modified(),
+    fn from_version(v: ObjectVersion) -> Self {
+        Self {
+            kind: VerOrDeleteKind::Version,
+            last_modified: v.last_modified,
+            version_id: v.version_id,
+            key: v.key,
         }
     }
-    fn version_id(&self) -> Option<&str> {
-        match self {
-            VerOrDelete::Version(v) => v.version_id(),
-            VerOrDelete::DeleteMarker(v) => v.version_id(),
-        }
-    }
-    fn key(&self) -> Option<&str> {
-        match self {
-            VerOrDelete::Version(v) => v.key(),
-            VerOrDelete::DeleteMarker(v) => v.key(),
+    fn from_delete_marker(v: DeleteMarkerEntry) -> Self {
+        Self {
+            kind: VerOrDeleteKind::DeleteMarker,
+            last_modified: v.last_modified,
+            version_id: v.version_id,
+            key: v.key,
         }
     }
 }
