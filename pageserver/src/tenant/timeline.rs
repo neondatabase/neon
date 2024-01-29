@@ -70,9 +70,7 @@ use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKin
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
-use crate::metrics::{
-    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
-};
+use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
 use pageserver_api::key::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
@@ -592,30 +590,9 @@ impl Timeline {
             ctx.task_kind()
         );
 
-        // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
-        // The cached image can be returned directly if there is no WAL between the cached image
-        // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
-        // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn, ctx).await {
-            Some((cached_lsn, cached_img)) => {
-                match cached_lsn.cmp(&lsn) {
-                    Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => {
-                        MATERIALIZED_PAGE_CACHE_HIT_DIRECT.inc();
-                        return Ok(cached_img); // exact LSN match, return the image
-                    }
-                    Ordering::Greater => {
-                        unreachable!("the returned lsn should never be after the requested lsn")
-                    }
-                }
-                Some((cached_lsn, cached_img))
-            }
-            None => None,
-        };
-
         let mut reconstruct_state = ValueReconstructState {
             records: Vec::new(),
-            img: cached_page_img,
+            img: None,
         };
 
         let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
@@ -2351,7 +2328,6 @@ impl Timeline {
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
-                        MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
                         return Ok(traversal_path);
                     }
                     if prev_lsn <= cont_lsn {
@@ -2553,26 +2529,6 @@ impl Timeline {
                 continue 'outer;
             }
         }
-    }
-
-    /// # Cancel-safety
-    ///
-    /// This method is cancellation-safe.
-    async fn lookup_cached_page(
-        &self,
-        key: &Key,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Option<(Lsn, Bytes)> {
-        let cache = page_cache::get();
-
-        // FIXME: It's pointless to check the cache for things that are not 8kB pages.
-        // We should look at the key to determine if it's a cacheable object
-        let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_shard_id, self.timeline_id, key, lsn, ctx)
-            .await?;
-        let img = Bytes::from(read_guard.to_vec());
-        Some((lsn, img))
     }
 
     fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
@@ -4398,8 +4354,6 @@ impl Timeline {
                     trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
                 };
 
-                let last_rec_lsn = data.records.last().unwrap().0;
-
                 let img = match self
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
@@ -4409,23 +4363,6 @@ impl Timeline {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::WalRedo(e)),
                 };
-
-                if img.len() == page_cache::PAGE_SZ {
-                    let cache = page_cache::get();
-                    if let Err(e) = cache
-                        .memorize_materialized_page(
-                            self.tenant_shard_id,
-                            self.timeline_id,
-                            key,
-                            last_rec_lsn,
-                            &img,
-                        )
-                        .await
-                        .context("Materialized page memoization failed")
-                    {
-                        return Err(PageReconstructError::from(e));
-                    }
-                }
 
                 Ok(img)
             }
