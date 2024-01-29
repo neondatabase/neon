@@ -810,8 +810,7 @@ impl Service {
                 // we go to secondary-only mode.  If they ask for detached we detach.
                 match req.config.mode {
                     LocationConfigMode::Detached => {
-                        // TODO: implement PlacementPolicy::Detached
-                        todo!();
+                        shard.policy = PlacementPolicy::Detached;
                     }
                     LocationConfigMode::Secondary => {
                         // TODO: implement secondary-only mode.
@@ -856,7 +855,8 @@ impl Service {
                 // Validate request mode
                 match req.config.mode {
                     LocationConfigMode::Detached | LocationConfigMode::Secondary => {
-                        // We can only import attached tenants, because we need the request to come with a generation
+                        // When using this API to onboard an existing tenant to this service, it must start in
+                        // an attached state, because we need the request to come with a generation
                         return Err(ApiError::BadRequest(anyhow::anyhow!(
                             "Imported tenant must be in attached mode"
                         )));
