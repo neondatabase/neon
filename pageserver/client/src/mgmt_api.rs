@@ -275,4 +275,13 @@ impl Client {
             .await
             .map_err(Error::ReceiveBody)
     }
+
+    pub async fn set_io_engine(&self, engine_str: &str) -> Result<()> {
+        let uri = format!("{}/v1/set_io_engine", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, engine_str)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
 }
