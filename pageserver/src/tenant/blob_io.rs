@@ -25,6 +25,7 @@ impl<'a> BlockCursor<'a> {
         offset: u64,
         ctx: &RequestContext,
     ) -> Result<Vec<u8>, std::io::Error> {
+        // TODO: used pooled allocation instead, used by ImageLayer::get_value_reconstruct_data
         let mut buf = Vec::new();
         self.read_blob_into_buf(offset, &mut buf, ctx).await?;
         Ok(buf)

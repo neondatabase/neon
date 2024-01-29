@@ -112,6 +112,8 @@ fn can_apply_in_neon(rec: &NeonWalRecord) -> bool {
     }
 }
 
+mod writebuf_pool;
+
 ///
 /// Public interface of WAL redo manager
 ///
@@ -798,7 +800,8 @@ impl WalRedoProcess {
         // Most requests start with a before-image with BLCKSZ bytes, followed by
         // by some other WAL records. Start with a buffer that can hold that
         // comfortably.
-        let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
+        // TODO replace with allocation pool
+        let mut writebuf: writebuf_pool::PooledVecU8 = writebuf_pool::get();
         build_begin_redo_for_block_msg(tag, &mut writebuf);
         if let Some(img) = base_img {
             build_push_page_msg(tag, img, &mut writebuf);
