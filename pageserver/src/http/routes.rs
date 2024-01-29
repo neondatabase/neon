@@ -2063,5 +2063,17 @@ pub fn make_router(
             }
             api_handler(r, set_io_engine_handler)
         })
+        .put("/v1/set_req_lru_size", |r| {
+            async fn set_req_lru_size_handler(
+                mut r: Request<Body>,
+                _cancel: CancellationToken,
+            ) -> Result<Response<Body>, ApiError> {
+                let size: usize = json_request(&mut r).await?;
+                crate::tenant::timeline::REQ_LRU_SIZE
+                    .store(size, std::sync::atomic::Ordering::Relaxed);
+                json_response(StatusCode::OK, ())
+            }
+            api_handler(r, set_req_lru_size_handler)
+        })
         .any(handler_404))
 }

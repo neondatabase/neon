@@ -7,6 +7,8 @@ pub mod span;
 pub mod uninit;
 mod walreceiver;
 
+pub(crate) static REQ_LRU_SIZE: AtomicUsize = AtomicUsize::new(0);
+
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -33,8 +35,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::sync::gate::Gate;
 
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
-use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -42,6 +42,14 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{
     cmp::{max, min, Ordering},
     ops::ControlFlow,
+};
+use std::{
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    sync::atomic::AtomicUsize,
+};
+use std::{
+    num::NonZeroUsize,
+    ops::{Deref, Range},
 };
 
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
@@ -2290,6 +2298,16 @@ impl Timeline {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> Result<Vec<TraversalPathItem>, PageReconstructError> {
+        let mut ctx = RequestContextBuilder::extend(ctx).build();
+        ctx.buf_cache = match REQ_LRU_SIZE.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            x => Some(Arc::new(Mutex::new(lru::LruCache::new(
+                // SAFETY: we just checked for 0 above
+                unsafe { NonZeroUsize::new_unchecked(x) },
+            )))),
+        };
+        let ctx = &ctx;
+
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;

@@ -284,4 +284,13 @@ impl Client {
             .await
             .map_err(Error::ReceiveBody)
     }
+
+    pub async fn set_request_lru_size(&self, size: usize) -> Result<()> {
+        let uri = format!("{}/v1/set_req_lru_size", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, size)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
 }

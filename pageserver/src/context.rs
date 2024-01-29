@@ -86,7 +86,9 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
-use crate::task_mgr::TaskKind;
+use std::sync::{Arc, Mutex};
+
+use crate::{buffer_pool, page_cache, task_mgr::TaskKind};
 
 // The main structure of this module, see module-level comment.
 #[derive(Clone, Debug)]
@@ -95,6 +97,8 @@ pub struct RequestContext {
     download_behavior: DownloadBehavior,
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
+    pub(crate) buf_cache:
+        Option<Arc<Mutex<lru::LruCache<page_cache::CacheKey, Arc<buffer_pool::Buffer>>>>>,
 }
 
 /// The kind of access to the page cache.
@@ -150,6 +154,7 @@ impl RequestContextBuilder {
                 download_behavior: DownloadBehavior::Download,
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
+                buf_cache: None,
             },
         }
     }
@@ -163,6 +168,7 @@ impl RequestContextBuilder {
                 download_behavior: original.download_behavior,
                 access_stats_behavior: original.access_stats_behavior,
                 page_content_kind: original.page_content_kind,
+                buf_cache: original.buf_cache.as_ref().map(Arc::clone),
             },
         }
     }
