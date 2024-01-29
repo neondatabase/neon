@@ -21,10 +21,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 
-# TODO: remove this after DB persistence is added, it is only used for
-# a parsing function when loading pageservers from neon_local LocalEnv
-postgres_backend.workspace = true
-
 diesel = { version = "2.1.4", features = ["serde_json", "postgres"] }
 
 utils = { path = "../../libs/utils/" }
