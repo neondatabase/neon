@@ -40,7 +40,6 @@ jobs:
         else
           MESSAGE="The PR should be reviewed and labelled with 'approved-for-ci-run' to trigger a CI run"
         fi
-        echo "$GITHUB_CONTEXT" 
 
         echo >&2 "We don't run CI for PRs from forks"
         echo >&2 "${MESSAGE}"
@@ -693,7 +692,7 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft }} 
+    if: ${{ !github.event.pull_request.draft }}
     needs: [ check-permissions, promote-images, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -705,7 +704,6 @@ jobs:
           # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
           # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
           # to place a job run status update later.
-          ${{github.event.pull_request.}}
           COMMIT_SHA=${{ github.event.pull_request.head.sha }}
           # For non-PR kinds of runs, the above will produce an empty variable, pick the original sha value for those
           COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
