@@ -137,6 +137,13 @@ def test_sharding_service_passthrough(
     timelines = client.timeline_list(tenant_id=env.initial_tenant)
     assert len(timelines) == 1
 
+    status = client.tenant_status(env.initial_tenant)
+    assert TenantId(status["id"]) == env.initial_tenant
+    assert set(TimelineId(t) for t in status["timelines"]) == {
+        env.initial_timeline,
+    }
+    assert status["state"]["slug"] == "Active"
+
 
 def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
