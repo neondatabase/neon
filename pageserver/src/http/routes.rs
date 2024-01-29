@@ -187,6 +187,7 @@ impl From<TenantSlotUpsertError> for ApiError {
         match e {
             InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
             MapState(e) => e.into(),
+            ShuttingDown(_) => ApiError::ShuttingDown,
         }
     }
 }
@@ -495,6 +496,10 @@ async fn timeline_create_handler(
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
+            Err(_) if tenant.cancel.is_cancelled() => {
+                // In case we get some ugly error type during shutdown, cast it into a clean 503.
+                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg("Tenant shutting down".to_string()))
+            }
             Err(tenant::CreateTimelineError::Conflict | tenant::CreateTimelineError::AlreadyCreating) => {
                 json_response(StatusCode::CONFLICT, ())
             }
@@ -559,6 +564,43 @@ async fn timeline_list_handler(
     .await?;
 
     json_response(StatusCode::OK, response_data)
+}
+
+async fn timeline_preserve_initdb_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    // Part of the process for disaster recovery from safekeeper-stored WAL:
+    // If we don't recover into a new timeline but want to keep the timeline ID,
+    // then the initdb archive is deleted. This endpoint copies it to a different
+    // location where timeline recreation cand find it.
+
+    async {
+        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+
+        let timeline = tenant
+            .get_timeline(timeline_id, false)
+            .map_err(|e| ApiError::NotFound(e.into()))?;
+
+        timeline
+            .preserve_initdb_archive()
+            .await
+            .context("preserving initdb archive")
+            .map_err(ApiError::InternalServerError)?;
+
+        Ok::<_, ApiError>(())
+    }
+    .instrument(info_span!("timeline_preserve_initdb_archive",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug(),
+                %timeline_id))
+    .await?;
+
+    json_response(StatusCode::OK, ())
 }
 
 async fn timeline_detail_handler(
@@ -1220,19 +1262,9 @@ async fn tenant_create_handler(
     };
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
-    if let res @ Err(_) = new_tenant
+    new_tenant
         .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
-        .await
-    {
-        // This shouldn't happen because we just created the tenant directory
-        // in upsert_location, and there aren't any remote timelines
-        // to load, so, nothing can really fail during load.
-        // Don't do cleanup because we don't know how we got here.
-        // The tenant will likely be in `Broken` state and subsequent
-        // calls will fail.
-        res.context("created tenant failed to become active")
-            .map_err(ApiError::InternalServerError)?;
-    }
+        .await?;
 
     json_response(
         StatusCode::CREATED,
@@ -1943,6 +1975,10 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/ignore", |r| {
             api_handler(r, tenant_ignore_handler)
         })
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
+            |r| api_handler(r, timeline_preserve_initdb_handler),
+        )
         .get("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)
         })

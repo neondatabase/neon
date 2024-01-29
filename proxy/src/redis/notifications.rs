@@ -3,9 +3,8 @@ use std::{convert::Infallible, sync::Arc};
 use futures::StreamExt;
 use redis::aio::PubSub;
 use serde::Deserialize;
-use smol_str::SmolStr;
 
-use crate::cache::project_info::ProjectInfoCache;
+use crate::{cache::project_info::ProjectInfoCache, ProjectId, RoleName};
 
 const CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -46,12 +45,12 @@ enum Notification {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct AllowedIpsUpdate {
-    project_id: SmolStr,
+    project_id: ProjectId,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct PasswordUpdate {
-    project_id: SmolStr,
-    role_name: SmolStr,
+    project_id: ProjectId,
+    role_name: RoleName,
 }
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where

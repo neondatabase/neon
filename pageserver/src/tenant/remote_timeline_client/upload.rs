@@ -13,8 +13,8 @@ use super::Generation;
 use crate::{
     config::PageServerConf,
     tenant::remote_timeline_client::{
-        index::IndexPart, remote_index_path, remote_initdb_archive_path, remote_path,
-        upload_cancellable,
+        index::IndexPart, remote_index_path, remote_initdb_archive_path,
+        remote_initdb_preserved_archive_path, remote_path, upload_cancellable,
     },
 };
 use remote_storage::GenericRemoteStorage;
@@ -143,4 +143,17 @@ pub(crate) async fn upload_initdb_dir(
     )
     .await
     .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
+}
+
+pub(crate) async fn preserve_initdb_archive(
+    storage: &GenericRemoteStorage,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    let source_path = remote_initdb_archive_path(tenant_id, timeline_id);
+    let dest_path = remote_initdb_preserved_archive_path(tenant_id, timeline_id);
+    upload_cancellable(cancel, storage.copy_object(&source_path, &dest_path))
+        .await
+        .with_context(|| format!("backing up initdb archive for '{tenant_id} / {timeline_id}'"))
 }

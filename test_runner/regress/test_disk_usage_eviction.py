@@ -2,7 +2,7 @@ import enum
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Iterable, Tuple
 
 import pytest
 import toml
@@ -121,17 +121,7 @@ class EvictionEnv:
         }
 
     def count_layers_per_tenant(self, pageserver: NeonPageserver) -> Dict[TenantId, int]:
-        ret: Counter[TenantId] = Counter()
-
-        for tenant_id, timeline_id in self.timelines:
-            timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
-            assert timeline_dir.exists()
-            for file in timeline_dir.iterdir():
-                if "__" not in file.name:
-                    continue
-                ret[tenant_id] += 1
-
-        return dict(ret)
+        return count_layers_per_tenant(pageserver, self.timelines)
 
     def warm_up_tenant(self, tenant_id: TenantId):
         """
@@ -199,6 +189,22 @@ class EvictionEnv:
         wait_until(10, 1, statvfs_called)
 
 
+def count_layers_per_tenant(
+    pageserver: NeonPageserver, timelines: Iterable[Tuple[TenantId, TimelineId]]
+) -> Dict[TenantId, int]:
+    ret: Counter[TenantId] = Counter()
+
+    for tenant_id, timeline_id in timelines:
+        timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
+        assert timeline_dir.exists()
+        for file in timeline_dir.iterdir():
+            if "__" not in file.name:
+                continue
+            ret[tenant_id] += 1
+
+    return dict(ret)
+
+
 def human_bytes(amt: float) -> str:
     suffixes = ["", "Ki", "Mi", "Gi"]
 
@@ -243,21 +249,7 @@ def _eviction_env(
 
     timelines = []
     for scale in pgbench_scales:
-        tenant_id, timeline_id = env.neon_cli.create_tenant(
-            conf={
-                "gc_period": "0s",
-                "compaction_period": "0s",
-                "checkpoint_distance": f"{layer_size}",
-                "image_creation_threshold": "100",
-                "compaction_target_size": f"{layer_size}",
-            }
-        )
-
-        with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-            pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
-            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-
-        timelines.append((tenant_id, timeline_id))
+        timelines.append(pgbench_init_tenant(layer_size, scale, env, pg_bin))
 
     # stop the safekeepers to avoid on-demand downloads caused by
     # initial logical size calculation triggered by walreceiver connection status
@@ -266,31 +258,62 @@ def _eviction_env(
 
     # after stopping the safekeepers, we know that no new WAL will be coming in
     for tenant_id, timeline_id in timelines:
-        pageserver_http = env.get_tenant_pageserver(tenant_id).http_client()
-
-        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-        wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
-        tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
-        assert tl_info["last_record_lsn"] == tl_info["disk_consistent_lsn"]
-        assert tl_info["disk_consistent_lsn"] == tl_info["remote_consistent_lsn"]
-        pgbench_init_lsns[tenant_id] = Lsn(tl_info["last_record_lsn"])
-
-        layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
-        log.info(f"{layers}")
-        assert (
-            len(layers.historic_layers) >= 10
-        ), "evictions happen at layer granularity, but we often assert at byte-granularity"
+        pgbench_init_lsns[tenant_id] = finish_tenant_creation(env, tenant_id, timeline_id, 10)
 
     eviction_env = EvictionEnv(
         timelines=timelines,
         neon_env=env,
-        pageserver_http=pageserver_http,
+        # this last tenant http client works for num_pageservers=1
+        pageserver_http=env.get_tenant_pageserver(timelines[-1][0]).http_client(),
         layer_size=layer_size,
         pg_bin=pg_bin,
         pgbench_init_lsns=pgbench_init_lsns,
     )
 
     return eviction_env
+
+
+def pgbench_init_tenant(
+    layer_size: int, scale: int, env: NeonEnv, pg_bin: PgBin
+) -> Tuple[TenantId, TimelineId]:
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{layer_size}",
+            "image_creation_threshold": "100",
+            "compaction_target_size": f"{layer_size}",
+        }
+    )
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    return (tenant_id, timeline_id)
+
+
+def finish_tenant_creation(
+    env: NeonEnv,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    min_expected_layers: int,
+) -> Lsn:
+    pageserver_http = env.get_tenant_pageserver(tenant_id).http_client()
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
+    tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
+    assert tl_info["last_record_lsn"] == tl_info["disk_consistent_lsn"]
+    assert tl_info["disk_consistent_lsn"] == tl_info["remote_consistent_lsn"]
+    pgbench_init_lsn = Lsn(tl_info["last_record_lsn"])
+
+    layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
+    # log.info(f"{layers}")
+    assert (
+        len(layers.historic_layers) >= min_expected_layers
+    ), "evictions happen at layer granularity, but we often assert at byte-granularity"
+
+    return pgbench_init_lsn
 
 
 @pytest.fixture
@@ -598,9 +621,82 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
             assert abs_diff < 0.05
 
 
+@pytest.mark.parametrize(
+    "order",
+    [
+        EvictionOrder.ABSOLUTE_ORDER,
+        EvictionOrder.RELATIVE_ORDER_EQUAL,
+        EvictionOrder.RELATIVE_ORDER_SPARE,
+    ],
+)
+def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, order: EvictionOrder):
+    """
+    Create in order first smaller tenants and finally a single larger tenant.
+    Assert that with relative order modes, the disk usage based eviction is
+    more fair towards the smaller tenants.
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+    env.pageserver.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
+
+    # initial_tenant and initial_timeline do not exist
+
+    # create N tenants the same fashion as EvictionEnv
+    layer_size = 5 * 1024**2
+    timelines = []
+    for scale in [1, 1, 1, 4]:
+        timelines.append((pgbench_init_tenant(layer_size, scale, env, pg_bin), scale))
+
+    env.neon_cli.safekeeper_stop()
+
+    for (tenant_id, timeline_id), scale in timelines:
+        min_expected_layers = 4 if scale == 1 else 10
+        finish_tenant_creation(env, tenant_id, timeline_id, min_expected_layers)
+
+    tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
+    (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, False)
+
+    # cut 10 percent
+    response = env.pageserver.http_client().disk_usage_eviction_run(
+        {"evict_bytes": total_on_disk // 10, "eviction_order": order.config()}
+    )
+    log.info(f"{response}")
+
+    after_tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
+
+    ratios = []
+    for i, ((tenant_id, _timeline_id), _scale) in enumerate(timelines):
+        # we expect the oldest to suffer most
+        originally, after = tenant_layers[tenant_id], after_tenant_layers[tenant_id]
+        log.info(f"{i + 1}th tenant went from {originally} -> {after}")
+        ratio = after / originally
+        ratios.append(ratio)
+
+    assert (
+        len(ratios) == 4
+    ), "rest of the assertions expect 3 + 1 timelines, ratios, scales, all in order"
+    log.info(f"{ratios}")
+
+    if order == EvictionOrder.ABSOLUTE_ORDER:
+        # first tenant loses most
+        assert ratios[0] <= ratios[1], "first should lose the most"
+        assert ratios[1] < ratios[2], "second should lose some"
+        assert ratios[1] < 1.0
+        assert ratios[2] <= ratios[3], "third might not lose"
+        assert ratios[3] == 1.0, "tenant created last does not lose"
+    elif order == EvictionOrder.RELATIVE_ORDER_EQUAL:
+        assert all([x for x in ratios if x < 1.0]), "all tenants lose layers"
+    elif order == EvictionOrder.RELATIVE_ORDER_SPARE:
+        # with different layer sizes and pg versions, there are different combinations
+        assert len([x for x in ratios if x < 1.0]) >= 2, "require 2..4 tenants to lose layers"
+        assert ratios[3] < 1.0, "largest tenant always loses layers"
+    else:
+        raise RuntimeError(f"unimplemented {order}")
+
+
 def poor_mans_du(
     env: NeonEnv,
-    timelines: list[Tuple[TenantId, TimelineId]],
+    timelines: Iterable[Tuple[TenantId, TimelineId]],
     pageserver: NeonPageserver,
     verbose: bool = False,
 ) -> Tuple[int, int, int]:

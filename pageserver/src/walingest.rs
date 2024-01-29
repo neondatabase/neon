@@ -33,11 +33,12 @@ use utils::failpoint_support;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
-use crate::pgdatadir_mapping::*;
+use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
+use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
@@ -1032,7 +1033,23 @@ impl WalIngest {
             // Copy content
             debug!("copying rel {} to {}, {} blocks", src_rel, dst_rel, nblocks);
             for blknum in 0..nblocks {
-                debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
+                // Sharding:
+                //  - src and dst are always on the same shard, because they differ only by dbNode, and
+                //    dbNode is not included in the hash inputs for sharding.
+                //  - This WAL command is replayed on all shards, but each shard only copies the blocks
+                //    that belong to it.
+                let src_key = rel_block_to_key(src_rel, blknum);
+                if !self.shard.is_key_local(&src_key) {
+                    debug!(
+                        "Skipping non-local key {} during XLOG_DBASE_CREATE",
+                        src_key
+                    );
+                    continue;
+                }
+                debug!(
+                    "copying block {} from {} ({}) to {}",
+                    blknum, src_rel, src_key, dst_rel
+                );
 
                 let content = modification
                     .tline
@@ -1346,16 +1363,22 @@ impl WalIngest {
             self.checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
             self.checkpoint_modified = true;
         }
-        let max_mbr_xid = xlrec.members.iter().fold(0u32, |acc, mbr| {
-            if mbr.xid.wrapping_sub(acc) as i32 > 0 {
-                mbr.xid
+        let max_mbr_xid = xlrec.members.iter().fold(None, |acc, mbr| {
+            if let Some(max_xid) = acc {
+                if mbr.xid.wrapping_sub(max_xid) as i32 > 0 {
+                    Some(mbr.xid)
+                } else {
+                    acc
+                }
             } else {
-                acc
+                Some(mbr.xid)
             }
         });
 
-        if self.checkpoint.update_next_xid(max_mbr_xid) {
-            self.checkpoint_modified = true;
+        if let Some(max_xid) = max_mbr_xid {
+            if self.checkpoint.update_next_xid(max_xid) {
+                self.checkpoint_modified = true;
+            }
         }
         Ok(())
     }

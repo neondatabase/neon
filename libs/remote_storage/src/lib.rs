@@ -25,6 +25,7 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use toml_edit::Item;
 use tracing::info;
 
@@ -142,7 +143,7 @@ pub struct Listing {
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
-#[async_trait::async_trait]
+#[allow(async_fn_in_trait)]
 pub trait RemoteStorage: Send + Sync + 'static {
     /// Lists all top level subdirectories for a given prefix
     /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
@@ -210,6 +211,15 @@ pub trait RemoteStorage: Send + Sync + 'static {
 
     /// Copy a remote object inside a bucket from one path to another.
     async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()>;
+
+    /// Resets the content of everything with the given prefix to the given state
+    async fn time_travel_recover(
+        &self,
+        prefix: Option<&RemotePath>,
+        timestamp: SystemTime,
+        done_if_after: SystemTime,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()>;
 }
 
 pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
@@ -262,14 +272,15 @@ impl std::error::Error for DownloadError {}
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
 #[derive(Clone)]
-pub enum GenericRemoteStorage {
+// Require Clone for `Other` due to https://github.com/rust-lang/rust/issues/26925
+pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
     AzureBlob(Arc<AzureBlobStorage>),
-    Unreliable(Arc<UnreliableWrapper>),
+    Unreliable(Other),
 }
 
-impl GenericRemoteStorage {
+impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     pub async fn list(
         &self,
         prefix: Option<&RemotePath>,
@@ -384,6 +395,33 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.copy(from, to).await,
             Self::AzureBlob(s) => s.copy(from, to).await,
             Self::Unreliable(s) => s.copy(from, to).await,
+        }
+    }
+
+    pub async fn time_travel_recover(
+        &self,
+        prefix: Option<&RemotePath>,
+        timestamp: SystemTime,
+        done_if_after: SystemTime,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                    .await
+            }
+            Self::AwsS3(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                    .await
+            }
+            Self::AzureBlob(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                    .await
+            }
+            Self::Unreliable(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
+                    .await
+            }
         }
     }
 }
@@ -673,6 +711,7 @@ impl ConcurrencyLimiter {
             RequestKind::List => &self.read,
             RequestKind::Delete => &self.write,
             RequestKind::Copy => &self.write,
+            RequestKind::TimeTravel => &self.write,
         }
     }
 

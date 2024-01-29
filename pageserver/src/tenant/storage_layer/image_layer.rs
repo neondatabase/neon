@@ -34,7 +34,7 @@ use crate::tenant::storage_layer::{
     LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
 use crate::tenant::Timeline;
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
@@ -327,7 +327,7 @@ impl ImageLayer {
     {
         let file = VirtualFile::open_with_options(
             path,
-            &*std::fs::OpenOptions::new().read(true).write(true),
+            virtual_file::OpenOptions::new().read(true).write(true),
         )
         .await
         .with_context(|| format!("Failed to open file '{}'", path))?;
@@ -492,11 +492,15 @@ impl ImageLayerWriterInner {
             },
         );
         info!("new image layer {path}");
-        let mut file = VirtualFile::open_with_options(
-            &path,
-            std::fs::OpenOptions::new().write(true).create_new(true),
-        )
-        .await?;
+        let mut file = {
+            VirtualFile::open_with_options(
+                &path,
+                virtual_file::OpenOptions::new()
+                    .write(true)
+                    .create_new(true),
+            )
+            .await?
+        };
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);

@@ -203,6 +203,16 @@ def test_import_at_2bil(
         $$;
         """
     )
+
+    # Also create a multi-XID with members past the 2 billion mark
+    conn2 = endpoint.connect()
+    cur2 = conn2.cursor()
+    cur.execute("INSERT INTO t VALUES ('x')")
+    cur.execute("BEGIN; select * from t WHERE t = 'x' FOR SHARE;")
+    cur2.execute("BEGIN; select * from t WHERE t = 'x' FOR SHARE;")
+    cur.execute("COMMIT")
+    cur2.execute("COMMIT")
+
     # A checkpoint writes a WAL record with xl_xid=0. Many other WAL
     # records would have the same effect.
     cur.execute("checkpoint")
@@ -217,4 +227,4 @@ def test_import_at_2bil(
     conn = endpoint.connect()
     cur = conn.cursor()
     cur.execute("SELECT count(*) from t")
-    assert cur.fetchone() == (10000 + 1,)
+    assert cur.fetchone() == (10000 + 1 + 1,)

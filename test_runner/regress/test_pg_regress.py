@@ -2,25 +2,40 @@
 # This file runs pg_regress-based tests.
 #
 from pathlib import Path
+from typing import Optional
 
-from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
+import pytest
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    check_restored_datadir_content,
+)
+from fixtures.remote_storage import s3_storage
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
+@pytest.mark.parametrize("shard_count", [None, 4])
 def test_pg_regress(
-    neon_simple_env: NeonEnv,
+    neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
     pg_bin,
     capsys,
     base_dir: Path,
     pg_distrib_dir: Path,
+    shard_count: Optional[int],
 ):
-    env = neon_simple_env
+    """
+    :param shard_count: if None, create an unsharded tenant.  Otherwise create a tenant with this
+                        many shards.
+    """
+    if shard_count is not None:
+        neon_env_builder.num_pageservers = shard_count
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.enable_scrub_on_exit()
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
-    env.neon_cli.create_branch("test_pg_regress", "empty")
     # Connect to postgres and create a database called "regression".
-    endpoint = env.endpoints.create_start("test_pg_regress")
+    endpoint = env.endpoints.create_start("main")
     endpoint.safe_psql("CREATE DATABASE regression")
 
     # Create some local directories for pg_regress to run in.
@@ -61,22 +76,25 @@ def test_pg_regress(
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #
+@pytest.mark.parametrize("shard_count", [None, 4])
 def test_isolation(
-    neon_simple_env: NeonEnv,
+    neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
     pg_bin,
     capsys,
     base_dir: Path,
     pg_distrib_dir: Path,
+    shard_count: Optional[int],
 ):
-    env = neon_simple_env
+    if shard_count is not None:
+        neon_env_builder.num_pageservers = shard_count
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.enable_scrub_on_exit()
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
-    env.neon_cli.create_branch("test_isolation", "empty")
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-    endpoint = env.endpoints.create_start(
-        "test_isolation", config_lines=["max_prepared_transactions=100"]
-    )
+    endpoint = env.endpoints.create_start("main", config_lines=["max_prepared_transactions=100"])
     endpoint.safe_psql("CREATE DATABASE isolation_regression")
 
     # Create some local directories for pg_isolation_regress to run in.
@@ -114,19 +132,24 @@ def test_isolation(
 
 # Run extra Neon-specific pg_regress-based tests. The tests and their
 # schedule file are in the sql_regress/ directory.
+@pytest.mark.parametrize("shard_count", [None, 4])
 def test_sql_regress(
-    neon_simple_env: NeonEnv,
+    neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
     pg_bin,
     capsys,
     base_dir: Path,
     pg_distrib_dir: Path,
+    shard_count: Optional[int],
 ):
-    env = neon_simple_env
+    if shard_count is not None:
+        neon_env_builder.num_pageservers = shard_count
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.enable_scrub_on_exit()
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
-    env.neon_cli.create_branch("test_sql_regress", "empty")
     # Connect to postgres and create a database called "regression".
-    endpoint = env.endpoints.create_start("test_sql_regress")
+    endpoint = env.endpoints.create_start("main")
     endpoint.safe_psql("CREATE DATABASE regression")
 
     # Create some local directories for pg_regress to run in.

@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import time
 from contextlib import closing
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import List
 
 import pytest
+import requests
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
@@ -17,7 +19,9 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
 )
-from fixtures.pageserver.utils import timeline_delete_wait_completed
+from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until_tenant_active
+from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId
 from fixtures.utils import wait_until
@@ -341,3 +345,78 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
     assert (
         tenant_active_count == 1
     ), f"Tenant {tenant_with_empty_timelines} should have metric as active"
+
+
+def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
+    """
+    Probabilistic stress test for the pageserver's handling of tenant requests
+    across a restart. This is intended to catch things like:
+    - Bad response codes during shutdown (e.g. returning 500 instead of 503)
+    - Issues where a tenant is still starting up while we receive a request for it
+    - Issues with interrupting/resuming tenant/timeline creation in shutdown
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+    tenant_id: TenantId = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Multiple creation requests which race will generate this error
+    env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
+
+    # Tenant creation requests which arrive out of order will generate complaints about
+    # generation nubmers out of order.
+    env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
+
+    # Our multiple creation requests will advance generation quickly, and when we skip
+    # a generation number we can generate these warnings
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates for tenant .+")
+
+    # Timeline::flush_and_shutdown cannot tell if it is hitting a failure because of
+    # an incomplete attach, or some other problem.  In the field this should be rare,
+    # so we allow it to log at WARN, even if it is occasionally a false positive.
+    env.pageserver.allowed_errors.append(".*failed to freeze and flush.*")
+
+    # When we shut down a tenant during a timeline creation, initdb is not cancelled, we wait
+    # for it to complete (since https://github.com/neondatabase/neon/pull/6451).  This means
+    # that shutdown can be delayed by >=1s on debug builds where initdb takes a long time to run.
+    env.pageserver.allowed_errors.append(".*still waiting, taking longer than expected... gate.*")
+
+    def create_bg(delay_ms):
+        time.sleep(delay_ms / 1000.0)
+        try:
+            env.pageserver.tenant_create(tenant_id=tenant_id)
+            env.pageserver.http_client().timeline_create(
+                PgVersion.NOT_SET, tenant_id, new_timeline_id=timeline_id
+            )
+        except PageserverApiException as e:
+            if e.status_code == 409:
+                log.info(f"delay_ms={delay_ms} 409")
+                pass
+            elif e.status_code == 400:
+                if "is less than existing" in e.message:
+                    # We send creation requests very close together in time: it is expected that these
+                    # race, and sometimes chigher-generation'd requests arrive first.  The pageserver rightly
+                    # rejects any attempt to make a generation number go backwards.
+                    pass
+                else:
+                    raise
+            else:
+                raise
+        except requests.exceptions.ConnectionError:
+            # Our requests might arrive during shutdown and be cut off at the transport level
+            pass
+
+    for _ in range(0, 10):
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futs = []
+            for delay_ms in (0, 1, 10, 50, 100, 200, 500, 800):
+                f = executor.submit(create_bg, delay_ms)
+                futs.append(f)
+            env.pageserver.stop()
+            env.pageserver.start()
+
+            for f in futs:
+                f.result(timeout=10)
+
+    # The tenant should end up active
+    wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)

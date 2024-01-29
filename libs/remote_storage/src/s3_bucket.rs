@@ -6,12 +6,14 @@
 
 use std::{
     borrow::Cow,
+    collections::HashMap,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::SystemTime,
 };
 
-use anyhow::Context as _;
+use anyhow::{anyhow, Context as _};
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider,
@@ -27,17 +29,19 @@ use aws_sdk_s3::{
     config::{AsyncSleep, Builder, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
     operation::get_object::GetObjectError,
-    types::{Delete, ObjectIdentifier},
+    types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion},
     Client,
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
 
-use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
+use aws_smithy_types::{body::SdkBody, DateTime};
 use bytes::Bytes;
 use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
+use tokio_util::sync::CancellationToken;
+use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
@@ -270,6 +274,59 @@ impl S3Bucket {
             }
         }
     }
+
+    async fn delete_oids(
+        &self,
+        kind: RequestKind,
+        delete_objects: &[ObjectIdentifier],
+    ) -> anyhow::Result<()> {
+        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
+            let started_at = start_measuring_requests(kind);
+
+            let resp = self
+                .client
+                .delete_objects()
+                .bucket(self.bucket_name.clone())
+                .delete(
+                    Delete::builder()
+                        .set_objects(Some(chunk.to_vec()))
+                        .build()?,
+                )
+                .send()
+                .await;
+
+            let started_at = ScopeGuard::into_inner(started_at);
+            metrics::BUCKET_METRICS
+                .req_seconds
+                .observe_elapsed(kind, &resp, started_at);
+
+            let resp = resp?;
+            metrics::BUCKET_METRICS
+                .deleted_objects_total
+                .inc_by(chunk.len() as u64);
+            if let Some(errors) = resp.errors {
+                // Log a bounded number of the errors within the response:
+                // these requests can carry 1000 keys so logging each one
+                // would be too verbose, especially as errors may lead us
+                // to retry repeatedly.
+                const LOG_UP_TO_N_ERRORS: usize = 10;
+                for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
+                    tracing::warn!(
+                        "DeleteObjects key {} failed: {}: {}",
+                        e.key.as_ref().map(Cow::from).unwrap_or("".into()),
+                        e.code.as_ref().map(Cow::from).unwrap_or("".into()),
+                        e.message.as_ref().map(Cow::from).unwrap_or("".into())
+                    );
+                }
+
+                return Err(anyhow::format_err!(
+                    "Failed to delete {} objects",
+                    errors.len()
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 pin_project_lite::pin_project! {
@@ -373,7 +430,6 @@ impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
     }
 }
 
-#[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
     async fn list(
         &self,
@@ -569,63 +625,167 @@ impl RemoteStorage for S3Bucket {
             delete_objects.push(obj_id);
         }
 
-        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
-            let started_at = start_measuring_requests(kind);
-
-            let resp = self
-                .client
-                .delete_objects()
-                .bucket(self.bucket_name.clone())
-                .delete(
-                    Delete::builder()
-                        .set_objects(Some(chunk.to_vec()))
-                        .build()?,
-                )
-                .send()
-                .await;
-
-            let started_at = ScopeGuard::into_inner(started_at);
-            metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, &resp, started_at);
-
-            match resp {
-                Ok(resp) => {
-                    metrics::BUCKET_METRICS
-                        .deleted_objects_total
-                        .inc_by(chunk.len() as u64);
-                    if let Some(errors) = resp.errors {
-                        // Log a bounded number of the errors within the response:
-                        // these requests can carry 1000 keys so logging each one
-                        // would be too verbose, especially as errors may lead us
-                        // to retry repeatedly.
-                        const LOG_UP_TO_N_ERRORS: usize = 10;
-                        for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
-                            tracing::warn!(
-                                "DeleteObjects key {} failed: {}: {}",
-                                e.key.as_ref().map(Cow::from).unwrap_or("".into()),
-                                e.code.as_ref().map(Cow::from).unwrap_or("".into()),
-                                e.message.as_ref().map(Cow::from).unwrap_or("".into())
-                            );
-                        }
-
-                        return Err(anyhow::format_err!(
-                            "Failed to delete {} objects",
-                            errors.len()
-                        ));
-                    }
-                }
-                Err(e) => {
-                    return Err(e.into());
-                }
-            }
-        }
-        Ok(())
+        self.delete_oids(kind, &delete_objects).await
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
         let paths = std::array::from_ref(path);
         self.delete_objects(paths).await
+    }
+
+    async fn time_travel_recover(
+        &self,
+        prefix: Option<&RemotePath>,
+        timestamp: SystemTime,
+        done_if_after: SystemTime,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        let kind = RequestKind::TimeTravel;
+        let _guard = self.permit(kind).await;
+
+        let timestamp = DateTime::from(timestamp);
+        let done_if_after = DateTime::from(done_if_after);
+
+        tracing::trace!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
+
+        // get the passed prefix or if it is not set use prefix_in_bucket value
+        let prefix = prefix
+            .map(|p| self.relative_path_to_s3_object(p))
+            .or_else(|| self.prefix_in_bucket.clone());
+
+        let warn_threshold = 3;
+        let max_retries = 10;
+        let is_permanent = |_e: &_| false;
+
+        let list = backoff::retry(
+            || async {
+                Ok(self
+                    .client
+                    .list_object_versions()
+                    .bucket(self.bucket_name.clone())
+                    .set_prefix(prefix.clone())
+                    .send()
+                    .await?)
+            },
+            is_permanent,
+            warn_threshold,
+            max_retries,
+            "listing object versions for time_travel_recover",
+            backoff::Cancel::new(cancel.clone(), || anyhow!("Cancelled")),
+        )
+        .await?;
+
+        if list.is_truncated().unwrap_or_default() {
+            anyhow::bail!("Received truncated ListObjectVersions response for prefix={prefix:?}");
+        }
+
+        let mut versions_deletes = list
+            .versions()
+            .iter()
+            .map(VerOrDelete::Version)
+            .chain(list.delete_markers().iter().map(VerOrDelete::DeleteMarker))
+            .collect::<Vec<_>>();
+
+        versions_deletes.sort_by_key(|vd| (vd.key(), vd.last_modified()));
+
+        let mut vds_for_key = HashMap::<_, Vec<_>>::new();
+
+        for vd in versions_deletes {
+            let last_modified = vd.last_modified();
+            let version_id = vd.version_id();
+            let key = vd.key();
+            let (Some(last_modified), Some(version_id), Some(key)) =
+                (last_modified, version_id, key)
+            else {
+                anyhow::bail!(
+                    "One (or more) of last_modified, key, and id is None. \
+                    Is versioning enabled in the bucket? last_modified={:?} key={:?} version_id={:?}",
+                    last_modified, key, version_id,
+                );
+            };
+            if version_id == "null" {
+                anyhow::bail!("Received ListVersions response for key={key} with version_id='null', \
+                    indicating either disabled versioning, or legacy objects with null version id values");
+            }
+            tracing::trace!(
+                "Parsing version key={key} version_id={version_id} is_delete={}",
+                matches!(vd, VerOrDelete::DeleteMarker(_))
+            );
+
+            vds_for_key
+                .entry(key)
+                .or_default()
+                .push((vd, last_modified, version_id));
+        }
+        for (key, versions) in vds_for_key {
+            let (last_vd, last_last_modified, _version_id) = versions.last().unwrap();
+            if last_last_modified > &&done_if_after {
+                tracing::trace!("Key {key} has version later than done_if_after, skipping");
+                continue;
+            }
+            // the version we want to restore to.
+            let version_to_restore_to =
+                match versions.binary_search_by_key(&timestamp, |tpl| *tpl.1) {
+                    Ok(v) => v,
+                    Err(e) => e,
+                };
+            if version_to_restore_to == versions.len() {
+                tracing::trace!("Key {key} has no changes since timestamp, skipping");
+                continue;
+            }
+            let mut do_delete = false;
+            if version_to_restore_to == 0 {
+                // All versions more recent, so the key didn't exist at the specified time point.
+                tracing::trace!(
+                    "All {} versions more recent for {key}, deleting",
+                    versions.len()
+                );
+                do_delete = true;
+            } else {
+                match &versions[version_to_restore_to - 1] {
+                    (VerOrDelete::Version(_), _last_modified, version_id) => {
+                        tracing::trace!("Copying old version {version_id} for {key}...");
+                        // Restore the state to the last version by copying
+                        let source_id =
+                            format!("{}/{key}?versionId={version_id}", self.bucket_name);
+
+                        backoff::retry(
+                            || async {
+                                Ok(self
+                                    .client
+                                    .copy_object()
+                                    .bucket(self.bucket_name.clone())
+                                    .key(key)
+                                    .copy_source(&source_id)
+                                    .send()
+                                    .await?)
+                            },
+                            is_permanent,
+                            warn_threshold,
+                            max_retries,
+                            "listing object versions for time_travel_recover",
+                            backoff::Cancel::new(cancel.clone(), || anyhow!("Cancelled")),
+                        )
+                        .await?;
+                    }
+                    (VerOrDelete::DeleteMarker(_), _last_modified, _version_id) => {
+                        do_delete = true;
+                    }
+                }
+            };
+            if do_delete {
+                if matches!(last_vd, VerOrDelete::DeleteMarker(_)) {
+                    // Key has since been deleted (but there was some history), no need to do anything
+                    tracing::trace!("Key {key} already deleted, skipping.");
+                } else {
+                    tracing::trace!("Deleting {key}...");
+
+                    let oid = ObjectIdentifier::builder().key(key.to_owned()).build()?;
+                    self.delete_oids(kind, &[oid]).await?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -649,6 +809,32 @@ fn start_measuring_requests(
             started_at,
         )
     })
+}
+
+enum VerOrDelete<'a> {
+    Version(&'a ObjectVersion),
+    DeleteMarker(&'a DeleteMarkerEntry),
+}
+
+impl<'a> VerOrDelete<'a> {
+    fn last_modified(&self) -> Option<&'a DateTime> {
+        match self {
+            VerOrDelete::Version(v) => v.last_modified(),
+            VerOrDelete::DeleteMarker(v) => v.last_modified(),
+        }
+    }
+    fn version_id(&self) -> Option<&'a str> {
+        match self {
+            VerOrDelete::Version(v) => v.version_id(),
+            VerOrDelete::DeleteMarker(v) => v.version_id(),
+        }
+    }
+    fn key(&self) -> Option<&'a str> {
+        match self {
+            VerOrDelete::Version(v) => v.key(),
+            VerOrDelete::DeleteMarker(v) => v.key(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -57,7 +57,7 @@ use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 
 use compute_api::responses::{ComputeState, ComputeStatus};
-use compute_api::spec::{Cluster, ComputeMode, ComputeSpec};
+use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -70,6 +70,7 @@ pub struct EndpointConf {
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    features: Vec<ComputeFeature>,
 }
 
 //
@@ -140,6 +141,7 @@ impl ComputeControlPlane {
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates: true,
+            features: vec![],
         });
 
         ep.create_endpoint_dir()?;
@@ -154,6 +156,7 @@ impl ComputeControlPlane {
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates: true,
+                features: vec![],
             })?,
         )?;
         std::fs::write(
@@ -215,6 +218,9 @@ pub struct Endpoint {
 
     // Optimizations
     skip_pg_catalog_updates: bool,
+
+    // Feature flags
+    features: Vec<ComputeFeature>,
 }
 
 impl Endpoint {
@@ -244,6 +250,7 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            features: conf.features,
         })
     }
 
@@ -431,7 +438,7 @@ impl Endpoint {
     }
 
     fn wait_for_compute_ctl_to_exit(&self, send_sigterm: bool) -> Result<()> {
-        // TODO use background_process::stop_process instead
+        // TODO use background_process::stop_process instead: https://github.com/neondatabase/neon/pull/6482
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
         let pid = nix::unistd::Pid::from_raw(pid as i32);
@@ -519,7 +526,7 @@ impl Endpoint {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
-            features: vec![],
+            features: self.features.clone(),
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
@@ -576,9 +583,21 @@ impl Endpoint {
         }
 
         let child = cmd.spawn()?;
+        // set up a scopeguard to kill & wait for the child in case we panic or bail below
+        let child = scopeguard::guard(child, |mut child| {
+            println!("SIGKILL & wait the started process");
+            (|| {
+                // TODO: use another signal that can be caught by the child so it can clean up any children it spawned
+                child.kill().context("SIGKILL child")?;
+                child.wait().context("wait() for child process")?;
+                anyhow::Ok(())
+            })()
+            .with_context(|| format!("scopeguard kill&wait child {child:?}"))
+            .unwrap();
+        });
 
         // Write down the pid so we can wait for it when we want to stop
-        // TODO use background_process::start_process instead
+        // TODO use background_process::start_process instead: https://github.com/neondatabase/neon/pull/6482
         let pid = child.id();
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         std::fs::write(pidfile_path, pid.to_string())?;
@@ -626,6 +645,9 @@ impl Endpoint {
             }
             std::thread::sleep(ATTEMPT_INTERVAL);
         }
+
+        // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
+        drop(scopeguard::ScopeGuard::into_inner(child));
 
         Ok(())
     }

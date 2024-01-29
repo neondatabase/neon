@@ -150,6 +150,43 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) struct GetVectoredLatency {
+    map: EnumMap<TaskKind, Option<Histogram>>,
+}
+
+impl GetVectoredLatency {
+    // Only these task types perform vectored gets. Filter all other tasks out to reduce total
+    // cardinality of the metric.
+    const TRACKED_TASK_KINDS: [TaskKind; 2] = [TaskKind::Compaction, TaskKind::PageRequestHandler];
+
+    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
+        self.map[task_kind].as_ref()
+    }
+}
+
+pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
+        "pageserver_get_vectored_seconds",
+        "Time spent in get_vectored",
+        &["task_kind"],
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric");
+
+    GetVectoredLatency {
+        map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
+            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+
+            if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
+                let task_kind = task_kind.into();
+                Some(inner.with_label_values(&[task_kind]))
+            } else {
+                None
+            }
+        })),
+    }
+});
+
 pub(crate) struct PageCacheMetricsForTaskKind {
     pub read_accesses_materialized_page: IntCounter,
     pub read_accesses_immutable: IntCounter,
@@ -932,6 +969,7 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+#[cfg(not(test))]
 pub(crate) mod virtual_file_descriptor_cache {
     use super::*;
 
@@ -949,6 +987,20 @@ pub(crate) mod virtual_file_descriptor_cache {
     // -ignoring(operation)
     // sum(pageserver_io_operations_seconds_count{operation=~"^(close|close-by-replace)$"}
     // ```
+}
+
+#[cfg(not(test))]
+pub(crate) mod virtual_file_io_engine {
+    use super::*;
+
+    pub(crate) static KIND: Lazy<UIntGaugeVec> = Lazy::new(|| {
+        register_uint_gauge_vec!(
+            "pageserver_virtual_file_io_engine_kind",
+            "The configured io engine for VirtualFile",
+            &["kind"],
+        )
+        .unwrap()
+    });
 }
 
 #[derive(Debug)]

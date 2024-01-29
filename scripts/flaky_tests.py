@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 from collections import defaultdict
 from typing import DefaultDict, Dict
 
@@ -45,6 +46,15 @@ def main(args: argparse.Namespace):
         logging.error("cannot fetch flaky tests from the DB due to an error", exc)
         rows = []
 
+    # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not std-fs),
+    # use it to parametrize test name along with build_type and pg_version
+    #
+    # See test_runner/fixtures/parametrize.py for details
+    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in ("", "std-fs"):
+        pageserver_virtual_file_io_engine_parameter = f"-{io_engine}"
+    else:
+        pageserver_virtual_file_io_engine_parameter = ""
+
     for row in rows:
         # We don't want to automatically rerun tests in a performance suite
         if row["parent_suite"] != "test_runner.regress":
@@ -53,10 +63,10 @@ def main(args: argparse.Namespace):
         if row["name"].endswith("]"):
             parametrized_test = row["name"].replace(
                 "[",
-                f"[{build_type}-pg{pg_version}-",
+                f"[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}-",
             )
         else:
-            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}]"
+            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}]"
 
         res[row["parent_suite"]][row["suite"]][parametrized_test] = True
 

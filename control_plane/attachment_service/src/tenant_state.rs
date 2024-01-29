@@ -312,6 +312,18 @@ impl TenantState {
                     modified = true;
                 }
             }
+            Detached => {
+                // Should have no attached or secondary pageservers
+                if self.intent.attached.is_some() {
+                    self.intent.attached = None;
+                    modified = true;
+                }
+
+                if !self.intent.secondary.is_empty() {
+                    self.intent.secondary.clear();
+                    modified = true;
+                }
+            }
         }
 
         if modified {

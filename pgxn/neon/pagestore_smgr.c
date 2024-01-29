@@ -172,6 +172,7 @@ typedef struct PrefetchRequest
 	XLogRecPtr	actual_request_lsn;
 	NeonResponse *response;		/* may be null */
 	PrefetchStatus status;
+	shardno_t   shard_no;
 	uint64		my_ring_index;
 } PrefetchRequest;
 
@@ -239,9 +240,16 @@ typedef struct PrefetchState
 								 * also unused */
 
 	/* the buffers */
-	prfh_hash  *prf_hash;
+	prfh_hash	*prf_hash;
+	int			max_shard_no;
+	/* Mark shards involved in prefetch */
+	uint8		shard_bitmap[(MAX_SHARDS + 7)/8];
 	PrefetchRequest prf_buffer[];	/* prefetch buffers */
 } PrefetchState;
+
+#define BITMAP_ISSET(bm, bit) ((bm)[(bit) >> 3] & (1 << ((bit) & 7)))
+#define BITMAP_SET(bm, bit) (bm)[(bit) >> 3] |= (1 << ((bit) & 7))
+#define BITMAP_CLR(bm, bit) (bm)[(bit) >> 3] &= ~(1 << ((bit) & 7))
 
 static PrefetchState *MyPState;
 
@@ -327,6 +335,7 @@ compact_prefetch_buffers(void)
 		Assert(target_slot->status == PRFS_UNUSED);
 
 		target_slot->buftag = source_slot->buftag;
+		target_slot->shard_no = source_slot->shard_no;
 		target_slot->status = source_slot->status;
 		target_slot->response = source_slot->response;
 		target_slot->effective_request_lsn = source_slot->effective_request_lsn;
@@ -494,6 +503,23 @@ prefetch_cleanup_trailing_unused(void)
 	}
 }
 
+
+static bool
+prefetch_flush_requests(void)
+{
+	for (shardno_t shard_no = 0; shard_no < MyPState->max_shard_no; shard_no++)
+	{
+		if (BITMAP_ISSET(MyPState->shard_bitmap, shard_no))
+		{
+			if (!page_server->flush(shard_no))
+				return false;
+			BITMAP_CLR(MyPState->shard_bitmap, shard_no);
+		}
+	}
+	MyPState->max_shard_no = 0;
+	return true;
+}
+
 /*
  * Wait for slot of ring_index to have received its response.
  * The caller is responsible for making sure the request buffer is flushed.
@@ -509,7 +535,7 @@ prefetch_wait_for(uint64 ring_index)
 	if (MyPState->ring_flush <= ring_index &&
 		MyPState->ring_unused > MyPState->ring_flush)
 	{
-		if (!page_server->flush())
+		if (!prefetch_flush_requests())
 			return false;
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
@@ -547,7 +573,7 @@ prefetch_read(PrefetchRequest *slot)
 	Assert(slot->my_ring_index == MyPState->ring_receive);
 
 	old = MemoryContextSwitchTo(MyPState->errctx);
-	response = (NeonResponse *) page_server->receive();
+	response = (NeonResponse *) page_server->receive(slot->shard_no);
 	MemoryContextSwitchTo(old);
 	if (response)
 	{
@@ -704,12 +730,14 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
 
-	while (!page_server->send((NeonRequest *) &request));
+	while (!page_server->send(slot->shard_no, (NeonRequest *) &request));
 
 	/* update prefetch state */
 	MyPState->n_requests_inflight += 1;
 	MyPState->n_unused -= 1;
 	MyPState->ring_unused += 1;
+	BITMAP_SET(MyPState->shard_bitmap, slot->shard_no);
+	MyPState->max_shard_no = Max(slot->shard_no+1, MyPState->max_shard_no);
 
 	/* update slot state */
 	slot->status = PRFS_REQUESTED;
@@ -880,6 +908,7 @@ Retry:
 	 * function reads the buffer tag from the slot.
 	 */
 	slot->buftag = tag;
+	slot->shard_no = get_shard_number(&tag);
 	slot->my_ring_index = ring_index;
 
 	prefetch_do_request(slot, force_latest, force_lsn);
@@ -890,7 +919,7 @@ Retry:
 	if (flush_every_n_requests > 0 &&
 		MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
 	{
-		if (!page_server->flush())
+		if (!prefetch_flush_requests())
 		{
 			/*
 			 * Prefetch set is reset in case of error, so we should try to
@@ -908,13 +937,44 @@ static NeonResponse *
 page_server_request(void const *req)
 {
 	NeonResponse *resp;
+	BufferTag tag = {0};
+	shardno_t shard_no;
+
+	switch (((NeonRequest *) req)->tag)
+	{
+		case T_NeonExistsRequest:
+			CopyNRelFileInfoToBufTag(tag, ((NeonExistsRequest *) req)->rinfo);
+			break;
+		case T_NeonNblocksRequest:
+			CopyNRelFileInfoToBufTag(tag, ((NeonNblocksRequest *) req)->rinfo);
+			break;
+		case T_NeonDbSizeRequest:
+			NInfoGetDbOid(BufTagGetNRelFileInfo(tag)) = ((NeonDbSizeRequest *) req)->dbNode;
+			break;
+		case T_NeonGetPageRequest:
+			CopyNRelFileInfoToBufTag(tag, ((NeonGetPageRequest *) req)->rinfo);
+			tag.blockNum = ((NeonGetPageRequest *) req)->blkno;
+			break;
+		default:
+			neon_log(ERROR, "Unexpected request tag: %d", ((NeonRequest *) req)->tag);
+	}
+	shard_no = get_shard_number(&tag);
+
+
+	/*
+	 * Current sharding model assumes that all metadata is present only at shard 0.
+	 * We still need to call get_shard_no() to check if shard map is up-to-date.
+	 */
+	if (((NeonRequest *) req)->tag != T_NeonGetPageRequest || ((NeonGetPageRequest *) req)->forknum != MAIN_FORKNUM)
+	{
+		shard_no = 0;
+	}
 
 	do
 	{
-		while (!page_server->send((NeonRequest *) req) || !page_server->flush());
-		MyPState->ring_flush = MyPState->ring_unused;
+		while (!page_server->send(shard_no, (NeonRequest *) req) || !page_server->flush(shard_no));
 		consume_prefetch_responses();
-		resp = page_server->receive();
+		resp = page_server->receive(shard_no);
 	} while (resp == NULL);
 	return resp;
 
@@ -2098,8 +2158,8 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg(NEON_TAG "could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
-							blkno,
+					 errmsg(NEON_TAG "[shard %d] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
+							slot->shard_no, blkno,
 							RelFileInfoFmt(rinfo),
 							forkNum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),

@@ -21,6 +21,8 @@ env:
   COPT: '-Werror'
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+  # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
+  E2E_CONCURRENCY_GROUP: ${{ github.repository }}-${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
 
 jobs:
   check-permissions:
@@ -43,6 +45,20 @@ jobs:
         echo >&2 "${MESSAGE}"
 
         exit 1
+
+  cancel-previous-e2e-tests:
+    needs: [ check-permissions ]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cancel previous e2e-tests runs for this PR
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          gh workflow --repo neondatabase/cloud \
+            run cancel-previous-in-concurrency-group.yml \
+              --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
   tag:
     needs: [ check-permissions ]
@@ -186,7 +202,11 @@ jobs:
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-      options: --init
+      # Raise locked memory limit for tokio-epoll-uring.
+      # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
+      # io_uring will account the memory of the CQ and SQ as locked.
+      # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
       matrix:
@@ -340,8 +360,12 @@ jobs:
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run rust tests
+        env:
+          NEXTEST_RETRIES: 3
         run: |
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+          for io_engine in std-fs tokio-epoll-uring ; do
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+          done
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
@@ -419,8 +443,8 @@ jobs:
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-      # Default shared memory is 64mb
-      options: --init --shm-size=512mb
+      # for changed limits, see comments on `options:` earlier in this file
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
       matrix:
@@ -448,6 +472,7 @@ jobs:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
@@ -458,12 +483,13 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-      # Default shared memory is 64mb
-      options: --init --shm-size=512mb
+      # for changed limits, see comments on `options:` earlier in this file
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
       fail-fast: false
       matrix:
+        # the amount of groups (N) should be reflected in `extra_params: --splits N ...`
         pytest_split_group: [ 1, 2, 3, 4 ]
         build_type: [ release ]
     steps:
@@ -477,11 +503,12 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: ${{ github.ref_name == 'main' }}
-          extra_params: --splits ${{ strategy.job-total }} --group ${{ matrix.pytest_split_group }}
+          extra_params: --splits 4 --group ${{ matrix.pytest_split_group }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -695,7 +722,8 @@ jobs:
                 \"commit_hash\": \"$COMMIT_SHA\",
                 \"remote_repo\": \"${{ github.repository }}\",
                 \"storage_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
-                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\"
+                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
               }
             }"
 

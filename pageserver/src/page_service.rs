@@ -61,7 +61,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
-use crate::pgdatadir_mapping::{rel_block_to_key, Version};
+use crate::pgdatadir_mapping::Version;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -75,6 +75,7 @@ use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
 
+use pageserver_api::key::rel_block_to_key;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
@@ -321,8 +322,8 @@ enum PageStreamError {
     Shutdown,
 
     /// Something went wrong reading a page: this likely indicates a pageserver bug
-    #[error("Read error: {0}")]
-    Read(PageReconstructError),
+    #[error("Read error")]
+    Read(#[source] PageReconstructError),
 
     /// Ran out of time waiting for an LSN
     #[error("LSN timeout: {0}")]
@@ -331,11 +332,11 @@ enum PageStreamError {
     /// The entity required to serve the request (tenant or timeline) is not found,
     /// or is not found in a suitable state to serve a request.
     #[error("Not found: {0}")]
-    NotFound(std::borrow::Cow<'static, str>),
+    NotFound(Cow<'static, str>),
 
     /// Request asked for something that doesn't make sense, like an invalid LSN
     #[error("Bad request: {0}")]
-    BadRequest(std::borrow::Cow<'static, str>),
+    BadRequest(Cow<'static, str>),
 }
 
 impl From<PageReconstructError> for PageStreamError {
@@ -666,7 +667,10 @@ impl PageServerHandler {
                         // print the all details to the log with {:#}, but for the client the
                         // error message is enough.  Do not log if shutting down, as the anyhow::Error
                         // here includes cancellation which is not an error.
-                        span.in_scope(|| error!("error reading relation or page version: {:#}", e));
+                        let full = utils::error::report_compact_sources(&e);
+                        span.in_scope(|| {
+                            error!("error reading relation or page version: {full:#}")
+                        });
                         PagestreamBeMessage::Error(PagestreamErrorResponse {
                             message: e.to_string(),
                         })

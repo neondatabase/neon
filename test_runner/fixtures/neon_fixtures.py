@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import concurrent.futures
 import filecmp
 import json
 import os
@@ -10,16 +11,18 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from fcntl import LOCK_EX, LOCK_UN, flock
 from functools import cached_property
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import urlparse
 
 import asyncpg
@@ -49,7 +52,10 @@ from fixtures.pageserver.allowed_errors import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.types import IndexPartDump
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
@@ -424,6 +430,7 @@ class NeonEnvBuilder:
         pg_distrib_dir: Path,
         pg_version: PgVersion,
         test_name: str,
+        top_output_dir: Path,
         test_output_dir: Path,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
@@ -440,6 +447,7 @@ class NeonEnvBuilder:
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
+        pageserver_virtual_file_io_engine: Optional[str] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -473,6 +481,9 @@ class NeonEnvBuilder:
         self.test_overlay_dir = test_overlay_dir
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
+        self.top_output_dir = top_output_dir
+
+        self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
         assert test_name.startswith(
             "test_"
@@ -526,6 +537,64 @@ class NeonEnvBuilder:
 
         return env
 
+    def build_and_use_snapshot(
+        self, global_ident: str, create_env_for_snapshot: Callable[[NeonEnvBuilder], NeonEnv]
+    ) -> NeonEnv:
+        if os.getenv("CI", "false") == "true":
+            log.info("do not use snapshots in ephemeral CI environment")
+            env = create_env_for_snapshot(self)
+            env.stop(immediate=True, ps_assert_metric_no_errors=False)
+            return env
+
+        with shared_snapshot_dir(self.top_output_dir, global_ident) as snapshot_dir:
+            if not snapshot_dir.is_initialized():
+                self._build_and_use_snapshot_impl(snapshot_dir, create_env_for_snapshot)
+                assert snapshot_dir.is_initialized()
+
+            return self.from_repo_dir(snapshot_dir.path)
+
+    def _build_and_use_snapshot_impl(
+        self,
+        snapshot_dir: SnapshotDirLocked,
+        create_env_for_snapshot: Callable[[NeonEnvBuilder], NeonEnv],
+    ):
+        if snapshot_dir.path.exists():
+            shutil.rmtree(snapshot_dir.path)
+
+        if self.test_overlay_dir is not None:
+            # Make repo_dir an overlayfs mount with lowerdir being the empty snapshot_dir.
+            # When we're done filling up repo_dir, tear everything down, unmount the overlayfs, and use
+            # the upperdir as the snapshot. This is equivalent to docker `FROM scratch`.
+            assert not self.repo_dir.exists()
+            assert self.repo_dir.parent.exists()
+            snapshot_dir.path.mkdir()
+            self.overlay_mount("create-snapshot-repo-dir", snapshot_dir.path, self.repo_dir)
+            self.config_init_force = "empty-dir-ok"
+
+        env = create_env_for_snapshot(self)
+        assert self.env is not None
+        assert self.env == env
+
+        # shut down everything for snapshot
+        env.stop(immediate=True, ps_assert_metric_no_errors=True)
+
+        # TODO: all kinds of assertions to ensure the env is unused
+
+        if self.test_overlay_dir is None:
+            log.info("take snapshot by moving repo dir")
+            env.repo_dir.rename(snapshot_dir.path)
+        else:
+            log.info("take snapshot by using overlayfs upperdir")
+            self.overlay_unmount_and_move("create-snapshot-repo-dir", snapshot_dir.path)
+            log.info("remove empty repo_dir (previously mountpoint) for snapshot overlay_mount")
+            env.repo_dir.rmdir()
+            # TODO from here on, we should be able to reset / goto top where snapshot_dir.is_initialized()
+            log.info("make repo_dir an overlayfs mount of the snapshot we just created")
+        assert not env.repo_dir.exists(), "both branches above should remove it"
+        snapshot_dir.set_initialized()
+
+        self.env = None  # so that from_repo_dir works again
+
     def from_repo_dir(
         self,
         repo_dir: Path,
@@ -557,10 +626,15 @@ class NeonEnvBuilder:
             tenants_from_dir = ps_dir / "tenants"
             tenants_to_dir = self.repo_dir / ps_dir.name / "tenants"
 
-            log.info(f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}")
             if self.test_overlay_dir is None:
+                log.info(
+                    f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}"
+                )
                 shutil.copytree(tenants_from_dir, tenants_to_dir)
             else:
+                log.info(
+                    f"Creating overlayfs mount of pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}"
+                )
                 self.overlay_mount(f"{ps_dir.name}:tenants", tenants_from_dir, tenants_to_dir)
 
         for sk_from_dir in (repo_dir / "safekeepers").glob("sk*"):
@@ -571,10 +645,12 @@ class NeonEnvBuilder:
 
         shutil.rmtree(self.repo_dir / "local_fs_remote_storage", ignore_errors=True)
         if self.test_overlay_dir is None:
+            log.info("Copying local_fs_remote_storage directory from snapshot")
             shutil.copytree(
                 repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
             )
         else:
+            log.info("Creating overlayfs mount of local_fs_remote_storage directory from snapshot")
             self.overlay_mount(
                 "local_fs_remote_storage",
                 repo_dir / "local_fs_remote_storage",
@@ -631,6 +707,54 @@ class NeonEnvBuilder:
         )
         self.overlay_mounts_created_by_us.append((ident, dstdir))
 
+    def _overlay_umount(self, mountpoint: Path):
+        cmd = ["sudo", "umount", str(mountpoint)]
+        assert mountpoint.is_mount()
+        subprocess_capture(
+            self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+        )
+
+    def overlay_unmount_and_move(self, ident: str, dst: Path):
+        """
+        Unmount previously established overlayfs mount at `dstdir` and move the upperdir contents to `dst`.
+        If `dst` is an empty directory, it gets replaced.
+        Caller is responsible for ensuring the unmount will succeed, i.e., that there aren't any nested mounts.
+
+        Raises exception if self.test_overlay_dir is None
+        """
+        assert self.test_overlay_dir is not None
+        # not mutating state yet, make checks
+        ident_state_dir = self.test_overlay_dir / ident
+        assert ident_state_dir.is_dir()
+        upper = ident_state_dir / "upper"
+        work = ident_state_dir / "work"
+        assert upper.is_dir()
+        assert work.is_dir()
+        assert (
+            self.test_overlay_dir not in dst.parents
+        ), "otherwise workdir cleanup below wouldn't work"
+        # find index, still not mutating state
+        idxmap = {
+            existing_ident: idx
+            for idx, (existing_ident, _) in enumerate(self.overlay_mounts_created_by_us)
+        }
+        idx = idxmap.get(ident)
+        if idx is None:
+            raise RuntimeError(f"cannot find mount for ident {ident}")
+
+        if dst.is_dir():
+            dst.rmdir()  # raises exception if not empty, which is what we want
+
+        _, mountpoint = self.overlay_mounts_created_by_us.pop(idx)
+        self._overlay_umount(mountpoint)
+        upper.rename(dst)
+        # we moved the upperdir, clean up workdir and then its parent ident_state_dir
+        cmd = ["sudo", "rm", "-rf", str(work)]
+        subprocess_capture(
+            self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+        )
+        ident_state_dir.rmdir()  # should be empty since we moved `upper` out
+
     def overlay_cleanup_teardown(self):
         """
         Unmount the overlayfs mounts created by `self.overlay_mount()`.
@@ -641,13 +765,10 @@ class NeonEnvBuilder:
         while len(self.overlay_mounts_created_by_us) > 0:
             (ident, mountpoint) = self.overlay_mounts_created_by_us.pop()
             ident_state_dir = self.test_overlay_dir / ident
-            cmd = ["sudo", "umount", str(mountpoint)]
             log.info(
-                f"Unmounting overlayfs mount created during setup for ident {ident} at {mountpoint}: {cmd}"
+                f"Unmounting overlayfs mount created during setup for ident {ident} at {mountpoint}"
             )
-            subprocess_capture(
-                self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
-            )
+            self._overlay_umount(mountpoint)
             log.info(
                 f"Cleaning up overlayfs state dir (owned by root user) for ident {ident} at {ident_state_dir}"
             )
@@ -725,8 +846,15 @@ class NeonEnvBuilder:
         if self.preserve_database_files:
             return
 
+        overlayfs_mounts = {mountpoint for _, mountpoint in self.overlay_mounts_created_by_us}
+
         directories_to_clean: List[Path] = []
         for test_entry in Path(self.repo_dir).glob("**/*"):
+            if test_entry in overlayfs_mounts:
+                continue
+            for parent in test_entry.parents:
+                if parent in overlayfs_mounts:
+                    continue
             if test_entry.is_file():
                 test_file = test_entry
                 if ATTACHMENT_NAME_REGEX.fullmatch(test_file.name):
@@ -776,13 +904,6 @@ class NeonEnvBuilder:
                     cleanup_error = e
 
             try:
-                self.overlay_cleanup_teardown()
-            except Exception as e:
-                log.error(f"Error cleaning up overlay state: {e}")
-                if cleanup_error is not None:
-                    cleanup_error = e
-
-            try:
                 self.cleanup_remote_storage()
             except Exception as e:
                 log.error(f"Error during remote storage cleanup: {e}")
@@ -801,6 +922,13 @@ class NeonEnvBuilder:
 
             for pageserver in self.env.pageservers:
                 pageserver.assert_no_errors()
+
+        try:
+            self.overlay_cleanup_teardown()
+        except Exception as e:
+            log.error(f"Error cleaning up overlay state: {e}")
+            if cleanup_error is not None:
+                cleanup_error = e
 
 
 class NeonEnv:
@@ -866,10 +994,17 @@ class NeonEnv:
         self.initial_timeline = config.initial_timeline
 
         attachment_service_port = self.port_distributor.get_port()
+        # Reserve the next port after attachment service for use by its postgres: this
+        # will assert out if the next port wasn't free.
+        attachment_service_pg_port = self.port_distributor.get_port()
+        assert attachment_service_pg_port == attachment_service_port + 1
+
         self.control_plane_api: str = f"http://127.0.0.1:{attachment_service_port}"
         self.attachment_service: NeonAttachmentService = NeonAttachmentService(
             self, config.auth_enabled
         )
+
+        self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
 
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
@@ -902,6 +1037,9 @@ class NeonEnv:
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
             }
+            if self.pageserver_virtual_file_io_engine is not None:
+                ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
                 NeonPageserver(
@@ -939,16 +1077,27 @@ class NeonEnv:
         self.neon_cli.init(cfg, force=config.config_init_force)
 
     def start(self):
-        # Start up broker, pageserver and all safekeepers
-        self.broker.try_start()
-
+        # Attachment service starts first, so that pageserver /re-attach calls don't
+        # bounce through retries on startup
         self.attachment_service.start()
 
-        for pageserver in self.pageservers:
-            pageserver.start()
+        # Start up broker, pageserver and all safekeepers
+        futs = []
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2 + len(self.pageservers) + len(self.safekeepers)
+        ) as executor:
+            futs.append(
+                executor.submit(lambda: self.broker.try_start() or None)
+            )  # The `or None` is for the linter
 
-        for safekeeper in self.safekeepers:
-            safekeeper.start()
+            for pageserver in self.pageservers:
+                futs.append(executor.submit(lambda ps=pageserver: ps.start()))
+
+            for safekeeper in self.safekeepers:
+                futs.append(executor.submit(lambda sk=safekeeper: sk.start()))
+
+        for f in futs:
+            f.result()
 
     def stop(self, immediate=False, ps_assert_metric_no_errors=False):
         """
@@ -971,7 +1120,9 @@ class NeonEnv:
         assert that there is only one. Tests with multiple pageservers should always use
         get_pageserver with an explicit ID.
         """
-        assert len(self.pageservers) == 1
+        assert (
+            len(self.pageservers) == 1
+        ), "env.pageserver must only be used with single pageserver NeonEnv"
         return self.pageservers[0]
 
     def get_pageserver(self, id: Optional[int]) -> NeonPageserver:
@@ -1065,6 +1216,7 @@ def _shared_simple_env(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
+    pageserver_virtual_file_io_engine: str,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1082,6 +1234,7 @@ def _shared_simple_env(
         shutil.rmtree(repo_dir, ignore_errors=True)
 
     with NeonEnvBuilder(
+        top_output_dir=top_output_dir,
         repo_dir=repo_dir,
         port_distributor=port_distributor,
         broker=default_broker,
@@ -1093,6 +1246,7 @@ def _shared_simple_env(
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
     ) as builder:
         env = builder.init_start()
 
@@ -1130,6 +1284,8 @@ def neon_env_builder(
     run_id: uuid.UUID,
     request: FixtureRequest,
     test_overlay_dir: Path,
+    top_output_dir: Path,
+    pageserver_virtual_file_io_engine: str,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1149,6 +1305,7 @@ def neon_env_builder(
 
     # Return the builder to the caller
     with NeonEnvBuilder(
+        top_output_dir=top_output_dir,
         repo_dir=Path(repo_dir),
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
@@ -1158,6 +1315,7 @@ def neon_env_builder(
         broker=default_broker,
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
@@ -1511,8 +1669,10 @@ class NeonCli(AbstractNeonCli):
         id: int,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        register: bool = True,
     ) -> "subprocess.CompletedProcess[str]":
-        start_args = ["pageserver", "start", f"--id={id}", *overrides]
+        register_str = "true" if register else "false"
+        start_args = ["pageserver", "start", f"--id={id}", *overrides, f"--register={register_str}"]
         storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -1939,6 +2099,7 @@ class NeonPageserver(PgProtocol):
         self,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        register: bool = True,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -1948,7 +2109,7 @@ class NeonPageserver(PgProtocol):
         assert self.running is False
 
         self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars
+            self.id, overrides=overrides, extra_env_vars=extra_env_vars, register=register
         )
         self.running = True
         return self
@@ -2914,6 +3075,7 @@ class Endpoint(PgProtocol):
 
         # Write it back updated
         with open(config_path, "w") as file:
+            log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Mock the extension part of spec passed from control plane for local testing
@@ -3486,6 +3648,10 @@ def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return _get_test_dir(request, top_output_dir, "overlay-")
 
 
+def get_shared_snapshot_dir_path(top_output_dir: Path, snapshot_name: str) -> Path:
+    return top_output_dir / "shared-snapshots" / snapshot_name
+
+
 def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return get_test_output_dir(request, top_output_dir) / "repo"
 
@@ -3532,6 +3698,75 @@ def test_output_dir(
     allure_attach_from_dir(test_dir)
 
 
+class FileAndThreadLock:
+    def __init__(self, path: Path):
+        self.path = path
+        self.thread_lock = threading.Lock()
+        self.fd: Optional[int] = None
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_CREAT | os.O_WRONLY)
+        # lock thread lock before file lock so that there's no race
+        # around flocking / funlocking the file lock
+        self.thread_lock.acquire()
+        flock(self.fd, LOCK_EX)
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        assert self.fd is not None
+        assert self.thread_lock.locked()  # ... by us
+        flock(self.fd, LOCK_UN)
+        self.thread_lock.release()
+        os.close(self.fd)
+        self.fd = None
+
+
+class SnapshotDirLocked:
+    def __init__(self, parent: SnapshotDir):
+        self._parent = parent
+
+    def is_initialized(self):
+        # TODO: in the future, take a `tag` as argument and store it in the marker in set_initialized.
+        # Then, in this function, compare marker file contents with the tag to invalidate the snapshot if the tag changed.
+        return self._parent._marker_file_path.exists()
+
+    def set_initialized(self):
+        self._parent._marker_file_path.write_text("")
+
+    @property
+    def path(self) -> Path:
+        return self._parent._path / "snapshot"
+
+
+class SnapshotDir:
+    _path: Path
+
+    def __init__(self, path: Path):
+        self._path = path
+        assert self._path.is_dir()
+        self._lock = FileAndThreadLock(self._lock_file_path)
+
+    @property
+    def _lock_file_path(self) -> Path:
+        return self._path / "initializing.flock"
+
+    @property
+    def _marker_file_path(self) -> Path:
+        return self._path / "initialized.marker"
+
+    def __enter__(self) -> SnapshotDirLocked:
+        self._lock.__enter__()
+        return SnapshotDirLocked(self)
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self._lock.__exit__(exc_type, exc_value, exc_traceback)
+
+
+def shared_snapshot_dir(top_output_dir, ident: str) -> SnapshotDir:
+    snapshot_dir_path = get_shared_snapshot_dir_path(top_output_dir, ident)
+    snapshot_dir_path.mkdir(exist_ok=True, parents=True)
+    return SnapshotDir(snapshot_dir_path)
+
+
 @pytest.fixture(scope="function")
 def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:
     """
@@ -3541,7 +3776,7 @@ def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[
     The procedure cleans up after previous runs that were aborted (e.g. due to Ctrl-C, OOM kills, etc).
     """
 
-    if os.getenv("NEON_ENV_BUILDER_FROM_REPO_DIR_USE_OVERLAYFS") is None:
+    if os.getenv("NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS") is None:
         return None
 
     overlay_dir = get_test_overlay_dir(request, top_output_dir)

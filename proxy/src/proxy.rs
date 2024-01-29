@@ -19,6 +19,7 @@ use crate::{
     rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
     usage_metrics::{Ids, USAGE_METRICS},
+    EndpointCacheKey,
 };
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
@@ -26,7 +27,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use regex::Regex;
-use smol_str::SmolStr;
+use smol_str::{format_smolstr, SmolStr};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -516,20 +517,21 @@ impl NeonOptions {
         Self(options)
     }
 
-    pub fn get_cache_key(&self, prefix: &str) -> SmolStr {
+    pub fn get_cache_key(&self, prefix: &str) -> EndpointCacheKey {
         // prefix + format!(" {k}:{v}")
         // kinda jank because SmolStr is immutable
         std::iter::once(prefix)
             .chain(self.0.iter().flat_map(|(k, v)| [" ", &**k, ":", &**v]))
-            .collect()
+            .collect::<SmolStr>()
+            .into()
     }
 
     /// <https://swagger.io/docs/specification/serialization/> DeepObject format
     /// `paramName[prop1]=value1&paramName[prop2]=value2&...`
-    pub fn to_deep_object(&self) -> Vec<(String, SmolStr)> {
+    pub fn to_deep_object(&self) -> Vec<(SmolStr, SmolStr)> {
         self.0
             .iter()
-            .map(|(k, v)| (format!("options[{}]", k), v.clone()))
+            .map(|(k, v)| (format_smolstr!("options[{}]", k), v.clone()))
             .collect()
     }
 }
