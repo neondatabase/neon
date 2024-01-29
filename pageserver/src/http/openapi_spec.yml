@@ -674,6 +674,10 @@ paths:
       responses:
         "200":
           description: Tenant is now in requested state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantLocationConfigResponse"
         "503":
           description: Tenant's state cannot be changed right now.  Wait a few seconds and retry.
           content:
