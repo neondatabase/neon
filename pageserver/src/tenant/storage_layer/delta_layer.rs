@@ -785,6 +785,9 @@ impl DeltaLayerInner {
                 .with_context(|| {
                     format!("Failed to read blob from virtual file {}", file.file.path)
                 })?;
+            // TODO: this one is super costly, it's allocating a Vec<> for the inner Bytes every time.
+            // That's on avg 200 allocations.
+            // Can we re-use the Vec from a buffer pool?
             let val = Value::des(&reconstruct_state.scratch).with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
