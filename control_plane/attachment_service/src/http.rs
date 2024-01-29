@@ -412,7 +412,12 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/timeline", |r| {
             tenant_service_handler(r, handle_tenant_timeline_create)
         })
-        // Timeline GET passthrough to shard zero
+        // Tenant detail GET passthrough to shard zero
+        .get("/v1/tenant/:tenant_id*", |r| {
+            tenant_service_handler(r, handle_tenant_timeline_passthrough)
+        })
+        // Timeline GET passthrough to shard zero.  Note that the `*` in the URL is a wildcard: any future
+        // timeline GET APIs will be implicitly included.
         .get("/v1/tenant/:tenant_id/timeline*", |r| {
             tenant_service_handler(r, handle_tenant_timeline_passthrough)
         })
