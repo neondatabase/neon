@@ -392,6 +392,8 @@ pub fn make_router(
             tenant_service_handler(r, handle_tenant_shard_migrate)
         })
         // Tenant operations
+        // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into
+        // this service to manage tenants that actually consist of many tenant shards, as if they are a single entity.
         .post("/v1/tenant", |r| {
             tenant_service_handler(r, handle_tenant_create)
         })
