@@ -6,6 +6,12 @@ on:
       - main
       - release
   pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - converted_to_draft
 
 defaults:
   run:
