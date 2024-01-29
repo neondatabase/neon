@@ -2823,11 +2823,12 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 		.segno = segno
 	};
 	int n_blocks;
+	shardno_t shard_no = 0; /* All SLRUs are at shard 0 */
 	do
 	{
-		while (!page_server->send(&request.req) || !page_server->flush());
+		while (!page_server->send(shard_no, &request.req) || !page_server->flush(shard_no));
 		consume_prefetch_responses();
-		resp = page_server->receive();
+		resp = page_server->receive(shard_no);
 	} while (resp == NULL);
 
 	switch (resp->tag)
