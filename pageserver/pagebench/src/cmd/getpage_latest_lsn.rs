@@ -51,6 +51,8 @@ pub(crate) struct Args {
     /// It doesn't get invalidated if the keyspace changes under the hood, e.g., due to new ingested data or compaction.
     #[clap(long)]
     keyspace_cache: Option<Utf8PathBuf>,
+    #[clap(long)]
+    set_io_engine: Option<String>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -102,6 +104,10 @@ async fn main_impl(
         args.mgmt_api_endpoint.clone(),
         args.pageserver_jwt.as_deref(),
     ));
+
+    if let Some(engine_str) = &args.set_io_engine {
+        mgmt_api_client.set_io_engine(engine_str).await?;
+    }
 
     // discover targets
     let timelines: Vec<TenantTimelineId> = crate::util::cli::targets::discover(

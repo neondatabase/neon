@@ -28,7 +28,7 @@ use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 use utils::fs_ext;
 
-mod io_engine;
+pub(crate) mod io_engine;
 mod open_options;
 pub use io_engine::IoEngineKind;
 pub(crate) use open_options::*;
