@@ -190,7 +190,10 @@ async fn auth_quirks(
         Err(info) => {
             let res = hacks::password_hack_no_authentication(info, client, &mut ctx.latency_timer)
                 .await?;
-            ctx.set_endpoint_id(Some(res.info.endpoint.clone()));
+
+            ctx.set_endpoint_id(res.info.endpoint.clone());
+            tracing::Span::current().record("ep", &tracing::field::display(&res.info.endpoint));
+
             (res.info, Some(res.keys))
         }
         Ok(info) => (info, None),
@@ -271,19 +274,12 @@ async fn authenticate_with_secret(
     classic::authenticate(info, client, config, &mut ctx.latency_timer, secret).await
 }
 
-/// Authenticate the user and then wake a compute (or retrieve an existing compute session from cache)
-/// only if authentication was successfuly.
-async fn auth_and_wake_compute(
+/// wake a compute (or retrieve an existing compute session from cache)
+async fn wake_compute(
     ctx: &mut RequestMonitoring,
     api: &impl console::Api,
-    user_info: ComputeUserInfoMaybeEndpoint,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
-    allow_cleartext: bool,
-    config: &'static AuthenticationConfig,
+    compute_credentials: ComputeCredentials<ComputeCredentialKeys>,
 ) -> auth::Result<(CachedNodeInfo, ComputeUserInfo)> {
-    let compute_credentials =
-        auth_quirks(ctx, api, user_info, client, allow_cleartext, config).await?;
-
     let mut num_retries = 0;
     let mut node = loop {
         let wake_res = api.wake_compute(ctx, &compute_credentials.info).await;
@@ -358,16 +354,16 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
                     "performing authentication using the console"
                 );
 
-                let (cache_info, user_info) =
-                    auth_and_wake_compute(ctx, &*api, user_info, client, allow_cleartext, config)
-                        .await?;
+                let compute_credentials =
+                    auth_quirks(ctx, &*api, user_info, client, allow_cleartext, config).await?;
+                let (cache_info, user_info) = wake_compute(ctx, &*api, compute_credentials).await?;
                 (cache_info, BackendType::Console(api, user_info))
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
                 info!("performing link authentication");
 
-                let node_info = link::authenticate(&url, client).await?;
+                let node_info = link::authenticate(ctx, &url, client).await?;
 
                 (
                     CachedNodeInfo::new_uncached(node_info),
