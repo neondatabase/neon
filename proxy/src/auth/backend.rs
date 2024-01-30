@@ -327,7 +327,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
 
                 let mut num_retries = 0;
                 let mut node =
-                    wake_compute(&mut num_retries, ctx, &*api, &compute_credentials.info).await?;
+                    wake_compute(&mut num_retries, ctx, &api, &compute_credentials.info).await?;
 
                 ctx.set_project(node.aux.clone());
 

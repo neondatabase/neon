@@ -1,6 +1,9 @@
 use crate::auth::backend::ComputeUserInfo;
-use crate::console::errors::WakeComputeError;
-use crate::console::{self, provider::CachedNodeInfo};
+use crate::console::{
+    errors::WakeComputeError,
+    provider::{CachedNodeInfo, ConsoleBackend},
+    Api,
+};
 use crate::context::RequestMonitoring;
 use crate::metrics::{bool_to_str, NUM_WAKEUP_FAILURES};
 use crate::proxy::retry::retry_after;
@@ -14,7 +17,7 @@ use super::retry::ShouldRetry;
 pub async fn wake_compute(
     num_retries: &mut u32,
     ctx: &mut RequestMonitoring,
-    api: &impl console::Api,
+    api: &ConsoleBackend,
     info: &ComputeUserInfo,
 ) -> Result<CachedNodeInfo, WakeComputeError> {
     loop {
@@ -43,9 +46,9 @@ pub async fn wake_compute(
 /// * Returns Ok(Break(node)) if the wakeup succeeded
 /// * Returns Err(e) if there was an error
 pub fn handle_try_wake(
-    result: Result<console::CachedNodeInfo, WakeComputeError>,
+    result: Result<CachedNodeInfo, WakeComputeError>,
     num_retries: u32,
-) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
+) -> Result<ControlFlow<CachedNodeInfo, WakeComputeError>, WakeComputeError> {
     match result {
         Err(err) => match &err {
             WakeComputeError::ApiError(api) if api.should_retry(num_retries) => {

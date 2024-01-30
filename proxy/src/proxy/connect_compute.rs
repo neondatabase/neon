@@ -127,7 +127,7 @@ where
     info!("compute node's state has likely changed; requesting a wake-up");
     let mut node_info = match user_info {
         auth::BackendType::Console(api, info) => {
-            wake_compute(&mut num_retries, ctx, &**api, info).await?
+            wake_compute(&mut num_retries, ctx, api, info).await?
         }
         // nothing to do?
         auth::BackendType::Link(_) => return Err(err.into()),
