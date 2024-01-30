@@ -3,10 +3,12 @@ import uuid
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.pg_version import run_only_on_default_postgres
 from fixtures.utils import wait_until
 
 
 @pytest.mark.parametrize("level", ["trace", "debug", "info", "warn", "error"])
+@run_only_on_default_postgres("it does not use any postgres functionality")
 def test_logging_event_count(neon_env_builder: NeonEnvBuilder, level: str):
     # self-test: make sure the event is logged (i.e., our testing endpoint works)
     log_expected = {
