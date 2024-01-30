@@ -250,7 +250,7 @@ where
                     .context("could not add config file to basebackup tarball")?;
             }
         }
-        if !on_demand_slru_download {
+        if !lazy_slru_download {
             // Gather non-relational files from object storage pages.
             let slru_partitions = self
                 .timeline
