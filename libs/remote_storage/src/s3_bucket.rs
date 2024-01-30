@@ -727,6 +727,8 @@ impl RemoteStorage for S3Bucket {
             }
         }
 
+        tracing::info!("Built list for time travel with {} versions and deletions", versions_and_deletes.len());
+
         // Work on the list of references instead of the objects directly,
         // otherwise we get lifetime errors in the sort_by_key call below.
         let mut versions_and_deletes = versions_and_deletes.iter().collect::<Vec<_>>();
