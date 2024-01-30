@@ -1,18 +1,16 @@
 use crate::{
     auth,
     compute::{self, PostgresConnection},
-    console::{self, errors::WakeComputeError, Api},
+    console::{self, errors::WakeComputeError},
     context::RequestMonitoring,
-    metrics::{bool_to_str, NUM_CONNECTION_FAILURES, NUM_WAKEUP_FAILURES},
+    metrics::NUM_CONNECTION_FAILURES,
     proxy::{
         retry::{retry_after, ShouldRetry},
-        wake_compute::handle_try_wake,
+        wake_compute::wake_compute,
     },
 };
 use async_trait::async_trait;
-use hyper::StatusCode;
 use pq_proto::StartupMessageParams;
-use std::ops::ControlFlow;
 use tokio::time;
 use tracing::{error, info, warn};
 
@@ -91,39 +89,6 @@ impl ConnectMechanism for TcpMechanism<'_> {
     }
 }
 
-fn report_error(e: &WakeComputeError, retry: bool) {
-    use crate::console::errors::ApiError;
-    let retry = bool_to_str(retry);
-    let kind = match e {
-        WakeComputeError::BadComputeAddress(_) => "bad_compute_address",
-        WakeComputeError::ApiError(ApiError::Transport(_)) => "api_transport_error",
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::LOCKED,
-            ref text,
-        }) if text.contains("written data quota exceeded")
-            || text.contains("the limit for current plan reached") =>
-        {
-            "quota_exceeded"
-        }
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::LOCKED,
-            ..
-        }) => "api_console_locked",
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::BAD_REQUEST,
-            ..
-        }) => "api_console_bad_request",
-        WakeComputeError::ApiError(ApiError::Console { status, .. })
-            if status.is_server_error() =>
-        {
-            "api_console_other_server_error"
-        }
-        WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
-        WakeComputeError::TimeoutError => "timeout_error",
-    };
-    NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
-}
-
 /// Try to connect to the compute node, retrying if necessary.
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
@@ -160,32 +125,12 @@ where
 
     // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
     info!("compute node's state has likely changed; requesting a wake-up");
-    let mut node_info = loop {
-        let wake_res = match user_info {
-            auth::BackendType::Console(api, user_info) => api.wake_compute(ctx, user_info).await,
-            // nothing to do?
-            auth::BackendType::Link(_) => return Err(err.into()),
-        };
-
-        match handle_try_wake(wake_res, num_retries) {
-            Err(e) => {
-                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
-                report_error(&e, false);
-                return Err(e.into());
-            }
-            // failed to wake up but we can continue to retry
-            Ok(ControlFlow::Continue(e)) => {
-                report_error(&e, true);
-                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-            }
-            // successfully woke up a compute node and can break the wakeup loop
-            Ok(ControlFlow::Break(node_info)) => break node_info,
+    let mut node_info = match user_info {
+        auth::BackendType::Console(api, info) => {
+            wake_compute(&mut num_retries, ctx, &**api, info).await?
         }
-
-        let wait_duration = retry_after(num_retries);
-        num_retries += 1;
-
-        time::sleep(wait_duration).await;
+        // nothing to do?
+        auth::BackendType::Link(_) => return Err(err.into()),
     };
 
     node_info.config.reuse_password(&config);

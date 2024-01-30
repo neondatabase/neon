@@ -324,7 +324,10 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
 
                 let compute_credentials =
                     auth_quirks(ctx, &*api, user_info, client, allow_cleartext, config).await?;
-                let mut node = wake_compute(ctx, &*api, &compute_credentials.info).await?;
+
+                let mut num_retries = 0;
+                let mut node =
+                    wake_compute(&mut num_retries, ctx, &*api, &compute_credentials.info).await?;
 
                 ctx.set_project(node.aux.clone());
 
