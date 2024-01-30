@@ -74,6 +74,14 @@ impl Conf {
         ensure!(path.exists(), "Command {:?} does not exist", path);
         let mut cmd = Command::new(path);
         cmd.env_clear()
+            .env(
+                "ASAN_OPTIONS",
+                std::env::var("ASAN_OPTIONS").unwrap_or_default(),
+            )
+            .env(
+                "UBSAN_OPTIONS",
+                std::env::var("UBSAN_OPTIONS").unwrap_or_default(),
+            )
             .env("LD_LIBRARY_PATH", self.pg_lib_dir()?)
             .env("DYLD_LIBRARY_PATH", self.pg_lib_dir()?);
         Ok(cmd)

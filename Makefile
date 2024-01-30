@@ -13,9 +13,14 @@ ifeq ($(BUILD_TYPE),release)
 	PG_CFLAGS = -O2 -g3 $(CFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
+	CPPFLAGS =
+	LDFLAGS =
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
+	CPPFLAGS = -fsanitize=address -fsanitize=undefined -fno-sanitize-recover -fno-omit-frame-pointer -fno-sanitize=alignment -Wno-cast-function-type-strict
+	LDFLAGS = -fsanitize=address -fsanitize=undefined
+	LD_PRELOAD=$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libubsan.so)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -23,7 +28,8 @@ endif
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
-	PG_CONFIGURE_OPTS += --with-libseccomp
+	#PG_CONFIGURE_OPTS += --with-libseccomp
+	NO_PG_CONFIGURE_OPTS += --with-libseccomp # libseccomp needs additional adjustments
 else ifeq ($(UNAME_S),Darwin)
 	# macOS with brew-installed openssl requires explicit paths
 	# It can be configured with OPENSSL_PREFIX variable
@@ -80,6 +86,8 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 	(cd $(POSTGRES_INSTALL_DIR)/build/$* && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure \
 		CFLAGS='$(PG_CFLAGS)' \
+		CPPFLAGS='$(CPPFLAGS)' \
+		LDFLAGS='$(LDFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$* > configure.log)
 
@@ -174,16 +182,17 @@ neon-pg-ext-clean-%:
 
 # Build walproposer as a static library. walproposer source code is located
 # in the pgxn/neon directory.
-# 
+#
 # We also need to include libpgport.a and libpgcommon.a, because walproposer
 # uses some functions from those libraries.
-# 
+#
 # Some object files are removed from libpgport.a and libpgcommon.a because
 # they depend on openssl and other libraries that are not included in our
 # Rust build.
 .PHONY: walproposer-lib
 walproposer-lib: neon-pg-ext-v16
 	+@echo "Compiling walproposer-lib"
+	unset CPPFLAGS LDFLAGS LD_PRELOAD
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \

@@ -29,6 +29,59 @@ fn main() -> anyhow::Result<()> {
     let pgxn_neon = std::fs::canonicalize(pgxn_neon)?;
     let pgxn_neon = pgxn_neon.to_str().ok_or(anyhow!("Bad non-UTF path"))?;
 
+    #[cfg(debug_assertions)]
+    {
+        // println!("cargo:rustc-link-arg=-fsanitize=address");
+        // println!("cargo:rustc-link-arg=-fsanitize=undefined");
+        //
+        //setting dynamically the symbols
+        let libasan_path = Command::new("gcc")
+            .arg("-print-file-name=libasan.so")
+            .output()
+            .context("failed to execute `gcc -print-file-name=libasan.so`")?;
+
+        if !libasan_path.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
+            panic!("`gcc -print-file-name=libasan.so` failed")
+        }
+
+        let libubsan_path = Command::new("gcc")
+            .arg("-print-file-name=libubsan.so")
+            .output()
+            .context("failed to execute `gcc -print-file-name=libubsan.so`")?;
+
+        if !libasan_path.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&libubsan_path.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&libubsan_path.stderr));
+            panic!("`gcc -print-file-name=libubsan.so` failed")
+        }
+
+        let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
+        let libubsan_path = String::from_utf8(libubsan_path.stdout).unwrap();
+
+        let ld_preload_str = format!("LD_PRELOAD={}:{}", libasan_path, libubsan_path);
+
+        let ld_preload_export = Command::new("export")
+            .arg(ld_preload_str)
+            .output()
+            .context(
+                "failed to execute `export LD_PRELOAD=<libasan.so path>:<libubsan.so path>`",
+            )?;
+
+        if !ld_preload_export.status.success() {
+            println!(
+                "stdout: {}",
+                String::from_utf8_lossy(&ld_preload_export.stdout)
+            );
+            println!(
+                "stderr: {}",
+                String::from_utf8_lossy(&ld_preload_export.stderr)
+            );
+            panic!("`export LD_PRELOAD=<libasan.so path>:<libubsan.so path>` failed")
+        }
+    }
+
     println!("cargo:rustc-link-lib=static=pgport");
     println!("cargo:rustc-link-lib=static=pgcommon");
     println!("cargo:rustc-link-lib=static=walproposer");
@@ -42,6 +95,8 @@ fn main() -> anyhow::Result<()> {
             .context("failed to execute `pg_config --includedir-server`")?;
 
         if !output.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
             panic!("`pg_config --includedir-server` failed")
         }
 
