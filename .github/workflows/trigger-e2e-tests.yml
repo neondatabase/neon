@@ -1,0 +1,133 @@
+name: Trigger E2E Tests
+
+on:
+  pull_request:
+    types:
+      - ready_for_review
+  workflow_call:
+    inputs:
+      build-tag:
+        required: true
+        type: string
+
+concurrency:
+  # Allow only one workflow per any non-`main` branch.
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+  # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
+  E2E_CONCURRENCY_GROUP: ${{ github.repository }}-${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+
+jobs:
+  check-permissions:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Disallow PRs from forks
+        if: |
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+
+        run: |
+          if [ "${{ contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}" = "true" ]; then
+            MESSAGE="Please create a PR from a branch of ${GITHUB_REPOSITORY} instead of a fork"
+          else
+            MESSAGE="The PR should be reviewed and labelled with 'approved-for-ci-run' to trigger a CI run"
+          fi
+          
+          echo >&2 "We don't run CI for PRs from forks"
+          echo >&2 "${MESSAGE}"
+          
+          exit 1
+
+  cancel-previous-e2e-tests:
+    needs: [ check-permissions ]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cancel previous e2e-tests runs for this PR
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          gh workflow --repo neondatabase/cloud \
+            run cancel-previous-in-concurrency-group.yml \
+              --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
+
+  tag:
+    needs: [ check-permissions ]
+    runs-on: [ self-hosted, gen3, small ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    outputs:
+      build-tag: ${{steps.build-tag.outputs.tag}}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get build tag
+        run: |
+          echo run:$GITHUB_RUN_ID
+          echo ref:$GITHUB_REF_NAME
+          echo rev:$(git rev-list --count HEAD)
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "tag=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+        id: build-tag
+
+  trigger-e2e-tests:
+    needs: [ tag ]
+    runs-on: [ self-hosted, gen3, small ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+      options: --init
+    steps:
+      - name: Set PR's status to pending and request a remote CI test
+        run: |
+          # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
+          # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
+          # to place a job run status update later.
+          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+          # For non-PR kinds of runs, the above will produce an empty variable, pick the original sha value for those
+          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+
+          REMOTE_REPO="${{ github.repository_owner }}/cloud"
+
+          curl -f -X POST \
+          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"state\": \"pending\",
+              \"context\": \"neon-cloud-e2e\",
+              \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
+            }"
+
+          curl -f -X POST \
+          https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"ref\": \"main\",
+              \"inputs\": {
+                \"ci_job_name\": \"neon-cloud-e2e\",
+                \"commit_hash\": \"$COMMIT_SHA\",
+                \"remote_repo\": \"${{ github.repository }}\",
+                \"storage_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
+              }
+            }"
