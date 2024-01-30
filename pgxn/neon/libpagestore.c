@@ -328,18 +328,14 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 	now = GetCurrentTimestamp();
 	us_since_last_connect = now - last_connect_time;
-	if (us_since_last_connect < delay_us)
+	if (us_since_last_connect < MAX_RECONNECT_INTERVAL_USEC)
 	{
-		pg_usleep(delay_us - us_since_last_connect);
+		pg_usleep(delay_us);
 		delay_us *= 2;
-		if (delay_us > MAX_RECONNECT_INTERVAL_USEC)
-			delay_us = MAX_RECONNECT_INTERVAL_USEC;
-		last_connect_time = GetCurrentTimestamp();
 	}
 	else
 	{
 		delay_us = MIN_RECONNECT_INTERVAL_USEC;
-		last_connect_time = now;
 	}
 
 	/*
@@ -366,6 +362,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	values[n] = NULL;
 	n++;
 	conn = PQconnectdbParams(keywords, values, 1);
+	last_connect_time = GetCurrentTimestamp();
 
 	if (PQstatus(conn) == CONNECTION_BAD)
 	{
