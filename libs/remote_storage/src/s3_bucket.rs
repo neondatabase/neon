@@ -687,14 +687,17 @@ impl RemoteStorage for S3Bucket {
                 response.version_id_marker,
                 response.key_marker
             );
-            let versions = response.versions.unwrap_or_default();
-            let delete_markers = response.delete_markers.unwrap_or_default();
-            let new_versions = versions.into_iter().map(VerOrDelete::from_version);
-            let new_deletes = delete_markers
+            let versions = response
+                .versions
+                .unwrap_or_default()
+                .into_iter()
+                .map(VerOrDelete::from_version);
+            let deletes = response
+                .delete_markers
+                .unwrap_or_default()
                 .into_iter()
                 .map(VerOrDelete::from_delete_marker);
-            let new_versions_and_deletes = new_versions.chain(new_deletes);
-            itertools::process_results(new_versions_and_deletes, |n_vds| {
+            itertools::process_results(versions.chain(deletes), |n_vds| {
                 versions_and_deletes.extend(n_vds)
             })?;
             fn none_if_empty(v: Option<String>) -> Option<String> {
@@ -749,7 +752,7 @@ impl RemoteStorage for S3Bucket {
         }
         for (key, versions) in vds_for_key {
             let last_vd = versions.last().unwrap();
-            if &last_vd.last_modified > &done_if_after {
+            if last_vd.last_modified > done_if_after {
                 tracing::trace!("Key {key} has version later than done_if_after, skipping");
                 continue;
             }
