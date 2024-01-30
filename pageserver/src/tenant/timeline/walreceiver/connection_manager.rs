@@ -553,9 +553,12 @@ impl ConnectionManagerState {
     fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
         WALRECEIVER_BROKER_UPDATES.inc();
 
-        self.timeline
-            .standby_horizon
-            .store(Lsn(timeline_update.standby_horizon));
+        if timeline_update.standby_horizon != 0 {
+            // ignore reports from safekeepers mnot connected to replicas
+            self.timeline
+                .standby_horizon
+                .store(Lsn(timeline_update.standby_horizon));
+        }
 
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
         let old_entry = self.wal_stream_candidates.insert(

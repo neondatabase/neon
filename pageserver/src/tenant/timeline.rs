@@ -4209,6 +4209,9 @@ impl Timeline {
             new_gc_cutoff
         };
 
+        // Reset standby horizon to ignore  it if it is not updated till next GC
+        self.standby_horizon.store(Lsn::INVALID);
+
         let res = self
             .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
             .instrument(

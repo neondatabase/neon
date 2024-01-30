@@ -7,12 +7,12 @@ from fixtures.neon_fixtures import NeonEnv, PgBin, wait_replica_caughtup
 
 def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
-    n_iterations = 10
+    n_iterations = 60
 
     # Use aggressive GC and checkpoint settings
     tenant, _ = env.neon_cli.create_tenant(
         conf={
-            "gc_period": "5 s",
+            "gc_period": "15 s", # should not be smaller than wal_receiver_status_interval
             "gc_horizon": f"{1024 ** 2}",
             "checkpoint_distance": f"{1024 ** 2}",
             "compaction_target_size": f"{1024 ** 2}",
@@ -23,7 +23,7 @@ def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
 
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
-        pg_bin.run_capture(["pgbench", "-T30", connstr])
+        pg_bin.run_capture(["pgbench", "-T60", connstr])
 
     with env.endpoints.create_start(
         branch_name="main", endpoint_id="primary", tenant_id=tenant

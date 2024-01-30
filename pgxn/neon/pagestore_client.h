@@ -33,9 +33,10 @@ typedef enum
 	/* pagestore_client -> pagestore */
 	T_NeonExistsRequest = 0,
 	T_NeonNblocksRequest,
-	T_NeonGetPageRequest,
+	T_NeonGetLatestPageRequest, /* old format of get_page command */
 	T_NeonDbSizeRequest,
 	T_NeonGetSlruSegmentRequest,
+	T_NeonGetPageRequest,
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
