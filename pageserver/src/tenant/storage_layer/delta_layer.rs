@@ -40,6 +40,7 @@ use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
+use bytes::{Buf, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
@@ -747,7 +748,7 @@ impl DeltaLayerInner {
         );
         let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
 
-        let mut offsets = smallvec::SmallVec::<[(Lsn, u64); 4]>::new();
+        let mut offsets = smallvec::SmallVec::<[(Lsn, u64); 10]>::new();
 
         tree_reader
             .visit(
@@ -789,7 +790,57 @@ impl DeltaLayerInner {
             // That's on avg 200 allocations.
             // Can we re-use the Vec from a buffer pool?
 
-            let val = ValueDe::des(&reconstruct_state.scratch).with_context(|| {
+            struct MoveVecBincodeRead {
+                buf: bytes::BytesMut,
+            }
+
+            impl std::io::Read for MoveVecBincodeRead {
+                fn read(&mut self, mut buf: &mut [u8]) -> std::io::Result<usize> {
+                    let prefix = self.buf.split_to(buf.len()); // FIXME: handle buf < len
+                    buf.copy_from_slice(&prefix);
+                    Ok(buf.len())
+                }
+            }
+
+            impl<'storage> bincode::BincodeRead<'storage> for MoveVecBincodeRead {
+                #[inline(always)]
+                fn forward_read_str<V>(
+                    &mut self,
+                    length: usize,
+                    visitor: V,
+                ) -> bincode::Result<V::Value>
+                where
+                    V: serde::de::Visitor<'storage>,
+                {
+                    todo!()
+                }
+
+                fn get_byte_buffer(&mut self, length: usize) -> bincode::Result<Vec<u8>> {
+                    let data = if self.buf.len() == length {
+                        // ensure `data` is uniquely owned so Vec::from below is fast
+                        std::mem::take(&mut self.buf)
+                    } else {
+                        self.buf.split_to(length)
+                    };
+                    Ok(Vec::<u8>::from(data))
+                }
+
+                fn forward_read_bytes<V>(
+                    &mut self,
+                    length: usize,
+                    visitor: V,
+                ) -> bincode::Result<V::Value>
+                where
+                    V: serde::de::Visitor<'storage>,
+                {
+                    todo!()
+                }
+            }
+
+            let val = ValueDe::des_from_custom(MoveVecBincodeRead {
+                buf: std::mem::take(&mut reconstruct_state.scratch),
+            })
+            .with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
                     file.file.path
@@ -797,24 +848,7 @@ impl DeltaLayerInner {
             })?;
             match val {
                 ValueDe::Image(img) => {
-                    let range_in_scratch = {
-                        // TODO, we should just make .img reference .scratch, but that's Pin pain
-                        assert!(
-                            reconstruct_state.scratch.as_ptr_range().start
-                                >= img.as_ptr_range().start
-                        );
-                        assert!(
-                            reconstruct_state.scratch.as_ptr_range().end <= img.as_ptr_range().end
-                        );
-                        // SAFETY: TODO; probably technicall some UB in here; we checked same bounds in above assert,
-                        // but other criteria don't hold. Probably fine though.
-                        let start =
-                            unsafe { img.as_ptr().offset_from(reconstruct_state.scratch.as_ptr()) };
-                        assert!(start >= 0);
-                        let start = usize::try_from(start).unwrap();
-                        start..(start.checked_add(img.len()).unwrap())
-                    };
-                    reconstruct_state.img = Some((entry_lsn, range_in_scratch));
+                    reconstruct_state.img = Some((entry_lsn, img));
                     need_image = false;
                     break;
                 }

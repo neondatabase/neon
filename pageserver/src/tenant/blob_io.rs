@@ -52,6 +52,20 @@ impl<const N: usize> VecIsh for smallvec::SmallVec<[u8; N]> {
     }
 }
 
+impl VecIsh for bytes::BytesMut {
+    fn clear(&mut self) {
+        bytes::BytesMut::clear(self)
+    }
+
+    fn reserve(&mut self, len: usize) {
+        bytes::BytesMut::reserve(self, len)
+    }
+
+    fn extend_from_slice(&mut self, o: &[u8]) {
+        bytes::BytesMut::extend_from_slice(self, o)
+    }
+}
+
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(

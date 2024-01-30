@@ -21,8 +21,8 @@ pub enum Value {
 }
 
 #[derive(Deserialize)]
-pub enum ValueDe<'a> {
-    Image(&'a [u8]),
+pub enum ValueDe {
+    Image(Vec<u8>),
     WalRecord(NeonWalRecord),
 }
 

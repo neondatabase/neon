@@ -173,36 +173,17 @@ impl InMemoryLayer {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
                 reconstruct_state.scratch.clear();
-                let buf = reader
+                reader
                     .read_blob_into_buf(*pos, &mut reconstruct_state.scratch, &ctx)
                     .await?;
-                let value = ValueDe::des(&reconstruct_state.scratch)?;
+                // TODO: avoid creating the bincode::SliceReader copy
+                let value = Value::des(&reconstruct_state.scratch)?;
                 match value {
-                    ValueDe::Image(img) => {
-                        let range_in_scratch = {
-                            // TODO, we should just make .img reference .scratch, but that's Pin pain
-                            assert!(
-                                reconstruct_state.scratch.as_ptr_range().start
-                                    >= img.as_ptr_range().start
-                            );
-                            assert!(
-                                reconstruct_state.scratch.as_ptr_range().end
-                                    <= img.as_ptr_range().end
-                            );
-                            // SAFETY: TODO; probably technicall some UB in here; we checked same bounds in above assert,
-                            // but other criteria don't hold. Probably fine though.
-                            let start = unsafe {
-                                img.as_ptr().offset_from(reconstruct_state.scratch.as_ptr())
-                            };
-                            assert!(start >= 0);
-                            let start = usize::try_from(start).unwrap();
-                            start..(start.checked_add(img.len()).unwrap())
-                        };
-
-                        reconstruct_state.img = Some((*entry_lsn, range_in_scratch));
+                    Value::Image(img) => {
+                        reconstruct_state.img = Some((*entry_lsn, img.to_vec()));
                         return Ok(ValueReconstructResult::Complete);
                     }
-                    ValueDe::WalRecord(rec) => {
+                    Value::WalRecord(rec) => {
                         let will_init = rec.will_init();
                         reconstruct_state.records.push((*entry_lsn, rec));
                         if will_init {

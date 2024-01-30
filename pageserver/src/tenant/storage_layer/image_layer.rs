@@ -445,7 +445,10 @@ impl ImageLayerInner {
                 )
                 .await
                 .with_context(|| format!("failed to read value from offset {}", offset))?;
-            reconstruct_state.img = Some((self.lsn, 0..reconstruct_state.scratch.len()));
+            reconstruct_state.img = Some((
+                self.lsn,
+                Vec::<u8>::from(std::mem::take(&mut reconstruct_state.scratch)),
+            ));
             Ok(ValueReconstructResult::Complete)
         } else {
             Ok(ValueReconstructResult::Missing)

@@ -161,6 +161,14 @@ pub trait BeSer {
         be_coder().deserialize_from(r).map_err(|e| e.into())
     }
 
+    /// Deserialize from a reader
+    fn des_from_custom<'s, R: bincode::BincodeRead<'s>>(r: R) -> Result<Self, DeserializeError>
+    where
+        Self: DeserializeOwned,
+    {
+        be_coder().deserialize_from_custom(r).map_err(|e| e.into())
+    }
+
     /// Compute the serialized size of a data structure
     ///
     /// Note: it may be faster to serialize to a buffer and then measure the

@@ -10,7 +10,7 @@ mod layer_desc;
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use once_cell::sync::Lazy;
@@ -66,14 +66,14 @@ where
 #[derive(Debug)]
 pub struct ValueReconstructState {
     pub records: smallvec::SmallVec<[(Lsn, NeonWalRecord); 300]>,
-    pub img: Option<(Lsn, Range<usize>)>,
-    pub(crate) scratch: smallvec::SmallVec<[u8; 2 * PAGE_SZ]>,
+    pub img: Option<(Lsn, Vec<u8>)>,
+    pub(crate) scratch: BytesMut,
 }
 
 impl ValueReconstructState {
     pub(crate) fn img_ref(&self) -> Option<(Lsn, &[u8])> {
         match &self.img {
-            Some((lsn, range_in_scratch)) => Some((*lsn, &self.scratch[range_in_scratch.clone()])),
+            Some((lsn, img)) => Some((*lsn, &img)),
             None => None,
         }
     }

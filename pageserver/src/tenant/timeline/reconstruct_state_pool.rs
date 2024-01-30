@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use crate::tenant::storage_layer::ValueReconstructState;
+use crate::{page_cache::PAGE_SZ, tenant::storage_layer::ValueReconstructState};
 
 struct Content(ValueReconstructState);
 
@@ -9,7 +9,7 @@ impl Content {
         Content(ValueReconstructState {
             records: smallvec::SmallVec::new(),
             img: None,
-            scratch: smallvec::SmallVec::new(),
+            scratch: bytes::BytesMut::with_capacity(2 * PAGE_SZ),
         })
     }
     fn reset(&mut self) {
