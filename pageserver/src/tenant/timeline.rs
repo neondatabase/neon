@@ -11,7 +11,7 @@ mod walreceiver;
 pub(crate) static REQ_LRU_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use fail::fail_point;
@@ -4333,14 +4333,16 @@ impl Timeline {
 
         // If we have a page image, and no WAL, we're all set
         if data.records.is_empty() {
-            if let Some((img_lsn, img)) = &data.img {
+            if let Some((img_lsn, img)) = data.img_ref() {
                 trace!(
                     "found page image for key {} at {}, no WAL redo required, req LSN {}",
                     key,
                     img_lsn,
                     request_lsn,
                 );
-                Ok(img.clone())
+                let mut bytes = BytesMut::new(); // TODO: avoid allocation
+                bytes.extend_from_slice(img);
+                Ok(bytes.into())
             } else {
                 Err(PageReconstructError::from(anyhow!(
                     "base image for {key} at {request_lsn} not found"

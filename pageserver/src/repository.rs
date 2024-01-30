@@ -20,6 +20,12 @@ pub enum Value {
     WalRecord(NeonWalRecord),
 }
 
+#[derive(Deserialize)]
+pub enum ValueDe<'a> {
+    Image(&'a [u8]),
+    WalRecord(NeonWalRecord),
+}
+
 impl Value {
     pub fn is_image(&self) -> bool {
         matches!(self, Value::Image(_))

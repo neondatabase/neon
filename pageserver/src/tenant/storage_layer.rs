@@ -66,14 +66,14 @@ where
 #[derive(Debug)]
 pub struct ValueReconstructState {
     pub records: smallvec::SmallVec<[(Lsn, NeonWalRecord); 300]>,
-    pub img: Option<(Lsn, Bytes)>,
+    pub img: Option<(Lsn, Range<usize>)>,
     pub(crate) scratch: smallvec::SmallVec<[u8; 2 * PAGE_SZ]>,
 }
 
 impl ValueReconstructState {
     pub(crate) fn img_ref(&self) -> Option<(Lsn, &[u8])> {
         match &self.img {
-            Some((lsn, bytes)) => Some((*lsn, bytes.as_ref())),
+            Some((lsn, range_in_scratch)) => Some((*lsn, &self.scratch[range_in_scratch.clone()])),
             None => None,
         }
     }

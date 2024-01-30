@@ -433,19 +433,19 @@ impl ImageLayerInner {
             )
             .await?
         {
+            reconstruct_state.scratch.clear();
             let blob = file
                 .block_cursor()
-                .read_blob(
+                .read_blob_into_buf(
                     offset,
+                    &mut reconstruct_state.scratch,
                     &RequestContextBuilder::extend(ctx)
                         .page_content_kind(PageContentKind::ImageLayerValue)
                         .build(),
                 )
                 .await
                 .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
-
-            reconstruct_state.img = Some((self.lsn, value));
+            reconstruct_state.img = Some((self.lsn, 0..reconstruct_state.scratch.len()));
             Ok(ValueReconstructResult::Complete)
         } else {
             Ok(ValueReconstructResult::Missing)

@@ -30,7 +30,7 @@
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::PAGE_SZ;
-use crate::repository::{Key, Value, KEY_SIZE};
+use crate::repository::{Key, Value, ValueDe, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
@@ -788,19 +788,37 @@ impl DeltaLayerInner {
             // TODO: this one is super costly, it's allocating a Vec<> for the inner Bytes every time.
             // That's on avg 200 allocations.
             // Can we re-use the Vec from a buffer pool?
-            let val = Value::des(&reconstruct_state.scratch).with_context(|| {
+
+            let val = ValueDe::des(&reconstruct_state.scratch).with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
                     file.file.path
                 )
             })?;
             match val {
-                Value::Image(img) => {
-                    reconstruct_state.img = Some((entry_lsn, img));
+                ValueDe::Image(img) => {
+                    let range_in_scratch = {
+                        // TODO, we should just make .img reference .scratch, but that's Pin pain
+                        assert!(
+                            reconstruct_state.scratch.as_ptr_range().start
+                                >= img.as_ptr_range().start
+                        );
+                        assert!(
+                            reconstruct_state.scratch.as_ptr_range().end <= img.as_ptr_range().end
+                        );
+                        // SAFETY: TODO; probably technicall some UB in here; we checked same bounds in above assert,
+                        // but other criteria don't hold. Probably fine though.
+                        let start =
+                            unsafe { img.as_ptr().offset_from(reconstruct_state.scratch.as_ptr()) };
+                        assert!(start >= 0);
+                        let start = usize::try_from(start).unwrap();
+                        start..(start.checked_add(img.len()).unwrap())
+                    };
+                    reconstruct_state.img = Some((entry_lsn, range_in_scratch));
                     need_image = false;
                     break;
                 }
-                Value::WalRecord(rec) => {
+                ValueDe::WalRecord(rec) => {
                     let will_init = rec.will_init();
                     reconstruct_state.records.push((entry_lsn, rec));
                     if will_init {

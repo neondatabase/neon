@@ -15,6 +15,7 @@ anyhow.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
+bincode.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 camino.workspace = true

@@ -6,7 +6,7 @@
 //!
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
-use crate::repository::{Key, Value};
+use crate::repository::{Key, Value, ValueDe};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
@@ -172,14 +172,37 @@ impl InMemoryLayer {
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos, &ctx).await?;
-                let value = Value::des(&buf)?;
+                reconstruct_state.scratch.clear();
+                let buf = reader
+                    .read_blob_into_buf(*pos, &mut reconstruct_state.scratch, &ctx)
+                    .await?;
+                let value = ValueDe::des(&reconstruct_state.scratch)?;
                 match value {
-                    Value::Image(img) => {
-                        reconstruct_state.img = Some((*entry_lsn, img));
+                    ValueDe::Image(img) => {
+                        let range_in_scratch = {
+                            // TODO, we should just make .img reference .scratch, but that's Pin pain
+                            assert!(
+                                reconstruct_state.scratch.as_ptr_range().start
+                                    >= img.as_ptr_range().start
+                            );
+                            assert!(
+                                reconstruct_state.scratch.as_ptr_range().end
+                                    <= img.as_ptr_range().end
+                            );
+                            // SAFETY: TODO; probably technicall some UB in here; we checked same bounds in above assert,
+                            // but other criteria don't hold. Probably fine though.
+                            let start = unsafe {
+                                img.as_ptr().offset_from(reconstruct_state.scratch.as_ptr())
+                            };
+                            assert!(start >= 0);
+                            let start = usize::try_from(start).unwrap();
+                            start..(start.checked_add(img.len()).unwrap())
+                        };
+
+                        reconstruct_state.img = Some((*entry_lsn, range_in_scratch));
                         return Ok(ValueReconstructResult::Complete);
                     }
-                    Value::WalRecord(rec) => {
+                    ValueDe::WalRecord(rec) => {
                         let will_init = rec.will_init();
                         reconstruct_state.records.push((*entry_lsn, rec));
                         if will_init {

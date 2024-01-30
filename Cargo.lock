@@ -3321,6 +3321,7 @@ dependencies = [
  "async-compression",
  "async-stream",
  "async-trait",
+ "bincode",
  "byteorder",
  "bytes",
  "camino",
