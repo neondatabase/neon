@@ -241,9 +241,62 @@ RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz -
 FROM build-deps AS vector-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+COPY <<EOF /pgvector-neon.patch
+From 88b589acee777e903fbf82157c24467354a78817 Mon Sep 17 00:00:00 2001
+From: Heikki Linnakangas <heikki.linnakangas@iki.fi>
+Date: Tue, 30 Jan 2024 13:46:17 +0200
+Subject: [PATCH] Make v0.6.0 work with Neon
+
+Now that the WAL-logging happens as a separate step at the end of the
+build, we need a few neon-specific hints to make it work.
+---
+ src/hnswbuild.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/hnswbuild.c b/src/hnswbuild.c
+index 680789ba..bbf20987 100644
+--- a/src/hnswbuild.c
++++ b/src/hnswbuild.c
+@@ -1089,13 +1089,34 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+ 	SeedRandom(42);
+ #endif
+
++#ifdef NEON_SMGR
++	smgr_start_unlogged_build(index->rd_smgr);
++#endif
++
+ 	InitBuildState(buildstate, heap, index, indexInfo, forkNum);
+
+ 	BuildGraph(buildstate, forkNum);
+
++#ifdef NEON_SMGR
++	smgr_finish_unlogged_build_phase_1(index->rd_smgr);
++#endif
++
+ 	if (RelationNeedsWAL(index))
++	{
+ 		log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocks(index), true);
+
++#ifdef NEON_SMGR
++		SetLastWrittenLSNForBlockRange(XactLastRecEnd,
++									   index->rd_smgr->smgr_rlocator.locator,
++									   MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
++		SetLastWrittenLSNForRelation(XactLastRecEnd, index->rd_smgr->smgr_rlocator.locator, MAIN_FORKNUM);
++#endif
++	}
++
++#ifdef NEON_SMGR
++	smgr_end_unlogged_build(index->rd_smgr);
++#endif
++
+ 	FreeBuildState(buildstate);
+ }
+EOF
+
 RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.6.0.tar.gz -O pgvector.tar.gz && \
     echo "b0cf4ba1ab016335ac8fb1cada0d2106235889a194fffeece217c5bda90b2f19 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xvzf ../pgvector.tar.gz --strip-components=1 -C . && \
+    patch -p1 < /pgvector-neon.patch && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/vector.control
