@@ -26,6 +26,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
+use remote_storage::TimeTravelError;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -1474,7 +1475,20 @@ async fn tenant_time_travel_remote_storage_handler(
         &cancel,
     )
     .await
-    .map_err(|e| ApiError::InternalServerError)?;
+    .map_err(|e| match e {
+        TimeTravelError::BadInput(e) => {
+            warn!("bad input error: {e}");
+            ApiError::BadRequest(anyhow!("bad input error"))
+        }
+        TimeTravelError::Cancelled => ApiError::InternalServerError(anyhow!("cancelled")),
+        TimeTravelError::TooManyVersions => {
+            ApiError::InternalServerError(anyhow!("too many versions in remote storage"))
+        }
+        TimeTravelError::Other(e) => {
+            warn!("internal error: {e}");
+            ApiError::InternalServerError(anyhow!("internal error"))
+        }
+    })?;
 
     json_response(StatusCode::OK, ())
 }

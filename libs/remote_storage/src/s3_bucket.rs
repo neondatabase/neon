@@ -46,7 +46,7 @@ use utils::backoff;
 use super::StorageMetadata;
 use crate::{
     ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    S3Config, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    S3Config, TimeTravelError, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -639,7 +639,7 @@ impl RemoteStorage for S3Bucket {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), TimeTravelError> {
         let kind = RequestKind::TimeTravel;
         let _guard = self.permit(kind).await;
 
@@ -664,7 +664,7 @@ impl RemoteStorage for S3Bucket {
         loop {
             let response = backoff::retry(
                 || async {
-                    Ok(self
+                    self
                         .client
                         .list_object_versions()
                         .bucket(self.bucket_name.clone())
@@ -672,13 +672,14 @@ impl RemoteStorage for S3Bucket {
                         .set_key_marker(key_marker.clone())
                         .set_version_id_marker(version_id_marker.clone())
                         .send()
-                        .await?)
+                        .await
+                        .map_err(|e| TimeTravelError::Other(e.into()))
                 },
                 is_permanent,
                 warn_threshold,
                 max_retries,
                 "listing object versions for time_travel_recover",
-                backoff::Cancel::new(cancel.clone(), || anyhow!("Cancelled")),
+                backoff::Cancel::new(cancel.clone(), || TimeTravelError::Cancelled),
             )
             .await?;
 
@@ -699,7 +700,8 @@ impl RemoteStorage for S3Bucket {
                 .map(VerOrDelete::from_delete_marker);
             itertools::process_results(versions.chain(deletes), |n_vds| {
                 versions_and_deletes.extend(n_vds)
-            })?;
+            })
+            .map_err(TimeTravelError::Other)?;
             fn none_if_empty(v: Option<String>) -> Option<String> {
                 v.filter(|v| !v.is_empty())
             }
@@ -708,9 +710,9 @@ impl RemoteStorage for S3Bucket {
             if version_id_marker.is_none() {
                 // The final response is not supposed to be truncated
                 if response.is_truncated.unwrap_or_default() {
-                    anyhow::bail!(
+                    return Err(TimeTravelError::Other(anyhow::anyhow!(
                         "Received truncated ListObjectVersions response for prefix={prefix:?}"
-                    );
+                    )));
                 }
                 break;
             }
@@ -721,9 +723,7 @@ impl RemoteStorage for S3Bucket {
             // 40 seconds, and roughly corresponds to tenants of 2 TiB physical size.
             const COMPLEXITY_LIMIT: usize = 100_000;
             if versions_and_deletes.len() >= COMPLEXITY_LIMIT {
-                anyhow::bail!(
-                    "Limit for number of versions/deletions exceeded for prefix={prefix:?}"
-                );
+                return Err(TimeTravelError::TooManyVersions);
             }
         }
 
@@ -740,8 +740,8 @@ impl RemoteStorage for S3Bucket {
                 version_id, key, ..
             } = &vd;
             if version_id == "null" {
-                anyhow::bail!("Received ListVersions response for key={key} with version_id='null', \
-                    indicating either disabled versioning, or legacy objects with null version id values");
+                return Err(TimeTravelError::Other(anyhow!("Received ListVersions response for key={key} with version_id='null', \
+                    indicating either disabled versioning, or legacy objects with null version id values")));
             }
             tracing::trace!(
                 "Parsing version key={key} version_id={version_id} kind={:?}",
@@ -788,20 +788,21 @@ impl RemoteStorage for S3Bucket {
 
                         backoff::retry(
                             || async {
-                                Ok(self
+                                self
                                     .client
                                     .copy_object()
                                     .bucket(self.bucket_name.clone())
                                     .key(key)
                                     .copy_source(&source_id)
                                     .send()
-                                    .await?)
+                                    .await
+                                    .map_err(|e| TimeTravelError::Other(e.into()))
                             },
                             is_permanent,
                             warn_threshold,
                             max_retries,
                             "listing object versions for time_travel_recover",
-                            backoff::Cancel::new(cancel.clone(), || anyhow!("Cancelled")),
+                            backoff::Cancel::new(cancel.clone(), || TimeTravelError::Cancelled),
                         )
                         .await?;
                     }
@@ -820,8 +821,13 @@ impl RemoteStorage for S3Bucket {
                 } else {
                     tracing::trace!("Deleting {key}...");
 
-                    let oid = ObjectIdentifier::builder().key(key.to_owned()).build()?;
-                    self.delete_oids(kind, &[oid]).await?;
+                    let oid = ObjectIdentifier::builder()
+                        .key(key.to_owned())
+                        .build()
+                        .map_err(|e| TimeTravelError::Other(anyhow::Error::new(e)))?;
+                    self.delete_oids(kind, &[oid])
+                        .await
+                        .map_err(TimeTravelError::Other)?;
                 }
             }
         }

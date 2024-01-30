@@ -19,7 +19,7 @@ use crate::{
         remote_initdb_preserved_archive_path, remote_path, upload_cancellable,
     },
 };
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, TimeTravelError};
 use utils::id::{TenantId, TimelineId};
 
 use super::index::LayerFileMetadata;
@@ -166,7 +166,7 @@ pub(crate) async fn time_travel_recover_tenant(
     timestamp: SystemTime,
     done_if_after: SystemTime,
     cancel: &CancellationToken,
-) -> anyhow::Result<()> {
+) -> Result<(), TimeTravelError> {
     let warn_after = 3;
     let max_attempts = 10;
     let mut prefixes = Vec::with_capacity(2);
@@ -191,11 +191,11 @@ pub(crate) async fn time_travel_recover_tenant(
                     .time_travel_recover(Some(prefix), timestamp, done_if_after, cancel.clone())
                     .await
             },
-            |_| false,
+            |e| !matches!(e, TimeTravelError::Other(_)),
             warn_after,
             max_attempts,
             "time travel recovery of tenant prefix",
-            backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
+            backoff::Cancel::new(cancel.clone(), || TimeTravelError::Cancelled),
         )
         .await?;
     }
