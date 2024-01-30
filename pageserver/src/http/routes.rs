@@ -47,6 +47,7 @@ use crate::tenant::mgr::{
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
 use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
+use crate::tenant::remote_timeline_client;
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
@@ -1423,6 +1424,61 @@ async fn list_location_config_handler(
     json_response(StatusCode::OK, result)
 }
 
+// Do a time travel recovery on the given tenant/tenant shard. Tenant needs to be detached
+// (from all pageservers) as it invalidates consistency assumptions.
+async fn tenant_time_travel_remote_storage_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let timestamp_raw = must_get_query_param(&request, "timestamp")?;
+    let timestamp = humantime::parse_rfc3339(&timestamp_raw)
+        .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
+        .map_err(ApiError::BadRequest)?;
+
+    let done_if_after_raw = must_get_query_param(&request, "done_if_after")?;
+    let done_if_after = humantime::parse_rfc3339(&done_if_after_raw)
+        .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
+        .map_err(ApiError::BadRequest)?;
+
+    // This is just a sanity check to fend off naive wrong usages of the API:
+    // the tenant needs to be detached *everywhere*
+    let state = get_state(&request);
+    let we_manage_tenant = state.tenant_manager.manages_tenant_shard(tenant_shard_id);
+    if we_manage_tenant {
+        return Err(ApiError::BadRequest(anyhow!(
+            "Tenant {tenant_shard_id} is already attached at this pageserver"
+        )));
+    }
+
+    let Some(storage) = state.remote_storage.as_ref() else {
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "remote storage not configured, cannot run time travel"
+        )));
+    };
+
+    if timestamp > done_if_after {
+        return Err(ApiError::BadRequest(anyhow!(
+            "The done_if_after timestamp comes before the timestamp to recover to"
+        )));
+    }
+
+    remote_timeline_client::upload::time_travel_recover_tenant(
+        storage,
+        &tenant_shard_id,
+        timestamp,
+        done_if_after,
+        &cancel,
+    )
+    .await
+    .map_err(|e| ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
 async fn handle_tenant_break(
     r: Request<Body>,
@@ -1968,6 +2024,10 @@ pub fn make_router(
         .get("/v1/location_config", |r| {
             api_handler(r, list_location_config_handler)
         })
+        .put(
+            "/v1/tenant/:tenant_shard_id/time_travel_remote_storage",
+            |r| api_handler(r, tenant_time_travel_remote_storage_handler),
+        )
         .get("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_list_handler)
         })

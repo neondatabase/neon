@@ -5,9 +5,11 @@ use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
 use std::io::{ErrorKind, SeekFrom};
+use std::time::SystemTime;
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
+use utils::backoff;
 
 use super::Generation;
 use crate::{
@@ -156,4 +158,46 @@ pub(crate) async fn preserve_initdb_archive(
     upload_cancellable(cancel, storage.copy_object(&source_path, &dest_path))
         .await
         .with_context(|| format!("backing up initdb archive for '{tenant_id} / {timeline_id}'"))
+}
+
+pub(crate) async fn time_travel_recover_tenant(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    timestamp: SystemTime,
+    done_if_after: SystemTime,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    let warn_after = 3;
+    let max_attempts = 10;
+    let mut prefixes = Vec::with_capacity(2);
+    if tenant_shard_id.is_zero() {
+        // Also recover the unsharded prefix for a shard of zero:
+        // - if the tenant is totally unsharded, the unsharded prefix contains all the data
+        // - if the tenant is sharded, we still want to recover the initdb data, but we only
+        //   want to do it once, so let's do it on the 0 shard
+        let timelines_path_unsharded =
+            super::remote_timelines_path_unsharded(&tenant_shard_id.tenant_id);
+        prefixes.push(timelines_path_unsharded);
+    }
+    if !tenant_shard_id.is_unsharded() {
+        // If the tenant is sharded, we need to recover the sharded prefix
+        let timelines_path = super::remote_timelines_path(tenant_shard_id);
+        prefixes.push(timelines_path);
+    }
+    for prefix in &prefixes {
+        backoff::retry(
+            || async {
+                storage
+                    .time_travel_recover(Some(prefix), timestamp, done_if_after, cancel.clone())
+                    .await
+            },
+            |_| false,
+            warn_after,
+            max_attempts,
+            "time travel recovery of tenant prefix",
+            backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
+        )
+        .await?;
+    }
+    Ok(())
 }
