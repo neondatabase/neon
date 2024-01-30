@@ -5,6 +5,7 @@
 mod conn_pool;
 mod sql_over_http;
 mod websocket;
+mod json;
 
 pub use conn_pool::GlobalConnPoolOptions;
 
