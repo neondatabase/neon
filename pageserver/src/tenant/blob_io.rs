@@ -18,6 +18,40 @@ use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
+pub trait VecIsh {
+    fn clear(&mut self);
+    fn reserve(&mut self, len: usize);
+    fn extend_from_slice(&mut self, o: &[u8]);
+}
+
+impl VecIsh for Vec<u8> {
+    fn clear(&mut self) {
+        Vec::clear(self)
+    }
+
+    fn reserve(&mut self, len: usize) {
+        Vec::reserve(self, len)
+    }
+
+    fn extend_from_slice(&mut self, o: &[u8]) {
+        Vec::extend_from_slice(self, o)
+    }
+}
+
+impl<const N: usize> VecIsh for smallvec::SmallVec<[u8; N]> {
+    fn clear(&mut self) {
+        smallvec::SmallVec::clear(self)
+    }
+
+    fn reserve(&mut self, len: usize) {
+        smallvec::SmallVec::reserve(self, len)
+    }
+
+    fn extend_from_slice(&mut self, o: &[u8]) {
+        smallvec::SmallVec::extend_from_slice(self, o)
+    }
+}
+
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(
@@ -32,10 +66,10 @@ impl<'a> BlockCursor<'a> {
     }
     /// Read blob into the given buffer. Any previous contents in the buffer
     /// are overwritten.
-    pub async fn read_blob_into_buf(
+    pub async fn read_blob_into_buf<B: VecIsh>(
         &self,
         offset: u64,
-        dstbuf: &mut Vec<u8>,
+        dstbuf: &mut B,
         ctx: &RequestContext,
     ) -> Result<(), std::io::Error> {
         let mut blknum = (offset / PAGE_SZ as u64) as u32;

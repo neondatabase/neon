@@ -138,7 +138,7 @@ serde_with = "2.0"
 serde_assert = "0.5.0"
 sha2 = "0.10.2"
 signal-hook = "0.3"
-smallvec = "1.11"
+smallvec = { version = "1.13.1", features = [ "const_generics" ] }
 smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
 strum = "0.24"

@@ -3,6 +3,7 @@ mod eviction_task;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
+mod reconstruct_state_pool;
 pub mod span;
 pub mod uninit;
 mod walreceiver;
@@ -598,11 +599,7 @@ impl Timeline {
             ctx.task_kind()
         );
 
-        let mut reconstruct_state = ValueReconstructState {
-            records: Vec::new(),
-            img: None,
-            scratch: Vec::with_capacity(2 * 8192), // for good measure
-        };
+        let mut reconstruct_state = reconstruct_state_pool::get();
 
         let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
         let path = self
@@ -4329,10 +4326,10 @@ impl Timeline {
         &self,
         key: Key,
         request_lsn: Lsn,
-        mut data: ValueReconstructState,
+        mut data: reconstruct_state_pool::Pooled,
     ) -> Result<Bytes, PageReconstructError> {
         // Perform WAL redo if needed
-        data.records.reverse();
+        data.records.reverse(); // TODO: avoid this, walredo code should simply walk backwards
 
         // If we have a page image, and no WAL, we're all set
         if data.records.is_empty() {

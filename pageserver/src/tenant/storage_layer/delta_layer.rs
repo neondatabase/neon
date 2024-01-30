@@ -747,7 +747,7 @@ impl DeltaLayerInner {
         );
         let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
 
-        let mut offsets: Vec<(Lsn, u64)> = Vec::new();
+        let mut offsets = smallvec::SmallVec::<[(Lsn, u64); 4]>::new();
 
         tree_reader
             .visit(
@@ -805,7 +805,7 @@ impl DeltaLayerInner {
                     reconstruct_state.records.push((entry_lsn, rec));
                     if will_init {
                         // This WAL record initializes the page, so no need to go further back
-                        need_image = false;
+                        need_image = false; // we bail out of this function anyway, might as well move ownership of the img
                         break;
                     }
                 }

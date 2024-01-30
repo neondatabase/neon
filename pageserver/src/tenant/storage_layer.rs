@@ -34,6 +34,8 @@ pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 
 pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 
+use super::disk_btree::PAGE_SZ;
+
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
     T: PartialOrd<T>,
@@ -63,9 +65,9 @@ where
 ///
 #[derive(Debug)]
 pub struct ValueReconstructState {
-    pub records: Vec<(Lsn, NeonWalRecord)>,
+    pub records: smallvec::SmallVec<[(Lsn, NeonWalRecord); 300]>,
     pub img: Option<(Lsn, Bytes)>,
-    pub(crate) scratch: Vec<u8>,
+    pub(crate) scratch: smallvec::SmallVec<[u8; 2 * PAGE_SZ]>,
 }
 
 impl ValueReconstructState {
