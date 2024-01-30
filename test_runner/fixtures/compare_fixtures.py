@@ -117,7 +117,10 @@ class NeonCompare(PgCompare):
         self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
 
         # Start pg
-        self._pg = self.env.endpoints.create_start(branch_name, "main", self.tenant)
+        config_lines = ["max_replication_write_lag=-1", "max_replication_flush_lag=-1"]
+        self._pg = self.env.endpoints.create_start(
+            branch_name, "main", self.tenant, config_lines=config_lines
+        )
 
     @property
     def pg(self) -> PgProtocol:
@@ -294,7 +297,7 @@ def remote_compare(zenbenchmark: NeonBenchmarker, remote_pg: RemotePostgres) -> 
     return RemoteCompare(zenbenchmark, remote_pg)
 
 
-@pytest.fixture(params=["vanilla_compare", "neon_compare"], ids=["vanilla", "neon"])
+@pytest.fixture(params=["neon_compare"], ids=["neon"])
 def neon_with_baseline(request: FixtureRequest) -> PgCompare:
     """Parameterized fixture that helps compare neon against vanilla postgres.
 

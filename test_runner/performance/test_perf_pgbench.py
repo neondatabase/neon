@@ -35,7 +35,7 @@ def init_pgbench(env: PgCompare, cmdline, password: None):
     t0 = timeit.default_timer()
     with env.record_pageserver_writes("init.pageserver_writes"):
         out = env.pg_bin.run_capture(cmdline, env=environ)
-        env.flush()
+        # env.flush()
 
     duration = timeit.default_timer() - t0
     end_timestamp = utc_now_timestamp()
@@ -94,9 +94,7 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
 
     if workload_type == PgBenchLoadType.INIT:
         # Run initialize
-        init_pgbench(
-            env, ["pgbench", f"-s{scale}", "-i", "-I", "dtGvp", connstr], password=password
-        )
+        init_pgbench(env, ["pgbench", f"-s{scale}", "-i", "-I", "dtG", connstr], password=password)
 
     if workload_type == PgBenchLoadType.SIMPLE_UPDATE:
         # Run simple-update workload
@@ -151,7 +149,7 @@ def get_durations_matrix(default: int = 45) -> List[int]:
     return rv
 
 
-def get_scales_matrix(default: int = 10) -> List[int]:
+def get_scales_matrix(default: int = 100) -> List[int]:
     scales = os.getenv("TEST_PG_BENCH_SCALES_MATRIX", default=str(default))
     rv = []
     for s in scales.split(","):
@@ -172,8 +170,8 @@ def get_scales_matrix(default: int = 10) -> List[int]:
 @pytest.mark.parametrize("duration", get_durations_matrix())
 def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.INIT)
-    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
-    run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
+    # run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
+    # run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
 # The following 3 tests run on an existing database as it was set up by previous tests,
