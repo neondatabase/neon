@@ -27,10 +27,26 @@ use crate::{
 };
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 use futures::TryFutureExt;
-use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
+
+/// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
+pub enum MaybeOwned<'a, T> {
+    Owned(T),
+    Borrowed(&'a T),
+}
+
+impl<T> std::ops::Deref for MaybeOwned<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            MaybeOwned::Owned(t) => t,
+            MaybeOwned::Borrowed(t) => t,
+        }
+    }
+}
 
 /// This type serves two purposes:
 ///
@@ -42,12 +58,9 @@ use tracing::info;
 ///   backends which require them for the authentication process.
 pub enum BackendType<'a, T> {
     /// Cloud API (V2).
-    Console(Cow<'a, ConsoleBackend>, T),
+    Console(MaybeOwned<'a, ConsoleBackend>, T),
     /// Authentication via a web browser.
-    Link(Cow<'a, url::ApiUrl>),
-    #[cfg(test)]
-    /// Test backend.
-    Test(&'a dyn TestBackend),
+    Link(MaybeOwned<'a, url::ApiUrl>),
 }
 
 pub trait TestBackend: Send + Sync + 'static {
@@ -65,14 +78,14 @@ impl std::fmt::Display for BackendType<'_, ()> {
                 ConsoleBackend::Console(endpoint) => {
                     fmt.debug_tuple("Console").field(&endpoint.url()).finish()
                 }
-                #[cfg(feature = "testing")]
+                #[cfg(any(test, feature = "testing"))]
                 ConsoleBackend::Postgres(endpoint) => {
                     fmt.debug_tuple("Postgres").field(&endpoint.url()).finish()
                 }
+                #[cfg(test)]
+                ConsoleBackend::Test(_) => fmt.debug_tuple("Test").finish(),
             },
             Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
-            #[cfg(test)]
-            Test(_) => fmt.debug_tuple("Test").finish(),
         }
     }
 }
@@ -83,10 +96,8 @@ impl<T> BackendType<'_, T> {
     pub fn as_ref(&self) -> BackendType<'_, &T> {
         use BackendType::*;
         match self {
-            Console(c, x) => Console(Cow::Borrowed(c), x),
-            Link(c) => Link(Cow::Borrowed(c)),
-            #[cfg(test)]
-            Test(x) => Test(*x),
+            Console(c, x) => Console(MaybeOwned::Borrowed(c), x),
+            Link(c) => Link(MaybeOwned::Borrowed(c)),
         }
     }
 }
@@ -100,8 +111,6 @@ impl<'a, T> BackendType<'a, T> {
         match self {
             Console(c, x) => Console(c, f(x)),
             Link(c) => Link(c),
-            #[cfg(test)]
-            Test(x) => Test(x),
         }
     }
 }
@@ -114,8 +123,6 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
         match self {
             Console(c, x) => x.map(|x| Console(c, x)),
             Link(c) => Ok(Link(c)),
-            #[cfg(test)]
-            Test(x) => Ok(Test(x)),
         }
     }
 }
@@ -145,7 +152,7 @@ impl ComputeUserInfo {
 }
 
 pub enum ComputeCredentialKeys {
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
 }
@@ -283,8 +290,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
         match self {
             Console(_, user_info) => user_info.endpoint_id.clone(),
             Link(_) => Some("link".into()),
-            #[cfg(test)]
-            Test(_) => Some("test".into()),
         }
     }
 
@@ -295,8 +300,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
         match self {
             Console(_, user_info) => &user_info.user,
             Link(_) => "link",
-            #[cfg(test)]
-            Test(_) => "test",
         }
     }
 
@@ -335,10 +338,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
                     BackendType::Link(url),
                 )
             }
-            #[cfg(test)]
-            Test(_) => {
-                unreachable!("this function should never be called in the test backend")
-            }
         };
 
         info!("user successfully authenticated");
@@ -355,8 +354,6 @@ impl BackendType<'_, ComputeUserInfo> {
         match self {
             Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             Link(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
-            #[cfg(test)]
-            Test(x) => x.get_allowed_ips_and_secret(),
         }
     }
 
@@ -371,8 +368,6 @@ impl BackendType<'_, ComputeUserInfo> {
         match self {
             Console(api, user_info) => api.wake_compute(ctx, user_info).map_ok(Some).await,
             Link(_) => Ok(None),
-            #[cfg(test)]
-            Test(x) => x.wake_compute().map(Some),
         }
     }
 }

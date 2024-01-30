@@ -36,7 +36,7 @@ pub async fn wake_compute(
     ctx.set_project(node.aux.clone());
 
     match compute_credentials.keys {
-        #[cfg(feature = "testing")]
+        #[cfg(any(test, feature = "testing"))]
         ComputeCredentialKeys::Password(password) => node.config.password(password),
         ComputeCredentialKeys::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
     };

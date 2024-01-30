@@ -165,9 +165,6 @@ where
             auth::BackendType::Console(api, user_info) => api.wake_compute(ctx, user_info).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
-            // test backend
-            #[cfg(test)]
-            auth::BackendType::Test(x) => x.wake_compute(),
         };
 
         match handle_try_wake(wake_res, num_retries) {
