@@ -715,7 +715,7 @@ impl RemoteStorage for S3Bucket {
             // keep requesting forever if the list is too long, as we'd put the
             // list in RAM.
             // Building a list of 100k entries that reaches the limit roughly takes
-            // 40 seconds, and roughly corresponds to tenants of 2 TiB resident_size.
+            // 40 seconds, and roughly corresponds to tenants of 2 TiB physical size.
             const COMPLEXITY_LIMIT: usize = 100_000;
             if versions_and_deletes.len() >= COMPLEXITY_LIMIT {
                 anyhow::bail!(
