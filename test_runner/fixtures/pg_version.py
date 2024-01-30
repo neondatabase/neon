@@ -52,7 +52,7 @@ class PgVersion(str, enum.Enum):
         return None
 
 
-DEFAULT_VERSION: PgVersion = PgVersion.V14
+DEFAULT_VERSION: PgVersion = PgVersion.V15
 
 
 def skip_on_postgres(version: PgVersion, reason: str):
@@ -75,6 +75,13 @@ def pytest_addoption(parser: Parser):
         action="store",
         type=PgVersion,
         help="DEPRECATED: Postgres version to use for tests",
+    )
+
+
+def run_only_on_default_postgres(reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is not DEFAULT_VERSION,
+        reason=reason,
     )
 
 
