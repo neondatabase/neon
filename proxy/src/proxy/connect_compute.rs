@@ -4,7 +4,10 @@ use crate::{
     console::{self, errors::WakeComputeError, Api},
     context::RequestMonitoring,
     metrics::{bool_to_str, NUM_CONNECTION_FAILURES, NUM_WAKEUP_FAILURES},
-    proxy::retry::{retry_after, ShouldRetry},
+    proxy::{
+        retry::{retry_after, ShouldRetry},
+        wake_compute::handle_try_wake,
+    },
 };
 use async_trait::async_trait;
 use hyper::StatusCode;
@@ -219,25 +222,5 @@ where
         num_retries += 1;
 
         time::sleep(wait_duration).await;
-    }
-}
-
-/// Attempts to wake up the compute node.
-/// * Returns Ok(Continue(e)) if there was an error waking but retries are acceptable
-/// * Returns Ok(Break(node)) if the wakeup succeeded
-/// * Returns Err(e) if there was an error
-pub fn handle_try_wake(
-    result: Result<console::CachedNodeInfo, WakeComputeError>,
-    num_retries: u32,
-) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
-    match result {
-        Err(err) => match &err {
-            WakeComputeError::ApiError(api) if api.should_retry(num_retries) => {
-                Ok(ControlFlow::Continue(err))
-            }
-            _ => Err(err),
-        },
-        // Ready to try again.
-        Ok(new) => Ok(ControlFlow::Break(new)),
     }
 }
