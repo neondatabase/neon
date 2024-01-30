@@ -9,8 +9,8 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     env.pageserver.allowed_errors.append(".*simulated connection error.*")
 
-    # Enable failpoint after starting everything else up so that loading initial
-    # basebackup doesn't fail
+    # Enable failpoint before starting everything else up so that we exercise the retry
+    # on fetching basebackup
     pageserver_http = env.pageserver.http_client()
     pageserver_http.configure_failpoints(("simulated-bad-compute-connection", "50%return(15)"))
 
