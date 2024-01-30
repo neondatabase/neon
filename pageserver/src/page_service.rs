@@ -867,6 +867,10 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<Lsn, PageStreamError> {
         let last_record_lsn = timeline.get_last_record_lsn();
+        // Horizon = 0 (INVALID) is treated as LSN interval degenerated to point [lsn,lsn].
+        // It as done mostly for convenience (because such get_page commands are widely used in tests) and
+        // also seems to be logical: Lsn::MAX moves upper boundary of LSN interval till last_record_lsn and
+        // Lsn(0) moves upper boundary to lower boundary.
         let request_horizon = if horizon == Lsn::INVALID {
             lsn
         } else {
