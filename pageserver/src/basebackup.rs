@@ -222,7 +222,7 @@ where
     async fn send_tarball(mut self) -> anyhow::Result<()> {
         // TODO include checksum
 
-        let on_demand_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
+        let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
