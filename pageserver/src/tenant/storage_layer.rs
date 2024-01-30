@@ -68,6 +68,15 @@ pub struct ValueReconstructState {
     pub(crate) scratch: Vec<u8>,
 }
 
+impl ValueReconstructState {
+    pub(crate) fn img_ref(&self) -> Option<(Lsn, &[u8])> {
+        match &self.img {
+            Some((lsn, bytes)) => Some((*lsn, bytes.as_ref())),
+            None => None,
+        }
+    }
+}
+
 /// Return value from [`Layer::get_value_reconstruct_data`]
 #[derive(Clone, Copy, Debug)]
 pub enum ValueReconstructResult {

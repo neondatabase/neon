@@ -131,8 +131,8 @@ impl PostgresRedoManager {
         &self,
         key: Key,
         lsn: Lsn,
-        base_img: Option<(Lsn, Bytes)>,
-        records: Vec<(Lsn, NeonWalRecord)>,
+        base_img: Option<(Lsn, &[u8])>,
+        records: &[(Lsn, NeonWalRecord)],
         pg_version: u32,
     ) -> anyhow::Result<Bytes> {
         if records.is_empty() {
@@ -141,6 +141,7 @@ impl PostgresRedoManager {
 
         let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
         let mut img = base_img.map(|p| p.1);
+        let mut _intermediate_img_storage = None;
         let mut batch_neon = can_apply_in_neon(&records[0].1);
         let mut batch_start = 0;
         for (i, record) in records.iter().enumerate().skip(1) {
@@ -161,7 +162,8 @@ impl PostgresRedoManager {
                     )
                     .await
                 };
-                img = Some(result?);
+                _intermediate_img_storage = Some(result?);
+                img = _intermediate_img_storage.as_deref();
 
                 batch_neon = rec_neon;
                 batch_start = i;
@@ -225,7 +227,7 @@ impl PostgresRedoManager {
         &self,
         key: Key,
         lsn: Lsn,
-        base_img: Option<Bytes>,
+        base_img: Option<&[u8]>,
         base_img_lsn: Lsn,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
@@ -360,7 +362,7 @@ impl PostgresRedoManager {
         &self,
         key: Key,
         lsn: Lsn,
-        base_img: Option<Bytes>,
+        base_img: Option<&[u8]>,
         records: &[(Lsn, NeonWalRecord)],
     ) -> anyhow::Result<Bytes> {
         let start_time = Instant::now();
@@ -787,7 +789,7 @@ impl WalRedoProcess {
     async fn apply_wal_records(
         &self,
         tag: BufferTag,
-        base_img: &Option<Bytes>,
+        base_img: &Option<&[u8]>,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
     ) -> anyhow::Result<Bytes> {

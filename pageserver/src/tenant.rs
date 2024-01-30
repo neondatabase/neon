@@ -348,8 +348,8 @@ impl WalRedoManager {
         &self,
         key: crate::repository::Key,
         lsn: Lsn,
-        base_img: Option<(Lsn, bytes::Bytes)>,
-        records: Vec<(Lsn, crate::walrecord::NeonWalRecord)>,
+        base_img: Option<(Lsn, &[u8])>,
+        records: &[(Lsn, crate::walrecord::NeonWalRecord)],
         pg_version: u32,
     ) -> anyhow::Result<bytes::Bytes> {
         match self {

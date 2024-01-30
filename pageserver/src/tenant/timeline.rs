@@ -4375,7 +4375,13 @@ impl Timeline {
 
                 let img = match self
                     .walredo_mgr
-                    .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
+                    .request_redo(
+                        key,
+                        request_lsn,
+                        data.img_ref(),
+                        &data.records,
+                        self.pg_version,
+                    )
                     .await
                     .context("reconstruct a page image")
                 {
