@@ -68,6 +68,7 @@ use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::mgr::GetTenantError;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
@@ -1675,8 +1676,16 @@ impl From<GetActiveTenantError> for QueryError {
                 ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
             GetActiveTenantError::Cancelled
-            | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
-                QueryError::Shutdown
+            | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. })
+            | GetActiveTenantError::NotFound(GetTenantError::MapState(_)) => QueryError::Shutdown,
+            GetActiveTenantError::NotFound(GetTenantError::NotFound(tenant_id)) => {
+                QueryError::NotFound(format!("Tenant {tenant_id} not attached").into())
+            }
+            GetActiveTenantError::NotFound(
+                GetTenantError::NotActive(_) | GetTenantError::Broken(_),
+            ) => {
+                // If the tenant is present but not in a state where it can serve I/O, prompt client to backoff/retry by reconnecting
+                QueryError::Reconnect
             }
             e => QueryError::Other(anyhow::anyhow!(e)),
         }
