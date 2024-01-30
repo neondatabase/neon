@@ -1,11 +1,11 @@
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef, ObjectTypeDef
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
-from fixtures.remote_storage import RemoteStorageKind, S3Storage
+from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 
@@ -63,6 +63,14 @@ def wait_for_upload(
     )
 
 
+def _tenant_in_expected_state(tenant_info: Dict[str, Any], expected_state: str):
+    if tenant_info["state"]["slug"] == expected_state:
+        return True
+    if tenant_info["state"]["slug"] == "Broken":
+        raise RuntimeError(f"tenant became Broken, not {expected_state}")
+    return False
+
+
 def wait_until_tenant_state(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
@@ -80,15 +88,41 @@ def wait_until_tenant_state(
             log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
         else:
             log.debug(f"Tenant {tenant_id} data: {tenant}")
-            if tenant["state"]["slug"] == expected_state:
+            if _tenant_in_expected_state(tenant, expected_state):
                 return tenant
-            if tenant["state"]["slug"] == "Broken":
-                raise RuntimeError(f"tenant became Broken, not {expected_state}")
 
         time.sleep(period)
 
     raise Exception(
         f"Tenant {tenant_id} did not become {expected_state} within {iterations * period} seconds"
+    )
+
+
+def wait_until_all_tenants_state(
+    pageserver_http: PageserverHttpClient,
+    expected_state: str,
+    iterations: int,
+    period: float = 1.0,
+    http_error_ok: bool = True,
+):
+    """
+    Like wait_until_tenant_state, but checks all tenants.
+    """
+    for _ in range(iterations):
+        try:
+            tenants = pageserver_http.tenant_list()
+        except Exception as e:
+            if http_error_ok:
+                log.debug(f"Failed to list tenants: {e}")
+            else:
+                raise
+        else:
+            if all(map(lambda tenant: _tenant_in_expected_state(tenant, expected_state), tenants)):
+                return
+        time.sleep(period)
+
+    raise Exception(
+        f"Not all tenants became active {expected_state} within {iterations * period} seconds"
     )
 
 
@@ -233,23 +267,18 @@ def timeline_delete_wait_completed(
     wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations, interval)
 
 
-if TYPE_CHECKING:
-    # TODO avoid by combining remote storage related stuff in single type
-    # and just passing in this type instead of whole builder
-    from fixtures.neon_fixtures import NeonEnvBuilder
-
-
+# remote_storage must not be None, but that's easier for callers to make mypy happy
 def assert_prefix_empty(
-    neon_env_builder: "NeonEnvBuilder",
+    remote_storage: Optional[RemoteStorage],
     prefix: Optional[str] = None,
     allowed_postfix: Optional[str] = None,
 ):
-    response = list_prefix(neon_env_builder, prefix)
+    assert remote_storage is not None
+    response = list_prefix(remote_storage, prefix)
     keys = response["KeyCount"]
     objects: List[ObjectTypeDef] = response.get("Contents", [])
     common_prefixes = response.get("CommonPrefixes", [])
 
-    remote_storage = neon_env_builder.pageserver_remote_storage
     is_mock_s3 = isinstance(remote_storage, S3Storage) and not remote_storage.cleanup
 
     if is_mock_s3:
@@ -283,19 +312,20 @@ def assert_prefix_empty(
     ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
-def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
-    response = list_prefix(neon_env_builder, prefix)
+# remote_storage must not be None, but that's easier for callers to make mypy happy
+def assert_prefix_not_empty(remote_storage: Optional[RemoteStorage], prefix: Optional[str] = None):
+    assert remote_storage is not None
+    response = list_prefix(remote_storage, prefix)
     assert response["KeyCount"] != 0, f"remote dir with prefix {prefix} is empty: {response}"
 
 
 def list_prefix(
-    neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None, delimiter: str = "/"
+    remote: RemoteStorage, prefix: Optional[str] = None, delimiter: str = "/"
 ) -> ListObjectsV2OutputTypeDef:
     """
     Note that this function takes into account prefix_in_bucket.
     """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
-    remote = neon_env_builder.pageserver_remote_storage
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
     assert remote.client is not None
 
@@ -341,8 +371,24 @@ def tenant_delete_wait_completed(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
     iterations: int,
+    ignore_errors: bool = False,
 ):
-    pageserver_http.tenant_delete(tenant_id=tenant_id)
+    if not ignore_errors:
+        pageserver_http.tenant_delete(tenant_id=tenant_id)
+    else:
+        interval = 0.5
+
+        def delete_request_sent():
+            try:
+                pageserver_http.tenant_delete(tenant_id=tenant_id)
+            except PageserverApiException as e:
+                log.debug(e)
+                if e.status_code == 404:
+                    return
+            except Exception as e:
+                log.debug(e)
+
+        wait_until(iterations, interval=interval, func=delete_request_sent)
     wait_tenant_status_404(pageserver_http, tenant_id=tenant_id, iterations=iterations)
 
 

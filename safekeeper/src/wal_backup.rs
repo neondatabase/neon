@@ -4,6 +4,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use utils::backoff;
 use utils::id::NodeId;
 
 use std::cmp::min;
@@ -166,6 +168,17 @@ async fn update_task(
     }
 }
 
+static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
+
+// Storage must be configured and initialized when this is called.
+fn get_configured_remote_storage() -> &'static GenericRemoteStorage {
+    REMOTE_STORAGE
+        .get()
+        .expect("failed to get remote storage")
+        .as_ref()
+        .unwrap()
+}
+
 const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 
 /// Sits on wal_backup_launcher_rx and starts/stops per timeline wal backup
@@ -199,7 +212,7 @@ pub async fn wal_backup_launcher_task_main(
             ttid = wal_backup_launcher_rx.recv() => {
                 // channel is never expected to get closed
                 let ttid = ttid.unwrap();
-                if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
+                if !conf.is_wal_backup_enabled() {
                     continue; /* just drain the channel and do nothing */
                 }
                 async {
@@ -484,18 +497,12 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
     res
 }
 
-static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
-
 async fn backup_object(
     source_file: &Utf8Path,
     target_file: &RemotePath,
     size: usize,
 ) -> Result<()> {
-    let storage = REMOTE_STORAGE
-        .get()
-        .expect("failed to get remote storage")
-        .as_ref()
-        .unwrap();
+    let storage = get_configured_remote_storage();
 
     let file = File::open(&source_file)
         .await
@@ -530,6 +537,39 @@ pub async fn read_object(
     let reader = tokio::io::BufReader::with_capacity(BUFFER_SIZE, reader);
 
     Ok(Box::pin(reader))
+}
+
+/// Delete WAL files for the given timeline. Remote storage must be configured
+/// when called.
+pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
+    let storage = get_configured_remote_storage();
+    let ttid_path = Utf8Path::new(&ttid.tenant_id.to_string()).join(ttid.timeline_id.to_string());
+    let remote_path = RemotePath::new(&ttid_path)?;
+
+    // A backoff::retry is used here for two reasons:
+    // - To provide a backoff rather than busy-polling the API on errors
+    // - To absorb transient 429/503 conditions without hitting our error
+    //   logging path for issues deleting objects.
+    //
+    // Note: listing segments might take a long time if there are many of them.
+    // We don't currently have http requests timeout cancellation, but if/once
+    // we have listing should get streaming interface to make progress.
+    let token = CancellationToken::new(); // not really used
+    backoff::retry(
+        || async {
+            let files = storage.list_files(Some(&remote_path)).await?;
+            storage.delete_objects(&files).await?;
+            Ok(())
+        },
+        |_| false,
+        3,
+        10,
+        "executing WAL segments deletion batch",
+        backoff::Cancel::new(token, || anyhow::anyhow!("canceled")),
+    )
+    .await?;
+
+    Ok(())
 }
 
 /// Copy segments from one timeline to another. Used in copy_timeline.

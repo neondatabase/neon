@@ -191,7 +191,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
         assert_prefix_not_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -275,7 +275,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     # Check remote is empty
     if remote_storage_kind is RemoteStorageKind.MOCK_S3:
         assert_prefix_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -449,7 +449,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     assert all([tl["state"] == "Active" for tl in timelines])
 
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -466,7 +466,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         )
 
         assert_prefix_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -482,7 +482,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     wait_until(
         2,
         0.5,
-        lambda: assert_prefix_empty(neon_env_builder),
+        lambda: assert_prefix_empty(neon_env_builder.pageserver_remote_storage),
     )
 
 
@@ -673,7 +673,7 @@ def test_timeline_delete_works_for_remote_smoke(
 
     for timeline_id in timeline_ids:
         assert_prefix_not_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -690,7 +690,7 @@ def test_timeline_delete_works_for_remote_smoke(
         timeline_delete_wait_completed(ps_http, tenant_id=tenant_id, timeline_id=timeline_id)
 
         assert_prefix_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -703,7 +703,7 @@ def test_timeline_delete_works_for_remote_smoke(
 
     # for some reason the check above doesnt immediately take effect for the below.
     # Assume it is mock server inconsistency and check twice.
-    wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder))
+    wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder.pageserver_remote_storage))
 
 
 def test_delete_orphaned_objects(
@@ -791,7 +791,7 @@ def test_timeline_delete_resumed_on_attach(
         last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
         assert_prefix_not_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -839,7 +839,7 @@ def test_timeline_delete_resumed_on_attach(
     assert reason.endswith(f"failpoint: {failpoint}"), reason
 
     assert_prefix_not_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -870,7 +870,7 @@ def test_timeline_delete_resumed_on_attach(
     assert not tenant_path.exists()
 
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",

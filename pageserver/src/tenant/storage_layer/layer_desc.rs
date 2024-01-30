@@ -55,13 +55,13 @@ impl PersistentLayerDesc {
     }
 
     #[cfg(test)]
-    pub fn new_test(key_range: Range<Key>) -> Self {
+    pub fn new_test(key_range: Range<Key>, lsn_range: Range<Lsn>, is_delta: bool) -> Self {
         Self {
             tenant_shard_id: TenantShardId::unsharded(TenantId::generate()),
             timeline_id: TimelineId::generate(),
             key_range,
-            lsn_range: Lsn(0)..Lsn(1),
-            is_delta: false,
+            lsn_range,
+            is_delta,
             file_size: 0,
         }
     }

@@ -249,12 +249,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
-        let cache = api.caches.project_info.clone();
-        if let Some(url) = args.redis_notifications {
-            info!("Starting redis notifications listener ({url})");
-            maintenance_tasks.spawn(notifications::task_main(url.to_owned(), cache.clone()));
+        match &**api {
+            proxy::console::provider::ConsoleBackend::Console(api) => {
+                let cache = api.caches.project_info.clone();
+                if let Some(url) = args.redis_notifications {
+                    info!("Starting redis notifications listener ({url})");
+                    maintenance_tasks
+                        .spawn(notifications::task_main(url.to_owned(), cache.clone()));
+                }
+                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+            }
+            #[cfg(feature = "testing")]
+            proxy::console::provider::ConsoleBackend::Postgres(_) => {}
         }
-        maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
     }
 
     let maintenance = loop {
@@ -351,13 +358,15 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
 
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
+            let api = console::provider::ConsoleBackend::Console(api);
             auth::BackendType::Console(Cow::Owned(api), ())
         }
         #[cfg(feature = "testing")]
         AuthBackend::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = console::provider::mock::Api::new(url);
-            auth::BackendType::Postgres(Cow::Owned(api), ())
+            let api = console::provider::ConsoleBackend::Postgres(api);
+            auth::BackendType::Console(Cow::Owned(api), ())
         }
         AuthBackend::Link => {
             let url = args.uri.parse()?;

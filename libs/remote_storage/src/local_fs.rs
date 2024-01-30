@@ -4,7 +4,7 @@
 //! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
-use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin};
+use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin, time::SystemTime};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -14,7 +14,7 @@ use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
-use tokio_util::io::ReaderStream;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
@@ -157,7 +157,6 @@ impl LocalFs {
     }
 }
 
-#[async_trait::async_trait]
 impl RemoteStorage for LocalFs {
     async fn list(
         &self,
@@ -422,6 +421,17 @@ impl RemoteStorage for LocalFs {
             )
         })?;
         Ok(())
+    }
+
+    #[allow(clippy::diverging_sub_expression)]
+    async fn time_travel_recover(
+        &self,
+        _prefix: Option<&RemotePath>,
+        _timestamp: SystemTime,
+        _done_if_after: SystemTime,
+        _cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
     }
 }
 

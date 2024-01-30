@@ -216,8 +216,14 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
             log.info(f"group: {m.group(1)}")
             return int(m.group(1), 16)
 
+    assert neon_env_builder.pageserver_remote_storage is not None
     pre_upgrade_keys = list(
-        [o["Key"] for o in list_prefix(neon_env_builder, delimiter="")["Contents"]]
+        [
+            o["Key"]
+            for o in list_prefix(neon_env_builder.pageserver_remote_storage, delimiter="")[
+                "Contents"
+            ]
+        ]
     )
     for key in pre_upgrade_keys:
         assert parse_generation_suffix(key) is None
@@ -232,7 +238,12 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     legacy_objects: list[str] = []
     suffixed_objects = []
     post_upgrade_keys = list(
-        [o["Key"] for o in list_prefix(neon_env_builder, delimiter="")["Contents"]]
+        [
+            o["Key"]
+            for o in list_prefix(neon_env_builder.pageserver_remote_storage, delimiter="")[
+                "Contents"
+            ]
+        ]
     )
     for key in post_upgrade_keys:
         log.info(f"post-upgrade key: {key}")
@@ -488,7 +499,8 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # and serve clients.
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
     env.pageserver.start(
-        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",)
+        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
+        register=False,
     )
 
     # The pageserver should provide service to clients

@@ -22,6 +22,7 @@ pub mod handler;
 pub mod http;
 pub mod json_ctrl;
 pub mod metrics;
+pub mod patch_control_file;
 pub mod pull_timeline;
 pub mod receive_wal;
 pub mod recovery;
@@ -87,6 +88,10 @@ impl SafeKeeperConf {
     pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> Utf8PathBuf {
         self.tenant_dir(&ttid.tenant_id)
             .join(ttid.timeline_id.to_string())
+    }
+
+    pub fn is_wal_backup_enabled(&self) -> bool {
+        self.remote_storage.is_some() && self.wal_backup_enabled
     }
 }
 

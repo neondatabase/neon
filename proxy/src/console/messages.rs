@@ -1,6 +1,9 @@
 use serde::Deserialize;
-use smol_str::SmolStr;
 use std::fmt;
+
+use crate::auth::IpPattern;
+
+use crate::{BranchId, EndpointId, ProjectId};
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -14,8 +17,8 @@ pub struct ConsoleError {
 #[derive(Deserialize)]
 pub struct GetRoleSecret {
     pub role_secret: Box<str>,
-    pub allowed_ips: Option<Vec<Box<str>>>,
-    pub project_id: Option<Box<str>>,
+    pub allowed_ips: Option<Vec<IpPattern>>,
+    pub project_id: Option<ProjectId>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -92,9 +95,9 @@ impl fmt::Debug for DatabaseInfo {
 /// Also known as `ProxyMetricsAuxInfo` in the console.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct MetricsAuxInfo {
-    pub endpoint_id: SmolStr,
-    pub project_id: SmolStr,
-    pub branch_id: SmolStr,
+    pub endpoint_id: EndpointId,
+    pub project_id: ProjectId,
+    pub branch_id: BranchId,
 }
 
 impl MetricsAuxInfo {

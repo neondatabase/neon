@@ -3,9 +3,8 @@ use std::{convert::Infallible, sync::Arc};
 use futures::StreamExt;
 use redis::aio::PubSub;
 use serde::Deserialize;
-use smol_str::SmolStr;
 
-use crate::cache::project_info::ProjectInfoCache;
+use crate::{cache::project_info::ProjectInfoCache, ProjectId, RoleName};
 
 const CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -46,15 +45,12 @@ enum Notification {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct AllowedIpsUpdate {
-    #[serde(rename = "project")]
-    project_id: SmolStr,
+    project_id: ProjectId,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct PasswordUpdate {
-    #[serde(rename = "project")]
-    project_id: SmolStr,
-    #[serde(rename = "role")]
-    role_name: SmolStr,
+    project_id: ProjectId,
+    role_name: RoleName,
 }
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -151,7 +147,7 @@ mod tests {
     #[test]
     fn parse_allowed_ips() -> anyhow::Result<()> {
         let project_id = "new_project".to_string();
-        let data = format!("{{\"project\": \"{project_id}\"}}");
+        let data = format!("{{\"project_id\": \"{project_id}\"}}");
         let text = json!({
             "type": "message",
             "topic": "/allowed_ips_updated",
@@ -177,7 +173,7 @@ mod tests {
     fn parse_password_updated() -> anyhow::Result<()> {
         let project_id = "new_project".to_string();
         let role_name = "new_role".to_string();
-        let data = format!("{{\"project\": \"{project_id}\", \"role\": \"{role_name}\"}}");
+        let data = format!("{{\"project_id\": \"{project_id}\", \"role_name\": \"{role_name}\"}}");
         let text = json!({
             "type": "message",
             "topic": "/password_updated",

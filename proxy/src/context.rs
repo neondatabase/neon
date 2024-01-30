@@ -7,7 +7,10 @@ use std::net::IpAddr;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::{console::messages::MetricsAuxInfo, error::ErrorKind, metrics::LatencyTimer};
+use crate::{
+    console::messages::MetricsAuxInfo, error::ErrorKind, metrics::LatencyTimer, BranchId,
+    EndpointId, ProjectId, RoleName,
+};
 
 pub mod parquet;
 
@@ -26,12 +29,13 @@ pub struct RequestMonitoring {
     region: &'static str,
 
     // filled in as they are discovered
-    project: Option<SmolStr>,
-    branch: Option<SmolStr>,
-    endpoint_id: Option<SmolStr>,
-    user: Option<SmolStr>,
+    project: Option<ProjectId>,
+    branch: Option<BranchId>,
+    endpoint_id: Option<EndpointId>,
+    user: Option<RoleName>,
     application: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
+    success: bool,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -59,6 +63,7 @@ impl RequestMonitoring {
             user: None,
             application: None,
             error_kind: None,
+            success: false,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
@@ -84,16 +89,23 @@ impl RequestMonitoring {
         self.project = Some(x.project_id);
     }
 
-    pub fn set_endpoint_id(&mut self, endpoint_id: Option<SmolStr>) {
-        self.endpoint_id = endpoint_id.or_else(|| self.endpoint_id.clone());
+    pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+        crate::metrics::CONNECTING_ENDPOINTS
+            .with_label_values(&[self.protocol])
+            .measure(&endpoint_id);
+        self.endpoint_id = Some(endpoint_id);
     }
 
     pub fn set_application(&mut self, app: Option<SmolStr>) {
         self.application = app.or_else(|| self.application.clone());
     }
 
-    pub fn set_user(&mut self, user: SmolStr) {
+    pub fn set_user(&mut self, user: RoleName) {
         self.user = Some(user);
+    }
+
+    pub fn set_success(&mut self) {
+        self.success = true;
     }
 
     pub fn log(&mut self) {

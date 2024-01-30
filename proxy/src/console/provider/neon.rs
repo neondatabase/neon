@@ -14,8 +14,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use itertools::Itertools;
-use smol_str::SmolStr;
 use std::sync::Arc;
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
@@ -86,20 +84,20 @@ impl Api {
                 },
             };
 
-            let secret = scram::ServerSecret::parse(&body.role_secret)
-                .map(AuthSecret::Scram)
-                .ok_or(GetAuthInfoError::BadSecret)?;
-            let allowed_ips = body
-                .allowed_ips
-                .into_iter()
-                .flatten()
-                .map(SmolStr::from)
-                .collect_vec();
+            let secret = if body.role_secret.is_empty() {
+                None
+            } else {
+                let secret = scram::ServerSecret::parse(&body.role_secret)
+                    .map(AuthSecret::Scram)
+                    .ok_or(GetAuthInfoError::BadSecret)?;
+                Some(secret)
+            };
+            let allowed_ips = body.allowed_ips.unwrap_or_default();
             ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
             Ok(AuthInfo {
-                secret: Some(secret),
+                secret,
                 allowed_ips,
-                project_id: body.project_id.map(SmolStr::from),
+                project_id: body.project_id,
             })
         }
         .map_err(crate::error::log_error)
@@ -172,26 +170,28 @@ impl super::Api for Api {
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<Option<CachedRoleSecret>, GetAuthInfoError> {
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         let ep = &user_info.endpoint;
         let user = &user_info.user;
         if let Some(role_secret) = self.caches.project_info.get_role_secret(ep, user) {
-            return Ok(Some(role_secret));
+            return Ok(role_secret);
         }
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
-        let project_id = auth_info.project_id.unwrap_or(ep.clone());
-        if let Some(secret) = &auth_info.secret {
-            self.caches
-                .project_info
-                .insert_role_secret(&project_id, ep, user, secret.clone())
+        if let Some(project_id) = auth_info.project_id {
+            self.caches.project_info.insert_role_secret(
+                &project_id,
+                ep,
+                user,
+                auth_info.secret.clone(),
+            );
+            self.caches.project_info.insert_allowed_ips(
+                &project_id,
+                ep,
+                Arc::new(auth_info.allowed_ips),
+            );
         }
-        self.caches.project_info.insert_allowed_ips(
-            &project_id,
-            ep,
-            Arc::new(auth_info.allowed_ips),
-        );
         // When we just got a secret, we don't need to invalidate it.
-        Ok(auth_info.secret.map(Cached::new_uncached))
+        Ok(Cached::new_uncached(auth_info.secret))
     }
 
     async fn get_allowed_ips(
@@ -212,15 +212,17 @@ impl super::Api for Api {
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let user = &user_info.user;
-        let project_id = auth_info.project_id.unwrap_or(ep.clone());
-        if let Some(secret) = &auth_info.secret {
+        if let Some(project_id) = auth_info.project_id {
+            self.caches.project_info.insert_role_secret(
+                &project_id,
+                ep,
+                user,
+                auth_info.secret.clone(),
+            );
             self.caches
                 .project_info
-                .insert_role_secret(&project_id, ep, user, secret.clone())
+                .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
         }
-        self.caches
-            .project_info
-            .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
         Ok(Cached::new_uncached(allowed_ips))
     }
 
@@ -236,7 +238,7 @@ impl super::Api for Api {
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(&*key) {
+        if let Some(cached) = self.caches.node_info.get(&key) {
             info!(key = &*key, "found cached compute node info");
             return Ok(cached);
         }

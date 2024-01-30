@@ -124,12 +124,12 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
       CARGO_FEATURES: --features testing
-      CARGO_FLAGS: --locked --release
+      CARGO_FLAGS: --release
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
       options: --init
 
     steps:
@@ -210,18 +210,20 @@ jobs:
 
       - name: Run cargo build
         run: |
-          mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          mold -run cargo build --locked $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run cargo test
+        env:
+          NEXTEST_RETRIES: 3
         run: |
-          cargo test $CARGO_FLAGS $CARGO_FEATURES
+          cargo nextest run $CARGO_FEATURES
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
           export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
+          cargo nextest run --package remote_storage --test test_real_s3
 
           # Run separate tests for real Azure Blob Storage
           # XXX: replace region with `eu-central-1`-like region
@@ -231,7 +233,7 @@ jobs:
           export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
           export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo test $CARGO_FLAGS --package remote_storage --test test_real_azure
+          cargo nextest run --package remote_storage --test test_real_azure
 
   check-codestyle-rust-arm:
     timeout-minutes: 90

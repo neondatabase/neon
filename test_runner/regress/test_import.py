@@ -163,6 +163,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
+    vanilla_pg.stop()
+
 
 def test_import_from_pageserver_small(
     pg_bin: PgBin, neon_env_builder: NeonEnvBuilder, test_output_dir: Path

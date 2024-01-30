@@ -25,6 +25,8 @@ tracing.workspace = true
 # a parsing function when loading pageservers from neon_local LocalEnv
 postgres_backend.workspace = true
 
+diesel = { version = "2.1.4", features = ["serde_json", "postgres"] }
+
 utils = { path = "../../libs/utils/" }
 metrics = { path = "../../libs/metrics/" }
 control_plane = { path = ".." }

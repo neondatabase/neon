@@ -5,7 +5,10 @@ from typing import Any, Dict, Optional
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
-from fixtures.pageserver.utils import assert_prefix_empty, tenant_delete_wait_completed
+from fixtures.pageserver.utils import (
+    assert_prefix_empty,
+    tenant_delete_wait_completed,
+)
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
@@ -135,6 +138,16 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
             pageserver.stop()
             pageserver.start()
             if last_state_ps[0].startswith("Attached") and latest_attached == pageserver.id:
+                # /re-attach call will bump generation: track that in our state in case we do an
+                # "attach in same generation" operation later
+                assert last_state_ps[1] is not None  # latest_attached == pageserfer.id implies this
+                # The re-attach API increments generation by exactly one.
+                new_generation = last_state_ps[1] + 1
+                last_state[pageserver.id] = (last_state_ps[0], new_generation)
+                tenants = pageserver.http_client().tenant_list()
+                assert len(tenants) == 1
+                assert tenants[0]["generation"] == new_generation
+
                 log.info("Entering postgres...")
                 workload.churn_rows(rng.randint(128, 256), pageserver.id)
                 workload.validate(pageserver.id)
@@ -504,7 +517,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     tenant_delete_wait_completed(ps_attached.http_client(), tenant_id, 10)
 
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",

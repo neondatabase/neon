@@ -1,4 +1,6 @@
+import random
 from contextlib import closing
+from typing import Optional
 
 import pytest
 from fixtures.log_helper import log
@@ -141,18 +143,24 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 # Test that repeatedly kills and restarts the page server, while the
 # safekeeper and compute node keep running.
 @pytest.mark.timeout(540)
-def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, build_type: str):
+@pytest.mark.parametrize("shard_count", [None, 4])
+def test_pageserver_chaos(
+    neon_env_builder: NeonEnvBuilder, build_type: str, shard_count: Optional[int]
+):
     if build_type == "debug":
         pytest.skip("times out in debug builds")
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
+    if shard_count is not None:
+        neon_env_builder.num_pageservers = shard_count
 
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
     # these can happen, if we shutdown at a good time. to be fixed as part of #5172.
     message = ".*duplicated L1 layer layer=.*"
-    env.pageserver.allowed_errors.append(message)
+    for ps in env.pageservers:
+        ps.allowed_errors.append(message)
 
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.
@@ -192,13 +200,19 @@ def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, build_type: str):
             log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
             assert int(row[0]) < int(row[1])
 
+    # We run "random" kills using a fixed seed, to improve reproducibility if a test
+    # failure is related to a particular order of operations.
+    seed = 0xDEADBEEF
+    rng = random.Random(seed)
+
     # Update the whole table, then immediately kill and restart the pageserver
     for i in range(1, 15):
         endpoint.safe_psql("UPDATE foo set updates = updates + 1")
 
         # This kills the pageserver immediately, to simulate a crash
-        env.pageserver.stop(immediate=True)
-        env.pageserver.start()
+        to_kill = rng.choice(env.pageservers)
+        to_kill.stop(immediate=True)
+        to_kill.start()
 
         # Check that all the updates are visible
         num_updates = endpoint.safe_psql("SELECT sum(updates) FROM foo")[0][0]

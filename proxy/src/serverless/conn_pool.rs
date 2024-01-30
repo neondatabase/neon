@@ -26,11 +26,12 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
-    console,
+    console::{self, messages::MetricsAuxInfo},
     context::RequestMonitoring,
     metrics::NUM_DB_CONNECTIONS_GAUGE,
     proxy::connect_compute::ConnectMechanism,
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
+    DbName, EndpointCacheKey, RoleName,
 };
 use crate::{compute, config};
 
@@ -42,17 +43,17 @@ pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
     pub user_info: ComputeUserInfo,
-    pub dbname: SmolStr,
+    pub dbname: DbName,
     pub password: SmolStr,
 }
 
 impl ConnInfo {
     // hm, change to hasher to avoid cloning?
-    pub fn db_and_user(&self) -> (SmolStr, SmolStr) {
+    pub fn db_and_user(&self) -> (DbName, RoleName) {
         (self.dbname.clone(), self.user_info.user.clone())
     }
 
-    pub fn endpoint_cache_key(&self) -> SmolStr {
+    pub fn endpoint_cache_key(&self) -> EndpointCacheKey {
         self.user_info.endpoint_cache_key()
     }
 }
@@ -79,14 +80,14 @@ struct ConnPoolEntry {
 // Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
 pub struct EndpointConnPool {
-    pools: HashMap<(SmolStr, SmolStr), DbUserConnPool>,
+    pools: HashMap<(DbName, RoleName), DbUserConnPool>,
     total_conns: usize,
     max_conns: usize,
     _guard: IntCounterPairGuard,
 }
 
 impl EndpointConnPool {
-    fn get_conn_entry(&mut self, db_user: (SmolStr, SmolStr)) -> Option<ConnPoolEntry> {
+    fn get_conn_entry(&mut self, db_user: (DbName, RoleName)) -> Option<ConnPoolEntry> {
         let Self {
             pools, total_conns, ..
         } = self;
@@ -95,7 +96,7 @@ impl EndpointConnPool {
             .and_then(|pool_entries| pool_entries.get_conn_entry(total_conns))
     }
 
-    fn remove_client(&mut self, db_user: (SmolStr, SmolStr), conn_id: uuid::Uuid) -> bool {
+    fn remove_client(&mut self, db_user: (DbName, RoleName), conn_id: uuid::Uuid) -> bool {
         let Self {
             pools, total_conns, ..
         } = self;
@@ -196,7 +197,7 @@ pub struct GlobalConnPool {
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: DashMap<SmolStr, Arc<RwLock<EndpointConnPool>>>,
+    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool>>>,
 
     /// Number of endpoint-connection pools
     ///
@@ -362,6 +363,7 @@ impl GlobalConnPool {
 
         // ok return cached connection if found and establish a new one otherwise
         let new_client = if let Some(client) = client {
+            ctx.set_project(client.aux.clone());
             if client.inner.is_closed() {
                 let conn_id = uuid::Uuid::new_v4();
                 info!(%conn_id, "pool: cached connection '{conn_info}' is closed, opening a new one");
@@ -439,7 +441,10 @@ impl GlobalConnPool {
         Ok(Client::new(new_client, conn_info, endpoint_pool).await)
     }
 
-    fn get_or_create_endpoint_pool(&self, endpoint: &SmolStr) -> Arc<RwLock<EndpointConnPool>> {
+    fn get_or_create_endpoint_pool(
+        &self,
+        endpoint: &EndpointCacheKey,
+    ) -> Arc<RwLock<EndpointConnPool>> {
         // fast path
         if let Some(pool) = self.global_pool.get(endpoint) {
             return pool.clone();
@@ -593,10 +598,6 @@ async fn connect_to_compute_once(
     span.in_scope(|| {
         info!(%conn_info, %session, "new connection");
     });
-    let ids = Ids {
-        endpoint_id: node_info.aux.endpoint_id.clone(),
-        branch_id: node_info.aux.branch_id.clone(),
-    };
 
     let db_user = conn_info.db_and_user();
     tokio::spawn(
@@ -664,7 +665,7 @@ async fn connect_to_compute_once(
     Ok(ClientInner {
         inner: client,
         session: tx,
-        ids,
+        aux: node_info.aux.clone(),
         conn_id,
     })
 }
@@ -672,13 +673,17 @@ async fn connect_to_compute_once(
 struct ClientInner {
     inner: tokio_postgres::Client,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
-    ids: Ids,
+    aux: MetricsAuxInfo,
     conn_id: uuid::Uuid,
 }
 
 impl Client {
     pub fn metrics(&self) -> Arc<MetricCounter> {
-        USAGE_METRICS.register(self.inner.as_ref().unwrap().ids.clone())
+        let aux = &self.inner.as_ref().unwrap().aux;
+        USAGE_METRICS.register(Ids {
+            endpoint_id: aux.endpoint_id.clone(),
+            branch_id: aux.branch_id.clone(),
+        })
     }
 }
 

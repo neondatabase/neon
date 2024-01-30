@@ -28,7 +28,7 @@ use crate::safekeeper::Term;
 use crate::safekeeper::{ServerInfo, TermLsn};
 use crate::send_wal::WalSenderState;
 use crate::timeline::PeerInfo;
-use crate::{copy_timeline, debug_dump, pull_timeline};
+use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
@@ -288,34 +288,32 @@ async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>
 }
 
 /// Deactivates the timeline and removes its data directory.
-async fn timeline_delete_force_handler(
-    mut request: Request<Body>,
-) -> Result<Response<Body>, ApiError> {
+async fn timeline_delete_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
+    let only_local = parse_query_param(&request, "only_local")?.unwrap_or(false);
     check_permission(&request, Some(ttid.tenant_id))?;
     ensure_no_body(&mut request).await?;
     // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
     // error handling here when we're able to.
-    let resp = GlobalTimelines::delete_force(&ttid)
+    let resp = GlobalTimelines::delete(&ttid, only_local)
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
 }
 
 /// Deactivates all timelines for the tenant and removes its data directory.
-/// See `timeline_delete_force_handler`.
-async fn tenant_delete_force_handler(
-    mut request: Request<Body>,
-) -> Result<Response<Body>, ApiError> {
+/// See `timeline_delete_handler`.
+async fn tenant_delete_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id = parse_request_param(&request, "tenant_id")?;
+    let only_local = parse_query_param(&request, "only_local")?.unwrap_or(false);
     check_permission(&request, Some(tenant_id))?;
     ensure_no_body(&mut request).await?;
     // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
     // Using an `InternalServerError` should be fixed when the types support it
-    let delete_info = GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
+    let delete_info = GlobalTimelines::delete_force_all_for_tenant(&tenant_id, only_local)
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(
@@ -467,6 +465,26 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     Ok(response)
 }
 
+async fn patch_control_file_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+
+    let patch_request: patch_control_file::Request = json_request(&mut request).await?;
+    let response = patch_control_file::handle_request(tli, patch_request)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, response)
+}
+
 /// Safekeeper http router.
 pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router();
@@ -512,10 +530,10 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             request_span(r, timeline_status_handler)
         })
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
-            request_span(r, timeline_delete_force_handler)
+            request_span(r, timeline_delete_handler)
         })
         .delete("/v1/tenant/:tenant_id", |r| {
-            request_span(r, tenant_delete_force_handler)
+            request_span(r, tenant_delete_handler)
         })
         .post("/v1/pull_timeline", |r| {
             request_span(r, timeline_pull_handler)
@@ -527,6 +545,10 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .post(
             "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",
             |r| request_span(r, timeline_copy_handler),
+        )
+        .patch(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/control_file",
+            |r| request_span(r, patch_control_file_handler),
         )
         // for tests
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {

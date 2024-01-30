@@ -7,7 +7,6 @@
 //! ```
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Child;
 use std::{io, result};
 
 use anyhow::Context;
@@ -104,7 +103,7 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<Child> {
+    pub async fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<()> {
         print!(
             "Starting safekeeper at '{}' in '{}'",
             self.pg_connection_config.raw_address(),

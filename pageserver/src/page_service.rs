@@ -61,7 +61,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
-use crate::pgdatadir_mapping::{rel_block_to_key, Version};
+use crate::pgdatadir_mapping::Version;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -75,6 +75,7 @@ use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
 
+use pageserver_api::key::rel_block_to_key;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
@@ -321,8 +322,8 @@ enum PageStreamError {
     Shutdown,
 
     /// Something went wrong reading a page: this likely indicates a pageserver bug
-    #[error("Read error: {0}")]
-    Read(PageReconstructError),
+    #[error("Read error")]
+    Read(#[source] PageReconstructError),
 
     /// Ran out of time waiting for an LSN
     #[error("LSN timeout: {0}")]
@@ -331,11 +332,11 @@ enum PageStreamError {
     /// The entity required to serve the request (tenant or timeline) is not found,
     /// or is not found in a suitable state to serve a request.
     #[error("Not found: {0}")]
-    NotFound(std::borrow::Cow<'static, str>),
+    NotFound(Cow<'static, str>),
 
     /// Request asked for something that doesn't make sense, like an invalid LSN
     #[error("Bad request: {0}")]
-    BadRequest(std::borrow::Cow<'static, str>),
+    BadRequest(Cow<'static, str>),
 }
 
 impl From<PageReconstructError> for PageStreamError {
@@ -394,11 +395,23 @@ impl PageServerHandler {
         }
     }
 
-    /// Analogous to calling cancelled() on a Timeline's cancellation token: waits for cancellation.
+    /// Future that completes when we need to shut down the connection.
     ///
-    /// We use many Timeline objects, and hold GateGuards on all of them.  We must therefore respect
-    /// all of their cancellation tokens.
-    async fn timeline_cancelled(&self) {
+    /// We currently need to shut down when any of the following happens:
+    /// 1. any of the timelines we hold GateGuards for in `shard_timelines` is cancelled
+    /// 2. task_mgr requests shutdown of the connection
+    ///
+    /// NB on (1): the connection's lifecycle is not actually tied to any of the
+    /// `shard_timelines`s' lifecycles. But it's _necessary_ in the current
+    /// implementation to be responsive to timeline cancellation because
+    /// the connection holds their `GateGuards` open (sored in `shard_timelines`).
+    /// We currently do the easy thing and terminate the connection if any of the
+    /// shard_timelines gets cancelled. But really, we cuold spend more effort
+    /// and simply remove the cancelled timeline from the `shard_timelines`, thereby
+    /// dropping the guard.
+    ///
+    /// NB: keep in sync with [`Self::is_connection_cancelled`]
+    async fn await_connection_cancelled(&self) {
         // A short wait before we expend the cycles to walk our timeline map.  This avoids incurring
         // that cost every time we check for cancellation.
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -408,20 +421,26 @@ impl PageServerHandler {
         // immutable &self).  So it's fine to evaluate shard_timelines after the sleep, we don't risk
         // missing any inserts to the map.
 
-        let mut futs = self
-            .shard_timelines
-            .values()
-            .map(|ht| ht.timeline.cancel.cancelled())
-            .collect::<FuturesUnordered<_>>();
-
-        futs.next().await;
+        let mut cancellation_sources = Vec::with_capacity(1 + self.shard_timelines.len());
+        use futures::future::Either;
+        cancellation_sources.push(Either::Left(task_mgr::shutdown_watcher()));
+        cancellation_sources.extend(
+            self.shard_timelines
+                .values()
+                .map(|ht| Either::Right(ht.timeline.cancel.cancelled())),
+        );
+        FuturesUnordered::from_iter(cancellation_sources)
+            .next()
+            .await;
     }
 
-    /// Analogous to calling is_cancelled() on a Timeline's cancellation token
-    fn timeline_is_cancelled(&self) -> bool {
-        self.shard_timelines
-            .values()
-            .any(|ht| ht.timeline.cancel.is_cancelled() || ht.timeline.is_stopping())
+    /// Checking variant of [`Self::await_connection_cancelled`].
+    fn is_connection_cancelled(&self) -> bool {
+        task_mgr::is_shutdown_requested()
+            || self
+                .shard_timelines
+                .values()
+                .any(|ht| ht.timeline.cancel.is_cancelled() || ht.timeline.is_stopping())
     }
 
     /// This function always respects cancellation of any timeline in `[Self::shard_timelines]`.  Pass in
@@ -442,7 +461,7 @@ impl PageServerHandler {
             flush_r = pgb.flush() => {
                 Ok(flush_r?)
             },
-            _ = self.timeline_cancelled() => {
+            _ = self.await_connection_cancelled() => {
                 Err(QueryError::Shutdown)
             }
             _ = cancel.cancelled() => {
@@ -559,7 +578,7 @@ impl PageServerHandler {
             let msg = tokio::select! {
                 biased;
 
-                _ = self.timeline_cancelled() => {
+                _ = self.await_connection_cancelled() => {
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
                     return Err(QueryError::Shutdown)
@@ -642,7 +661,7 @@ impl PageServerHandler {
                     span.in_scope(|| info!("handler requested reconnect: {reason}"));
                     return Err(QueryError::Reconnect);
                 }
-                Err(e) if self.timeline_is_cancelled() => {
+                Err(e) if self.is_connection_cancelled() => {
                     // This branch accomodates code within request handlers that returns an anyhow::Error instead of a clean
                     // shutdown error, this may be buried inside a PageReconstructError::Other for example.
                     //
@@ -658,7 +677,10 @@ impl PageServerHandler {
                         // print the all details to the log with {:#}, but for the client the
                         // error message is enough.  Do not log if shutting down, as the anyhow::Error
                         // here includes cancellation which is not an error.
-                        span.in_scope(|| error!("error reading relation or page version: {:#}", e));
+                        let full = utils::error::report_compact_sources(&e);
+                        span.in_scope(|| {
+                            error!("error reading relation or page version: {full:#}")
+                        });
                         PagestreamBeMessage::Error(PagestreamErrorResponse {
                             message: e.to_string(),
                         })
