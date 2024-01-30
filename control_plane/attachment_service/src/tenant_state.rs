@@ -181,6 +181,13 @@ impl IntentState {
         }
     }
 
+    /// Remove the last secondary node from the list of secondaries
+    pub(crate) fn pop_secondary(&mut self, scheduler: &mut Scheduler) {
+        if let Some(node_id) = self.secondary.pop() {
+            scheduler.node_dec_ref(node_id);
+        }
+    }
+
     pub(crate) fn clear(&mut self, scheduler: &mut Scheduler) {
         if let Some(old_attached) = self.attached.take() {
             scheduler.node_dec_ref(old_attached);
@@ -212,7 +219,7 @@ impl IntentState {
     /// as their attached pageserver.
     ///
     /// Returns true if a change was made
-    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
+    pub(crate) fn demote_attached(&mut self, node_id: NodeId) -> bool {
         if self.attached == Some(node_id) {
             // TODO: when scheduler starts tracking attached + secondary counts separately, we will
             // need to call into it here.
@@ -438,7 +445,49 @@ impl TenantState {
         // more work on the same pageservers we're already using.
         let mut modified = false;
 
+        // Remove any intent state that should no longer be present
         use PlacementPolicy::*;
+        match self.policy {
+            Single => {
+                if !self.intent.secondary.is_empty() {
+                    self.intent.clear_secondary(scheduler);
+                    modified = true;
+                }
+            }
+            Double(secondary_count) => {
+                let retain_secondaries = if self.intent.attached.is_none()
+                    && scheduler.node_preferred(&self.intent.secondary).is_some()
+                {
+                    // If we have no attached, and one of the secondaries is elegible to be promoted, retain
+                    // one more secondary than we usually would, as one of them will become attached futher down this function.
+                    secondary_count + 1
+                } else {
+                    secondary_count
+                };
+
+                while self.intent.secondary.len() > retain_secondaries {
+                    // We have no particular preference for one secondary location over another: just
+                    // arbitrarily drop from the end
+                    self.intent.pop_secondary(scheduler);
+                    modified = true;
+                }
+            }
+            Secondary => {
+                while self.intent.secondary.len() > 1 {
+                    // We have no particular preference for one secondary location over another: just
+                    // arbitrarily drop from the end
+                    self.intent.pop_secondary(scheduler);
+                    modified = true;
+                }
+            }
+            Detached => {
+                if self.intent.get_attached().is_some() || !self.intent.get_secondary().is_empty() {
+                    self.intent.clear(scheduler);
+                    modified = true;
+                }
+            }
+        }
+
         match self.policy {
             Single => {
                 // Should have exactly one attached, and zero secondaries
@@ -463,17 +512,20 @@ impl TenantState {
                     modified = true;
                 }
             }
+            Secondary => {
+                if let Some(node_id) = self.intent.get_attached() {
+                    // Populate secondary by demoting the attached node
+                    self.intent.demote_attached(*node_id);
+                    modified = true;
+                } else if self.intent.secondary.is_empty() {
+                    // Populate secondary by scheduling a fresh node
+                    let node_id = scheduler.schedule_shard(&[])?;
+                    self.intent.push_secondary(scheduler, node_id);
+                    modified = true;
+                }
+            }
             Detached => {
-                // Should have no attached or secondary pageservers
-                if self.intent.attached.is_some() {
-                    self.intent.set_attached(scheduler, None);
-                    modified = true;
-                }
-
-                if !self.intent.secondary.is_empty() {
-                    self.intent.clear_secondary(scheduler);
-                    modified = true;
-                }
+                // Never add locations in this mode
             }
         }
 
@@ -809,8 +861,10 @@ pub(crate) mod tests {
         assert_ne!(attached_node_id, secondary_node_id);
 
         // Notifying the attached node is offline should demote it to a secondary
-        let changed = tenant_state.intent.notify_offline(attached_node_id);
+        let changed = tenant_state.intent.demote_attached(attached_node_id);
         assert!(changed);
+        assert!(tenant_state.intent.attached.is_none());
+        assert_eq!(tenant_state.intent.secondary.len(), 2);
 
         // Update the scheduler state to indicate the node is offline
         nodes.get_mut(&attached_node_id).unwrap().availability = NodeAvailability::Offline;

@@ -367,6 +367,52 @@ impl Persistence {
         Ok(Generation::new(updated.generation as u32))
     }
 
+    /// For use when updating a persistent property of a tenant, such as its config or placement_policy.
+    ///
+    /// Do not use this for settting generation, unless in the special onboarding code path (/location_config)
+    /// API: use [`Self::increment_generation`] instead.  Setting the generation via this route is a one-time thing
+    /// that we only do the first time a tenant is set to an attached policy via /location_config.
+    pub(crate) async fn update_tenant_shard(
+        &self,
+        tenant_shard_id: TenantShardId,
+        input_placement_policy: PlacementPolicy,
+        input_config: TenantConfig,
+        input_generation: Option<Generation>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::tenant_shards::dsl::*;
+        self.with_conn(move |conn| {
+            let query = diesel::update(tenant_shards)
+                .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
+                .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
+                .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32));
+            if let Some(input_generation) = input_generation {
+                // Update includes generation column
+                query
+                    .set((
+                        generation.eq(input_generation.into().unwrap() as i32),
+                        placement_policy
+                            .eq(serde_json::to_string(&input_placement_policy).unwrap()),
+                        config.eq(serde_json::to_string(&input_config).unwrap()),
+                    ))
+                    .execute(conn)?;
+            } else {
+                // Update does not include generation column
+                query
+                    .set((
+                        placement_policy
+                            .eq(serde_json::to_string(&input_placement_policy).unwrap()),
+                        config.eq(serde_json::to_string(&input_config).unwrap()),
+                    ))
+                    .execute(conn)?;
+            }
+
+            Ok(())
+        })
+        .await?;
+
+        Ok(())
+    }
+
     pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_conn(move |conn| {

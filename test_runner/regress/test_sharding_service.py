@@ -12,7 +12,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     TokenScope,
 )
-from fixtures.pageserver.http import PageserverHttpClient, TenantConfig
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     enable_remote_storage_versioning,
@@ -146,6 +146,8 @@ def test_sharding_service_smoke(
     for tid in tenant_ids:
         tenant_delete_wait_completed(env.attachment_service.pageserver_api(), tid, 10)
 
+    env.attachment_service.consistency_check()
+
     # Set a scheduling policy on one node, create all the tenants, observe
     # that the scheduling policy is respected.
     env.attachment_service.node_configure(env.pageservers[1].id, {"scheduling": "Draining"})
@@ -256,9 +258,8 @@ def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
     env.attachment_service.consistency_check()
 
 
-def test_sharding_service_onboarding(
-    neon_env_builder: NeonEnvBuilder,
-):
+@pytest.mark.parametrize("warm_up", [True, False])
+def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
     """
     We onboard tenants to the sharding service by treating it as a 'virtual pageserver'
     which provides the /location_config API.  This is similar to creating a tenant,
@@ -306,6 +307,23 @@ def test_sharding_service_onboarding(
         },
     )
 
+    if warm_up:
+        origin_ps.http_client().tenant_heatmap_upload(tenant_id)
+
+        # We expect to be called via live migration code, which may try to configure the tenant into secondary
+        # mode before attaching it.
+        virtual_ps_http.tenant_location_conf(
+            tenant_id,
+            {
+                "mode": "Secondary",
+                "secondary_conf": {"warm": True},
+                "tenant_conf": {},
+                "generation": None,
+            },
+        )
+
+        virtual_ps_http.tenant_secondary_download(tenant_id)
+
     # Call into attachment service to onboard the tenant
     generation += 1
     virtual_ps_http.tenant_location_conf(
@@ -351,7 +369,9 @@ def test_sharding_service_onboarding(
     assert len(dest_tenants) == 1
     assert TenantId(dest_tenants[0]["id"]) == tenant_id
 
-    # sharding service advances generation by 1 when it first attaches
+    # sharding service advances generation by 1 when it first attaches.  We started
+    # with a nonzero generation so this equality also proves that the generation
+    # was properly carried over during onboarding.
     assert dest_tenants[0]["generation"] == generation + 1
 
     # The onboarded tenant should survive a restart of sharding service

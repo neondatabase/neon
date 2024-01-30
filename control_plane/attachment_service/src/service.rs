@@ -65,6 +65,11 @@ const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 // some data in it.
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
+// If we receive a call using Secondary mode initially, it will omit generation.  We will initialize
+// tenant shards into this generation, and as long as it remains in this generation, we will accept
+// input generation from future requests as authoritative.
+const INITIAL_GENERATION: Generation = Generation::new(0);
+
 /// How long [`Service::startup_reconcile`] is allowed to take before it should give
 /// up on unresponsive pageservers and proceed.
 pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1030,8 +1035,9 @@ impl Service {
     pub(crate) async fn tenant_create(
         &self,
         create_req: TenantCreateRequest,
+        placement_policy: PlacementPolicy,
     ) -> Result<TenantCreateResponse, ApiError> {
-        let (response, waiters) = self.do_tenant_create(create_req).await?;
+        let (response, waiters) = self.do_tenant_create(create_req, placement_policy).await?;
 
         self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await?;
         Ok(response)
@@ -1040,6 +1046,7 @@ impl Service {
     pub(crate) async fn do_tenant_create(
         &self,
         create_req: TenantCreateRequest,
+        placement_policy: PlacementPolicy,
     ) -> Result<(TenantCreateResponse, Vec<ReconcilerWaiter>), ApiError> {
         // This service expects to handle sharding itself: it is an error to try and directly create
         // a particular shard here.
@@ -1065,10 +1072,6 @@ impl Service {
             })
             .collect::<Vec<_>>();
 
-        // TODO: enable specifying this.  Using Single as a default helps legacy tests to work (they
-        // have no expectation of HA).
-        let placement_policy: PlacementPolicy = PlacementPolicy::Single;
-
         // Ordering: we persist tenant shards before creating them on the pageserver.  This enables a caller
         // to clean up after themselves by issuing a tenant deletion if something goes wrong and we restart
         // during the creation, rather than risking leaving orphan objects in S3.
@@ -1079,7 +1082,10 @@ impl Service {
                 shard_number: tenant_shard_id.shard_number.0 as i32,
                 shard_count: tenant_shard_id.shard_count.literal() as i32,
                 shard_stripe_size: create_req.shard_parameters.stripe_size.0 as i32,
-                generation: create_req.generation.map(|g| g as i32).unwrap_or(0),
+                generation: create_req
+                    .generation
+                    .map(|g| g as i32)
+                    .unwrap_or(INITIAL_GENERATION.into().unwrap() as i32),
                 generation_pageserver: i64::MAX,
                 placement_policy: serde_json::to_string(&placement_policy).unwrap(),
                 config: serde_json::to_string(&create_req.config).unwrap(),
@@ -1153,14 +1159,15 @@ impl Service {
                             ))
                         })?;
 
-                        response_shards.push(TenantCreateResponseShard {
-                            shard_id: tenant_shard_id,
-                            node_id: state
-                                .intent
-                                .get_attached()
-                                .expect("We just set pageserver if it was None"),
-                            generation: state.generation.into().unwrap(),
-                        });
+                        // Only include shards in result if we are attaching: the purpose
+                        // of the response is to tell the caller where the shards are attached.
+                        if let Some(node_id) = state.intent.get_attached() {
+                            response_shards.push(TenantCreateResponseShard {
+                                shard_id: tenant_shard_id,
+                                node_id: *node_id,
+                                generation: state.generation.into().unwrap(),
+                            });
+                        }
                         entry.insert(state)
                     }
                 };
@@ -1216,6 +1223,8 @@ impl Service {
 
     /// This API is used by the cloud control plane to do coarse-grained control of tenants:
     /// - Call with mode Attached* to upsert the tenant.
+    /// - Call with mode Secondary to either onboard a tenant without attaching it, or
+    ///   to set an existing tenant to PolicyMode::Secondary
     /// - Call with mode Detached to switch to PolicyMode::Detached
     ///
     /// In future, calling with mode Secondary may switch to a detach-lite mode in which a tenant only has
@@ -1231,132 +1240,176 @@ impl Service {
             )));
         }
 
-        let mut waiters = Vec::new();
-        let mut result = TenantLocationConfigResponse { shards: Vec::new() };
-        let maybe_create = {
-            let mut locked = self.inner.write().unwrap();
-            let result_tx = locked.result_tx.clone();
-            let compute_hook = locked.compute_hook.clone();
-            let (nodes, tenants, scheduler) = locked.parts_mut();
+        #[allow(clippy::large_enum_variant)]
+        enum CreateOrUpdate {
+            Create((TenantCreateRequest, PlacementPolicy)),
+            Update(
+                Vec<(
+                    TenantShardId,
+                    PlacementPolicy,
+                    TenantConfig,
+                    Option<Generation>,
+                )>,
+            ),
+        }
 
-            // Maybe we have existing shards
+        // First check if this is a creation or an update
+        let create_or_update = {
+            let mut updates = Vec::new();
+            let mut locked = self.inner.write().unwrap();
+            let (nodes, tenants, _scheduler) = locked.parts_mut();
+
+            // Use location config mode as an indicator of policy.
+            let placement_policy = match req.config.mode {
+                LocationConfigMode::Detached => PlacementPolicy::Detached,
+                LocationConfigMode::Secondary => PlacementPolicy::Secondary,
+                LocationConfigMode::AttachedMulti
+                | LocationConfigMode::AttachedSingle
+                | LocationConfigMode::AttachedStale => {
+                    if nodes.len() > 1 {
+                        PlacementPolicy::Double(1)
+                    } else {
+                        // Convenience for dev/test: if we just have one pageserver, import
+                        // tenants into Single mode so that scheduling will succeed.
+                        PlacementPolicy::Single
+                    }
+                }
+            };
+
             let mut create = true;
             for (shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
                 // Saw an existing shard: this is not a creation
                 create = false;
 
-                // Note that for existing tenants we do _not_ respect the generation in the request: this is likely
-                // to be stale.  Once a tenant is created in this service, our view of generation is authoritative, and
+                // Note that for existing tenants we do _not_ respect the generation in the request, unless our current
+                // generation is set to INITIAL_GENERATION (i.e. we have not seen a valid generation yet).  This is because
+                // once a tenant is created in this service, our view of generation is authoritative, and
                 // callers' generations may be ignored.  This represents a one-way migration of tenants from the outer
                 // cloud control plane into this service.
+                let set_generation = if shard.generation == INITIAL_GENERATION {
+                    // Requests don't ordinarily specify generation in secondary, but if it is provided respect it
+                    req.config.generation.map(Generation::new)
+                } else {
+                    None
+                };
 
-                // Use location config mode as an indicator of policy: if they ask for
-                // attached we go to default HA attached mode.  If they ask for secondary
-                // we go to secondary-only mode.  If they ask for detached we detach.
-                match req.config.mode {
-                    LocationConfigMode::Detached => {
-                        shard.policy = PlacementPolicy::Detached;
-                    }
-                    LocationConfigMode::Secondary => {
-                        // TODO: implement secondary-only mode.
-                        todo!();
-                    }
-                    LocationConfigMode::AttachedMulti
-                    | LocationConfigMode::AttachedSingle
-                    | LocationConfigMode::AttachedStale => {
-                        // TODO: persistence for changes in policy
-                        if nodes.len() > 1 {
-                            shard.policy = PlacementPolicy::Double(1)
-                        } else {
-                            // Convenience for dev/test: if we just have one pageserver, import
-                            // tenants into Single mode so that scheduling will succeed.
-                            shard.policy = PlacementPolicy::Single
-                        }
-                    }
-                }
-
-                shard.config = req.config.tenant_conf.clone();
-                shard.schedule(scheduler)?;
-
-                let maybe_waiter = shard.maybe_reconcile(
-                    result_tx.clone(),
-                    nodes,
-                    &compute_hook,
-                    &self.config,
-                    &self.persistence,
-                    &self.gate,
-                    &self.cancel,
-                );
-                if let Some(waiter) = maybe_waiter {
-                    waiters.push(waiter);
-                }
-
-                if let Some(node_id) = shard.intent.get_attached() {
-                    result.shards.push(TenantShardLocation {
-                        shard_id: *shard_id,
-                        node_id: *node_id,
-                    })
+                if shard.policy != placement_policy
+                    || shard.config != req.config.tenant_conf
+                    || set_generation.is_some()
+                {
+                    updates.push((
+                        *shard_id,
+                        placement_policy.clone(),
+                        req.config.tenant_conf.clone(),
+                        set_generation,
+                    ));
                 }
             }
 
             if create {
-                // Validate request mode
-                match req.config.mode {
-                    LocationConfigMode::Detached | LocationConfigMode::Secondary => {
-                        // When using this API to onboard an existing tenant to this service, it must start in
-                        // an attached state, because we need the request to come with a generation
-                        return Err(ApiError::BadRequest(anyhow::anyhow!(
-                            "Imported tenant must be in attached mode"
-                        )));
-                    }
-
-                    LocationConfigMode::AttachedMulti
-                    | LocationConfigMode::AttachedSingle
-                    | LocationConfigMode::AttachedStale => {
-                        // Pass
-                    }
-                }
-
-                // Validate request generation
-                let Some(generation) = req.config.generation else {
-                    // We can only import attached tenants, because we need the request to come with a generation
-                    return Err(ApiError::BadRequest(anyhow::anyhow!(
-                        "Generation is mandatory when importing tenant"
-                    )));
-                };
-
-                // Synthesize a creation request
-                Some(TenantCreateRequest {
-                    new_tenant_id: TenantShardId::unsharded(tenant_id),
-                    generation: Some(generation),
-                    shard_parameters: ShardParameters {
-                        // Must preserve the incoming shard_count do distinguish unsharded (0)
-                        // from single-sharded (1): this distinction appears in the S3 keys of the tenant.
-                        count: req.tenant_id.shard_count,
-                        // We only import un-sharded or single-sharded tenants, so stripe
-                        // size can be made up arbitrarily here.
-                        stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
-                    },
-                    config: req.config.tenant_conf,
-                })
+                CreateOrUpdate::Create(
+                    // Synthesize a creation request
+                    (
+                        TenantCreateRequest {
+                            new_tenant_id: TenantShardId::unsharded(tenant_id),
+                            generation: Some(
+                                req.config
+                                    .generation
+                                    .unwrap_or(INITIAL_GENERATION.into().unwrap()),
+                            ),
+                            shard_parameters: ShardParameters {
+                                // Must preserve the incoming shard_count do distinguish unsharded (0)
+                                // from single-sharded (1): this distinction appears in the S3 keys of the tenant.
+                                count: req.tenant_id.shard_count,
+                                // We only import un-sharded or single-sharded tenants, so stripe
+                                // size can be made up arbitrarily here.
+                                stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
+                            },
+                            config: req.config.tenant_conf,
+                        },
+                        placement_policy,
+                    ),
+                )
             } else {
-                None
+                CreateOrUpdate::Update(updates)
             }
         };
 
-        let waiters = if let Some(create_req) = maybe_create {
-            let (create_resp, waiters) = self.do_tenant_create(create_req).await?;
-            result.shards = create_resp
-                .shards
-                .into_iter()
-                .map(|s| TenantShardLocation {
-                    node_id: s.node_id,
-                    shard_id: s.shard_id,
-                })
-                .collect();
-            waiters
-        } else {
-            waiters
+        let mut result = TenantLocationConfigResponse { shards: Vec::new() };
+        let waiters = match create_or_update {
+            CreateOrUpdate::Create((create_req, placement_policy)) => {
+                let (create_resp, waiters) =
+                    self.do_tenant_create(create_req, placement_policy).await?;
+                result.shards = create_resp
+                    .shards
+                    .into_iter()
+                    .map(|s| TenantShardLocation {
+                        node_id: s.node_id,
+                        shard_id: s.shard_id,
+                    })
+                    .collect();
+                waiters
+            }
+            CreateOrUpdate::Update(updates) => {
+                // Persist updates
+                // Ordering: write to the database before applying changes in-memory, so that
+                // we will not appear time-travel backwards on a restart.
+                for (tenant_shard_id, placement_policy, config, maybe_generation) in &updates {
+                    self.persistence
+                        .update_tenant_shard(
+                            *tenant_shard_id,
+                            placement_policy.clone(),
+                            config.clone(),
+                            *maybe_generation,
+                        )
+                        .await?;
+                }
+
+                // Apply updates in-memory
+                let mut waiters = Vec::new();
+                {
+                    let mut locked = self.inner.write().unwrap();
+                    let result_tx = locked.result_tx.clone();
+                    let compute_hook = locked.compute_hook.clone();
+                    let (nodes, tenants, scheduler) = locked.parts_mut();
+
+                    for (tenant_shard_id, placement_policy, config, maybe_generation) in updates {
+                        let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
+                            tracing::warn!("Shard {tenant_shard_id} removed while updating");
+                            continue;
+                        };
+
+                        shard.policy = placement_policy;
+                        shard.config = config;
+                        if let Some(generation) = maybe_generation {
+                            shard.generation = generation;
+                        }
+
+                        shard.schedule(scheduler)?;
+
+                        let maybe_waiter = shard.maybe_reconcile(
+                            result_tx.clone(),
+                            &nodes,
+                            &compute_hook,
+                            &self.config,
+                            &self.persistence,
+                            &self.gate,
+                            &self.cancel,
+                        );
+                        if let Some(waiter) = maybe_waiter {
+                            waiters.push(waiter);
+                        }
+
+                        if let Some(node_id) = shard.intent.get_attached() {
+                            result.shards.push(TenantShardLocation {
+                                shard_id: tenant_shard_id,
+                                node_id: *node_id,
+                            })
+                        }
+                    }
+                }
+                waiters
+            }
         };
 
         if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
@@ -1460,6 +1513,60 @@ impl Service {
                             ))
                         })?;
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn tenant_secondary_download(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<(), ApiError> {
+        // Acquire lock and yield the collection of shard-node tuples which we will send requests onward to
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            for (tenant_shard_id, shard) in
+                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+            {
+                for node_id in shard.intent.get_secondary() {
+                    let node = locked
+                        .nodes
+                        .get(node_id)
+                        .expect("Pageservers may not be deleted while referenced");
+
+                    targets.push((*tenant_shard_id, node.clone()));
+                }
+            }
+            targets
+        };
+
+        // TODO: this API, and the underlying pageserver API, should take a timeout argument so that for long running
+        // downloads, they can return a clean 202 response instead of the HTTP client timing out.
+
+        // Issue concurrent requests to all shards' locations
+        let mut futs = FuturesUnordered::new();
+        for (tenant_shard_id, node) in targets {
+            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            futs.push(async move {
+                let result = client.tenant_secondary_download(tenant_shard_id).await;
+                (result, node)
+            })
+        }
+
+        // Handle any errors returned by pageservers.  This includes cases like this request racing with
+        // a scheduling operation, such that the tenant shard we're calling doesn't exist on that pageserver any more, as
+        // well as more general cases like 503s, 500s, or timeouts.
+        while let Some((result, node)) = futs.next().await {
+            let Err(e) = result else { continue };
+
+            // Secondary downloads are always advisory: if something fails, we nevertheless report success, so that whoever
+            // is calling us will proceed with whatever migration they're doing, albeit with a slightly less warm cache
+            // than they had hoped for.
+            tracing::warn!(
+                "Ignoring tenant secondary download error from pageserver {}: {e}",
+                node.id,
+            );
         }
 
         Ok(())
@@ -2248,6 +2355,7 @@ impl Service {
                 match shard.policy {
                     PlacementPolicy::Single => {
                         shard.intent.clear_secondary(scheduler);
+                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
                     }
                     PlacementPolicy::Double(_n) => {
                         // If our new attached node was a secondary, it no longer should be.
@@ -2257,6 +2365,12 @@ impl Service {
                         if let Some(old_attached) = old_attached {
                             shard.intent.push_secondary(scheduler, old_attached);
                         }
+
+                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
+                    }
+                    PlacementPolicy::Secondary => {
+                        shard.intent.clear(scheduler);
+                        shard.intent.push_secondary(scheduler, migrate_req.node_id);
                     }
                     PlacementPolicy::Detached => {
                         return Err(ApiError::BadRequest(anyhow::anyhow!(
@@ -2264,9 +2378,6 @@ impl Service {
                         )))
                     }
                 }
-                shard
-                    .intent
-                    .set_attached(scheduler, Some(migrate_req.node_id));
 
                 tracing::info!("Migrating: new intent {:?}", shard.intent);
                 shard.sequence = shard.sequence.next();
@@ -2594,7 +2705,7 @@ impl Service {
                     observed_loc.conf = None;
                 }
 
-                if tenant_state.intent.notify_offline(config_req.node_id) {
+                if tenant_state.intent.demote_attached(config_req.node_id) {
                     tenant_state.sequence = tenant_state.sequence.next();
                     match tenant_state.schedule(scheduler) {
                         Err(e) => {
@@ -2661,6 +2772,9 @@ impl Service {
     /// Helper for methods that will try and call pageserver APIs for
     /// a tenant, such as timeline CRUD: they cannot proceed unless the tenant
     /// is attached somewhere.
+    ///
+    /// TODO: this doesn't actually ensure attached unless the PlacementPolicy is
+    /// an attached policy.  We should error out if it isn't.
     fn ensure_attached_schedule(
         &self,
         mut locked: std::sync::RwLockWriteGuard<'_, ServiceState>,
