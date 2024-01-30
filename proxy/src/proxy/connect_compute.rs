@@ -160,7 +160,7 @@ where
 
     // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
     info!("compute node's state has likely changed; requesting a wake-up");
-    let node_info = loop {
+    let mut node_info = loop {
         let wake_res = match user_info {
             auth::BackendType::Console(api, user_info) => api.wake_compute(ctx, user_info).await,
             // nothing to do?
@@ -179,11 +179,7 @@ where
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
             }
             // successfully woke up a compute node and can break the wakeup loop
-            Ok(ControlFlow::Break(mut node_info)) => {
-                node_info.config.reuse_password(&config);
-                mechanism.update_connect_config(&mut node_info.config);
-                break node_info;
-            }
+            Ok(ControlFlow::Break(node_info)) => break node_info,
         }
 
         let wait_duration = retry_after(num_retries);
@@ -191,6 +187,9 @@ where
 
         time::sleep(wait_duration).await;
     };
+
+    node_info.config.reuse_password(&config);
+    mechanism.update_connect_config(&mut node_info.config);
 
     // now that we have a new node, try connect to it repeatedly.
     // this can error for a few reasons, for instance:

@@ -324,8 +324,17 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
 
                 let compute_credentials =
                     auth_quirks(ctx, &*api, user_info, client, allow_cleartext, config).await?;
-                let (cache_info, user_info) = wake_compute(ctx, &*api, compute_credentials).await?;
-                (cache_info, BackendType::Console(api, user_info))
+                let mut node = wake_compute(ctx, &*api, &compute_credentials.info).await?;
+
+                ctx.set_project(node.aux.clone());
+
+                match compute_credentials.keys {
+                    #[cfg(any(test, feature = "testing"))]
+                    ComputeCredentialKeys::Password(password) => node.config.password(password),
+                    ComputeCredentialKeys::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
+                };
+
+                (node, BackendType::Console(api, compute_credentials.info))
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
