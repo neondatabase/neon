@@ -438,7 +438,7 @@ impl Endpoint {
     }
 
     fn wait_for_compute_ctl_to_exit(&self, send_sigterm: bool) -> Result<()> {
-        // TODO use background_process::stop_process instead
+        // TODO use background_process::stop_process instead: https://github.com/neondatabase/neon/pull/6482
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
         let pid = nix::unistd::Pid::from_raw(pid as i32);
@@ -583,9 +583,21 @@ impl Endpoint {
         }
 
         let child = cmd.spawn()?;
+        // set up a scopeguard to kill & wait for the child in case we panic or bail below
+        let child = scopeguard::guard(child, |mut child| {
+            println!("SIGKILL & wait the started process");
+            (|| {
+                // TODO: use another signal that can be caught by the child so it can clean up any children it spawned
+                child.kill().context("SIGKILL child")?;
+                child.wait().context("wait() for child process")?;
+                anyhow::Ok(())
+            })()
+            .with_context(|| format!("scopeguard kill&wait child {child:?}"))
+            .unwrap();
+        });
 
         // Write down the pid so we can wait for it when we want to stop
-        // TODO use background_process::start_process instead
+        // TODO use background_process::start_process instead: https://github.com/neondatabase/neon/pull/6482
         let pid = child.id();
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         std::fs::write(pidfile_path, pid.to_string())?;
@@ -633,6 +645,9 @@ impl Endpoint {
             }
             std::thread::sleep(ATTEMPT_INTERVAL);
         }
+
+        // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
+        drop(scopeguard::ScopeGuard::into_inner(child));
 
         Ok(())
     }

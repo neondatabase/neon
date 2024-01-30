@@ -14,7 +14,6 @@ hyper.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true
-scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -25,6 +24,8 @@ tracing.workspace = true
 # TODO: remove this after DB persistence is added, it is only used for
 # a parsing function when loading pageservers from neon_local LocalEnv
 postgres_backend.workspace = true
+
+diesel = { version = "2.1.4", features = ["serde_json", "postgres"] }
 
 utils = { path = "../../libs/utils/" }
 metrics = { path = "../../libs/metrics/" }

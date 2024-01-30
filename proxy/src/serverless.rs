@@ -41,6 +41,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
 
+pub const SERVERLESS_DRIVER_SNI: &str = "api";
+
 pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
@@ -228,7 +230,7 @@ async fn request_handler(
                     config,
                     &mut ctx,
                     websocket,
-                    &cancel_map,
+                    cancel_map,
                     host,
                     endpoint_rate_limiter,
                 )

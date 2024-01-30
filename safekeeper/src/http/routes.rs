@@ -28,7 +28,7 @@ use crate::safekeeper::Term;
 use crate::safekeeper::{ServerInfo, TermLsn};
 use crate::send_wal::WalSenderState;
 use crate::timeline::PeerInfo;
-use crate::{copy_timeline, debug_dump, pull_timeline};
+use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
@@ -465,6 +465,26 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     Ok(response)
 }
 
+async fn patch_control_file_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+
+    let patch_request: patch_control_file::Request = json_request(&mut request).await?;
+    let response = patch_control_file::handle_request(tli, patch_request)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, response)
+}
+
 /// Safekeeper http router.
 pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router();
@@ -525,6 +545,10 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .post(
             "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",
             |r| request_span(r, timeline_copy_handler),
+        )
+        .patch(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/control_file",
+            |r| request_span(r, patch_control_file_handler),
         )
         // for tests
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {

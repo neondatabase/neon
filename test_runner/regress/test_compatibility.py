@@ -138,6 +138,7 @@ def test_create_snapshot(
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
+    env.attachment_service.stop()
 
     # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
     compatibility_snapshot_dir = (
@@ -226,11 +227,17 @@ def test_forward_compatibility(
 
     try:
         neon_env_builder.num_safekeepers = 3
+        neon_local_binpath = neon_env_builder.neon_binpath
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
             neon_binpath=compatibility_neon_bin,
             pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
+
+        # Use current neon_local even though we're using old binaries for
+        # everything else: our test code is written for latest CLI args.
+        env.neon_local_binpath = neon_local_binpath
+
         neon_env_builder.start()
 
         check_neon_works(

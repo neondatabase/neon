@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import concurrent.futures
 import filecmp
 import json
 import os
@@ -446,6 +447,7 @@ class NeonEnvBuilder:
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
+        pageserver_virtual_file_io_engine: Optional[str] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -480,6 +482,8 @@ class NeonEnvBuilder:
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
+
+        self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
         assert test_name.startswith(
             "test_"
@@ -990,10 +994,17 @@ class NeonEnv:
         self.initial_timeline = config.initial_timeline
 
         attachment_service_port = self.port_distributor.get_port()
+        # Reserve the next port after attachment service for use by its postgres: this
+        # will assert out if the next port wasn't free.
+        attachment_service_pg_port = self.port_distributor.get_port()
+        assert attachment_service_pg_port == attachment_service_port + 1
+
         self.control_plane_api: str = f"http://127.0.0.1:{attachment_service_port}"
         self.attachment_service: NeonAttachmentService = NeonAttachmentService(
             self, config.auth_enabled
         )
+
+        self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
 
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
@@ -1026,6 +1037,9 @@ class NeonEnv:
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
             }
+            if self.pageserver_virtual_file_io_engine is not None:
+                ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
                 NeonPageserver(
@@ -1063,16 +1077,27 @@ class NeonEnv:
         self.neon_cli.init(cfg, force=config.config_init_force)
 
     def start(self):
-        # Start up broker, pageserver and all safekeepers
-        self.broker.try_start()
-
+        # Attachment service starts first, so that pageserver /re-attach calls don't
+        # bounce through retries on startup
         self.attachment_service.start()
 
-        for pageserver in self.pageservers:
-            pageserver.start()
+        # Start up broker, pageserver and all safekeepers
+        futs = []
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2 + len(self.pageservers) + len(self.safekeepers)
+        ) as executor:
+            futs.append(
+                executor.submit(lambda: self.broker.try_start() or None)
+            )  # The `or None` is for the linter
 
-        for safekeeper in self.safekeepers:
-            safekeeper.start()
+            for pageserver in self.pageservers:
+                futs.append(executor.submit(lambda ps=pageserver: ps.start()))
+
+            for safekeeper in self.safekeepers:
+                futs.append(executor.submit(lambda sk=safekeeper: sk.start()))
+
+        for f in futs:
+            f.result()
 
     def stop(self, immediate=False, ps_assert_metric_no_errors=False):
         """
@@ -1191,6 +1216,7 @@ def _shared_simple_env(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
+    pageserver_virtual_file_io_engine: str,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1220,6 +1246,7 @@ def _shared_simple_env(
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
     ) as builder:
         env = builder.init_start()
 
@@ -1258,6 +1285,7 @@ def neon_env_builder(
     request: FixtureRequest,
     test_overlay_dir: Path,
     top_output_dir: Path,
+    pageserver_virtual_file_io_engine: str,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1287,6 +1315,7 @@ def neon_env_builder(
         broker=default_broker,
         run_id=run_id,
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
@@ -1640,8 +1669,10 @@ class NeonCli(AbstractNeonCli):
         id: int,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        register: bool = True,
     ) -> "subprocess.CompletedProcess[str]":
-        start_args = ["pageserver", "start", f"--id={id}", *overrides]
+        register_str = "true" if register else "false"
+        start_args = ["pageserver", "start", f"--id={id}", *overrides, f"--register={register_str}"]
         storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -2068,6 +2099,7 @@ class NeonPageserver(PgProtocol):
         self,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        register: bool = True,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -2077,7 +2109,7 @@ class NeonPageserver(PgProtocol):
         assert self.running is False
 
         self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars
+            self.id, overrides=overrides, extra_env_vars=extra_env_vars, register=register
         )
         self.running = True
         return self
@@ -3408,6 +3440,24 @@ class SafekeeperHttpClient(requests.Session):
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
         res.raise_for_status()
         res_json = json.loads(res.text)
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def patch_control_file(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        patch: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        res = self.patch(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/control_file",
+            json={
+                "updates": patch,
+                "apply_fields": list(patch.keys()),
+            },
+        )
+        res.raise_for_status()
+        res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
 

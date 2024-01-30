@@ -9,5 +9,10 @@ prometheus.workspace = true
 libc.workspace = true
 once_cell.workspace = true
 chrono.workspace = true
+twox-hash.workspace = true
 
 workspace_hack.workspace = true
+
+[dev-dependencies]
+rand = "0.8"
+rand_distr = "0.4.3"
