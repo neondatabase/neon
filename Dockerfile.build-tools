@@ -73,13 +73,6 @@ RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# PostgreSQL 14
-RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
-    && echo 'deb http://apt.postgresql.org/pub/repos/apt bullseye-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
-    && apt update \
-    && apt install -y postgresql-client-14 \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
 # AWS CLI
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip" \
     && unzip -q awscliv2.zip \
