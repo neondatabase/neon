@@ -133,10 +133,10 @@ impl Gate {
         let mut do_close = std::pin::pin!(self.do_close());
 
         let nag_after = Duration::from_secs(1);
-        match tokio::time::timeout(nag_after, &mut do_close).await {
-            Ok(()) => return,
-            Err(_timeout) => {}
-        }
+
+        let Err(_timeout) = tokio::time::timeout(nag_after, &mut do_close).await else {
+            return;
+        };
 
         tracing::warn!(
             gate = ?self.as_ptr(),
