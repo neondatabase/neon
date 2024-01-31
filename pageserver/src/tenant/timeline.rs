@@ -1502,7 +1502,7 @@ impl Timeline {
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
 
                 cancel,
-                gate: Gate::new(format!("Timeline<{tenant_shard_id}/{timeline_id}>")),
+                gate: Gate::default(),
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),

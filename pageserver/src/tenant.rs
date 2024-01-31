@@ -2694,7 +2694,7 @@ impl Tenant {
             activate_now_sem: tokio::sync::Semaphore::new(0),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
-            gate: Gate::new(format!("Tenant<{tenant_shard_id}>")),
+            gate: Gate::default(),
         }
     }
 
