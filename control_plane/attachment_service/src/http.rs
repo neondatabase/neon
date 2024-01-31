@@ -419,8 +419,4 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_id/timeline*", |r| {
             tenant_service_handler(r, handle_tenant_timeline_passthrough)
         })
-        // Path aliases for tests_forward_compatibility
-        // TODO: remove these in future PR
-        .post("/re-attach", |r| request_span(r, handle_re_attach))
-        .post("/validate", |r| request_span(r, handle_validate))
 }
