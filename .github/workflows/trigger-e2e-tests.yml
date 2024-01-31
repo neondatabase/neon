@@ -144,7 +144,7 @@ jobs:
             curl -f -X POST \
                       https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
                       -H "Accept: application/vnd.github.v3+json" \
-                      --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+                      -H "Authorization: token ${{ secrets.CI_ACCESS_TOKEN }}" \
                       --data \
                         "{
                           \"state\": \"success\",
