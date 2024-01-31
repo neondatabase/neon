@@ -1799,6 +1799,15 @@ async fn post_tracing_event_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn post_set_io_engine_handler(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
+    crate::virtual_file::io_engine::set(kind.into());
+    json_response(StatusCode::OK, ())
+}
+
 /// Common functionality of all the HTTP API handlers.
 ///
 /// - Adds a tracing span to each request (by `request_span`)
@@ -2053,15 +2062,7 @@ pub fn make_router(
             |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
         )
         .put("/v1/set_io_engine", |r| {
-            async fn set_io_engine_handler(
-                mut r: Request<Body>,
-                _cancel: CancellationToken,
-            ) -> Result<Response<Body>, ApiError> {
-                let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
-                crate::virtual_file::io_engine::set(kind.into());
-                json_response(StatusCode::OK, ())
-            }
-            api_handler(r, set_io_engine_handler)
+            api_handler(r, post_set_io_engine_handler)
         })
         .any(handler_404))
 }
