@@ -20,8 +20,7 @@ COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
 ENV BUILD_TYPE release
 RUN set -e \
     && mold -run make -j $(nproc) -s neon-pg-ext \
-    && rm -rf pg_install/build \
-    && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
+    && rm -rf pg_install/build
 
 # Build neon binaries
 FROM $REPOSITORY/$IMAGE:$TAG AS build
@@ -88,7 +87,6 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local     
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
 COPY --from=pg-build /home/nonroot/pg_install/v16 /usr/local/v16/
-COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
