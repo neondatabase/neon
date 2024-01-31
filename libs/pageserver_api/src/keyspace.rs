@@ -85,7 +85,6 @@ impl KeySpace {
             .take_while(|range| self_end > range.start);
 
         for range in other_ranges {
-            dbg!(range);
             while let Some(overlap_at) = self.overlaps_at(range) {
                 let overlapped = self.ranges[overlap_at].clone();
 
