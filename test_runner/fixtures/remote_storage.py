@@ -160,8 +160,9 @@ class LocalFsStorage:
 class S3Storage:
     bucket_name: str
     bucket_region: str
-    access_key: str
-    secret_key: str
+    access_key: Optional[str]
+    secret_key: Optional[str]
+    aws_profile: Optional[str]
     prefix_in_bucket: str
     client: S3Client
     cleanup: bool
@@ -170,10 +171,15 @@ class S3Storage:
     endpoint: Optional[str] = None
 
     def access_env_vars(self) -> Dict[str, str]:
-        return {
-            "AWS_ACCESS_KEY_ID": self.access_key,
-            "AWS_SECRET_ACCESS_KEY": self.secret_key,
-        }
+        if self.aws_profile is not None:
+            return {
+                "AWS_PROFILE": self.aws_profile,
+            }
+        else:
+            return {
+                "AWS_ACCESS_KEY_ID": self.access_key,
+                "AWS_SECRET_ACCESS_KEY": self.secret_key,
+            }
 
     def to_string(self) -> str:
         return json.dumps(
@@ -308,6 +314,7 @@ class RemoteStorageKind(str, enum.Enum):
                 bucket_region=mock_region,
                 access_key=access_key,
                 secret_key=secret_key,
+                aws_profile=None,
                 prefix_in_bucket="",
                 client=client,
                 cleanup=False,
@@ -317,12 +324,9 @@ class RemoteStorageKind(str, enum.Enum):
         assert self == RemoteStorageKind.REAL_S3
 
         env_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-        assert env_access_key, "no aws access key provided"
         env_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        assert env_secret_key, "no aws access key provided"
-
-        # session token is needed for local runs with sso auth
-        session_token = os.getenv("AWS_SESSION_TOKEN")
+        env_profile = os.getenv("AWS_PROFILE")
+        assert ((env_access_key and env_secret_key) or env_profile), "need to specify either access key and secret access key or profile"
 
         bucket_name = bucket_name or os.getenv("REMOTE_STORAGE_S3_BUCKET")
         assert bucket_name is not None, "no remote storage bucket name provided"
@@ -334,9 +338,6 @@ class RemoteStorageKind(str, enum.Enum):
         client = boto3.client(
             "s3",
             region_name=bucket_region,
-            aws_access_key_id=env_access_key,
-            aws_secret_access_key=env_secret_key,
-            aws_session_token=session_token,
         )
 
         return S3Storage(
@@ -344,6 +345,7 @@ class RemoteStorageKind(str, enum.Enum):
             bucket_region=bucket_region,
             access_key=env_access_key,
             secret_key=env_secret_key,
+            aws_profile=env_profile,
             prefix_in_bucket=prefix_in_bucket,
             client=client,
             cleanup=True,
