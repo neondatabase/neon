@@ -23,8 +23,9 @@ env:
 
 jobs:
   check-permissions:
+    # if the e2e test were already ran in draft mode then we can skip this when the PR is marked 'ready for review'
+    if : github.event.action == 'ready_for_review' && !contains( github.event.pull_request.labels.*.name, 'run-e2e-test-in-draft')
     runs-on: ubuntu-latest
-
     steps:
       - name: Disallow PRs from forks
         if: |
@@ -131,3 +132,27 @@ jobs:
                 \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
               }
             }"
+
+      - name: Update status of trigger e2e test job
+        uses: nick-fields/retry@943e742917ac94714d2f408a0e8320f2d1fcafcd
+        with:
+          timeout_seconds: 60
+          retry_wait_seconds: 60
+          max_attempts: 3
+          command: |
+            REMOTE_REPO="${{ github.repository_owner }}/neon"
+            COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+            CI_JOB_NAME="Build and Test / trigger-e2e-tests"
+            ACTION_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            set -e
+            curl -f -X POST \
+              https://api.github.com/repos/$REMOTE_REPO/statuses/$COMMIT_HASH \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.ci_access_token }}" \
+              --data \
+                "{
+                  \"state\": \"success\",
+                  \"context\": \"$CI_JOB_NAME\",
+                  \"description\": \"[$LOCAL_REPO] The e2e test were triggered successfully\",
+                  \"target_url\": \"$ACTION_URL\"
+                }"
