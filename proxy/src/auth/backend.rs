@@ -9,7 +9,7 @@ use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::validate_password_and_exchange;
 use crate::cache::Cached;
 use crate::console::errors::GetAuthInfoError;
-use crate::console::provider::ConsoleBackend;
+use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::AuthSecret;
 use crate::context::RequestMonitoring;
 use crate::proxy::connect_compute::handle_try_wake;
@@ -34,8 +34,6 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, warn};
 
-use super::IpPattern;
-
 /// This type serves two purposes:
 ///
 /// * When `T` is `()`, it's just a regular auth backend selector
@@ -56,7 +54,9 @@ pub enum BackendType<'a, T> {
 
 pub trait TestBackend: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
-    fn get_allowed_ips(&self) -> Result<Vec<IpPattern>, console::errors::GetAuthInfoError>;
+    fn get_allowed_ips_and_secret(
+        &self,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, ()> {
@@ -200,13 +200,16 @@ async fn auth_quirks(
     };
 
     info!("fetching user's authentication info");
-    let allowed_ips = api.get_allowed_ips(ctx, &info).await?;
+    let (allowed_ips, maybe_secret) = api.get_allowed_ips_and_secret(ctx, &info).await?;
 
     // check allowed list
     if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
         return Err(auth::AuthError::ip_address_not_allowed());
     }
-    let cached_secret = api.get_role_secret(ctx, &info).await?;
+    let cached_secret = match maybe_secret {
+        Some(secret) => secret,
+        None => api.get_role_secret(ctx, &info).await?,
+    };
 
     let secret = cached_secret.value.clone().unwrap_or_else(|| {
         // If we don't have an authentication secret, we mock one to
@@ -382,16 +385,16 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
 }
 
 impl BackendType<'_, ComputeUserInfo> {
-    pub async fn get_allowed_ips(
+    pub async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
-    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         use BackendType::*;
         match self {
-            Console(api, user_info) => api.get_allowed_ips(ctx, user_info).await,
-            Link(_) => Ok(Cached::new_uncached(Arc::new(vec![]))),
+            Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Link(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
             #[cfg(test)]
-            Test(x) => Ok(Cached::new_uncached(Arc::new(x.get_allowed_ips()?))),
+            Test(x) => x.get_allowed_ips_and_secret(),
         }
     }
 

@@ -250,11 +250,11 @@ pub trait Api {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, errors::GetAuthInfoError>;
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
@@ -288,16 +288,16 @@ impl Api for ConsoleBackend {
         }
     }
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, errors::GetAuthInfoError> {
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
         use ConsoleBackend::*;
         match self {
-            Console(api) => api.get_allowed_ips(ctx, user_info).await,
+            Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(feature = "testing")]
-            Postgres(api) => api.get_allowed_ips(ctx, user_info).await,
+            Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
         }
     }
 
