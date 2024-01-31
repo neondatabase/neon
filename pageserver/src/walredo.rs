@@ -34,6 +34,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::*;
+use utils::poison::Poison;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
 #[cfg(feature = "testing")]
@@ -58,8 +59,6 @@ use postgres_ffi::v14::nonrelfile_utils::{
 };
 use postgres_ffi::BLCKSZ;
 
-use self::poison::Poison;
-
 ///
 /// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
 ///
@@ -81,96 +80,6 @@ struct ProcessOutput {
     stdout: tokio::process::ChildStdout,
     pending_responses: VecDeque<Option<Bytes>>,
     n_processed_responses: usize,
-}
-
-mod poison {
-    use std::time::Instant;
-
-    use tracing::warn;
-
-    pub struct Poison<T> {
-        what: &'static str,
-        state: State,
-        data: T,
-    }
-
-    #[derive(Clone, Copy)]
-    enum State {
-        Clean,
-        Armed,
-        Poisoned { at: Instant },
-    }
-
-    impl<T> Poison<T> {
-        pub fn new(what: &'static str, data: T) -> Self {
-            Self {
-                what,
-                state: State::Clean,
-                data,
-            }
-        }
-        pub fn check_and_arm(&mut self) -> Result<Guard<T>, Error> {
-            match self.state {
-                State::Clean => {
-                    self.state = State::Armed;
-                    Ok(Guard(self))
-                }
-                State::Armed => unreachable!("transient state"),
-                State::Poisoned { at } => Err(Error::Poisoned {
-                    what: self.what,
-                    at,
-                }),
-            }
-        }
-    }
-
-    pub struct Guard<'a, T>(&'a mut Poison<T>);
-
-    impl<'a, T> Guard<'a, T> {
-        pub fn data(&self) -> &T {
-            &self.0.data
-        }
-        pub fn data_mut(&mut self) -> &mut T {
-            &mut self.0.data
-        }
-
-        pub fn disarm(self) {
-            match self.0.state {
-                State::Clean => unreachable!("we set it to Armed in check_and_arm()"),
-                State::Armed => {
-                    self.0.state = State::Clean;
-                }
-                State::Poisoned { at } => {
-                    unreachable!("we fail check_and_arm() if it's in that state: {at:?}")
-                }
-            }
-        }
-    }
-
-    impl<'a, T> Drop for Guard<'a, T> {
-        fn drop(&mut self) {
-            match self.0.state {
-                State::Clean => {
-                    // set by disarm()
-                }
-                State::Armed => {
-                    // still armed => poison it
-                    let at = Instant::now();
-                    self.0.state = State::Poisoned { at };
-                    warn!(at=?at, "poisoning {}", self.0.what);
-                }
-                State::Poisoned { at } => {
-                    unreachable!("we fail check_and_arm() if it's in that state: {at:?}")
-                }
-            }
-        }
-    }
-
-    #[derive(thiserror::Error, Debug)]
-    pub enum Error {
-        #[error("poisoned at {at:?}: {what}")]
-        Poisoned { what: &'static str, at: Instant },
-    }
 }
 
 ///
