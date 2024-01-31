@@ -369,6 +369,16 @@ impl From<WaitLsnError> for PageStreamError {
     }
 }
 
+impl From<WaitLsnError> for QueryError {
+    fn from(value: WaitLsnError) -> Self {
+        match value {
+            e @ WaitLsnError::Timeout(_) => Self::Other(anyhow::Error::new(e)),
+            WaitLsnError::Shutdown => Self::Shutdown,
+            WaitLsnError::BadState => Self::Reconnect,
+        }
+    }
+}
+
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
@@ -1176,7 +1186,7 @@ impl PageServerHandler {
         full_backup: bool,
         gzip: bool,
         ctx: RequestContext,
-    ) -> anyhow::Result<()>
+    ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
@@ -1441,7 +1451,7 @@ where
                     )
                     .await?;
                     pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-                    anyhow::Ok(())
+                    Result::<(), QueryError>::Ok(())
                 },
             )
             .await?;
@@ -1715,6 +1725,7 @@ impl From<GetActiveTenantError> for QueryError {
             | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
                 QueryError::Shutdown
             }
+            e @ GetActiveTenantError::NotFound(_) => QueryError::NotFound(format!("{e}").into()),
             e => QueryError::Other(anyhow::anyhow!(e)),
         }
     }

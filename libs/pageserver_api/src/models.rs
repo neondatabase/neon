@@ -368,6 +368,19 @@ pub struct TenantLocationConfigRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
+pub struct TenantShardLocation {
+    pub shard_id: TenantShardId,
+    pub node_id: NodeId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLocationConfigResponse {
+    pub shards: Vec<TenantShardLocation>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct TenantConfigRequest {
     pub tenant_id: TenantId,
     #[serde(flatten)]

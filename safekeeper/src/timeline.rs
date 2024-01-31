@@ -901,6 +901,20 @@ impl Timeline {
             file_open,
         }
     }
+
+    /// Apply a function to the control file state and persist it.
+    pub async fn map_control_file<T>(
+        &self,
+        f: impl FnOnce(&mut TimelinePersistentState) -> Result<T>,
+    ) -> Result<T> {
+        let mut state = self.write_shared_state().await;
+        let mut persistent_state = state.sk.state.start_change();
+        // If f returns error, we abort the change and don't persist anything.
+        let res = f(&mut persistent_state)?;
+        // If persisting fails, we abort the change and return error.
+        state.sk.state.finish_change(&persistent_state).await?;
+        Ok(res)
+    }
 }
 
 /// Deletes directory and it's contents. Returns false if directory does not exist.

@@ -3778,6 +3778,11 @@ async fn run_initdb(
         .env_clear()
         .env("LD_LIBRARY_PATH", &initdb_lib_dir)
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
+        .stdin(std::process::Stdio::null())
+        // stdout invocation produces the same output every time, we don't need it
+        .stdout(std::process::Stdio::null())
+        // we would be interested in the stderr output, if there was any
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
 
     // Ideally we'd select here with the cancellation token, but the problem is that

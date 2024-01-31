@@ -230,7 +230,7 @@ async fn request_handler(
                     config,
                     &mut ctx,
                     websocket,
-                    &cancel_map,
+                    cancel_map,
                     host,
                     endpoint_rate_limiter,
                 )

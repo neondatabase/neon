@@ -109,7 +109,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
         result = client.timeline_get_lsn_by_timestamp(
-            tenant_id, timeline_id_child, f"{probe_timestamp.isoformat()}Z", 2
+            tenant_id, timeline_id_child, f"{probe_timestamp.isoformat()}Z"
         )
         assert result["kind"] == "past"
         # make sure that we return the minimum lsn here at the start of the range

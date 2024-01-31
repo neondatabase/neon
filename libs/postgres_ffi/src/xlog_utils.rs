@@ -207,10 +207,16 @@ pub fn find_end_of_wal(
                 let seg_offs = curr_lsn.segment_offset(wal_seg_size);
                 segment.seek(SeekFrom::Start(seg_offs as u64))?;
                 // loop inside segment
-                loop {
+                while curr_lsn.segment_number(wal_seg_size) == segno {
                     let bytes_read = segment.read(&mut buf)?;
                     if bytes_read == 0 {
-                        break; // EOF
+                        debug!(
+                            "find_end_of_wal reached end at {:?}, EOF in segment {:?} at offset {}",
+                            result,
+                            seg_file_path,
+                            curr_lsn.segment_offset(wal_seg_size)
+                        );
+                        return Ok(result);
                     }
                     curr_lsn += bytes_read as u64;
                     decoder.feed_bytes(&buf[0..bytes_read]);

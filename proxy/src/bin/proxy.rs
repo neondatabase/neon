@@ -32,6 +32,9 @@ project_build_tag!(BUILD_TAG);
 
 use clap::{Parser, ValueEnum};
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackend {
     Console,
@@ -186,6 +189,13 @@ async fn main() -> anyhow::Result<()> {
     info!("Version: {GIT_VERSION}");
     info!("Build_tag: {BUILD_TAG}");
     ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
+
+    match proxy::jemalloc::MetricRecorder::new(prometheus::default_registry()) {
+        Ok(t) => {
+            t.start();
+        }
+        Err(e) => tracing::error!(error = ?e, "could not start jemalloc metrics loop"),
+    }
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;

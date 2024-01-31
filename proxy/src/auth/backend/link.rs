@@ -1,6 +1,7 @@
 use crate::{
     auth, compute,
     console::{self, provider::NodeInfo},
+    context::RequestMonitoring,
     error::UserFacingError,
     stream::PqStream,
     waiters,
@@ -54,6 +55,7 @@ pub fn new_psql_session_id() -> String {
 }
 
 pub(super) async fn authenticate(
+    ctx: &mut RequestMonitoring,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {
@@ -93,6 +95,10 @@ pub(super) async fn authenticate(
         .port(db_info.port)
         .dbname(&db_info.dbname)
         .user(&db_info.user);
+
+    ctx.set_user(db_info.user.into());
+    ctx.set_project(db_info.aux.clone());
+    tracing::Span::current().record("ep", &tracing::field::display(&db_info.aux.endpoint_id));
 
     // Backwards compatibility. pg_sni_proxy uses "--" in domain names
     // while direct connections do not. Once we migrate to pg_sni_proxy

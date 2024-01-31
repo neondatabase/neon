@@ -69,6 +69,25 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    /// Get an arbitrary path and returning a streaming Response.  This function is suitable
+    /// for pass-through/proxy use cases where we don't care what the response content looks
+    /// like.
+    ///
+    /// Use/add one of the properly typed methods below if you know aren't proxying, and
+    /// know what kind of response you expect.
+    pub async fn get_raw(&self, path: String) -> Result<reqwest::Response> {
+        debug_assert!(path.starts_with('/'));
+        let uri = format!("{}{}", self.mgmt_api_endpoint, path);
+
+        let req = self.client.request(Method::GET, uri);
+        let req = if let Some(value) = &self.authorization_header {
+            req.header(reqwest::header::AUTHORIZATION, value)
+        } else {
+            req
+        };
+        req.send().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn tenant_details(
         &self,
         tenant_shard_id: TenantShardId,
@@ -171,6 +190,25 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    /// The tenant deletion API can return 202 if deletion is incomplete, or
+    /// 404 if it is complete.  Callers are responsible for checking the status
+    /// code and retrying.  Error codes other than 404 will return Err().
+    pub async fn tenant_delete(&self, tenant_shard_id: TenantShardId) -> Result<StatusCode> {
+        let uri = format!("{}/v1/tenant/{tenant_shard_id}", self.mgmt_api_endpoint);
+
+        match self.request(Method::DELETE, &uri, ()).await {
+            Err(Error::ApiError(status_code, msg)) => {
+                if status_code == StatusCode::NOT_FOUND {
+                    Ok(StatusCode::NOT_FOUND)
+                } else {
+                    Err(Error::ApiError(status_code, msg))
+                }
+            }
+            Err(e) => Err(e),
+            Ok(response) => Ok(response.status()),
+        }
+    }
+
     pub async fn tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
         self.request(Method::PUT, &uri, req).await?;
@@ -232,6 +270,32 @@ impl Client {
             .json()
             .await
             .map_err(Error::ReceiveBody)
+    }
+
+    /// The timeline deletion API can return 201 if deletion is incomplete, or
+    /// 403 if it is complete.  Callers are responsible for checking the status
+    /// code and retrying.  Error codes other than 403 will return Err().
+    pub async fn timeline_delete(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<StatusCode> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
+            self.mgmt_api_endpoint
+        );
+
+        match self.request(Method::DELETE, &uri, ()).await {
+            Err(Error::ApiError(status_code, msg)) => {
+                if status_code == StatusCode::NOT_FOUND {
+                    Ok(StatusCode::NOT_FOUND)
+                } else {
+                    Err(Error::ApiError(status_code, msg))
+                }
+            }
+            Err(e) => Err(e),
+            Ok(response) => Ok(response.status()),
+        }
     }
 
     pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {

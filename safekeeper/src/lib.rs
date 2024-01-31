@@ -22,6 +22,7 @@ pub mod handler;
 pub mod http;
 pub mod json_ctrl;
 pub mod metrics;
+pub mod patch_control_file;
 pub mod pull_timeline;
 pub mod receive_wal;
 pub mod recovery;

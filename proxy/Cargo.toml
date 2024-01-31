@@ -62,6 +62,8 @@ socket2.workspace = true
 sync_wrapper.workspace = true
 task-local-extensions.workspace = true
 thiserror.workspace = true
+tikv-jemallocator.workspace = true
+tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
 tls-listener.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true

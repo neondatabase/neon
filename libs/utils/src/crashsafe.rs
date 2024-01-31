@@ -112,6 +112,55 @@ pub async fn fsync_async(path: impl AsRef<Utf8Path>) -> Result<(), std::io::Erro
     tokio::fs::File::open(path.as_ref()).await?.sync_all().await
 }
 
+pub async fn fsync_async_opt(
+    path: impl AsRef<Utf8Path>,
+    do_fsync: bool,
+) -> Result<(), std::io::Error> {
+    if do_fsync {
+        fsync_async(path.as_ref()).await?;
+    }
+    Ok(())
+}
+
+/// Like postgres' durable_rename, renames file issuing fsyncs do make it
+/// durable. After return, file and rename are guaranteed to be persisted.
+///
+/// Unlike postgres, it only does fsyncs to 1) file to be renamed to make
+/// contents durable; 2) its directory entry to make rename durable 3) again to
+/// already renamed file, which is not required by standards but postgres does
+/// it, let's stick to that. Postgres additionally fsyncs newpath *before*
+/// rename if it exists to ensure that at least one of the files survives, but
+/// current callers don't need that.
+///
+/// virtual_file.rs has similar code, but it doesn't use vfs.
+///
+/// Useful links: <https://lwn.net/Articles/457667/>
+/// <https://www.postgresql.org/message-id/flat/56583BDD.9060302%402ndquadrant.com>
+/// <https://thunk.org/tytso/blog/2009/03/15/dont-fear-the-fsync/>
+pub async fn durable_rename(
+    old_path: impl AsRef<Utf8Path>,
+    new_path: impl AsRef<Utf8Path>,
+    do_fsync: bool,
+) -> io::Result<()> {
+    // first fsync the file
+    fsync_async_opt(old_path.as_ref(), do_fsync).await?;
+
+    // Time to do the real deal.
+    tokio::fs::rename(old_path.as_ref(), new_path.as_ref()).await?;
+
+    // Postgres'ish fsync of renamed file.
+    fsync_async_opt(new_path.as_ref(), do_fsync).await?;
+
+    // Now fsync the parent
+    let parent = match new_path.as_ref().parent() {
+        Some(p) => p,
+        None => Utf8Path::new("./"), // assume current dir if there is no parent
+    };
+    fsync_async_opt(parent, do_fsync).await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 

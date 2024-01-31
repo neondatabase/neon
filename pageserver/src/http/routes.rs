@@ -17,6 +17,8 @@ use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
+use pageserver_api::models::TenantLocationConfigResponse;
+use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
@@ -1356,7 +1358,7 @@ async fn put_tenant_location_config_handler(
     let location_conf =
         LocationConf::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
-    state
+    let attached = state
         .tenant_manager
         .upsert_location(
             tenant_shard_id,
@@ -1365,7 +1367,8 @@ async fn put_tenant_location_config_handler(
             tenant::SpawnMode::Normal,
             &ctx,
         )
-        .await?;
+        .await?
+        .is_some();
 
     if let Some(_flush_ms) = flush {
         match state
@@ -1384,7 +1387,18 @@ async fn put_tenant_location_config_handler(
         tracing::info!("No flush requested when configuring");
     }
 
-    json_response(StatusCode::OK, ())
+    // This API returns a vector of pageservers where the tenant is attached: this is
+    // primarily for use in the sharding service.  For compatibilty, we also return this
+    // when called directly on a pageserver, but the payload is always zero or one shards.
+    let mut response = TenantLocationConfigResponse { shards: Vec::new() };
+    if attached {
+        response.shards.push(TenantShardLocation {
+            shard_id: tenant_shard_id,
+            node_id: state.conf.id,
+        })
+    }
+
+    json_response(StatusCode::OK, response)
 }
 
 async fn list_location_config_handler(
