@@ -138,7 +138,7 @@ impl Gate {
             return;
         };
 
-        tracing::warn!(
+        tracing::info!(
             gate = ?self.as_ptr(),
             elapsed_ms = started_at.elapsed().as_millis(),
             "closing is taking longer than expected"
