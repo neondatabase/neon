@@ -913,6 +913,7 @@ impl WalRedoProcess {
 
         let path = self.conf.tenant_path(&self.tenant_shard_id).join(&filename);
 
+        use std::io::Write;
         let res = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
