@@ -72,7 +72,8 @@ impl Drop for GateGuard {
             );
         }
 
-        // manual implementation of what OwnedSemaphoreGuard does
+        // when the permit was acquired, it was forgotten to allow us to manage it's lifecycle
+        // manually, so "return" the permit now.
         self.gate.sem.add_permits(1);
     }
 }
@@ -111,8 +112,8 @@ impl Gate {
             .try_acquire()
             .map_err(|_| GateError::GateClosed)?;
 
-        // we now have the permit, let's disable the normal raii functionality and leave adding
-        // the permit back to our GateGuard::drop
+        // we now have the permit, let's disable the normal raii functionality and leave
+        // "returning" the permit to our GateGuard::drop
         permit.forget();
 
         Ok(GateGuard {
@@ -145,7 +146,7 @@ impl Gate {
 
         // close operation is not trying to be cancellation safe as pageserver does not need it.
         //
-        // note: "closing" is not checked in Gate::enter -- it exists just for Observability,
+        // note: "closing" is not checked in Gate::enter -- it exists just for observability,
         // dropping of GateGuard after this will log who they were.
         self.inner.closing.store(true, Ordering::Relaxed);
 
@@ -158,6 +159,12 @@ impl Gate {
         );
     }
 
+    /// Used as an identity of a gate. This identity will be resolved to something useful when
+    /// it's actually closed in a hopefully sensible `tracing::Span` which will describe it even
+    /// more.
+    ///
+    /// `GateGuard::drop` also logs this pointer when it has realized it has been keeping the gate
+    /// open for too long.
     fn as_ptr(&self) -> *const GateInner {
         Arc::as_ptr(&self.inner)
     }
