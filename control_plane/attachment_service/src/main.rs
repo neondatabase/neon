@@ -39,7 +39,7 @@ struct Cli {
 
     /// Path to the .json file to store state (will be created if it doesn't exist)
     #[arg(short, long)]
-    path: Utf8PathBuf,
+    path: Option<Utf8PathBuf>,
 
     /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
     #[arg(long)]
@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         GIT_VERSION,
         launch_ts.to_string(),
         BUILD_TAG,
-        args.path,
+        args.path.as_ref().unwrap_or(&Utf8PathBuf::from("<none>")),
         args.listen
     );
 
@@ -70,11 +70,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_token: args.jwt_token,
     };
 
-    let json_path = if args.path.as_os_str().is_empty() {
-        None
-    } else {
-        Some(args.path)
-    };
+    let json_path = args.path;
     let persistence = Arc::new(Persistence::new(args.database_url, json_path.clone()));
 
     let service = Service::spawn(config, persistence.clone()).await?;
