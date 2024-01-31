@@ -18,11 +18,11 @@ def test_migrations(neon_simple_env: NeonEnv):
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
-        assert migration_id[0][0] == 2
+        assert migration_id[0][0] == 3
 
     with open(log_path, "r") as log_file:
         logs = log_file.read()
-        assert "INFO handle_migrations: Ran 2 migrations" in logs
+        assert "INFO handle_migrations: Ran 3 migrations" in logs
 
     endpoint.stop()
     endpoint.start()
@@ -30,7 +30,7 @@ def test_migrations(neon_simple_env: NeonEnv):
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
-        assert migration_id[0][0] == 2
+        assert migration_id[0][0] == 3
 
     with open(log_path, "r") as log_file:
         logs = log_file.read()
