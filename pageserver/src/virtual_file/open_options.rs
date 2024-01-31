@@ -13,6 +13,7 @@ pub enum OpenOptions {
 impl Default for OpenOptions {
     fn default() -> Self {
         match super::io_engine::get() {
+            IoEngine::NotSet => panic!("io engine not set"),
             IoEngine::StdFs => Self::StdFs(std::fs::OpenOptions::new()),
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {

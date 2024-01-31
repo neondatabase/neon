@@ -9,7 +9,9 @@
 
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
+#[repr(u8)]
 pub(crate) enum IoEngine {
+    NotSet,
     StdFs,
     #[cfg(target_os = "linux")]
     TokioEpollUring,
@@ -25,18 +27,33 @@ impl From<IoEngineKind> for IoEngine {
     }
 }
 
-static IO_ENGINE: std::sync::RwLock<Option<IoEngine>> = std::sync::RwLock::new(None);
+impl TryFrom<u8> for IoEngine {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            v if v == (IoEngine::NotSet as u8) => IoEngine::NotSet,
+            v if v == (IoEngine::StdFs as u8) => IoEngine::StdFs,
+            #[cfg(target_os = "linux")]
+            v if v == (IoEngine::TokioEpollUring as u8) => IoEngine::TokioEpollUring,
+            x => return Err(x),
+        })
+    }
+}
+
+static IO_ENGINE: AtomicU8 = AtomicU8::new(IoEngine::NotSet as u8);
 
 pub(crate) fn set(engine_kind: IoEngineKind) {
-    let engine = engine_kind.into();
-    let mut guard = IO_ENGINE.write().unwrap();
-    *guard = Some(engine);
-    let metric = &crate::metrics::virtual_file_io_engine::KIND;
-    metric.reset();
-    metric
-        .with_label_values(&[&format!("{engine_kind}")])
-        .set(1);
-    drop(guard);
+    let engine: IoEngine = engine_kind.into();
+    IO_ENGINE.store(engine as u8, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(test))]
+    {
+        let metric = &crate::metrics::virtual_file_io_engine::KIND;
+        metric.reset();
+        metric
+            .with_label_values(&[&format!("{engine_kind}")])
+            .set(1);
+    }
 }
 
 #[cfg(not(test))]
@@ -45,38 +62,41 @@ pub(super) fn init(engine_kind: IoEngineKind) {
 }
 
 pub(super) fn get() -> IoEngine {
-    #[cfg(test)]
-    {
+    let cur = IoEngine::try_from(IO_ENGINE.load(Ordering::Relaxed)).unwrap();
+    if cfg!(test) {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE";
-        let guard = IO_ENGINE.read().unwrap();
-        if let Some(v) = guard.is_some() {
-            return v;
+        match cur {
+            IoEngine::NotSet => {
+                let kind = match std::env::var(env_var_name) {
+                    Ok(v) => match v.parse::<IoEngineKind>() {
+                        Ok(engine_kind) => engine_kind,
+                        Err(e) => {
+                            panic!("invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}")
+                        }
+                    },
+                    Err(std::env::VarError::NotPresent) => {
+                        crate::config::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE
+                            .parse()
+                            .unwrap()
+                    }
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        panic!("env var {env_var_name} is not unicode");
+                    }
+                };
+                self::set(kind);
+                self::get()
+            }
+            x => x,
         }
-        *guard = Some(match std::env::var(env_var_name) {
-            Ok(v) => match v.parse::<IoEngine>() {
-                Ok(engine_kind) => engine_kind,
-                Err(e) => {
-                    panic!("invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}")
-                }
-            },
-            Err(std::env::VarError::NotPresent) => {
-                crate::config::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE
-                    .parse()
-                    .unwrap()
-            }
-            Err(std::env::VarError::NotUnicode(_)) => {
-                panic!("env var {env_var_name} is not unicode");
-            }
-        });
+    } else {
+        cur
     }
-    #[cfg(not(test))]
-    IO_ENGINE
-        .read()
-        .unwrap()
-        .expect("should have called set() or init() before")
 }
 
-use std::os::unix::prelude::FileExt;
+use std::{
+    os::unix::prelude::FileExt,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 use super::FileGuard;
 
@@ -91,6 +111,7 @@ impl IoEngine {
         B: tokio_epoll_uring::BoundedBufMut + Send,
     {
         match self {
+            IoEngine::NotSet => panic!("not initialized"),
             IoEngine::StdFs => {
                 // SAFETY: `dst` only lives at most as long as this match arm, during which buf remains valid memory.
                 let dst = unsafe {

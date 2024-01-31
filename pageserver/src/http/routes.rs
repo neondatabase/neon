@@ -1804,7 +1804,7 @@ async fn post_set_io_engine_handler(
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
-    crate::virtual_file::io_engine::set(kind.into());
+    crate::virtual_file::io_engine::set(kind);
     json_response(StatusCode::OK, ())
 }
 
