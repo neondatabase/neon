@@ -27,7 +27,6 @@ use std::collections::VecDeque;
 use std::io;
 use std::io::prelude::*;
 use std::ops::{Deref, DerefMut};
-use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::CommandExt;
 use std::process::Stdio;
 use std::process::{Child, Command};
@@ -36,7 +35,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::*;
-use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock};
+use utils::{bin_ser::BeSer, lsn::Lsn};
 
 #[cfg(feature = "testing")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -818,7 +817,7 @@ impl WalRedoProcess {
     }
 
     async fn apply_wal_records0(&self, writebuf: &[u8]) -> anyhow::Result<Bytes> {
-        let input = self.stdin.lock().await;
+        let mut input = self.stdin.lock().await;
         input
             .stdin
             .write_all(writebuf)
