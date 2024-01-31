@@ -1,34 +1,21 @@
-import concurrent.futures
-import enum
-import os
-import shutil
 import time
-from threading import Thread
+from datetime import datetime, timezone
 
-import pytest
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
-    wait_tenant_status_404,
-    wait_until_tenant_active,
-    wait_until_tenant_state,
 )
-from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
-from fixtures.types import TenantId, TimelineId
-from fixtures.utils import run_pg_bench_small, wait_until
-from requests.exceptions import ReadTimeout
-from datetime import date, timezone, datetime
+from fixtures.remote_storage import s3_storage
+from fixtures.types import TenantId
+from fixtures.utils import run_pg_bench_small
 
 
 def test_tenant_s3_restore(
