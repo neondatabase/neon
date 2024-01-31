@@ -176,6 +176,7 @@ impl Gate {
         self.inner.sem.is_closed()
     }
 
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(gate = ?self.as_ptr()))]
     async fn do_close(&self) {
         tracing::debug!("Closing Gate...");
 
