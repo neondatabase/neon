@@ -1,6 +1,6 @@
 //! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
 
-use super::IoEngineKind;
+use super::io_engine::IoEngine;
 use std::{os::fd::OwnedFd, path::Path};
 
 #[derive(Debug, Clone)]
@@ -13,9 +13,9 @@ pub enum OpenOptions {
 impl Default for OpenOptions {
     fn default() -> Self {
         match super::io_engine::get() {
-            IoEngineKind::StdFs => Self::StdFs(std::fs::OpenOptions::new()),
+            IoEngine::StdFs => Self::StdFs(std::fs::OpenOptions::new()),
             #[cfg(target_os = "linux")]
-            IoEngineKind::TokioEpollUring => {
+            IoEngine::TokioEpollUring => {
                 Self::TokioEpollUring(tokio_epoll_uring::ops::open_at::OpenOptions::new())
             }
         }

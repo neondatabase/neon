@@ -52,7 +52,7 @@ pub(crate) struct Args {
     #[clap(long)]
     keyspace_cache: Option<Utf8PathBuf>,
     #[clap(long)]
-    set_io_engine: Option<String>,
+    set_io_engine: Option<pageserver_api::models::virtual_file::IoEngineKind>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 

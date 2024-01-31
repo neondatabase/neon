@@ -7,42 +7,44 @@
 //!
 //! Then use [`get`] and  [`super::OpenOptions`].
 
-#[derive(
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-    Debug,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum IoEngineKind {
+pub(crate) use super::api::IoEngineKind;
+#[derive(Clone, Copy)]
+pub(crate) enum IoEngine {
     StdFs,
     #[cfg(target_os = "linux")]
     TokioEpollUring,
 }
 
-static IO_ENGINE: std::sync::RwLock<Option<IoEngineKind>> = std::sync::RwLock::new(None);
+impl From<IoEngineKind> for IoEngine {
+    fn from(value: IoEngineKind) -> Self {
+        match value {
+            IoEngineKind::StdFs => IoEngine::StdFs,
+            #[cfg(target_os = "linux")]
+            IoEngineKind::TokioEpollUring => IoEngine::TokioEpollUring,
+        }
+    }
+}
 
-pub(crate) fn set(engine: IoEngineKind) {
+static IO_ENGINE: std::sync::RwLock<Option<IoEngine>> = std::sync::RwLock::new(None);
+
+pub(crate) fn set(engine_kind: IoEngineKind) {
+    let engine = engine_kind.into();
     let mut guard = IO_ENGINE.write().unwrap();
     *guard = Some(engine);
     let metric = &crate::metrics::virtual_file_io_engine::KIND;
     metric.reset();
-    metric.with_label_values(&[&format!("{engine}")]).set(1);
+    metric
+        .with_label_values(&[&format!("{engine_kind}")])
+        .set(1);
     drop(guard);
 }
 
 #[cfg(not(test))]
-pub(super) fn init(engine: IoEngineKind) {
-    set(engine);
+pub(super) fn init(engine_kind: IoEngineKind) {
+    set(engine_kind);
 }
 
-pub(super) fn get() -> IoEngineKind {
+pub(super) fn get() -> IoEngine {
     #[cfg(test)]
     {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE";
@@ -51,7 +53,7 @@ pub(super) fn get() -> IoEngineKind {
             return v;
         }
         *guard = Some(match std::env::var(env_var_name) {
-            Ok(v) => match v.parse::<IoEngineKind>() {
+            Ok(v) => match v.parse::<IoEngine>() {
                 Ok(engine_kind) => engine_kind,
                 Err(e) => {
                     panic!("invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}")
@@ -78,7 +80,7 @@ use std::os::unix::prelude::FileExt;
 
 use super::FileGuard;
 
-impl IoEngineKind {
+impl IoEngine {
     pub(super) async fn read_at<B>(
         &self,
         file_guard: FileGuard,
@@ -89,7 +91,7 @@ impl IoEngineKind {
         B: tokio_epoll_uring::BoundedBufMut + Send,
     {
         match self {
-            IoEngineKind::StdFs => {
+            IoEngine::StdFs => {
                 // SAFETY: `dst` only lives at most as long as this match arm, during which buf remains valid memory.
                 let dst = unsafe {
                     std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf.bytes_total())
@@ -107,7 +109,7 @@ impl IoEngineKind {
                 ((file_guard, buf), res)
             }
             #[cfg(target_os = "linux")]
-            IoEngineKind::TokioEpollUring => {
+            IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
                 let (resources, res) = system.read(file_guard, offset, buf).await;
                 (

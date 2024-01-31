@@ -2058,7 +2058,7 @@ pub fn make_router(
                 _cancel: CancellationToken,
             ) -> Result<Response<Body>, ApiError> {
                 let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
-                crate::virtual_file::io_engine::set(kind);
+                crate::virtual_file::io_engine::set(kind.into());
                 json_response(StatusCode::OK, ())
             }
             api_handler(r, set_io_engine_handler)
