@@ -17,6 +17,8 @@ use crate::service::Config;
 const BUSY_DELAY: Duration = Duration::from_secs(1);
 const SLOWDOWN_DELAY: Duration = Duration::from_secs(5);
 
+pub(crate) const API_CONCURRENCY: usize = 32;
+
 pub(super) struct ComputeHookTenant {
     shards: Vec<(ShardIndex, NodeId)>,
 }
@@ -255,7 +257,13 @@ impl ComputeHook {
     /// - All the shards have the same shard_count (i.e. we are not mid-split)
     ///
     /// Cancellation token enables callers to drop out, e.g. if calling from a Reconciler
-    /// that is cancelled
+    /// that is cancelled.
+    ///
+    /// This function is fallible, including in the case that the control plane is transiently
+    /// unavailable.  A limited number of retries are done internally to efficiently hide short unavailability
+    /// periods, but we don't retry forever.  The **caller** is responsible for handling failures and
+    /// ensuring that they eventually call again to ensure that the compute is eventually notified of
+    /// the proper pageserver nodes for a tenant.
     #[tracing::instrument(skip_all, fields(tenant_shard_id, node_id))]
     pub(super) async fn notify(
         &self,
@@ -291,10 +299,6 @@ impl ComputeHook {
             tracing::debug!("Tenant isn't yet ready to emit a notification",);
             return Ok(());
         };
-
-        // TODO: if our cancellation token fires, we may drop out without notifying.  But the
-        // Reconciler that calls us might consider its work complete, and never retry.  Should
-        // carry some dirty flag and retry in the background.
 
         if let Some(notify_url) = &self.config.compute_hook_url {
             self.do_notify(notify_url, reconfigure_request, cancel)

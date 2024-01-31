@@ -14,7 +14,7 @@ use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
 
-use crate::compute_hook::ComputeHook;
+use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
 use crate::tenant_state::{IntentState, ObservedState, ObservedStateLocation};
 
@@ -37,8 +37,14 @@ pub(super) struct Reconciler {
     pub(crate) pageservers: Arc<HashMap<NodeId, Node>>,
 
     /// A hook to notify the running postgres instances when we change the location
-    /// of a tenant
+    /// of a tenant.  Use this via [`Self::compute_notify`] to update our failure flag
+    /// and guarantee eventual retries.
     pub(crate) compute_hook: Arc<ComputeHook>,
+
+    /// To avoid stalling if the cloud control plane is unavailable, we may proceed
+    /// past failures in [`ComputeHook::notify`], but we _must_ remember that we failed
+    /// so that we can set [`crate::tenant_state::TenantState::pending_compute_notification`] to ensure a later retry.
+    pub(crate) compute_notify_failure: bool,
 
     /// A means to abort background reconciliation: it is essential to
     /// call this when something changes in the original TenantState that
@@ -52,7 +58,9 @@ pub(super) struct Reconciler {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ReconcileError {
+pub(crate) enum ReconcileError {
+    #[error(transparent)]
+    Notify(#[from] NotifyError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -317,9 +325,19 @@ impl Reconciler {
         }
 
         tracing::info!("🔁 Notifying compute to use pageserver {}", dest_ps_id);
-        self.compute_hook
-            .notify(self.tenant_shard_id, dest_ps_id, &self.cancel)
-            .await?;
+
+        // During a live migration it is unhelpful to proceed if we couldn't notify compute: if we detach
+        // the origin without notifying compute, we will render the tenant unavailable.
+        while let Err(e) = self.compute_notify().await {
+            match e {
+                NotifyError::Fatal(_) => return Err(anyhow::anyhow!(e)),
+                _ => {
+                    tracing::warn!(
+                        "Live migration blocked by compute notification error, retrying: {e}"
+                    );
+                }
+            }
+        }
 
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Single, then
         // this location will be deleted in the general case reconciliation that runs after this.
@@ -400,15 +418,7 @@ impl Reconciler {
                     wanted_conf.generation = self.generation.into();
                     tracing::info!("Observed configuration requires update.");
                     self.location_config(node_id, wanted_conf, None).await?;
-                    if let Err(e) = self
-                        .compute_hook
-                        .notify(self.tenant_shard_id, node_id, &self.cancel)
-                        .await
-                    {
-                        tracing::warn!(
-                            "Failed to notify compute of newly attached pageserver {node_id}: {e}"
-                        );
-                    }
+                    self.compute_notify().await?;
                 }
             }
         }
@@ -460,6 +470,29 @@ impl Reconciler {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn compute_notify(&mut self) -> Result<(), NotifyError> {
+        // Whenever a particular Reconciler emits a notification, it is always notifying for the intended
+        // destination.
+        if let Some(node_id) = self.intent.attached {
+            let result = self
+                .compute_hook
+                .notify(self.tenant_shard_id, node_id, &self.cancel)
+                .await;
+            if let Err(e) = &result {
+                // It is up to the caller whether they want to drop out on this error, but they don't have to:
+                // in general we should avoid letting unavailability of the cloud control plane stop us from
+                // making progress.
+                tracing::warn!("Failed to notify compute of attached pageserver {node_id}: {e}");
+                // Set this flag so that in our ReconcileResult we will set the flag on the shard that it
+                // needs to retry at some point.
+                self.compute_notify_failure = true;
+            }
+            result
+        } else {
+            Ok(())
+        }
     }
 }
 

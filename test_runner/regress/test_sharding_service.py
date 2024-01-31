@@ -330,3 +330,13 @@ def test_sharding_service_compute_hook(
         "shards": [{"node_id": int(env.pageservers[1].id), "shard_number": 0}],
     }
     assert notifications[1] == expect
+
+    # When we restart, we should re-emit notifications for all tenants
+    env.attachment_service.stop()
+    env.attachment_service.start()
+
+    def received_restart_notification():
+        assert len(notifications) == 3
+        assert notifications[1] == expect
+
+    wait_until(10, 1, received_restart_notification)
