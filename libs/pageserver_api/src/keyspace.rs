@@ -63,16 +63,64 @@ impl KeySpace {
         KeyPartitioning { parts }
     }
 
+    /// Update the keyspace such that it doesn't contain any range
+    /// that is overlapping with `other`. This can involve splitting or
+    /// removing of existing ranges.
+    pub fn remove_overlapping_with(&mut self, other: &KeySpace) {
+        for range in &other.ranges {
+            while let Some(overlap_at) = self.overlaps_at(range) {
+                let overlapped = self.ranges[overlap_at].clone();
+
+                if overlapped.start < range.start && overlapped.end <= range.end {
+                    // Higher part of the range is completely overlapped.
+                    self.ranges[overlap_at].end = range.start;
+                }
+                if overlapped.start >= range.start && overlapped.end > range.end {
+                    // Lower part of the range is completely overlapped.
+                    self.ranges[overlap_at].start = range.end;
+                }
+                if overlapped.start < range.start && overlapped.end > range.end {
+                    // Middle part of the range is overlapped.
+                    self.ranges[overlap_at].end = range.start;
+                    self.ranges
+                        .insert(overlap_at + 1, range.end..overlapped.end);
+                }
+                if overlapped.start >= range.start && overlapped.end <= range.end {
+                    // Whole range is overlapped
+                    self.ranges.remove(overlap_at);
+                }
+            }
+        }
+    }
+
+    #[allow(unused)]
+    pub fn start(&self) -> Option<Key> {
+        self.ranges.first().map(|range| range.start)
+    }
+
+    #[allow(unused)]
+    pub fn total_size(&self) -> usize {
+        self.ranges
+            .iter()
+            .map(|range| key_range_size(range) as usize)
+            .sum()
+    }
+
+    fn overlaps_at(&self, range: &Range<Key>) -> Option<usize> {
+        match self.ranges.binary_search_by_key(&range.end, |r| r.start) {
+            Ok(0) => None,
+            Err(0) => None,
+            Ok(index) if self.ranges[index - 1].end > range.start => Some(index - 1),
+            Err(index) if self.ranges[index - 1].end > range.start => Some(index - 1),
+            _ => None,
+        }
+    }
+
     ///
     /// Check if key space contains overlapping range
     ///
     pub fn overlaps(&self, range: &Range<Key>) -> bool {
-        match self.ranges.binary_search_by_key(&range.end, |r| r.start) {
-            Ok(0) => false,
-            Err(0) => false,
-            Ok(index) => self.ranges[index - 1].end > range.start,
-            Err(index) => self.ranges[index - 1].end > range.start,
-        }
+        self.overlaps_at(range).is_some()
     }
 }
 
@@ -440,5 +488,105 @@ mod tests {
         //        #####      #####
         //        xxxxxxxxxxx
         assert!(ks.overlaps(&kr(0..30))); // XXXXX This fails currently!
+    }
+
+    #[test]
+    fn test_remove_overlapping_with() {
+        // Test full overlaps
+        let mut key_space1 = KeySpace {
+            ranges: vec![
+                Key::from_i128(1)..Key::from_i128(4),
+                Key::from_i128(5)..Key::from_i128(8),
+                Key::from_i128(10)..Key::from_i128(12),
+            ],
+        };
+        let key_space2 = KeySpace {
+            ranges: vec![
+                Key::from_i128(2)..Key::from_i128(3),
+                Key::from_i128(6)..Key::from_i128(7),
+                Key::from_i128(11)..Key::from_i128(13),
+            ],
+        };
+        key_space1.remove_overlapping_with(&key_space2);
+        assert_eq!(
+            key_space1.ranges,
+            vec![
+                Key::from_i128(1)..Key::from_i128(2),
+                Key::from_i128(3)..Key::from_i128(4),
+                Key::from_i128(5)..Key::from_i128(6),
+                Key::from_i128(7)..Key::from_i128(8),
+                Key::from_i128(10)..Key::from_i128(11)
+            ]
+        );
+
+        // Test partial ovelaps
+        let mut key_space1 = KeySpace {
+            ranges: vec![
+                Key::from_i128(1)..Key::from_i128(5),
+                Key::from_i128(7)..Key::from_i128(10),
+                Key::from_i128(12)..Key::from_i128(15),
+            ],
+        };
+        let key_space2 = KeySpace {
+            ranges: vec![
+                Key::from_i128(3)..Key::from_i128(6),
+                Key::from_i128(8)..Key::from_i128(11),
+                Key::from_i128(14)..Key::from_i128(17),
+            ],
+        };
+        key_space1.remove_overlapping_with(&key_space2);
+        assert_eq!(
+            key_space1.ranges,
+            vec![
+                Key::from_i128(1)..Key::from_i128(3),
+                Key::from_i128(7)..Key::from_i128(8),
+                Key::from_i128(12)..Key::from_i128(14),
+            ]
+        );
+
+        // Test no overlaps
+        let mut key_space1 = KeySpace {
+            ranges: vec![
+                Key::from_i128(1)..Key::from_i128(5),
+                Key::from_i128(7)..Key::from_i128(10),
+                Key::from_i128(12)..Key::from_i128(15),
+            ],
+        };
+        let key_space2 = KeySpace {
+            ranges: vec![
+                Key::from_i128(6)..Key::from_i128(7),
+                Key::from_i128(11)..Key::from_i128(12),
+                Key::from_i128(15)..Key::from_i128(17),
+            ],
+        };
+        key_space1.remove_overlapping_with(&key_space2);
+        assert_eq!(
+            key_space1.ranges,
+            vec![
+                Key::from_i128(1)..Key::from_i128(5),
+                Key::from_i128(7)..Key::from_i128(10),
+                Key::from_i128(12)..Key::from_i128(15),
+            ]
+        );
+
+        // Test one range overlaps multiple
+        let mut key_space1 = KeySpace {
+            ranges: vec![
+                Key::from_i128(1)..Key::from_i128(5),
+                Key::from_i128(7)..Key::from_i128(10),
+                Key::from_i128(12)..Key::from_i128(15),
+            ],
+        };
+        let key_space2 = KeySpace {
+            ranges: vec![Key::from_i128(4)..Key::from_i128(14)],
+        };
+        key_space1.remove_overlapping_with(&key_space2);
+        assert_eq!(
+            key_space1.ranges,
+            vec![
+                Key::from_i128(1)..Key::from_i128(4),
+                Key::from_i128(14)..Key::from_i128(15),
+            ]
+        );
     }
 }
