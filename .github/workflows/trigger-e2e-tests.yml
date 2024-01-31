@@ -140,19 +140,16 @@ jobs:
           retry_wait_seconds: 60
           max_attempts: 3
           command: |
-            REMOTE_REPO="${{ github.repository_owner }}/neon"
             COMMIT_SHA=${{ github.event.pull_request.head.sha }}
             CI_JOB_NAME="Build and Test / trigger-e2e-tests"
-            ACTION_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             set -e
             curl -f -X POST \
-              https://api.github.com/repos/$REMOTE_REPO/statuses/$COMMIT_HASH \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: token ${{ secrets.ci_access_token }}" \
-              --data \
-                "{
-                  \"state\": \"success\",
-                  \"context\": \"$CI_JOB_NAME\",
-                  \"description\": \"[$LOCAL_REPO] The e2e test were triggered successfully\",
-                  \"target_url\": \"$ACTION_URL\"
-                }"
+                      https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+                      -H "Accept: application/vnd.github.v3+json" \
+                      --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+                      --data \
+                        "{
+                          \"state\": \"success\",
+                          \"context\": \"$CI_JOB_NAME\",
+                          \"description\": \"The e2e test were triggered successfully\"
+                        }"
