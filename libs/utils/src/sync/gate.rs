@@ -242,7 +242,7 @@ mod tests {
         drop(guard);
 
         // Guard is gone, close should finish
-        tokio::time::timeout(forever, close_fut).await.unwrap();
+        close_fut.await;
 
         // Attempting to enter() is still forbidden
         gate.enter().expect_err("enter should fail finishing close");
