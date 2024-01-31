@@ -659,21 +659,21 @@ fn start_pageserver(
         let signal_handler = BACKGROUND_RUNTIME.spawn_blocking(move || {
             let mut signals =
                 signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGQUIT]).unwrap();
-            for sig in signals.forever() {
-                return sig;
-            }
-            unreachable!()
+            return signals
+                .forever()
+                .next()
+                .expect("forever() never returns None unless explicitly closed");
         });
         let signal = BACKGROUND_RUNTIME
             .block_on(signal_handler)
             .expect("join error");
         match signal {
             SIGQUIT => {
-                info!("Got {signal}. Terminating in immediate shutdown mode",);
+                info!("Got signal {signal}. Terminating in immediate shutdown mode",);
                 std::process::exit(111);
             }
             SIGINT | SIGTERM => {
-                info!("Got {signal}. Terminating gracefully in fast shutdown mode",);
+                info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
 
                 // This cancels the `shutdown_pageserver` cancellation tree.
                 // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
