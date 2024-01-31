@@ -110,7 +110,7 @@ jobs:
         run: make walproposer-lib -j$(sysctl -n hw.ncpu)
 
       - name: Run cargo build
-        run: cargo build --all --release
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release
 
       - name: Check that no warnings are produced
         run: ./run_clippy.sh
