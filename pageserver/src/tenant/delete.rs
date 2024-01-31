@@ -137,8 +137,10 @@ async fn schedule_ordered_timeline_deletions(
 
     for (timeline_id, _) in sorted.into_iter().rev() {
         let span = tracing::info_span!("timeline_delete", %timeline_id);
-        let fut = DeleteTimelineFlow::run(tenant, timeline_id, true).instrument(span);
-        if let Err(e) = fut.await {
+        let res = DeleteTimelineFlow::run(tenant, timeline_id, true)
+            .instrument(span)
+            .await;
+        if let Err(e) = res {
             match e {
                 DeleteTimelineError::NotFound => {
                     // Timeline deletion finished after call to clone above but before call
