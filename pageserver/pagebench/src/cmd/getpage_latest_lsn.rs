@@ -51,6 +51,8 @@ pub(crate) struct Args {
     /// It doesn't get invalidated if the keyspace changes under the hood, e.g., due to new ingested data or compaction.
     #[clap(long)]
     keyspace_cache: Option<Utf8PathBuf>,
+    /// Before starting the benchmark, live-reconfigure the pageserver to use the given
+    /// [`virtual_file::IoEngineKind`].
     #[clap(long)]
     set_io_engine: Option<pageserver_api::models::virtual_file::IoEngineKind>,
     targets: Option<Vec<TenantTimelineId>>,
