@@ -59,7 +59,7 @@ impl std::fmt::Debug for GateInner {
 /// not complete.
 #[derive(Debug)]
 pub struct GateGuard {
-    // hopefully not a permanent solution, but this should help us find causes for long Gate::close
+    // Record the span where the gate was entered, so that we can identify who was blocking Gate::close
     span_at_enter: tracing::Span,
     gate: Arc<GateInner>,
 }
