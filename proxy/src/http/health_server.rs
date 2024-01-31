@@ -1,12 +1,17 @@
 use anyhow::{anyhow, bail};
+use camino::Utf8PathBuf;
+use camino_tempfile::Utf8TempDir;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
 use measured::{text::BufferedTextEncoder, MetricGroup};
 use metrics::NeonMetrics;
+use once_cell::sync::Lazy;
 use std::{
     convert::Infallible,
+    ffi::CString,
     net::TcpListener,
     sync::{Arc, Mutex},
 };
+use tikv_jemalloc_ctl::{opt, prof};
 use tracing::{info, info_span};
 use utils::http::{
     endpoint::{self, request_span},
@@ -21,11 +26,36 @@ async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, "")
 }
 
+async fn prof_dump(_: Request<Body>) -> Result<Response<Body>, ApiError> {
+    static PROF_MIB: Lazy<prof::dump_mib> =
+        Lazy::new(|| prof::dump::mib().expect("could not create prof.dump MIB"));
+    static PROF_DIR: Lazy<Utf8TempDir> =
+        Lazy::new(|| camino_tempfile::tempdir().expect("could not create tempdir"));
+    static PROF_FILE: Lazy<Utf8PathBuf> = Lazy::new(|| PROF_DIR.path().join("prof.dump"));
+    static PROF_FILE0: Lazy<CString> = Lazy::new(|| CString::new(PROF_FILE.as_str()).unwrap());
+    static DUMP_LOCK: Mutex<()> = Mutex::new(());
+
+    tokio::task::spawn_blocking(|| {
+        let _guard = DUMP_LOCK.lock();
+        PROF_MIB
+            .write(&PROF_FILE0)
+            .expect("could not trigger prof.dump");
+        let prof_dump = std::fs::read_to_string(&*PROF_FILE).expect("could not open prof.dump");
+
+        Response::new(Body::from(prof_dump))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(e.into()))
+}
+
 fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper::Body, ApiError> {
     let state = Arc::new(Mutex::new(PrometheusHandler {
         encoder: BufferedTextEncoder::new(),
         metrics,
     }));
+
+    info!(enabled = opt::prof::read().unwrap(), "jemalloc profiling");
+    prof::active::write(true).unwrap();
 
     endpoint::make_router()
         .get("/metrics", move |r| {
@@ -33,6 +63,7 @@ fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper::Body, ApiError> {
             request_span(r, move |b| prometheus_metrics_handler(b, state))
         })
         .get("/v1/status", status_handler)
+        .get("/v1/jemalloc/prof.dump", prof_dump)
 }
 
 pub async fn task_main(

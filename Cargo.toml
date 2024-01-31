@@ -163,8 +163,8 @@ tar = "0.4"
 task-local-extensions = "0.1.4"
 test-context = "0.3"
 thiserror = "1.0"
-tikv-jemallocator = "0.5"
-tikv-jemalloc-ctl = "0.5"
+tikv-jemallocator = { git = "https://github.com/yuhao-su/jemallocator", rev = "a0911601bb7bb263ca55c7ea161ef308fdc623f8" }
+tikv-jemalloc-ctl = { git = "https://github.com/yuhao-su/jemallocator", rev = "a0911601bb7bb263ca55c7ea161ef308fdc623f8" }
 tokio = { version = "1.17", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
@@ -252,7 +252,7 @@ debug = true
 
 # disable debug symbols for all packages except this one to decrease binaries size
 [profile.release.package."*"]
-debug = false
+debug = true
 
 [profile.release-line-debug]
 inherits = "release"
