@@ -664,8 +664,7 @@ impl RemoteStorage for S3Bucket {
         loop {
             let response = backoff::retry(
                 || async {
-                    self
-                        .client
+                    self.client
                         .list_object_versions()
                         .bucket(self.bucket_name.clone())
                         .set_prefix(prefix.clone())
@@ -727,7 +726,10 @@ impl RemoteStorage for S3Bucket {
             }
         }
 
-        tracing::info!("Built list for time travel with {} versions and deletions", versions_and_deletes.len());
+        tracing::info!(
+            "Built list for time travel with {} versions and deletions",
+            versions_and_deletes.len()
+        );
 
         // Work on the list of references instead of the objects directly,
         // otherwise we get lifetime errors in the sort_by_key call below.
@@ -790,8 +792,7 @@ impl RemoteStorage for S3Bucket {
 
                         backoff::retry(
                             || async {
-                                self
-                                    .client
+                                self.client
                                     .copy_object()
                                     .bucket(self.bucket_name.clone())
                                     .key(key)
