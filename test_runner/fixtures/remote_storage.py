@@ -326,7 +326,9 @@ class RemoteStorageKind(str, enum.Enum):
         env_access_key = os.getenv("AWS_ACCESS_KEY_ID")
         env_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
         env_profile = os.getenv("AWS_PROFILE")
-        assert ((env_access_key and env_secret_key) or env_profile), "need to specify either access key and secret access key or profile"
+        assert (
+            env_access_key and env_secret_key
+        ) or env_profile, "need to specify either access key and secret access key or profile"
 
         bucket_name = bucket_name or os.getenv("REMOTE_STORAGE_S3_BUCKET")
         assert bucket_name is not None, "no remote storage bucket name provided"
