@@ -552,15 +552,12 @@ impl From<GetVectoredError> for CreateImageLayersError {
 
 impl From<GetReadyAncestorError> for PageReconstructError {
     fn from(e: GetReadyAncestorError) -> Self {
+        use GetReadyAncestorError::*;
         match e {
-            GetReadyAncestorError::AncestorStopping(tid) => {
-                PageReconstructError::AncestorStopping(tid)
-            }
-            GetReadyAncestorError::AncestorLsnTimeout(wait_err) => {
-                PageReconstructError::AncestorLsnTimeout(wait_err)
-            }
-            GetReadyAncestorError::Cancelled => PageReconstructError::Cancelled,
-            GetReadyAncestorError::Other(other) => PageReconstructError::Other(other),
+            AncestorStopping(tid) => PageReconstructError::AncestorStopping(tid),
+            AncestorLsnTimeout(wait_err) => PageReconstructError::AncestorLsnTimeout(wait_err),
+            Cancelled => PageReconstructError::Cancelled,
+            Other(other) => PageReconstructError::Other(other),
         }
     }
 }
