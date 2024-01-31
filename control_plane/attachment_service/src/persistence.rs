@@ -331,7 +331,15 @@ impl Persistence {
                 shard_number: ShardNumber(tsp.shard_number as u8),
                 shard_count: ShardCount::new(tsp.shard_count as u8),
             };
-            result.insert(tenant_shard_id, Generation::new(tsp.generation as u32));
+
+            let Some(g) = tsp.generation else {
+                // If the generation_pageserver column was non-NULL, then the generation column should also be non-NULL:
+                // we only set generation_pageserver when setting generation.
+                return Err(DatabaseError::Logical(
+                    "Generation should always be set after incrementing".to_string(),
+                ));
+            };
+            result.insert(tenant_shard_id, Generation::new(g as u32));
         }
 
         Ok(result)
@@ -364,7 +372,16 @@ impl Persistence {
             })
             .await?;
 
-        Ok(Generation::new(updated.generation as u32))
+        let Some(g) = updated.generation else {
+            // If the generation column had been NULL, then we should have experienced an SQL Confilict error
+            // while executing a query that tries to increment it.
+            return Err(DatabaseError::Logical(
+                "Generation should always be set after incrementing".to_string(),
+            )
+            .into());
+        };
+
+        Ok(Generation::new(g as u32))
     }
 
     /// For use when updating a persistent property of a tenant, such as its config or placement_policy.
@@ -389,7 +406,7 @@ impl Persistence {
                 // Update includes generation column
                 query
                     .set((
-                        generation.eq(input_generation.into().unwrap() as i32),
+                        generation.eq(Some(input_generation.into().unwrap() as i32)),
                         placement_policy
                             .eq(serde_json::to_string(&input_placement_policy).unwrap()),
                         config.eq(serde_json::to_string(&input_config).unwrap()),
@@ -421,7 +438,7 @@ impl Persistence {
                 .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
                 .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
                 .set((
-                    generation_pageserver.eq(i64::MAX),
+                    generation_pageserver.eq(Option::<i64>::None),
                     placement_policy.eq(serde_json::to_string(&PlacementPolicy::Detached).unwrap()),
                 ))
                 .execute(conn)?;
@@ -547,12 +564,15 @@ pub(crate) struct TenantShardPersistence {
     pub(crate) shard_stripe_size: i32,
 
     // Latest generation number: next time we attach, increment this
-    // and use the incremented number when attaching
-    pub(crate) generation: i32,
+    // and use the incremented number when attaching.
+    //
+    // Generation is only None when first onboarding a tenant, where it may
+    // be in PlacementPolicy::Secondary and therefore have no valid generation state.
+    pub(crate) generation: Option<i32>,
 
     // Currently attached pageserver
     #[serde(rename = "pageserver")]
-    pub(crate) generation_pageserver: i64,
+    pub(crate) generation_pageserver: Option<i64>,
 
     #[serde(default)]
     pub(crate) placement_policy: String,

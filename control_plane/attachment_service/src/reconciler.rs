@@ -26,7 +26,7 @@ pub(super) struct Reconciler {
     /// of a tenant's state from when we spawned a reconcile task.
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
-    pub(crate) generation: Generation,
+    pub(crate) generation: Option<Generation>,
     pub(crate) intent: TargetState,
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
@@ -312,7 +312,7 @@ impl Reconciler {
             &self.shard,
             &self.config,
             LocationConfigMode::AttachedStale,
-            Some(self.generation),
+            self.generation,
             None,
         );
         self.location_config(origin_ps_id, stale_conf, Some(Duration::from_secs(10)))
@@ -335,16 +335,17 @@ impl Reconciler {
         }
 
         // Increment generation before attaching to new pageserver
-        self.generation = self
-            .persistence
-            .increment_generation(self.tenant_shard_id, dest_ps_id)
-            .await?;
+        self.generation = Some(
+            self.persistence
+                .increment_generation(self.tenant_shard_id, dest_ps_id)
+                .await?,
+        );
 
         let dest_conf = build_location_config(
             &self.shard,
             &self.config,
             LocationConfigMode::AttachedMulti,
-            Some(self.generation),
+            self.generation,
             None,
         );
 
@@ -401,7 +402,7 @@ impl Reconciler {
             &self.shard,
             &self.config,
             LocationConfigMode::AttachedSingle,
-            Some(self.generation),
+            self.generation,
             None,
         );
         self.location_config(dest_ps_id, dest_final_conf.clone(), None)
@@ -433,8 +434,15 @@ impl Reconciler {
 
         // If the attached pageserver is not attached, do so now.
         if let Some(node_id) = self.intent.attached {
-            let mut wanted_conf =
-                attached_location_conf(self.generation, &self.shard, &self.config);
+            let Some(generation) = self.generation else {
+                // This should never happen: we do not enter an attached PlacementPolicy without
+                // initializing the generation for a tenant.
+                return Err(ReconcileError::Other(anyhow::anyhow!(
+                    "Attempted to attach with NULL generation"
+                )));
+            };
+
+            let mut wanted_conf = attached_location_conf(generation, &self.shard, &self.config);
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
@@ -474,11 +482,12 @@ impl Reconciler {
                     };
 
                     if increment_generation {
-                        self.generation = self
+                        let generation = self
                             .persistence
                             .increment_generation(self.tenant_shard_id, node_id)
                             .await?;
-                        wanted_conf.generation = self.generation.into();
+                        self.generation = Some(generation);
+                        wanted_conf.generation = generation.into();
                     }
                     tracing::info!(%node_id, "Observed configuration requires update.");
                     self.location_config(node_id, wanted_conf, None).await?;
