@@ -3075,9 +3075,16 @@ class PSQL:
         host: str = "127.0.0.1",
         port: int = 5432,
     ):
-        assert shutil.which(path)
+        search_path = None
+        if (d := os.getenv("POSTGRES_DISTRIB_DIR")) is not None and (
+            v := os.getenv("DEFAULT_PG_VERSION")
+        ) is not None:
+            search_path = Path(d) / f"v{v}" / "bin"
 
-        self.path = path
+        full_path = shutil.which(path, path=search_path)
+        assert full_path is not None
+
+        self.path = full_path
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
 
     async def run(self, query: Optional[str] = None) -> asyncio.subprocess.Process:
