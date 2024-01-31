@@ -443,6 +443,22 @@ pub(crate) enum GetVectoredError {
 
     #[error("Requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
+
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum GetReadyAncestorError {
+    #[error("ancestor timeline {0} is being stopped")]
+    AncestorStopping(TimelineId),
+
+    #[error("Ancestor LSN wait error: {0}")]
+    AncestorLsnTimeout(#[from] WaitLsnError),
+
+    #[error("Cancelled")]
+    Cancelled,
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 #[derive(Clone, Copy)]
@@ -519,6 +535,17 @@ impl From<GetVectoredError> for CreateImageLayersError {
         match e {
             GetVectoredError::Cancelled => CreateImageLayersError::Cancelled,
             _ => CreateImageLayersError::GetVectoredError(e),
+        }
+    }
+}
+
+impl From<GetReadyAncestorError> for PageReconstructError {
+    fn from(e: GetReadyAncestorError) -> Self {
+        match e {
+            GetReadyAncestorError::AncestorStopping(tid) => PageReconstructError::AncestorStopping(tid),
+            GetReadyAncestorError::AncestorLsnTimeout(wait_err) => PageReconstructError::AncestorLsnTimeout(wait_err),
+            GetReadyAncestorError::Cancelled => PageReconstructError::Cancelled,
+            GetReadyAncestorError::Other(other) => PageReconstructError::Other(other)
         }
     }
 }
@@ -2376,60 +2403,8 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                let ancestor = match timeline.get_ancestor_timeline() {
-                    Ok(timeline) => timeline,
-                    Err(e) => return Err(PageReconstructError::from(e)),
-                };
 
-                // It's possible that the ancestor timeline isn't active yet, or
-                // is active but hasn't yet caught up to the branch point. Wait
-                // for it.
-                //
-                // This cannot happen while the pageserver is running normally,
-                // because you cannot create a branch from a point that isn't
-                // present in the pageserver yet. However, we don't wait for the
-                // branch point to be uploaded to cloud storage before creating
-                // a branch. I.e., the branch LSN need not be remote consistent
-                // for the branching operation to succeed.
-                //
-                // Hence, if we try to load a tenant in such a state where
-                // 1. the existence of the branch was persisted (in IndexPart and/or locally)
-                // 2. but the ancestor state is behind branch_lsn because it was not yet persisted
-                // then we will need to wait for the ancestor timeline to
-                // re-stream WAL up to branch_lsn before we access it.
-                //
-                // How can a tenant get in such a state?
-                // - ungraceful pageserver process exit
-                // - detach+attach => this is a bug, https://github.com/neondatabase/neon/issues/4219
-                //
-                // NB: this could be avoided by requiring
-                //   branch_lsn >= remote_consistent_lsn
-                // during branch creation.
-                match ancestor.wait_to_become_active(ctx).await {
-                    Ok(()) => {}
-                    Err(TimelineState::Stopping) => {
-                        return Err(PageReconstructError::AncestorStopping(ancestor.timeline_id));
-                    }
-                    Err(state) => {
-                        return Err(PageReconstructError::Other(anyhow::anyhow!(
-                            "Timeline {} will not become active. Current state: {:?}",
-                            ancestor.timeline_id,
-                            &state,
-                        )));
-                    }
-                }
-                ancestor
-                    .wait_lsn(timeline.ancestor_lsn, ctx)
-                    .await
-                    .map_err(|e| match e {
-                        e @ WaitLsnError::Timeout(_) => PageReconstructError::AncestorLsnTimeout(e),
-                        WaitLsnError::Shutdown => PageReconstructError::Cancelled,
-                        e @ WaitLsnError::BadState => {
-                            PageReconstructError::Other(anyhow::anyhow!(e))
-                        }
-                    })?;
-
-                timeline_owned = ancestor;
+                timeline_owned = timeline.get_ready_ancestor_timeline(ctx).await?;
                 timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
                 continue 'outer;
@@ -2557,6 +2532,66 @@ impl Timeline {
             .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
+    }
+
+    async fn get_ready_ancestor_timeline(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<Arc<Timeline>, GetReadyAncestorError> {
+        let ancestor = match self.get_ancestor_timeline() {
+            Ok(timeline) => timeline,
+            Err(e) => return Err(GetReadyAncestorError::from(e)),
+        };
+
+        // It's possible that the ancestor timeline isn't active yet, or
+        // is active but hasn't yet caught up to the branch point. Wait
+        // for it.
+        //
+        // This cannot happen while the pageserver is running normally,
+        // because you cannot create a branch from a point that isn't
+        // present in the pageserver yet. However, we don't wait for the
+        // branch point to be uploaded to cloud storage before creating
+        // a branch. I.e., the branch LSN need not be remote consistent
+        // for the branching operation to succeed.
+        //
+        // Hence, if we try to load a tenant in such a state where
+        // 1. the existence of the branch was persisted (in IndexPart and/or locally)
+        // 2. but the ancestor state is behind branch_lsn because it was not yet persisted
+        // then we will need to wait for the ancestor timeline to
+        // re-stream WAL up to branch_lsn before we access it.
+        //
+        // How can a tenant get in such a state?
+        // - ungraceful pageserver process exit
+        // - detach+attach => this is a bug, https://github.com/neondatabase/neon/issues/4219
+        //
+        // NB: this could be avoided by requiring
+        //   branch_lsn >= remote_consistent_lsn
+        // during branch creation.
+        match ancestor.wait_to_become_active(ctx).await {
+            Ok(()) => {}
+            Err(TimelineState::Stopping) => {
+                return Err(GetReadyAncestorError::AncestorStopping(
+                    ancestor.timeline_id,
+                ));
+            }
+            Err(state) => {
+                return Err(GetReadyAncestorError::Other(anyhow::anyhow!(
+                    "Timeline {} will not become active. Current state: {:?}",
+                    ancestor.timeline_id,
+                    &state,
+                )));
+            }
+        }
+        ancestor
+            .wait_lsn(self.ancestor_lsn, ctx)
+            .await
+            .map_err(|e| match e {
+                e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
+                WaitLsnError::Shutdown => GetReadyAncestorError::Cancelled,
+                e @ WaitLsnError::BadState => GetReadyAncestorError::Other(anyhow::anyhow!(e)),
+            })?;
+
+        Ok(ancestor)
     }
 
     fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
