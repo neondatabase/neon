@@ -108,7 +108,7 @@ async fn main_impl(
     ));
 
     if let Some(engine_str) = &args.set_io_engine {
-        mgmt_api_client.set_io_engine(engine_str).await?;
+        mgmt_api_client.put_io_engine(engine_str).await?;
     }
 
     // discover targets
