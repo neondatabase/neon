@@ -1435,14 +1435,14 @@ async fn tenant_time_travel_remote_storage_handler(
 
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let timestamp_raw = must_get_query_param(&request, "timestamp")?;
+    let timestamp_raw = must_get_query_param(&request, "travel_to")?;
     let timestamp = humantime::parse_rfc3339(&timestamp_raw)
-        .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
+        .with_context(|| format!("Invalid time for travel_to: {timestamp_raw:?}"))
         .map_err(ApiError::BadRequest)?;
 
     let done_if_after_raw = must_get_query_param(&request, "done_if_after")?;
     let done_if_after = humantime::parse_rfc3339(&done_if_after_raw)
-        .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
+        .with_context(|| format!("Invalid time for done_if_after: {done_if_after_raw:?}"))
         .map_err(ApiError::BadRequest)?;
 
     // This is just a sanity check to fend off naive wrong usages of the API:
@@ -1466,6 +1466,8 @@ async fn tenant_time_travel_remote_storage_handler(
             "The done_if_after timestamp comes before the timestamp to recover to"
         )));
     }
+
+    tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={timestamp_raw}");
 
     remote_timeline_client::upload::time_travel_recover_tenant(
         storage,
