@@ -826,14 +826,10 @@ impl WalRedoProcess {
 
     async fn apply_wal_records0(&self, writebuf: &[u8]) -> anyhow::Result<Bytes> {
         let input = self.stdin.lock().await;
-
-        let mut proc = { input }; // TODO: remove this legacy rename, but this keep the patch small.
-
-        proc.stdin.write_all(writebuf).await.unwrap(); // TODO: bring back timeout & error handling
-
-        let request_no = proc.n_requests;
-        proc.n_requests += 1;
-        drop(proc);
+        input.stdin.write_all(writebuf).await.unwrap(); // TODO: bring back timeout & error handling
+        let request_no = input.n_requests;
+        input.n_requests += 1;
+        drop(input);
 
         // To improve walredo performance we separate sending requests and receiving
         // responses. Them are protected by different mutexes (output and input).
