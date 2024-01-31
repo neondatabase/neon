@@ -6,8 +6,8 @@ use super::connect_compute::ConnectMechanism;
 use super::retry::ShouldRetry;
 use super::*;
 use crate::auth::backend::{ComputeUserInfo, TestBackend};
-use crate::auth::IpPattern;
 use crate::config::CertResolver;
+use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
@@ -471,7 +471,10 @@ impl TestBackend for TestConnectMechanism {
         }
     }
 
-    fn get_allowed_ips(&self) -> Result<Vec<IpPattern>, console::errors::GetAuthInfoError> {
+    fn get_allowed_ips_and_secret(
+        &self,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>
+    {
         unimplemented!("not used in tests")
     }
 }
