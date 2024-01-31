@@ -1020,6 +1020,7 @@ impl Tenant {
                 Some(remote_timeline_client),
                 self.deletion_queue_client.clone(),
             )
+            .instrument(tracing::info_span!("timeline_delete", %timeline_id))
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
