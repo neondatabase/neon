@@ -2094,7 +2094,10 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             timelines.values().for_each(|timeline| {
                 let timeline = Arc::clone(timeline);
-                let span = Span::current();
+                let timeline_id = timeline.timeline_id;
+
+                let span =
+                    tracing::info_span!("timeline_shutdown", %timeline_id, ?freeze_and_flush);
                 js.spawn(async move {
                     if freeze_and_flush {
                         timeline.flush_and_shutdown().instrument(span).await
