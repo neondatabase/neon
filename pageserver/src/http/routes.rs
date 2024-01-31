@@ -1482,6 +1482,10 @@ async fn tenant_time_travel_remote_storage_handler(
             warn!("bad input error: {e}");
             ApiError::BadRequest(anyhow!("bad input error"))
         }
+        TimeTravelError::Unimplemented => {
+            ApiError::BadRequest(anyhow!("unimplemented for the configured remote storage"))
+
+        }
         TimeTravelError::Cancelled => ApiError::InternalServerError(anyhow!("cancelled")),
         TimeTravelError::TooManyVersions => {
             ApiError::InternalServerError(anyhow!("too many versions in remote storage"))
