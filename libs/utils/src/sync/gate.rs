@@ -113,7 +113,10 @@ impl Gate {
             .map_err(|_| GateError::GateClosed)?;
 
         // we now have the permit, let's disable the normal raii functionality and leave
-        // "returning" the permit to our GateGuard::drop
+        // "returning" the permit to our GateGuard::drop.
+        //
+        // this is done to avoid the need for multiple Arcs (one for semaphore, next for other
+        // fields).
         permit.forget();
 
         Ok(GateGuard {
