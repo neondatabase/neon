@@ -3903,6 +3903,7 @@ pub(crate) mod harness {
                 ),
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
+                lazy_slru_download: Some(tenant_conf.lazy_slru_download),
             }
         }
     }

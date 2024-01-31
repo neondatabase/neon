@@ -1043,6 +1043,7 @@ pub enum SmgrQueryType {
     GetRelSize,
     GetPageAtLsn,
     GetDbSize,
+    GetSlruSegment,
 }
 
 #[derive(Debug)]
@@ -1159,11 +1160,12 @@ mod smgr_query_time_tests {
     #[test]
     fn op_label_name() {
         use super::SmgrQueryType::*;
-        let expect: [(super::SmgrQueryType, &'static str); 4] = [
+        let expect: [(super::SmgrQueryType, &'static str); 5] = [
             (GetRelExists, "get_rel_exists"),
             (GetRelSize, "get_rel_size"),
             (GetPageAtLsn, "get_page_at_lsn"),
             (GetDbSize, "get_db_size"),
+            (GetSlruSegment, "get_slru_segment"),
         ];
         for (op, expect) in expect {
             let actual: &'static str = op.into();

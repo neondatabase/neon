@@ -1287,6 +1287,13 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
+    pub fn get_lazy_slru_download(&self) -> bool {
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        tenant_conf
+            .lazy_slru_download
+            .unwrap_or(self.conf.default_tenant_conf.lazy_slru_download)
+    }
+
     fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf

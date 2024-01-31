@@ -22,7 +22,8 @@ use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
-    PagestreamNblocksRequest, PagestreamNblocksResponse,
+    PagestreamGetSlruSegmentRequest, PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest,
+    PagestreamNblocksResponse,
 };
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::shard::{ShardCount, ShardNumber};
@@ -74,8 +75,8 @@ use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
-
 use pageserver_api::key::rel_block_to_key;
+use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
@@ -647,6 +648,15 @@ impl PageServerHandler {
                         span,
                     )
                 }
+                PagestreamFeMessage::GetSlruSegment(req) => {
+                    let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
+                }
             };
 
             match response {
@@ -1135,6 +1145,33 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
+    }
+
+    async fn handle_get_slru_segment_request(
+        &mut self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &PagestreamGetSlruSegmentRequest,
+        ctx: &RequestContext,
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
+        let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+
+        let _timer = timeline
+            .query_metrics
+            .start_timer(metrics::SmgrQueryType::GetSlruSegment);
+
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
+
+        let kind = SlruKind::from_repr(req.kind)
+            .ok_or(PageStreamError::BadRequest("invalid SLRU kind".into()))?;
+        let segment = timeline.get_slru_segment(kind, req.segno, lsn, ctx).await?;
+
+        Ok(PagestreamBeMessage::GetSlruSegment(
+            PagestreamGetSlruSegmentResponse { segment },
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -3980,7 +3980,16 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     # list files we're going to compare
     assert endpoint.pgdata_dir
     pgdata_files = list_files_to_compare(Path(endpoint.pgdata_dir))
+
     restored_files = list_files_to_compare(restored_dir_path)
+
+    if pgdata_files != restored_files:
+        # filter pg_xact and multixact files which are downloaded on demand
+        pgdata_files = [
+            f
+            for f in pgdata_files
+            if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
+        ]
 
     # check that file sets are equal
     assert pgdata_files == restored_files
