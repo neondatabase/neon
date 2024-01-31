@@ -928,7 +928,7 @@ impl DeltaLayerInner {
                         println!("   CHECKPOINT: {:?}", checkpoint);
                     }
                     Value::WalRecord(_rec) => {
-                        format!(" unexpected walrecord for checkpoint key");
+                        println!("   unexpected walrecord value for checkpoint key");
                     }
                 }
             }
