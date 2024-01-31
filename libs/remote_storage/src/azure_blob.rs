@@ -383,9 +383,7 @@ impl RemoteStorage for AzureBlobStorage {
     ) -> Result<(), TimeTravelError> {
         // TODO use Azure point in time recovery feature for this
         // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview
-        Err(TimeTravelError::BadInput(anyhow::anyhow!(
-            "time travel recovery for azure blob storage is not implemented"
-        )))
+        Err(TimeTravelError::Unimplemented)
     }
 }
 

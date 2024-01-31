@@ -273,6 +273,8 @@ impl std::error::Error for DownloadError {}
 pub enum TimeTravelError {
     /// Validation or other error happened due to user input.
     BadInput(anyhow::Error),
+    /// The
+    Unimplemented,
     /// The number of versions/deletion markers is above our limit.
     TooManyVersions,
     /// A cancellation token aborted the process, typically during
@@ -291,6 +293,10 @@ impl std::fmt::Display for TimeTravelError {
                     "Failed to time travel recover a prefix due to user input: {e}"
                 )
             }
+            TimeTravelError::Unimplemented => write!(
+                f,
+                "time travel recovery is not implemented for the current storage backend"
+            ),
             TimeTravelError::Cancelled => write!(f, "Cancelled, shutting down"),
             TimeTravelError::TooManyVersions => {
                 write!(f, "Number of versions/delete markers above limit")
