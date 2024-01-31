@@ -549,17 +549,12 @@ class PageserverHttpClient(requests.Session):
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
         timestamp,
-        version: Optional[int] = None,
     ):
         log.info(
             f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}"
         )
-        if version is None:
-            version_str = ""
-        else:
-            version_str = f"&version={version}"
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp}{version_str}",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp}",
         )
         self.verbose_error(res)
         res_json = res.json()

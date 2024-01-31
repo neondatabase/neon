@@ -419,12 +419,6 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
-        - name: version
-          in: query
-          required: false
-          schema:
-            type: integer
-          description: The version of the endpoint to use
       responses:
         "200":
           description: OK
