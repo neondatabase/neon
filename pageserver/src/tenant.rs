@@ -2094,7 +2094,10 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             timelines.values().for_each(|timeline| {
                 let timeline = Arc::clone(timeline);
-                let span = Span::current();
+                let timeline_id = timeline.timeline_id;
+
+                let span =
+                    tracing::info_span!("timeline_shutdown", %timeline_id, ?freeze_and_flush);
                 js.spawn(async move {
                     if freeze_and_flush {
                         timeline.flush_and_shutdown().instrument(span).await
@@ -2694,7 +2697,7 @@ impl Tenant {
             activate_now_sem: tokio::sync::Semaphore::new(0),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
-            gate: Gate::new(format!("Tenant<{tenant_shard_id}>")),
+            gate: Gate::default(),
         }
     }
 
@@ -5227,7 +5230,7 @@ mod tests {
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
                 .shutdown()
-                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id))
+                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, timeline_id=%TIMELINE_ID))
                 .await;
             std::mem::forget(tline);
         }

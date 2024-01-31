@@ -1060,7 +1060,6 @@ impl Timeline {
     /// also to remote storage.  This method can easily take multiple seconds for a busy timeline.
     ///
     /// While we are flushing, we continue to accept read I/O.
-    #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(crate) async fn flush_and_shutdown(&self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -1109,6 +1108,8 @@ impl Timeline {
     /// Shut down immediately, without waiting for any open layers to flush to disk.  This is a subset of
     /// the graceful [`Timeline::flush_and_shutdown`] function.
     pub(crate) async fn shutdown(&self) {
+        span::debug_assert_current_span_has_tenant_and_timeline_id();
+
         // Signal any subscribers to our cancellation token to drop out
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
@@ -1502,7 +1503,7 @@ impl Timeline {
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
 
                 cancel,
-                gate: Gate::new(format!("Timeline<{tenant_shard_id}/{timeline_id}>")),
+                gate: Gate::default(),
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),

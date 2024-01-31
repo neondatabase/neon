@@ -1311,6 +1311,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         activation_timeout: Duration,
     ) -> Result<(), DeleteTenantError> {
+        super::span::debug_assert_current_span_has_tenant_id();
         // We acquire a SlotGuard during this function to protect against concurrent
         // changes while the ::prepare phase of DeleteTenantFlow executes, but then
         // have to return the Tenant to the map while the background deletion runs.
