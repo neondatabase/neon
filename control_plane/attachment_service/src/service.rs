@@ -1221,14 +1221,19 @@ impl Service {
         Ok(())
     }
 
-    /// This API is used by the cloud control plane to do coarse-grained control of tenants:
+    /// This API is used by the cloud control plane to migrate unsharded tenants that it created
+    /// directly with pageservers into this service.
+    ///
+    /// Cloud control plane MUST NOT continue issuing GENERATION NUMBERS for this tenant once it
+    /// has attempted to call this API. Failure to oblige to this rule may lead to S3 corruption.
+    /// Think of the first attempt to call this API as a transfer of absolute authority over the
+    /// tenant's source of generation numbers.
+    ///
+    /// The mode in this request coarse-grained control of tenants:
     /// - Call with mode Attached* to upsert the tenant.
     /// - Call with mode Secondary to either onboard a tenant without attaching it, or
     ///   to set an existing tenant to PolicyMode::Secondary
     /// - Call with mode Detached to switch to PolicyMode::Detached
-    ///
-    /// In future, calling with mode Secondary may switch to a detach-lite mode in which a tenant only has
-    /// secondary locations.
     pub(crate) async fn tenant_location_config(
         &self,
         tenant_id: TenantId,
