@@ -403,10 +403,6 @@ pub fn make_router(
         .put("/v1/tenant/:tenant_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
         })
-        // Tenant Shard operations (low level/maintenance)
-        .put("/tenant/:tenant_shard_id/migrate", |r| {
-            tenant_service_handler(r, handle_tenant_shard_migrate)
-        })
         // Timeline operations
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             tenant_service_handler(r, handle_tenant_timeline_delete)
