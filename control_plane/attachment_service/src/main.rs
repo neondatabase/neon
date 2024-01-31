@@ -11,7 +11,6 @@ use attachment_service::service::{Config, Service};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use metrics::launch_timestamp::LaunchTimestamp;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::signal::unix::SignalKind;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
@@ -63,9 +62,7 @@ async fn main() -> anyhow::Result<()> {
         GIT_VERSION,
         launch_ts.to_string(),
         BUILD_TAG,
-        args.path
-            .as_ref()
-            .unwrap_or(&Utf8PathBuf::from_str("<none>").unwrap()),
+        args.path.as_ref().unwrap_or(&Utf8PathBuf::from("<none>")),
         args.listen
     );
 
