@@ -11,7 +11,7 @@ def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
     # Use aggressive GC and checkpoint settings
     tenant, _ = env.neon_cli.create_tenant(
         conf={
-            "gc_period": "15 s", # should not be smaller than wal_receiver_status_interval
+            "gc_period": "15 s",  # should not be smaller than wal_receiver_status_interval
             "gc_horizon": f"{1024 ** 2}",
             "checkpoint_distance": f"{1024 ** 2}",
             "compaction_target_size": f"{1024 ** 2}",
