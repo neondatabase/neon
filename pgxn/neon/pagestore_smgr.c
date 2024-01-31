@@ -1063,7 +1063,7 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonGetSlruSegmentRequest *msg_req = (NeonGetSlruSegmentRequest *) msg;
 
-				pq_sendbyte(&s, msg_req->req.latest);
+				pq_sendint64(&s, msg_req->req.horizon);
 				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendbyte(&s, msg_req->kind);
 				pq_sendint32(&s, msg_req->segno);
@@ -1265,7 +1265,7 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfo(&s, ", \"kind\": %u", msg_req->kind);
 				appendStringInfo(&s, ", \"segno\": %u", msg_req->segno);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfo(&s, ", \"horizon\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.horizon));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -2832,7 +2832,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	NeonResponse *resp;
 	NeonGetSlruSegmentRequest request = {
 		.req.tag = T_NeonGetSlruSegmentRequest,
-		.req.latest = false,
+		.req.horizon =  InvalidXLogRecPtr,
 		.req.lsn = request_lsn,
 
 		.kind = kind,

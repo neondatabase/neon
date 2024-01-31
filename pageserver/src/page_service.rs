@@ -1175,7 +1175,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.horizon, &latest_gc_cutoff_lsn, ctx)
                 .await?;
 
         let kind = SlruKind::from_repr(req.kind)
