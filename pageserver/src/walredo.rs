@@ -154,7 +154,6 @@ impl PostgresRedoManager {
                         img,
                         base_img_lsn,
                         &records[batch_start..i],
-                        self.conf.wal_redo_timeout,
                         pg_version,
                     )
                     .await
@@ -175,7 +174,6 @@ impl PostgresRedoManager {
                 img,
                 base_img_lsn,
                 &records[batch_start..],
-                self.conf.wal_redo_timeout,
                 pg_version,
             )
             .await
@@ -226,7 +224,6 @@ impl PostgresRedoManager {
         base_img: Option<Bytes>,
         base_img_lsn: Lsn,
         records: &[(Lsn, NeonWalRecord)],
-        wal_redo_timeout: Duration,
         pg_version: u32,
     ) -> anyhow::Result<Bytes> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
@@ -271,7 +268,7 @@ impl PostgresRedoManager {
             // Relational WAL records are applied using wal-redo-postgres
             let buf_tag = BufferTag { rel, blknum };
             let result = proc
-                .apply_wal_records(buf_tag, &base_img, records, wal_redo_timeout)
+                .apply_wal_records(buf_tag, &base_img, records)
                 .await
                 .context("apply_wal_records");
 
@@ -787,7 +784,6 @@ impl WalRedoProcess {
         tag: BufferTag,
         base_img: &Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
-        wal_redo_timeout: Duration,
     ) -> anyhow::Result<Bytes> {
         // Serialize all the messages to send the WAL redo process first.
         //
@@ -817,7 +813,7 @@ impl WalRedoProcess {
         build_get_page_msg(tag, &mut writebuf);
         WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
 
-        let res = self.apply_wal_records0(&writebuf, wal_redo_timeout).await;
+        let res = self.apply_wal_records0(&writebuf).await;
 
         if res.is_err() {
             // not all of these can be caused by this particular input, however these are so rare
@@ -828,11 +824,7 @@ impl WalRedoProcess {
         res
     }
 
-    async fn apply_wal_records0(
-        &self,
-        writebuf: &[u8],
-        _wal_redo_timeout: Duration, // TODO respect
-    ) -> anyhow::Result<Bytes> {
+    async fn apply_wal_records0(&self, writebuf: &[u8]) -> anyhow::Result<Bytes> {
         let input = self.stdin.lock().await;
 
         let mut proc = { input }; // TODO: remove this legacy rename, but this keep the patch small.

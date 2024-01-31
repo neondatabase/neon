@@ -57,7 +57,6 @@ pub mod defaults {
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
-    pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
 
@@ -94,7 +93,6 @@ pub mod defaults {
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
 
 #wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
-#wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
 
 #page_cache_size = {DEFAULT_PAGE_CACHE_SIZE}
 #max_file_descriptors = {DEFAULT_MAX_FILE_DESCRIPTORS}
@@ -162,8 +160,6 @@ pub struct PageServerConf {
 
     // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
     pub wait_lsn_timeout: Duration,
-    // How long to wait for WAL redo to complete.
-    pub wal_redo_timeout: Duration,
 
     pub superuser: String,
 
@@ -291,7 +287,6 @@ struct PageServerConfigBuilder {
     availability_zone: BuilderValue<Option<String>>,
 
     wait_lsn_timeout: BuilderValue<Duration>,
-    wal_redo_timeout: BuilderValue<Duration>,
 
     superuser: BuilderValue<String>,
 
@@ -354,8 +349,6 @@ impl Default for PageServerConfigBuilder {
             availability_zone: Set(None),
             wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
-            wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
-                .expect("cannot parse default wal redo timeout")),
             superuser: Set(DEFAULT_SUPERUSER.to_string()),
             page_cache_size: Set(DEFAULT_PAGE_CACHE_SIZE),
             max_file_descriptors: Set(DEFAULT_MAX_FILE_DESCRIPTORS),
@@ -438,10 +431,6 @@ impl PageServerConfigBuilder {
 
     pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
         self.wait_lsn_timeout = BuilderValue::Set(wait_lsn_timeout)
-    }
-
-    pub fn wal_redo_timeout(&mut self, wal_redo_timeout: Duration) {
-        self.wal_redo_timeout = BuilderValue::Set(wal_redo_timeout)
     }
 
     pub fn superuser(&mut self, superuser: String) {
@@ -601,9 +590,6 @@ impl PageServerConfigBuilder {
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow!("missing wait_lsn_timeout"))?,
-            wal_redo_timeout: self
-                .wal_redo_timeout
-                .ok_or(anyhow!("missing wal_redo_timeout"))?,
             superuser: self.superuser.ok_or(anyhow!("missing superuser"))?,
             page_cache_size: self
                 .page_cache_size
@@ -860,7 +846,6 @@ impl PageServerConf {
                 "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
                 "availability_zone" => builder.availability_zone(Some(parse_toml_string(key, item)?)),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
-                "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
                 "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
                 "page_cache_size" => builder.page_cache_size(parse_toml_u64(key, item)? as usize),
                 "max_file_descriptors" => {
@@ -978,7 +963,6 @@ impl PageServerConf {
         PageServerConf {
             id: NodeId(0),
             wait_lsn_timeout: Duration::from_secs(60),
-            wal_redo_timeout: Duration::from_secs(60),
             page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
@@ -1164,7 +1148,6 @@ listen_pg_addr = '127.0.0.1:64000'
 listen_http_addr = '127.0.0.1:9898'
 
 wait_lsn_timeout = '111 s'
-wal_redo_timeout = '111 s'
 
 page_cache_size = 444
 max_file_descriptors = 333
@@ -1205,7 +1188,6 @@ background_task_maximum_delay = '334 s'
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
                 availability_zone: None,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
-                wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
                 page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
                 max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
@@ -1279,7 +1261,6 @@ background_task_maximum_delay = '334 s'
                 listen_http_addr: "127.0.0.1:9898".to_string(),
                 availability_zone: None,
                 wait_lsn_timeout: Duration::from_secs(111),
-                wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),
                 page_cache_size: 444,
                 max_file_descriptors: 333,
