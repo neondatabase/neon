@@ -2785,12 +2785,12 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id, layer=%frozen_layer))]
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
         ctx: &RequestContext,
     ) -> Result<(), FlushLayerError> {
+        span::debug_assert_current_span_has_tenant_and_timeline_id();
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
