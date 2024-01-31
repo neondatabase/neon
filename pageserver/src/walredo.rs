@@ -25,7 +25,6 @@ use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::io;
-use std::io::prelude::*;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::prelude::CommandExt;
 use std::process::Stdio;
