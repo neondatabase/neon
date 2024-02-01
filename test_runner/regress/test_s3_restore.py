@@ -63,12 +63,15 @@ def test_tenant_s3_restore(
     ts_before_deletion = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     time.sleep(4)
 
+    assert (
+        ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    ), "tenant removed before we deletion was issued"
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
     ps_http.deletion_queue_flush(execute=True)
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+    assert (
+        ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+    ), "tenant removed before we deletion was issued"
     env.attachment_service.attach_hook_drop(tenant_id)
 
     tenant_path = env.pageserver.tenant_dir(tenant_id)
