@@ -1855,6 +1855,12 @@ impl Timeline {
         priority: GetLogicalSizePriority,
         ctx: &RequestContext,
     ) -> logical_size::CurrentLogicalSize {
+        if !self.tenant_shard_id.is_zero() {
+            // Logical size is only accurately maintained on shard zero: when called elsewhere, for example
+            // when HTTP API is serving a GET for timeline zero, return zero
+            return logical_size::CurrentLogicalSize::Approximate(logical_size::Approximate::zero());
+        }
+
         let current_size = self.current_logical_size.current_size();
         debug!("Current size: {current_size:?}");
 
