@@ -283,18 +283,17 @@ impl GlobalConnPool {
         self: &Arc<Self>,
         ctx: &mut RequestMonitoring,
         conn_info: &ConnInfo,
-        force_new: bool,
     ) -> anyhow::Result<Option<Client>> {
         let mut client: Option<ClientInner> = None;
 
-        let mut endpoint_pool = Weak::new();
-        if !force_new {
-            let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
-            if let Some(entry) = pool.write().get_conn_entry(conn_info.db_and_user()) {
-                client = Some(entry.conn)
-            }
-            endpoint_pool = Arc::downgrade(&pool);
+        let endpoint_pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
+        if let Some(entry) = endpoint_pool
+            .write()
+            .get_conn_entry(conn_info.db_and_user())
+        {
+            client = Some(entry.conn)
         }
+        let endpoint_pool = Arc::downgrade(&endpoint_pool);
 
         // ok return cached connection if found and establish a new one otherwise
         if let Some(client) = client {

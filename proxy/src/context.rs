@@ -89,6 +89,10 @@ impl RequestMonitoring {
         self.project = Some(x.project_id);
     }
 
+    pub fn set_project_id(&mut self, project_id: ProjectId) {
+        self.project = Some(project_id);
+    }
+
     pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
         crate::metrics::CONNECTING_ENDPOINTS
             .with_label_values(&[self.protocol])

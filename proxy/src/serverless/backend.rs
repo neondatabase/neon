@@ -67,7 +67,12 @@ impl PoolingBackend {
         keys: ComputeCredentialKeys,
         force_new: bool,
     ) -> anyhow::Result<Client> {
-        let maybe_client = self.pool.get(ctx, &conn_info, force_new).await?;
+        let maybe_client = if !force_new {
+            self.pool.get(ctx, &conn_info).await?
+        } else {
+            None
+        };
+
         if let Some(client) = maybe_client {
             return Ok(client);
         }

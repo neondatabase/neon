@@ -189,6 +189,7 @@ impl super::Api for Api {
                 ep,
                 Arc::new(auth_info.allowed_ips),
             );
+            ctx.set_project_id(project_id);
         }
         // When we just got a secret, we don't need to invalidate it.
         Ok(Cached::new_uncached(auth_info.secret))
@@ -222,6 +223,7 @@ impl super::Api for Api {
             self.caches
                 .project_info
                 .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
+            ctx.set_project_id(project_id);
         }
         Ok((
             Cached::new_uncached(allowed_ips),
