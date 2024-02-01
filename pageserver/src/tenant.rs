@@ -97,6 +97,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::span;
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
@@ -147,7 +148,6 @@ pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
-mod span;
 
 pub mod metadata;
 mod par_fsync;
@@ -165,7 +165,7 @@ pub(crate) mod timeline;
 
 pub mod size;
 
-pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
+pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
 // re-export for use in remote_timeline_client.rs
@@ -3990,6 +3990,10 @@ pub(crate) mod harness {
             })
         }
 
+        pub fn span(&self) -> tracing::Span {
+            info_span!("TenantHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
+        }
+
         pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
@@ -4594,7 +4598,7 @@ mod tests {
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
-                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+                .instrument(harness.span())
                 .await
                 .ok()
                 .unwrap();
@@ -4635,7 +4639,7 @@ mod tests {
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
-                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+                .instrument(harness.span())
                 .await
                 .ok()
                 .unwrap();
@@ -4697,7 +4701,7 @@ mod tests {
         // so that all uploads finish & we can call harness.try_load() below again
         tenant
             .shutdown(Default::default(), true)
-            .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+            .instrument(harness.span())
             .await
             .ok()
             .unwrap();

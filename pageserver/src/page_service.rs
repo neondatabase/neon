@@ -63,9 +63,9 @@ use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::pgdatadir_mapping::Version;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
@@ -549,7 +549,7 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         let tenant = mgr::get_active_tenant_with_timeout(
             tenant_id,
@@ -631,7 +631,8 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetPage(req) => {
-                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
+                    // shard_id is filled in by the handler
+                    let span = tracing::info_span!("handle_get_page_at_lsn_request", shard_id=tracing::field::Empty, rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
                     (
                         self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
@@ -719,7 +720,7 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         // Create empty timeline
         info!("creating new timeline");
@@ -785,7 +786,7 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         let timeline = self
             .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
@@ -1129,6 +1130,11 @@ impl PageServerHandler {
             }
         };
 
+        tracing::Span::current().record(
+            "shard_id",
+            format!("{}", timeline.tenant_shard_id.shard_slug()),
+        );
+
         let _timer = timeline
             .query_metrics
             .start_timer(metrics::SmgrQueryType::GetPageAtLsn);
@@ -1190,7 +1196,7 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         let started = std::time::Instant::now();
 

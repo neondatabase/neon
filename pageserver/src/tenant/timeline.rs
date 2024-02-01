@@ -1952,7 +1952,7 @@ impl Timeline {
                     .await;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "initial_size_calculation", tenant_id=%self.tenant_shard_id.tenant_id, timeline_id=%self.timeline_id)),
+            .instrument(info_span!(parent: None, "initial_size_calculation", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id)),
         );
     }
 
@@ -2139,7 +2139,7 @@ impl Timeline {
         cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        span::debug_assert_current_span_has_tenant_and_timeline_id();
+        crate::span::debug_assert_current_span_has_tenant_and_timeline_id();
 
         let _guard = self.gate.enter();
 

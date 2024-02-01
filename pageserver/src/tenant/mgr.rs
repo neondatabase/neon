@@ -691,7 +691,7 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                                     // going to log too many lines
                                     debug!("tenant successfully stopped");
                                 }
-                                .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug())),
+                                .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
                             );
 
                             total_attached += 1;
@@ -2118,7 +2118,7 @@ fn tenant_map_acquire_slot_impl(
     METRICS.tenant_slot_writes.inc();
 
     let mut locked = tenants.write().unwrap();
-    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard = %tenant_shard_id.shard_slug());
+    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug());
     let _guard = span.enter();
 
     let m = match &mut *locked {
@@ -2354,7 +2354,7 @@ pub(crate) async fn immediate_gc(
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use tracing::{info_span, Instrument};
+    use tracing::Instrument;
 
     use crate::tenant::mgr::TenantSlot;
 
@@ -2365,17 +2365,16 @@ mod tests {
         // Test that if an InProgress tenant is in the map during shutdown, the shutdown will gracefully
         // wait for it to complete before proceeding.
 
-        let (t, _ctx) = TenantHarness::create("shutdown_awaits_in_progress_tenant")
-            .unwrap()
-            .load()
-            .await;
+        let h = TenantHarness::create("shutdown_awaits_in_progress_tenant").unwrap();
+        let (t, _ctx) = h.load().await;
 
         // harness loads it to active, which is forced and nothing is running on the tenant
 
         let id = t.tenant_shard_id();
 
         // tenant harness configures the logging and we cannot escape it
-        let _e = info_span!("testing", tenant_id = %id).entered();
+        let span = h.span();
+        let _e = span.enter();
 
         let tenants = BTreeMap::from([(id, TenantSlot::Attached(t.clone()))]);
         let tenants = Arc::new(std::sync::RwLock::new(TenantsMap::Open(tenants)));
@@ -2396,7 +2395,7 @@ mod tests {
                     };
                     super::remove_tenant_from_memory(&tenants, id, cleanup).await
                 }
-                .instrument(info_span!("foobar", tenant_id = %id))
+                .instrument(h.span())
             });
 
             // now the long cleanup should be in place, with the stopping state
