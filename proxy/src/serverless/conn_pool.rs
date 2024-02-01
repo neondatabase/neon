@@ -74,6 +74,8 @@ pub struct EndpointConnPool {
     total_conns: usize,
     max_conns: usize,
     _guard: IntCounterPairGuard,
+    global_pool_size: Arc<AtomicUsize>,
+    global_pool_size_max_conns: usize,
 }
 
 impl EndpointConnPool {
@@ -95,6 +97,10 @@ impl EndpointConnPool {
             pool.conns.retain(|conn| conn.conn.conn_id != conn_id);
             let new_len = pool.conns.len();
             let removed = old_len - new_len;
+            if removed > 0 {
+                self.global_pool_size
+                    .fetch_sub(removed, atomic::Ordering::Relaxed);
+            }
             *total_conns -= removed;
             removed > 0
         } else {
@@ -107,6 +113,11 @@ impl EndpointConnPool {
 
         if client.postgres_client.is_closed() {
             info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
+            return Ok(());
+        }
+        let global_max_conn = pool.read().global_pool_size_max_conns;
+        if pool.read().global_pool_size.load(atomic::Ordering::Relaxed) >= global_max_conn {
+            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full");
             return Ok(());
         }
 
@@ -127,6 +138,8 @@ impl EndpointConnPool {
                 per_db_size = pool_entries.conns.len();
 
                 pool.total_conns += 1;
+                pool.global_pool_size
+                    .fetch_add(1, atomic::Ordering::Relaxed);
             }
 
             pool.total_conns
@@ -140,6 +153,13 @@ impl EndpointConnPool {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for EndpointConnPool {
+    fn drop(&mut self) {
+        self.global_pool_size
+            .fetch_sub(self.total_conns, atomic::Ordering::Relaxed);
     }
 }
 
@@ -184,6 +204,9 @@ pub struct GlobalConnPool {
     /// It's only used for diagnostics.
     global_pool_size: AtomicUsize,
 
+    // total number of connections in the pool
+    total_conns: Arc<AtomicUsize>,
+
     config: &'static crate::config::HttpConfig,
 }
 
@@ -202,6 +225,9 @@ pub struct GlobalConnPoolOptions {
     pub idle_timeout: Duration,
 
     pub opt_in: bool,
+
+    // Total number of connections in the pool.
+    pub max_total_conns: usize,
 }
 
 impl GlobalConnPool {
@@ -211,6 +237,7 @@ impl GlobalConnPool {
             global_pool: DashMap::with_shard_amount(shards),
             global_pool_size: AtomicUsize::new(0),
             config,
+            total_conns: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -312,7 +339,7 @@ impl GlobalConnPool {
     }
 
     fn get_or_create_endpoint_pool(
-        &self,
+        self: &Arc<Self>,
         endpoint: &EndpointCacheKey,
     ) -> Arc<RwLock<EndpointConnPool>> {
         // fast path
@@ -326,6 +353,8 @@ impl GlobalConnPool {
             total_conns: 0,
             max_conns: self.config.pool_options.max_conns_per_endpoint,
             _guard: ENDPOINT_POOLS.guard(),
+            global_pool_size: self.total_conns.clone(),
+            global_pool_size_max_conns: self.config.pool_options.max_total_conns,
         }));
 
         // find or create a pool for this endpoint
