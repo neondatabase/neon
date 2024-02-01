@@ -14,6 +14,7 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use tokio::join;
 use tokio_postgres::error::DbError;
 use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::types::Kind;
@@ -45,7 +46,8 @@ use super::SERVERLESS_DRIVER_SNI;
 #[derive(serde::Deserialize)]
 struct QueryData {
     query: String,
-    params: Vec<serde_json::Value>,
+    #[serde(deserialize_with = "bytes_to_pg_text")]
+    params: Vec<Option<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -71,6 +73,14 @@ static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only
 static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
+
+fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let json: Vec<Value> = serde::de::Deserialize::deserialize(deserializer)?;
+    Ok(json_to_pg_text(json))
+}
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
@@ -405,17 +415,28 @@ async fn handle_inner(
         ));
     }
 
-    //
-    // Read the query and query params from the request body
-    //
-    let body = hyper::body::to_bytes(request.into_body()).await?;
-    let payload: Payload = serde_json::from_slice(&body)?;
+    let fetch_and_process_request = async {
+        let body = hyper::body::to_bytes(request.into_body())
+            .await
+            .map_err(anyhow::Error::from)?;
+        let payload: Payload = serde_json::from_slice(&body)?;
+        Ok::<Payload, anyhow::Error>(payload) // Adjust error type accordingly
+    };
 
-    let keys = backend.authenticate(ctx, &conn_info).await?;
+    let authenticate_and_connect = async {
+        let keys = backend.authenticate(ctx, &conn_info).await?;
+        backend
+            .connect_to_compute(ctx, conn_info, keys, !allow_pool)
+            .await
+    };
 
-    let mut client = backend
-        .connect_to_compute(ctx, conn_info, keys, !allow_pool)
-        .await?;
+    // Run both operations in parallel
+    let (payload_result, auth_and_connect_result) =
+        join!(fetch_and_process_request, authenticate_and_connect,);
+
+    // Handle the results
+    let payload = payload_result?; // Handle errors appropriately
+    let mut client = auth_and_connect_result?; // Handle errors appropriately
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -549,7 +570,7 @@ async fn query_to_json<T: GenericClient>(
     raw_output: bool,
     array_mode: bool,
 ) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
-    let query_params = json_to_pg_text(data.params);
+    let query_params = data.params;
     let row_stream = client.query_raw_txt(&data.query, query_params).await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
