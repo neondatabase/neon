@@ -1467,7 +1467,7 @@ async fn tenant_time_travel_remote_storage_handler(
         )));
     }
 
-    tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={timestamp_raw}");
+    tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}");
 
     remote_timeline_client::upload::time_travel_recover_tenant(
         storage,
