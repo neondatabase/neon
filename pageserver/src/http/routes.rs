@@ -959,6 +959,7 @@ async fn tenant_status(
                 attachment_status: state.attachment_status(),
                 generation: tenant.generation().into(),
             },
+            walredo: tenant.wal_redo_manager_status(),
             timelines: tenant.list_timeline_ids(),
         })
     }

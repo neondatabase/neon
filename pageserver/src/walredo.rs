@@ -22,6 +22,7 @@ use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
+use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -179,6 +180,20 @@ impl PostgresRedoManager {
             )
         }
     }
+
+    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+        Some(WalRedoManagerStatus {
+            last_redo_at: {
+                let at = *self.last_redo_at.lock().unwrap();
+                at.and_then(|at| {
+                    let age = at.elapsed();
+                    // map any chrono errors silently to None here
+                    chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
+                })
+            },
+            pid: self.redo_process.read().unwrap().as_ref().map(|p| p.id()),
+        })
+    }
 }
 
 impl PostgresRedoManager {
@@ -243,8 +258,7 @@ impl PostgresRedoManager {
                         let mut proc_guard = self.redo_process.write().unwrap();
                         match &*proc_guard {
                             None => {
-                                let timer =
-                                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.start_timer();
+                                let start = Instant::now();
                                 let proc = Arc::new(
                                     WalRedoProcess::launch(
                                         self.conf,
@@ -253,7 +267,14 @@ impl PostgresRedoManager {
                                     )
                                     .context("launch walredo process")?,
                                 );
-                                timer.observe_duration();
+                                let duration = start.elapsed();
+                                WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM
+                                    .observe(duration.as_secs_f64());
+                                info!(
+                                    duration_ms = duration.as_millis(),
+                                    pid = proc.id(),
+                                    "launched walredo process"
+                                );
                                 *proc_guard = Some(Arc::clone(&proc));
                                 proc
                             }
@@ -669,7 +690,11 @@ impl WalRedoProcess {
 
         // Start postgres itself
         let child = Command::new(pg_bin_dir_path.join("postgres"))
+            // the first arg must be --wal-redo so the child process enters into walredo mode
             .arg("--wal-redo")
+            // the child doesn't process this arg, but, having it in the argv helps indentify the
+            // walredo process for a particular tenant when debugging a pagserver
+            .args(["--tenant-shard-id", &format!("{tenant_shard_id}")])
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
