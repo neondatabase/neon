@@ -165,7 +165,7 @@ impl PostgresRedoManager {
             }
         }
         // last batch
-        let res = if batch_neon {
+        if batch_neon {
             self.apply_batch_neon(key, lsn, img, &records[batch_start..])
         } else {
             self.apply_batch_postgres(
@@ -177,11 +177,7 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
-        };
-        if res.is_ok() {
-            *(self.last_successful_redo_at.lock().unwrap()) = Some(Instant::now());
         }
-        res
     }
 }
 
@@ -222,6 +218,32 @@ impl PostgresRedoManager {
     ///
     #[allow(clippy::too_many_arguments)]
     fn apply_batch_postgres(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        base_img: Option<Bytes>,
+        base_img_lsn: Lsn,
+        records: &[(Lsn, NeonWalRecord)],
+        wal_redo_timeout: Duration,
+        pg_version: u32,
+    ) -> anyhow::Result<Bytes> {
+        let res = self.apply_batch_postgres0(
+            key,
+            lsn,
+            base_img,
+            base_img_lsn,
+            records,
+            wal_redo_timeout,
+            pg_version,
+        );
+        if res.is_ok() {
+            *self.last_successful_redo_at.lock().unwrap() = Some(Instant::now());
+        }
+        res
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_batch_postgres0(
         &self,
         key: Key,
         lsn: Lsn,
