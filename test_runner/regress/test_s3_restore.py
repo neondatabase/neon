@@ -4,13 +4,13 @@ from datetime import datetime, timezone
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    wait_for_upload,
 )
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
+    wait_for_upload,
 )
 from fixtures.remote_storage import s3_storage
 from fixtures.types import Lsn
