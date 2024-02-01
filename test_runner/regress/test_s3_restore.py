@@ -13,8 +13,8 @@ from fixtures.pageserver.utils import (
     tenant_delete_wait_completed,
 )
 from fixtures.remote_storage import s3_storage
-from fixtures.utils import run_pg_bench_small
 from fixtures.types import Lsn
+from fixtures.utils import run_pg_bench_small
 
 
 def test_tenant_s3_restore(
