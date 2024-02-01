@@ -204,6 +204,18 @@ impl PostgresRedoManager {
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         if let Ok(g) = self.last_successful_redo_at.try_lock() {
             if let Some(last_successful_redo_at) = *g {
+                // Kill the walredo process if
+                // - it has been unused for `idle_timeout`
+                // - it has been used, but, without success.
+                // The former is just good housekeeping.
+                // The latter adds robustness for the case where something is wrong
+                // with the walredo process.
+                //
+                // Note that we don't want to kill the process immediately on each redo failure.
+                // The reason is that the redo failure could be caused by corrupted or malicious data.
+                // We don't want to get into a kill-respawn loop in that case.
+                // So, we piggy-back on the quiescing mechanism,
+                // resulting in a max kill-respawn frequency of `1/idle_timeout`.
                 if last_successful_redo_at.elapsed() >= idle_timeout {
                     drop(g);
                     let mut guard = self.redo_process.write().unwrap();
