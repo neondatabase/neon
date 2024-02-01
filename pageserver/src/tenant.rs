@@ -625,6 +625,9 @@ impl Tenant {
             deletion_queue_client,
         } = resources;
 
+        let attach_mode = attached_conf.location.attach_mode;
+        let generation = attached_conf.location.generation;
+
         let tenant = Arc::new(Tenant::new(
             TenantState::Attaching,
             conf,
@@ -654,6 +657,12 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+
+                info!(
+                    ?attach_mode,
+                    "Attaching tenant"
+                );
+
                 let _gate_guard = attach_gate_guard;
 
                 // Is this tenant being spawned as part of process startup?
@@ -865,7 +874,7 @@ impl Tenant {
                 Ok(())
             }
             .instrument({
-                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
+                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation);
                 span.follows_from(Span::current());
                 span
             }),
