@@ -273,7 +273,7 @@ impl std::error::Error for DownloadError {}
 pub enum TimeTravelError {
     /// Validation or other error happened due to user input.
     BadInput(anyhow::Error),
-    /// The
+    /// The used remote storage does not have time travel recovery implemented
     Unimplemented,
     /// The number of versions/deletion markers is above our limit.
     TooManyVersions,
