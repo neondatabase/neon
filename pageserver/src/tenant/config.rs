@@ -51,7 +51,7 @@ pub mod defaults {
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum AttachmentMode {
     /// Our generation is current as far as we know, and as far as we know we are the only attached
     /// pageserver.  This is the "normal" attachment mode.
@@ -66,7 +66,7 @@ pub(crate) enum AttachmentMode {
     Stale,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AttachedLocationConfig {
     pub(crate) generation: Generation,
     pub(crate) attach_mode: AttachmentMode,

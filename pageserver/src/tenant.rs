@@ -205,7 +205,7 @@ impl AttachedTenantConf {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => Ok(Self {
                 tenant_conf: location_conf.tenant_conf,
-                location: attach_conf.clone(),
+                location: *attach_conf,
             }),
             LocationMode::Secondary(_) => {
                 anyhow::bail!("Attempted to construct AttachedTenantConf from a LocationConf in secondary mode")
@@ -2354,12 +2354,7 @@ impl Tenant {
     }
 
     pub(crate) fn get_attach_mode(&self) -> AttachmentMode {
-        self.tenant_conf
-            .read()
-            .unwrap()
-            .location
-            .attach_mode
-            .clone()
+        self.tenant_conf.read().unwrap().location.attach_mode
     }
 
     /// For API access: generate a LocationConfig equivalent to the one that would be used to
