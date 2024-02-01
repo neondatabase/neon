@@ -1135,7 +1135,7 @@ impl Timeline {
     /// Shut down immediately, without waiting for any open layers to flush to disk.  This is a subset of
     /// the graceful [`Timeline::flush_and_shutdown`] function.
     pub(crate) async fn shutdown(&self) {
-        span::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Signal any subscribers to our cancellation token to drop out
         tracing::debug!("Cancelling CancellationToken");
@@ -2833,7 +2833,7 @@ impl Timeline {
         frozen_layer: Arc<InMemoryLayer>,
         ctx: &RequestContext,
     ) -> Result<(), FlushLayerError> {
-        span::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id();
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
