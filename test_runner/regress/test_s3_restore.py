@@ -8,11 +8,12 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
+    enable_remote_storage_versioning,
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
     wait_for_upload,
 )
-from fixtures.remote_storage import s3_storage
+from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.types import Lsn
 from fixtures.utils import run_pg_bench_small
 
@@ -23,6 +24,13 @@ def test_tenant_s3_restore(
 ):
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    # Mock S3 doesn't have versioning enabled by default, enable it
+    # (also do it before there is any writes to the bucket)
+    if remote_storage_kind == RemoteStorageKind.MOCK_S3:
+        remote_storage = neon_env_builder.pageserver_remote_storage
+        assert remote_storage, "remote storage not configured"
+        enable_remote_storage_versioning(remote_storage)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
     env.pageserver.allowed_errors.extend(
