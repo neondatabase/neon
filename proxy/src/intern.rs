@@ -43,6 +43,13 @@ impl<Id: InternId> StringInterner<Id> {
             _id: PhantomData,
         }
     }
+
+    pub fn get(&self, s: &str) -> Option<InternedString<Id>> {
+        Some(InternedString {
+            inner: self.inner.get(s)?,
+            _id: PhantomData,
+        })
+    }
 }
 
 impl<Id: InternId> Index<InternedString<Id>> for StringInterner<Id> {

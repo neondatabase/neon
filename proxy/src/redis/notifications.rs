@@ -4,11 +4,7 @@ use futures::StreamExt;
 use redis::aio::PubSub;
 use serde::Deserialize;
 
-use crate::{
-    cache::project_info::ProjectInfoCache,
-    intern::{PROJECT_IDS, ROLE_NAMES},
-    ProjectId, RoleName,
-};
+use crate::{cache::project_info::ProjectInfoCache, ProjectId, RoleName};
 
 const CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -68,12 +64,12 @@ where
 fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
     use Notification::*;
     match msg {
-        AllowedIpsUpdate { allowed_ips_update } => cache.invalidate_allowed_ips_for_project(
-            PROJECT_IDS.get_or_intern(&allowed_ips_update.project_id),
-        ),
+        AllowedIpsUpdate { allowed_ips_update } => {
+            cache.invalidate_allowed_ips_for_project(&allowed_ips_update.project_id)
+        }
         PasswordUpdate { password_update } => cache.invalidate_role_secret_for_project(
-            PROJECT_IDS.get_or_intern(&password_update.project_id),
-            ROLE_NAMES.get_or_intern(&password_update.role_name),
+            &password_update.project_id,
+            &password_update.role_name,
         ),
     }
 }

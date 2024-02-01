@@ -22,8 +22,8 @@ use crate::{
 use super::{Cache, Cached};
 
 pub trait ProjectInfoCache {
-    fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt);
-    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
+    fn invalidate_allowed_ips_for_project(&self, project_id: &ProjectId);
+    fn invalidate_role_secret_for_project(&self, project_id: &ProjectId, role_name: &RoleName);
     fn enable_ttl(&self);
     fn disable_ttl(&self);
 }
@@ -119,11 +119,11 @@ pub struct ProjectInfoCacheImpl {
 }
 
 impl ProjectInfoCache for ProjectInfoCacheImpl {
-    fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt) {
-        info!(
-            "invalidating allowed ips for project `{}`",
-            &PROJECT_IDS[project_id]
-        );
+    fn invalidate_allowed_ips_for_project(&self, project_id: &ProjectId) {
+        info!("invalidating allowed ips for project `{}`", project_id);
+        let Some(project_id) = PROJECT_IDS.get(project_id) else {
+            return;
+        };
         let endpoints = self
             .project2ep
             .get(&project_id)
@@ -135,11 +135,17 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt) {
+    fn invalidate_role_secret_for_project(&self, project_id: &ProjectId, role_name: &RoleName) {
         info!(
             "invalidating role secret for project_id `{}` and role_name `{}`",
-            &PROJECT_IDS[project_id], &ROLE_NAMES[role_name],
+            project_id, role_name,
         );
+        let Some(project_id) = PROJECT_IDS.get(project_id) else {
+            return;
+        };
+        let Some(role_name) = ROLE_NAMES.get(role_name) else {
+            return;
+        };
         let endpoints = self
             .project2ep
             .get(&project_id)
@@ -179,8 +185,8 @@ impl ProjectInfoCacheImpl {
         endpoint_id: &EndpointId,
         role_name: &RoleName,
     ) -> Option<Cached<&Self, Option<AuthSecret>>> {
-        let endpoint_id = ENDPOINT_IDS.get_or_intern(endpoint_id);
-        let role_name = ROLE_NAMES.get_or_intern(role_name);
+        let endpoint_id = ENDPOINT_IDS.get(endpoint_id)?;
+        let role_name = ROLE_NAMES.get(role_name)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(&endpoint_id)?;
         let (value, ignore_cache) =
@@ -201,7 +207,7 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &EndpointId,
     ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
-        let endpoint_id = ENDPOINT_IDS.get_or_intern(endpoint_id);
+        let endpoint_id = ENDPOINT_IDS.get(endpoint_id)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(&endpoint_id)?;
         let value = endpoint_info.get_allowed_ips(valid_since, ignore_cache_since);
@@ -468,10 +474,7 @@ mod tests {
         assert_eq!(cached.value, secret2);
 
         // The only way to invalidate this value is to invalidate via the api.
-        cache.invalidate_role_secret_for_project(
-            PROJECT_IDS.get_or_intern(&project_id),
-            ROLE_NAMES.get_or_intern(&user2),
-        );
+        cache.invalidate_role_secret_for_project(&project_id, &user2);
         assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
 
         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
