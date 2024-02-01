@@ -259,7 +259,6 @@ fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
         "AWS_PROFILE",
         // HOME is needed in combination with `AWS_PROFILE` to pick up the SSO sessions.
         "HOME",
-        "AWS_SESSION_TOKEN",
         "AZURE_STORAGE_ACCOUNT",
         "AZURE_STORAGE_ACCESS_KEY",
     ] {
