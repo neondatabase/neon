@@ -22,6 +22,7 @@ use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
+use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -179,6 +180,20 @@ impl PostgresRedoManager {
             )
         }
     }
+
+    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+        Some(WalRedoManagerStatus {
+            last_successful_redo_at: {
+                let at = self.last_successful_redo_at.lock().unwrap().clone();
+                at.and_then(|at| {
+                    let age = at.elapsed();
+                    // map any chrono errors silently to None here
+                    chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
+                })
+            },
+            pid: self.redo_process.read().unwrap().as_ref().map(|p| p.id()),
+        })
+    }
 }
 
 impl PostgresRedoManager {
@@ -243,8 +258,7 @@ impl PostgresRedoManager {
                         let mut proc_guard = self.redo_process.write().unwrap();
                         match &*proc_guard {
                             None => {
-                                let timer =
-                                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.start_timer();
+                                let start = Instant::now();
                                 let proc = Arc::new(
                                     WalRedoProcess::launch(
                                         self.conf,
@@ -253,7 +267,15 @@ impl PostgresRedoManager {
                                     )
                                     .context("launch walredo process")?,
                                 );
-                                timer.observe_duration();
+                                let duration = start.elapsed();
+                                WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM
+                                    .observe(duration.as_secs_f64());
+                                crate::span::debug_assert_current_span_has_tenant_id();
+                                info!(
+                                    duration_ms = duration.as_millis(),
+                                    pid = proc.id(),
+                                    "launched walredo process"
+                                );
                                 *proc_guard = Some(Arc::clone(&proc));
                                 proc
                             }
@@ -658,7 +680,7 @@ impl WalRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    #[instrument(skip_all,fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), pg_version=pg_version))]
+    #[instrument(skip_all,fields(pg_version=pg_version))]
     fn launch(
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
@@ -669,7 +691,11 @@ impl WalRedoProcess {
 
         // Start postgres itself
         let child = Command::new(pg_bin_dir_path.join("postgres"))
+            // the first arg must be --wal-redo so the child process enters into walredo mode
             .arg("--wal-redo")
+            // the child doesn't process this arg, but, having it in the argv helps indentify the
+            // walredo process for a particular tenant when debugging a pagserver
+            .args(&["--tenant-shard-id", &format!("{tenant_shard_id}")])
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1162,6 +1188,7 @@ mod tests {
     use bytes::Bytes;
     use pageserver_api::shard::TenantShardId;
     use std::str::FromStr;
+    use tracing::Instrument;
     use utils::{id::TenantId, lsn::Lsn};
 
     #[tokio::test]
@@ -1186,6 +1213,7 @@ mod tests {
                 short_records(),
                 14,
             )
+            .instrument(h.span())
             .await
             .unwrap();
 
@@ -1213,6 +1241,7 @@ mod tests {
                 short_records(),
                 14,
             )
+            .instrument(h.span())
             .await
             .unwrap();
 
@@ -1233,6 +1262,7 @@ mod tests {
                 short_records(),
                 16, /* 16 currently produces stderr output on startup, which adds a nice extra edge */
             )
+            .instrument(h.span())
             .await
             .unwrap_err();
     }
@@ -1261,6 +1291,7 @@ mod tests {
         // underscored because unused, except for removal at drop
         _repo_dir: camino_tempfile::Utf8TempDir,
         manager: PostgresRedoManager,
+        tenant_shard_id: TenantShardId,
     }
 
     impl RedoHarness {
@@ -1277,7 +1308,11 @@ mod tests {
             Ok(RedoHarness {
                 _repo_dir: repo_dir,
                 manager,
+                tenant_shard_id,
             })
+        }
+        fn span(&self) -> tracing::Span {
+            tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
         }
     }
 }

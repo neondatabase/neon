@@ -454,6 +454,8 @@ pub struct TenantDetails {
     #[serde(flatten)]
     pub tenant_info: TenantInfo,
 
+    pub walredo: Option<WalRedoManagerStatus>,
+
     pub timelines: Vec<TimelineId>,
 }
 
@@ -639,6 +641,12 @@ pub enum DownloadRemoteLayersTaskState {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimelineGcRequest {
     pub gc_horizon: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalRedoManagerStatus {
+    pub last_successful_redo_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub pid: Option<u32>,
 }
 
 // Wrapped in libpq CopyData
