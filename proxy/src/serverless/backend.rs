@@ -51,7 +51,7 @@ impl PoolingBackend {
             crate::sasl::Outcome::Success(key) => Ok(key),
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
-                Err(AuthError::auth_failed(&*conn_info.user_info.user).into())
+                Err(AuthError::auth_failed(&*conn_info.user_info.user))
             }
         }
     }

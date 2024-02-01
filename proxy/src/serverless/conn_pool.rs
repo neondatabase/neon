@@ -118,10 +118,7 @@ impl EndpointConnPool {
 
             if pool.total_conns < pool.max_conns {
                 // we create this db-user entry in get, so it should not be None
-                let pool_entries = pool
-                    .pools
-                    .entry(conn_info.db_and_user())
-                    .or_insert_with(Default::default);
+                let pool_entries = pool.pools.entry(conn_info.db_and_user()).or_default();
                 pool_entries.conns.push(ConnPoolEntry {
                     conn: client,
                     _last_access: std::time::Instant::now(),
