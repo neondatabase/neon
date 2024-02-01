@@ -265,9 +265,9 @@ impl WalSendersShared {
     /// Update aggregated pageserver feedback. LSNs (last_received,
     /// disk_consistent, remote_consistent) and reply timestamp are just
     /// maximized; timeline_size if taken from feedback with highest
-    /// last_received lsn. This is generally reasonable, but we might want to
-    /// implement other policies once multiple pageservers start to be actively
-    /// used.
+    /// last_received lsn except when it is 0 (sent from non zero shards). This
+    /// is generally reasonable, but we might want to implement other policies
+    /// once multiple pageservers start to be actively used.
     fn update_ps_feedback(&mut self) {
         let init = PageserverFeedback::empty();
         let acc =
@@ -276,7 +276,9 @@ impl WalSendersShared {
                 .flatten()
                 .fold(init, |mut acc, ws_state| match ws_state.feedback {
                     ReplicationFeedback::Pageserver(feedback) => {
-                        if feedback.last_received_lsn > acc.last_received_lsn {
+                        if feedback.current_timeline_size != 0
+                            && feedback.last_received_lsn > acc.last_received_lsn
+                        {
                             acc.current_timeline_size = feedback.current_timeline_size;
                         }
                         acc.last_received_lsn =

@@ -1804,17 +1804,31 @@ walprop_pg_finish_sync_safekeepers(WalProposer *wp, XLogRecPtr lsn)
 static void
 GetLatestNeonFeedback(PageserverFeedback *rf, WalProposer *wp)
 {
-	int			latest_safekeeper = 0;
+	int			latest_safekeeper = -1;
 	XLogRecPtr	last_received_lsn = InvalidXLogRecPtr;
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
+		/*
+		 * Non-zero shards don't known the timeline size and send zero.
+
+		 * TODO: right now we ignore all feedback from non zero shards. We
+		 * should make reporting sharding aware instead and do per shard
+		 * aggregation as any lagging shard should trigger backpressure.
+		 */
+		if (wp->safekeeper[i].appendResponse.rf.currentClusterSize == 0)
+			continue;
+
 		if (wp->safekeeper[i].appendResponse.rf.last_received_lsn > last_received_lsn)
 		{
 			latest_safekeeper = i;
 			last_received_lsn = wp->safekeeper[i].appendResponse.rf.last_received_lsn;
 		}
 	}
+
+	/* no feedback yet */
+	if (latest_safekeeper == -1)
+		return;
 
 	rf->currentClusterSize = wp->safekeeper[latest_safekeeper].appendResponse.rf.currentClusterSize;
 	rf->last_received_lsn = wp->safekeeper[latest_safekeeper].appendResponse.rf.last_received_lsn;
