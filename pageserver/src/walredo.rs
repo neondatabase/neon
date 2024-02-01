@@ -184,7 +184,7 @@ impl PostgresRedoManager {
     pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         Some(WalRedoManagerStatus {
             last_redo_at: {
-                let at = self.last_redo_at.lock().unwrap().clone();
+                let at = *self.last_redo_at.lock().unwrap();
                 at.and_then(|at| {
                     let age = at.elapsed();
                     // map any chrono errors silently to None here
@@ -694,7 +694,7 @@ impl WalRedoProcess {
             .arg("--wal-redo")
             // the child doesn't process this arg, but, having it in the argv helps indentify the
             // walredo process for a particular tenant when debugging a pagserver
-            .args(&["--tenant-shard-id", &format!("{tenant_shard_id}")])
+            .args(["--tenant-shard-id", &format!("{tenant_shard_id}")])
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
