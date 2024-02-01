@@ -93,7 +93,7 @@ struct ProcessOutput {
 pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
-    last_redo_at: std::sync::Mutex<Option<Instant>>,
+    last_successful_redo_at: std::sync::Mutex<Option<Instant>>,
     redo_process: RwLock<Option<Arc<WalRedoProcess>>>,
 }
 
@@ -165,7 +165,7 @@ impl PostgresRedoManager {
             }
         }
         // last batch
-        if batch_neon {
+        let res = if batch_neon {
             self.apply_batch_neon(key, lsn, img, &records[batch_start..])
         } else {
             self.apply_batch_postgres(
@@ -177,7 +177,11 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
+        };
+        if res.is_ok() {
+            *(self.last_successful_redo_at.lock().unwrap()) = Some(Instant::now());
         }
+        res
     }
 }
 
@@ -193,7 +197,7 @@ impl PostgresRedoManager {
         PostgresRedoManager {
             tenant_shard_id,
             conf,
-            last_redo_at: std::sync::Mutex::default(),
+            last_successful_redo_at: std::sync::Mutex::default(),
             redo_process: RwLock::new(None),
         }
     }
@@ -202,9 +206,9 @@ impl PostgresRedoManager {
     /// rely on our owner calling this function periodically in its own housekeeping
     /// loops.
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
-        if let Ok(g) = self.last_redo_at.try_lock() {
-            if let Some(last_redo_at) = *g {
-                if last_redo_at.elapsed() >= idle_timeout {
+        if let Ok(g) = self.last_successful_redo_at.try_lock() {
+            if let Some(last_successful_redo_at) = *g {
+                if last_successful_redo_at.elapsed() >= idle_timeout {
                     drop(g);
                     let mut guard = self.redo_process.write().unwrap();
                     *guard = None;
@@ -227,8 +231,6 @@ impl PostgresRedoManager {
         wal_redo_timeout: Duration,
         pg_version: u32,
     ) -> anyhow::Result<Bytes> {
-        *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
-
         let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
