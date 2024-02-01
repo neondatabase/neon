@@ -658,7 +658,7 @@ impl WalRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    #[instrument(skip_all,fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), pg_version=pg_version))]
+    #[instrument(skip_all,fields(pg_version=pg_version))]
     fn launch(
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
@@ -1163,6 +1163,7 @@ mod tests {
     use bytes::Bytes;
     use pageserver_api::shard::TenantShardId;
     use std::str::FromStr;
+    use tracing::Instrument;
     use utils::{id::TenantId, lsn::Lsn};
 
     #[tokio::test]
@@ -1187,6 +1188,7 @@ mod tests {
                 short_records(),
                 14,
             )
+            .instrument(h.span())
             .await
             .unwrap();
 
@@ -1214,6 +1216,7 @@ mod tests {
                 short_records(),
                 14,
             )
+            .instrument(h.span())
             .await
             .unwrap();
 
@@ -1234,6 +1237,7 @@ mod tests {
                 short_records(),
                 16, /* 16 currently produces stderr output on startup, which adds a nice extra edge */
             )
+            .instrument(h.span())
             .await
             .unwrap_err();
     }
@@ -1262,6 +1266,7 @@ mod tests {
         // underscored because unused, except for removal at drop
         _repo_dir: camino_tempfile::Utf8TempDir,
         manager: PostgresRedoManager,
+        tenant_shard_id: TenantShardId,
     }
 
     impl RedoHarness {
@@ -1278,7 +1283,11 @@ mod tests {
             Ok(RedoHarness {
                 _repo_dir: repo_dir,
                 manager,
+                tenant_shard_id,
             })
+        }
+        fn span(&self) -> tracing::Span {
+            tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
         }
     }
 }
