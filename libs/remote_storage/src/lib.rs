@@ -434,7 +434,12 @@ impl GenericRemoteStorage {
                 Self::LocalFs(LocalFs::new(root.clone())?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
-                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
+                // The profile and access key id are only printed here for debugging purposes,
+                // their values don't indicate the eventually taken choice for auth.
+                let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "<none>".into());
+                let access_key_id =
+                    std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "<none>".into());
+                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
             }
