@@ -77,7 +77,13 @@ use utils::{
 // For APIs that require an Active tenant, how long should we block waiting for that state?
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
 // failed API calls while tenants are activating.
+#[cfg(not(feature = "testing"))]
 const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
+
+// Tests run on slow/oversubscribed nodes, and may need to wait much longer for tenants to
+// finish attaching, if calls to remote storage are slow.
+#[cfg(feature = "testing")]
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 pub struct State {
     conf: &'static PageServerConf,
