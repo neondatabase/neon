@@ -646,7 +646,7 @@ impl RemoteStorage for S3Bucket {
         let timestamp = DateTime::from(timestamp);
         let done_if_after = DateTime::from(done_if_after);
 
-        tracing::info!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
+        tracing::trace!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let prefix = prefix
@@ -804,10 +804,11 @@ impl RemoteStorage for S3Bucket {
                             is_permanent,
                             warn_threshold,
                             max_retries,
-                            "listing object versions for time_travel_recover",
+                            "copying object version for time_travel_recover",
                             backoff::Cancel::new(cancel.clone(), || TimeTravelError::Cancelled),
                         )
                         .await?;
+                        tracing::info!(%version_id, %key, "Copied old version in S3");
                     }
                     VerOrDelete {
                         kind: VerOrDeleteKind::DeleteMarker,
