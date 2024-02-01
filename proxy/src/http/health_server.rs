@@ -44,14 +44,16 @@ async fn prof_dump(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 }
 
 fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
-    dbg!(opt::prof::read().unwrap());
-    prof::active::write(true).unwrap();
-    // let _: bool = dbg!(b"opt.prof\0".name().read().unwrap());
-    // b"prof.active\0".name().write(true).unwrap();
+    let mut r = endpoint::make_router().get("/v1/status", status_handler);
 
-    endpoint::make_router()
-        .get("/v1/status", status_handler)
-        .get("/v1/jemalloc/prof.dump", prof_dump)
+    if opt::prof::read().unwrap() {
+        info!("activating jemalloc profiling");
+        prof::active::write(true).unwrap();
+        r = r.get("/v1/jemalloc/prof.dump", prof_dump);
+    } else {
+        info!("jemalloc profiling not supported");
+    }
+    r
 }
 
 pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<Infallible> {
