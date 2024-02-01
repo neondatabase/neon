@@ -31,15 +31,15 @@ use utils::http::json::json_response;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
-use crate::config::HttpConfig;
+use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
 use crate::RoleName;
 
+use super::backend::PoolingBackend;
 use super::conn_pool::ConnInfo;
-use super::conn_pool::GlobalConnPool;
 use super::SERVERLESS_DRIVER_SNI;
 
 #[derive(serde::Deserialize)]
@@ -230,16 +230,15 @@ fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Err
 
 // TODO: return different http error codes
 pub async fn handle(
-    tls: &'static TlsConfig,
-    config: &'static HttpConfig,
+    config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
-    conn_pool: Arc<GlobalConnPool>,
+    backend: Arc<PoolingBackend>,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
-        config.request_timeout,
-        handle_inner(tls, config, ctx, request, sni_hostname, conn_pool),
+        config.http_config.request_timeout,
+        handle_inner(config, ctx, request, sni_hostname, backend),
     )
     .await;
     let mut response = match result {
@@ -324,7 +323,7 @@ pub async fn handle(
         Err(_) => {
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
-                config.request_timeout.as_secs()
+                config.http_config.request_timeout.as_secs()
             );
             error!(message);
             json_response(
@@ -342,12 +341,11 @@ pub async fn handle(
 
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
-    tls: &'static TlsConfig,
-    config: &'static HttpConfig,
+    config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
-    conn_pool: Arc<GlobalConnPool>,
+    backend: Arc<PoolingBackend>,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&["http"])
@@ -357,7 +355,13 @@ async fn handle_inner(
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let conn_info = get_conn_info(ctx, headers, sni_hostname, tls)?;
+    // TLS config should be there.
+    let conn_info = get_conn_info(
+        ctx,
+        headers,
+        sni_hostname,
+        config.tls_config.as_ref().unwrap(),
+    )?;
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
@@ -366,8 +370,8 @@ async fn handle_inner(
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
-    let allow_pool =
-        !config.pool_options.opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+    let allow_pool = !config.http_config.pool_options.opt_in
+        || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     // isolation level, read only and deferrable
 
@@ -407,7 +411,11 @@ async fn handle_inner(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool.get(ctx, conn_info, !allow_pool).await?;
+    let keys = backend.authenticate(ctx, &conn_info).await?;
+
+    let mut client = backend
+        .connect_to_compute(ctx, conn_info, keys, !allow_pool)
+        .await?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)

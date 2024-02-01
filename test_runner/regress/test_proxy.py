@@ -393,11 +393,11 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
 def test_sql_over_http_pool(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth with password 'http' superuser")
 
-    def get_pid(status: int, pw: str) -> Any:
+    def get_pid(status: int, pw: str, user="http_auth") -> Any:
         return static_proxy.http_query(
             GET_CONNECTION_PID_QUERY,
             [],
-            user="http_auth",
+            user=user,
             password=pw,
             expected_code=status,
         )
@@ -418,20 +418,14 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
 
     static_proxy.safe_psql("alter user http_auth with password 'http2'")
 
-    # after password change, should open a new connection to verify it
-    pid2 = get_pid(200, "http2")["rows"][0]["pid"]
-    assert pid1 != pid2
+    # after password change, shouldn't open a new connection because it checks password in proxy.
+    rows = get_pid(200, "http2")["rows"]
+    assert rows == [{"pid": pid1}]
 
     time.sleep(0.02)
 
-    # query should be on an existing connection
-    pid = get_pid(200, "http2")["rows"][0]["pid"]
-    assert pid in [pid1, pid2]
-
-    time.sleep(0.02)
-
-    # old password should not work
-    res = get_pid(400, "http")
+    # incorrect user shouldn't reveal that the user doesn't exists
+    res = get_pid(400, "http", user="http_auth2")
     assert "password authentication failed for user" in res["message"]
 
 
