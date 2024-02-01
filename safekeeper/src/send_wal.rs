@@ -167,6 +167,10 @@ impl WalSenders {
     fn record_standby_reply(self: &Arc<WalSenders>, id: WalSenderId, reply: &StandbyReply) {
         let mut shared = self.mutex.lock();
         let slot = shared.get_slot_mut(id);
+        info!(
+            "Record standby reply: ts={} apply_lsn={}",
+            reply.reply_ts, reply.apply_lsn
+        );
         match &mut slot.feedback {
             ReplicationFeedback::Standby(sf) => sf.reply = *reply,
             ReplicationFeedback::Pageserver(_) => {

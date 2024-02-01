@@ -50,9 +50,7 @@ def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
                     )
                 except Exception as error:
                     print(f"Query failed: {error}")
-                    if not str(error).startswith(
-                        "canceling statement due to conflict with recovery"
-                    ):
+                    if "canceling statement due to conflict with recovery" not in str(error):
                         raise
 
         t.join()
