@@ -117,7 +117,6 @@ impl EndpointConnPool {
             let mut pool = pool.write();
 
             if pool.total_conns < pool.max_conns {
-                // we create this db-user entry in get, so it should not be None
                 let pool_entries = pool.pools.entry(conn_info.db_and_user()).or_default();
                 pool_entries.conns.push(ConnPoolEntry {
                     conn: client,
