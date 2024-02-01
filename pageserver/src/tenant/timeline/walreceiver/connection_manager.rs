@@ -553,6 +553,10 @@ impl ConnectionManagerState {
     fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
         WALRECEIVER_BROKER_UPDATES.inc();
 
+        info!(
+            "Safekeeper info update: standby_horizon(cutoff)={}",
+            timeline_update.standby_horizon
+        );
         if timeline_update.standby_horizon != 0 {
             // ignore reports from safekeepers mnot connected to replicas
             self.timeline
