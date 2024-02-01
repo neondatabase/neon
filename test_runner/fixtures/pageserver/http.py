@@ -395,7 +395,7 @@ class PageserverHttpClient(requests.Session):
         tenant_id: Union[TenantId, TenantShardId],
         timestamp: datetime,
         done_if_after: datetime,
-    ) -> Dict[str, Any]:
+    ):
         """
         Issues a request to perform time travel operations on the remote storage
         """
@@ -403,9 +403,6 @@ class PageserverHttpClient(requests.Session):
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/time_travel_remote_storage?travel_to={timestamp.isoformat()}Z&done_if_after={done_if_after.isoformat()}Z"
         )
         self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
 
     def timeline_list(
         self,
