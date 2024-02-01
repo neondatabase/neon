@@ -359,17 +359,17 @@ impl GlobalConnPool {
 
     pub fn poll_client(
         self: Arc<Self>,
+        ctx: &mut RequestMonitoring,
         conn_info: ConnInfo,
         client: tokio_postgres::Client,
         mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
-        mut session_id: uuid::Uuid,
         conn_id: uuid::Uuid,
-        protocol: &str,
         aux: MetricsAuxInfo,
     ) -> Client {
         let conn_gauge = NUM_DB_CONNECTIONS_GAUGE
-            .with_label_values(&[protocol])
+            .with_label_values(&[ctx.protocol])
             .guard();
+        let mut session_id = ctx.session_id;
         let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
         let span = info_span!(parent: None, "connection", %conn_id);

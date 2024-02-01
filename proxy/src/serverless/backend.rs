@@ -142,12 +142,11 @@ impl ConnectMechanism for TokioMechanism {
         tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         let pool = self.pool.clone();
         Ok(pool.poll_client(
+            ctx,
             self.conn_info.clone(),
             client,
             connection,
-            ctx.session_id,
             self.conn_id,
-            ctx.protocol,
             node_info.aux.clone(),
         ))
     }
