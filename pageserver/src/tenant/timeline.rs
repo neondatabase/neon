@@ -1077,7 +1077,10 @@ impl Timeline {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
-        self.spawn_initial_logical_size_computation_task(ctx);
+        if self.tenant_shard_id.is_zero() {
+            // Logical size is only maintained accurately on shard zero.
+            self.spawn_initial_logical_size_computation_task(ctx);
+        }
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
         self.launch_eviction_task(background_jobs_can_start);
@@ -2140,6 +2143,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         span::debug_assert_current_span_has_tenant_and_timeline_id();
+        // We should never be calculating logical sizes on shard !=0, because these shards do not have
+        // accurate relation sizes, and they do not emit consumption metrics.
+        debug_assert!(self.tenant_shard_id.is_zero());
 
         let _guard = self.gate.enter();
 
