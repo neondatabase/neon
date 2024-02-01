@@ -978,9 +978,7 @@ jobs:
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} vm-compute-node-v16
 
       - name: Add latest tag to images
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-           github.event_name != 'workflow_dispatch'
+        if: github.ref_name == 'main' || github.ref_name == 'release'
         run: |
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
@@ -992,9 +990,7 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-           github.event_name != 'workflow_dispatch'
+        if: github.ref_name == 'main' || github.ref_name == 'release'
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
@@ -1018,9 +1014,7 @@ jobs:
           crane push vm-compute-node-v16 neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}}
 
       - name: Push latest tags to Docker Hub
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
+        if: github.ref_name == 'main' || github.ref_name == 'release'
         run: |
           crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
@@ -1110,7 +1104,7 @@ jobs:
 
   deploy:
     needs: [ check-permissions, promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
-    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
+    if: github.ref_name == 'main' || github.ref_name == 'release'
 
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
