@@ -9,13 +9,16 @@ use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::repository::{Key, Value};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
-use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
-use crate::tenant::Timeline;
+use crate::tenant::storage_layer::ValueReconstructResult;
+use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::walrecord;
-use anyhow::{ensure, Result};
+use anyhow::{anyhow, ensure, Result};
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use std::collections::HashMap;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
@@ -25,7 +28,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use super::{DeltaLayerWriter, ResidentLayer};
+use super::{DeltaLayerWriter, ResidentLayer, ValueReconstructState, ValuesReconstructState};
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -59,12 +62,20 @@ pub struct InMemoryLayerInner {
     /// All versions of all pages in the layer are kept here.  Indexed
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
+    // IDEA: would be great if this was ordered
     index: HashMap<Key, VecMap<Lsn, u64>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
     /// PerSeg::page_versions map stores offsets into this file.
     file: EphemeralFile,
+}
+
+#[derive(Eq, PartialEq, Ord, PartialOrd)]
+struct BlockRead {
+    key: Key,
+    lsn: Lsn,
+    block_offset: u64,
 }
 
 impl std::fmt::Debug for InMemoryLayerInner {
@@ -201,6 +212,85 @@ impl InMemoryLayer {
         } else {
             Ok(ValueReconstructResult::Complete)
         }
+    }
+
+    pub(crate) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        end_lsn: Lsn,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::InMemoryLayer)
+            .build();
+
+        let inner = self.inner.read().await;
+
+        let reader = inner.file.block_cursor();
+
+        let mut completed_keys = HashSet::new();
+        let mut min_heap = BinaryHeap::new();
+
+        for range in keyspace.ranges.iter() {
+            let mut key = range.start;
+            while key < range.end {
+                if let Some(vec_map) = inner.index.get(&key) {
+                    let range = match reconstruct_state.get_cached_lsn(&key) {
+                        Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
+                        None => self.start_lsn..end_lsn,
+                    };
+
+                    let slice = vec_map.slice_range(range);
+                    for (entry_lsn, pos) in slice.iter().rev() {
+                        min_heap.push(Reverse(BlockRead {
+                            key,
+                            lsn: *entry_lsn,
+                            block_offset: *pos,
+                        }));
+                    }
+                }
+
+                key = key.next();
+            }
+        }
+
+        let keyspace_size = keyspace.total_size();
+
+        // IDEA: coalesce reads as long as they have sequential block numbers
+        while completed_keys.len() < keyspace_size && !min_heap.is_empty() {
+            let block_read = min_heap.pop().unwrap();
+            if completed_keys.contains(&block_read.0.key) {
+                continue;
+            }
+
+            let buf = reader.read_blob(block_read.0.block_offset, &ctx).await;
+            if let Err(e) = buf {
+                reconstruct_state
+                    .on_key_error(block_read.0.key, PageReconstructError::from(anyhow!(e)));
+                completed_keys.insert(block_read.0.key);
+                continue;
+            }
+
+            let value = Value::des(&buf.unwrap());
+            if let Err(e) = value {
+                reconstruct_state
+                    .on_key_error(block_read.0.key, PageReconstructError::from(anyhow!(e)));
+                completed_keys.insert(block_read.0.key);
+                continue;
+            }
+
+            let key_done = reconstruct_state.update_key(
+                dbg!(&block_read.0.key),
+                block_read.0.lsn,
+                value.unwrap(),
+            );
+            if key_done {
+                completed_keys.insert(block_read.0.key);
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -1,5 +1,6 @@
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
@@ -15,10 +16,11 @@ use utils::sync::heavier_once_cell;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
+use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
-use super::image_layer;
+use super::{image_layer, ValuesReconstructState};
 use super::{
     AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerFileName, PersistentLayerDesc,
     ValueReconstructResult, ValueReconstructState,
@@ -259,6 +261,40 @@ impl Layer {
             .instrument(tracing::debug_span!("get_value_reconstruct_data", layer=%self))
             .await
             .with_context(|| format!("get_value_reconstruct_data for layer {self}"))
+    }
+
+    pub(crate) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        end_lsn: Lsn,
+        reconstruct_data: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        // use anyhow::ensure;
+
+        let layer = self
+            .0
+            .get_or_maybe_download(true, Some(ctx))
+            .await
+            .map_err(|err| GetVectoredError::Other(anyhow::anyhow!(err)))?;
+
+        self.0
+            .access_stats
+            .record_access(LayerAccessKind::GetValueReconstructData, ctx);
+
+        // if self.layer_desc().is_delta {
+        //     ensure!(lsn_range.start >= self.layer_desc().lsn_range.start);
+        //     ensure!(self.layer_desc().key_range.contains(&key));
+        // } else {
+        //     ensure!(self.layer_desc().key_range.contains(&key));
+        //     ensure!(lsn_range.start >= self.layer_desc().image_layer_lsn());
+        //     ensure!(lsn_range.end >= self.layer_desc().image_layer_lsn());
+        // }
+
+        layer
+            .get_values_reconstruct_data(keyspace, end_lsn, reconstruct_data, &self.0, ctx)
+            .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
+            .await
     }
 
     /// Download the layer if evicted.
@@ -1174,7 +1210,7 @@ pub(crate) enum EvictionError {
 
 /// Error internal to the [`LayerInner::get_or_maybe_download`]
 #[derive(Debug, thiserror::Error)]
-enum DownloadError {
+pub(crate) enum DownloadError {
     #[error("timeline has already shutdown")]
     TimelineShutdown,
     #[error("no remote storage configured")]
@@ -1329,6 +1365,28 @@ impl DownloadedLayer {
             }
             Image(i) => {
                 i.get_value_reconstruct_data(key, reconstruct_data, ctx)
+                    .await
+            }
+        }
+    }
+
+    async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        end_lsn: Lsn,
+        reconstruct_data: &mut ValuesReconstructState,
+        owner: &Arc<LayerInner>,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        use LayerKind::*;
+
+        match self.get(owner, ctx).await.map_err(GetVectoredError::from)? {
+            Delta(d) => {
+                d.get_values_reconstruct_data(keyspace, end_lsn, reconstruct_data, ctx)
+                    .await
+            }
+            Image(i) => {
+                i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
                     .await
             }
         }

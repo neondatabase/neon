@@ -60,7 +60,7 @@ use crate::{
     tenant::storage_layer::{
         AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
         LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
-        ValueReconstructState,
+        ValueReconstructState, ValuesReconstructState,
     },
 };
 use crate::{
@@ -104,11 +104,14 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
-use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::{config::TenantConf, storage_layer::ReadableLayerDesc};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{
+    remote_timeline_client::index::{IndexLayerMetadata, IndexPart},
+    storage_layer::LayerFringe,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -157,6 +160,13 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
     pub deletion_queue_client: DeletionQueueClient,
+}
+
+#[derive(Debug, Default, Copy, Clone)]
+pub(crate) enum GetVectoredImpl {
+    Sequential,
+    #[default]
+    Vectored,
 }
 
 pub struct Timeline {
@@ -346,6 +356,8 @@ pub struct Timeline {
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
+
+    get_vectored_impl: RwLock<GetVectoredImpl>,
 }
 
 pub struct WalReceiverInfo {
@@ -444,6 +456,14 @@ pub(crate) enum GetVectoredError {
     #[error("Requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
 
+    #[error("Requested key {0} not found")]
+    MissingKey(Key),
+
+    #[error(transparent)]
+    GetReadyAncestorError(GetReadyAncestorError),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -542,10 +562,14 @@ impl From<GetVectoredError> for CreateImageLayersError {
 impl From<GetReadyAncestorError> for PageReconstructError {
     fn from(e: GetReadyAncestorError) -> Self {
         match e {
-            GetReadyAncestorError::AncestorStopping(tid) => PageReconstructError::AncestorStopping(tid),
-            GetReadyAncestorError::AncestorLsnTimeout(wait_err) => PageReconstructError::AncestorLsnTimeout(wait_err),
+            GetReadyAncestorError::AncestorStopping(tid) => {
+                PageReconstructError::AncestorStopping(tid)
+            }
+            GetReadyAncestorError::AncestorLsnTimeout(wait_err) => {
+                PageReconstructError::AncestorLsnTimeout(wait_err)
+            }
             GetReadyAncestorError::Cancelled => PageReconstructError::Cancelled,
-            GetReadyAncestorError::Other(other) => PageReconstructError::Other(other)
+            GetReadyAncestorError::Other(other) => PageReconstructError::Other(other),
         }
     }
 }
@@ -639,6 +663,7 @@ impl Timeline {
             .await?;
         timer.stop_and_record();
 
+        // info!("Sequential reconstruct state for {key} {reconstruct_state:?}");
         let start = Instant::now();
         let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
         let elapsed = start.elapsed();
@@ -646,27 +671,25 @@ impl Timeline {
             .for_result(&res)
             .observe(elapsed.as_secs_f64());
 
-        if cfg!(feature = "testing") && res.is_err() {
-            // it can only be walredo issue
-            use std::fmt::Write;
+        use std::fmt::Write;
+        let mut msg = String::new();
 
-            let mut msg = String::new();
+        path.into_iter().for_each(|(res, cont_lsn, layer)| {
+            writeln!(
+                msg,
+                "- layer traversal: result {res:?}, cont_lsn {cont_lsn}, layer: {}",
+                layer(),
+            )
+            .expect("string grows")
+        });
 
-            path.into_iter().for_each(|(res, cont_lsn, layer)| {
-                writeln!(
-                    msg,
-                    "- layer traversal: result {res:?}, cont_lsn {cont_lsn}, layer: {}",
-                    layer(),
-                )
-                .expect("string grows")
-            });
-
-            // this is to rule out or provide evidence that we could in some cases read a duplicate
-            // walrecord
-            tracing::info!("walredo failed, path:\n{msg}");
-        }
+        info!("Path taken: {msg}");
 
         res
+    }
+
+    pub(crate) fn set_get_vectored_impl(&self, impl_type: GetVectoredImpl) {
+        *self.get_vectored_impl.write().unwrap() = impl_type;
     }
 
     pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
@@ -693,8 +716,66 @@ impl Timeline {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
-        let mut values = BTreeMap::new();
         for range in key_ranges {
+            let mut key = range.start;
+            while key != range.end {
+                assert!(!self.shard_identity.is_key_disposable(&key));
+                key = key.next();
+            }
+        }
+
+        // TODO: update api above to take KeySpace
+        let keyspace = KeySpace {
+            ranges: Vec::from(key_ranges),
+        };
+
+        let which = *self.get_vectored_impl.read().unwrap();
+        match which {
+            GetVectoredImpl::Sequential => {
+                self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
+            }
+            GetVectoredImpl::Vectored => {
+                let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await?;
+                let sequential_res = self
+                    .get_vectored_sequential_impl(keyspace, lsn, ctx)
+                    .await
+                    .unwrap();
+
+                vectored_res.iter().zip(sequential_res.iter()).for_each(
+                    |((seq_key, seq_res), (vec_key, vec_res))| {
+                        assert_eq!(seq_key, vec_key, "{} != {}", seq_key, vec_key);
+                        match (seq_res, vec_res) {
+                            (Ok(seq_blob), Ok(vec_blob)) => {
+                                assert_eq!(seq_blob, vec_blob, "Wrong image for key {}", seq_key)
+                            }
+                            _ => {
+                                error!(
+                                    "Unexpected error for key={}: seq_res={:?} vec_res={:?}",
+                                    seq_key,
+                                    seq_res.as_ref().map(|_| "Ok(...)"),
+                                    vec_res.as_ref().map(|_| "Ok(...)")
+                                );
+                                panic!()
+                            }
+                        }
+                    },
+                );
+
+                Ok(vectored_res)
+            }
+        }
+    }
+
+    async fn get_vectored_sequential_impl(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        trace!("get_vectored_sequential_impl range={keyspace:?}");
+
+        let mut values = BTreeMap::new();
+        for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
                 assert!(!self.shard_identity.is_key_disposable(&key));
@@ -714,6 +795,46 @@ impl Timeline {
         }
 
         Ok(values)
+    }
+
+    async fn get_vectored_impl(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        trace!("get_vectored_impl range={keyspace:?}");
+
+        for range in &keyspace.ranges {
+            let mut key = range.start;
+            while key != range.end {
+                assert!(!self.shard_identity.is_key_disposable(&key));
+                key = key.next();
+            }
+        }
+
+        let mut reconstruct_state = ValuesReconstructState::new();
+
+        self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
+            .await?;
+
+        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
+        for (key, res) in reconstruct_state.keys {
+            match res {
+                Err(err) => {
+                    results.insert(key, Err(err));
+                }
+                Ok(state) => {
+                    let state = ValueReconstructState::from(state);
+                    // info!("Vectored reconstruct state for {key} {state:?}");
+
+                    let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
+                    results.insert(key, reconstruct_res);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -1510,6 +1631,7 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),
+                get_vectored_impl: RwLock::new(GetVectoredImpl::default()),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -2356,7 +2478,14 @@ impl Timeline {
             }
 
             // The function should have updated 'state'
-            //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
+            info!(
+                "CALLED for {} at {}: {:?} with {} records, cached {}",
+                key,
+                cont_lsn,
+                result,
+                reconstruct_state.records.len(),
+                cached_lsn
+            );
             match result {
                 ValueReconstructResult::Complete => return Ok(traversal_path),
                 ValueReconstructResult::Continue => {
@@ -2418,7 +2547,7 @@ impl Timeline {
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
+                    // info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
                     // Get all the data needed to reconstruct the page version from this layer.
                     // But if we have an older cached page image, no need to go past that.
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
@@ -2451,6 +2580,7 @@ impl Timeline {
                 let start_lsn = frozen_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
+                    //how
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
                     result = match frozen_layer
                         .get_value_reconstruct_data(
@@ -2512,6 +2642,135 @@ impl Timeline {
                 continue 'outer;
             }
         }
+    }
+
+    async fn get_vectored_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        request_lsn: Lsn,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        // Start from the current timeline.
+        let mut timeline_owned: Arc<Timeline>;
+        let mut timeline = self;
+
+        let mut unmapped_keyspace = keyspace.clone();
+        let mut cont_lsn = Lsn(request_lsn.0 + 1);
+
+        let mut fringe = LayerFringe::new();
+
+        let initial_keyspace_size = keyspace.total_size();
+        while reconstruct_state.total_keys_done < initial_keyspace_size {
+            if self.cancel.is_cancelled() {
+                return Err(GetVectoredError::Cancelled);
+            }
+
+            // 1. Check if all keys are done and return if true
+            // 2. Split key ranges up to account for gaps left by finished keys
+            // 3. Switch timelines if needed
+            // 4. Find the next layer for each unmapped range. This can be open, frozen or disk
+            // 5. For the latest layer, inspect it and put all the required data in the bag - pop
+            //    the layer from the heap.
+            // 6. Mark the ranges that previously mapped to this layer as unmapped
+            // 7. Go back to 1
+            let keys_done_last_step = reconstruct_state.consume_done_keys();
+            trace!("keys_done_last_step={keys_done_last_step:?}");
+            unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
+
+            if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
+                trace!(
+                    "going into ancestor {}, cont_lsn is {}",
+                    timeline.ancestor_lsn,
+                    cont_lsn
+                );
+
+                timeline_owned = timeline
+                    .get_ready_ancestor_timeline(ctx)
+                    .await
+                    .map_err(GetVectoredError::GetReadyAncestorError)?;
+                timeline = &*timeline_owned;
+            }
+
+            let guard = timeline.layers.read().await;
+            let layers = guard.layer_map();
+
+            let in_memory_layer = layers.find_in_memory_layer(|l| {
+                let start_lsn = l.get_lsn_range().start;
+                cont_lsn > start_lsn
+            });
+
+            match in_memory_layer {
+                Some(l) => {
+                    fringe.update(ReadableLayerDesc::InMemory(l), unmapped_keyspace.clone());
+                }
+                None => {
+                    for range in unmapped_keyspace.ranges.iter() {
+                        let results = layers
+                            .range_search(range.clone(), cont_lsn)
+                            .ok_or_else(|| GetVectoredError::InvalidLsn(cont_lsn))?;
+
+                        trace!(
+                            "Range search for {:?} at {} returned {:?}",
+                            range,
+                            cont_lsn,
+                            results
+                        );
+
+                        results
+                            .found
+                            .into_iter()
+                            .map(|(res, accum)| {
+                                (
+                                    ReadableLayerDesc::Persistent {
+                                        desc: (*res.0.layer).clone(),
+                                        lsn_floor: res.0.lsn_floor,
+                                    },
+                                    accum.to_keyspace(),
+                                )
+                            })
+                            .for_each(|(layer, keyspace)| fringe.update(layer, keyspace));
+
+                        let not_found = &results.not_found.to_keyspace();
+                        if let Some(first_missing_key) = not_found.start() {
+                            return Err(GetVectoredError::MissingKey(first_missing_key));
+                        }
+                    }
+                }
+            }
+
+            trace!("fringe={fringe:?}");
+
+            if let Some((layer_to_read, keyspace_to_read)) = fringe.next_layer() {
+                trace!(
+                    "Handling layer {:?} for keyspace {:?}",
+                    layer_to_read,
+                    keyspace_to_read
+                );
+
+                layer_to_read
+                    .get_values_reconstruct_data(
+                        &guard,
+                        keyspace_to_read.clone(),
+                        cont_lsn,
+                        reconstruct_state,
+                        ctx,
+                    )
+                    .await?;
+
+                unmapped_keyspace = keyspace_to_read;
+                cont_lsn = layer_to_read.get_lsn_floor();
+
+                trace!(
+                    "Handled layer {:?}. cont_lsn={}, unmapped_keyspace={:?}",
+                    layer_to_read,
+                    cont_lsn,
+                    unmapped_keyspace
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// # Cancel-safety

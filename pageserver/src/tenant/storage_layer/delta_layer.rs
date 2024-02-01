@@ -35,16 +35,19 @@ use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use crate::tenant::Timeline;
+use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
+use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
@@ -59,7 +62,9 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer};
+use super::{
+    AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -773,6 +778,7 @@ impl DeltaLayerInner {
         let cursor = file.block_cursor();
         let mut buf = Vec::new();
         for (entry_lsn, pos) in offsets {
+            info!("Reading sequential from delta layer: key={} lsn={} block={}", key, entry_lsn, pos);
             cursor
                 .read_blob_into_buf(pos, &mut buf, ctx)
                 .await
@@ -810,6 +816,121 @@ impl DeltaLayerInner {
         } else {
             Ok(ValueReconstructResult::Complete)
         }
+    }
+
+    pub(super) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        end_lsn: Lsn,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        // Scan the page versions backwards, starting from `lsn`.
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            file,
+        );
+
+        let mut offsets: BTreeMap<Key, VecDeque<(Lsn, u64)>> = BTreeMap::new();
+
+        for range in keyspace.ranges.iter() {
+            let mut ignore_key = None;
+
+            let last_key = Key::from_i128(range.end.to_i128() - 1);
+            let last_key = DeltaKey::from_key_lsn(&last_key, Lsn(end_lsn.0 - 1));
+            tree_reader
+                .visit(
+                    &last_key.0,
+                    VisitDirection::Backwards,
+                    |raw_key, value| {
+                        let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                        let entry_lsn = DeltaKey::extract_lsn_from_buf(raw_key);
+
+                        if key < range.start {
+                            return false;
+                        }
+
+                        if Some(key) == ignore_key {
+                            return true;
+                        }
+
+                        if let Some(cached_lsn) = reconstruct_state.get_cached_lsn(&key) {
+                            if entry_lsn <= cached_lsn {
+                                return key != range.start;
+                            }
+                        }
+
+                        let blob_ref = BlobRef(value);
+                        let lsns_at = offsets
+                            .entry(key)
+                            .or_default();
+                        lsns_at.push_front((entry_lsn, blob_ref.pos()));
+
+                        if blob_ref.will_init() {
+                            if key == range.start {
+                                return false;
+                            } else {
+                                ignore_key = Some(key);
+                                return true;
+                            }
+                        }
+
+                        true
+                    },
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+                        .build(),
+                )
+                .await
+                .map_err(|err| GetVectoredError::Other(anyhow!(err)))?;
+        }
+
+        let ctx = &RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::DeltaLayerValue)
+            .build();
+
+        // TODO: coalesce reads
+        let cursor = file.block_cursor();
+        let mut buf = Vec::new();
+        for (key, lsns_at) in offsets {
+            for (lsn, block_offset) in lsns_at {
+                info!("Reading vectored from delta layer: key={} lsn={} block={}", key, lsn, block_offset);
+                let res = cursor
+                    .read_blob_into_buf(block_offset, &mut buf, ctx)
+                    .await;
+
+                if let Err(e) = res {
+                    reconstruct_state.on_key_error(
+                        key,
+                        PageReconstructError::from(anyhow!(e).context(format!(
+                            "Failed to read blob from virtual file {}",
+                            file.file.path
+                        ))),
+                    );
+
+                    break;
+                }
+
+                let value = Value::des(&buf);
+                if let Err(e) = value {
+                    reconstruct_state.on_key_error(
+                        key,
+                        PageReconstructError::from(anyhow!(e).context(format!(
+                            "Failed to deserialize file blob from virtual file {}",
+                            file.file.path
+                        ))),
+                    );
+
+                    break;
+                }
+
+                reconstruct_state.update_key(&key, lsn, value.unwrap());
+            }
+        }
+
+        Ok(())
     }
 
     pub(super) async fn load_keys<'a>(

@@ -3386,6 +3386,7 @@ dependencies = [
  "enum-map",
  "hex",
  "humantime-serde",
+ "itertools",
  "postgres_ffi",
  "rand 0.8.5",
  "serde",

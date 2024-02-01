@@ -262,10 +262,26 @@ where
             let blocks = self
                 .timeline
                 .get_vectored(&part.ranges, self.lsn, self.ctx)
-                .await?;
+                .await;
+
+            let blocks = match blocks {
+                Ok(blocks) => blocks,
+                Err(err) => {
+                    error!("get_vectored failed: {}", err);
+                    return Err(anyhow!(err));
+                }
+            };
 
             for (key, block) in blocks {
-                slru_builder.add_block(&key, block?).await?;
+                let block = match block {
+                    Ok(block) => block,
+                    Err(err) => {
+                        error!("get_vectored failed on key {}: {}", key, err);
+                        return Err(anyhow!(err));
+                    }
+                };
+
+                slru_builder.add_block(&key, block).await?;
             }
         }
 

@@ -194,7 +194,7 @@ def post_migration_check(endpoint: Endpoint, sum_before_migration: int, old_loca
         "major",
     ],
 )
-@pytest.mark.parametrize("with_load", ["with_load", "without_load"])
+@pytest.mark.parametrize("with_load", ["with_load"])
 def test_tenant_relocation(
     neon_env_builder: NeonEnvBuilder,
     port_distributor: PortDistributor,

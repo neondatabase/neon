@@ -26,20 +26,22 @@
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::PAGE_SZ;
-use crate::repository::{Key, KEY_SIZE};
+use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
     LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
-use crate::tenant::Timeline;
+use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
+use pageserver_api::keyspace::{key_range_size, KeySpace};
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
@@ -59,7 +61,7 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer};
+use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -443,6 +445,108 @@ impl ImageLayerInner {
         } else {
             Ok(ValueReconstructResult::Missing)
         }
+    }
+
+    pub(super) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        // Same deal as for get_values_reconstruct_data in delta_layer.rs.
+        // It's simple here since we only have keys and no LSNs.
+        // For each range in the keyspace, visit the btree starting from the start key.
+        // Move forward while collecting block offsets until we hit the end key.
+        //
+        // Once done, issue the reads.
+
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
+
+        let mut blocks_for_ranges = Vec::new();
+
+        for range in keyspace.ranges.iter() {
+            let mut raw_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+            range.start.write_to_byte_slice(&mut raw_key);
+
+            let maybe_start_offset = tree_reader
+                .get(
+                    &raw_key,
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::ImageLayerBtreeNode)
+                        .build(),
+                )
+                .await
+                .map_err(|err| GetVectoredError::Other(anyhow!(err)))?;
+
+            match maybe_start_offset {
+                Some(start_offset) => {
+                    blocks_for_ranges.push((range, start_offset));
+                }
+                None => {
+                    return Err(GetVectoredError::MissingKey(range.start));
+                }
+            }
+
+            // Assert on the fact that the on disk key range has no gaps
+            // in the interval specified by 'range'.
+            let range_size = key_range_size(range);
+            let last_key = range.start.add(range_size - 1);
+            last_key.write_to_byte_slice(&mut raw_key);
+
+            let maybe_end_offset = tree_reader
+                .get(
+                    &raw_key,
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::ImageLayerBtreeNode)
+                        .build(),
+                )
+                .await
+                .map_err(|err| GetVectoredError::Other(anyhow!(err)))?;
+            assert!(maybe_end_offset.is_some());
+            assert_eq!(
+                maybe_end_offset.unwrap() - maybe_start_offset.unwrap(),
+                (range_size - 1) as u64
+            );
+        }
+
+        let ctx = &RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::ImageLayerValue)
+            .build();
+
+        // TODO: coalesce reads
+        let cursor = file.block_cursor();
+        let mut buf = Vec::new();
+        for (range, start_offset) in blocks_for_ranges {
+            let mut range_offset = 0;
+            let mut key = range.start;
+            while key < range.end {
+                let res = cursor
+                    .read_blob_into_buf(start_offset + range_offset, &mut buf, ctx)
+                    .await;
+                if let Err(e) = res {
+                    reconstruct_state.on_key_error(
+                        key,
+                        PageReconstructError::from(anyhow!(e).context(format!(
+                            "Failed to read blob from virtual file {}",
+                            file.file.path
+                        ))),
+                    );
+
+                    buf.clear();
+                    break;
+                }
+
+                let blob = Bytes::copy_from_slice(buf.as_slice());
+                reconstruct_state.update_key(&key, self.lsn, Value::Image(blob));
+                buf.clear();
+
+                range_offset += 1;
+                key = key.next();
+            }
+        }
+
+        Ok(())
     }
 }
 
