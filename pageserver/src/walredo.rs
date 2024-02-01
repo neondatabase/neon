@@ -183,8 +183,8 @@ impl PostgresRedoManager {
 
     pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         Some(WalRedoManagerStatus {
-            last_successful_redo_at: {
-                let at = self.last_successful_redo_at.lock().unwrap().clone();
+            last_redo_at: {
+                let at = self.last_redo_at.lock().unwrap().clone();
                 at.and_then(|at| {
                     let age = at.elapsed();
                     // map any chrono errors silently to None here
@@ -270,7 +270,6 @@ impl PostgresRedoManager {
                                 let duration = start.elapsed();
                                 WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM
                                     .observe(duration.as_secs_f64());
-                                crate::span::debug_assert_current_span_has_tenant_id();
                                 info!(
                                     duration_ms = duration.as_millis(),
                                     pid = proc.id(),

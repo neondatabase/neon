@@ -645,7 +645,7 @@ pub struct TimelineGcRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRedoManagerStatus {
-    pub last_successful_redo_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
     pub pid: Option<u32>,
 }
 
