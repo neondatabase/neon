@@ -175,16 +175,14 @@ class S3Storage:
             return {
                 "AWS_PROFILE": self.aws_profile,
             }
-        else:
-            if self.access_key is not None and self.secret_key is not None:
-                return {
-                    "AWS_ACCESS_KEY_ID": self.access_key,
-                    "AWS_SECRET_ACCESS_KEY": self.secret_key,
-                }
-            else:
-                raise RuntimeError(
-                    "Either AWS_PROFILE or (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) have to be set for S3Storage"
-                )
+        if self.access_key is not None and self.secret_key is not None:
+            return {
+                "AWS_ACCESS_KEY_ID": self.access_key,
+                "AWS_SECRET_ACCESS_KEY": self.secret_key,
+            }
+        raise RuntimeError(
+            "Either AWS_PROFILE or (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) have to be set for S3Storage"
+        )
 
     def to_string(self) -> str:
         return json.dumps(
