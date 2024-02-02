@@ -13,7 +13,7 @@ defaults:
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  group: Build and Test-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
 
 env:
@@ -90,7 +90,6 @@ jobs:
         id: build-tag
 
   build-buildtools-image:
-    if: github.event.action != 'ready_for_review'
     needs: [ check-permissions ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
@@ -547,7 +546,7 @@ jobs:
 
   create-test-report:
     needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-buildtools-image ]
-    if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) && github.event.action != 'ready_for_review' }}
+    if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -1022,7 +1021,6 @@ jobs:
         run: rm -rf ~/.ecr
 
   trigger-custom-extensions-build-and-wait:
-    if: github.event.action != 'ready_for_review'
     needs: [ check-permissions, tag ]
     runs-on: ubuntu-latest
     steps:

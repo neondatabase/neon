@@ -106,24 +106,3 @@ jobs:
                 \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
               }
             }"
-
-      - name: Update status of trigger e2e test job
-        uses: nick-fields/retry@943e742917ac94714d2f408a0e8320f2d1fcafcd
-        with:
-          timeout_seconds: 60
-          retry_wait_seconds: 60
-          max_attempts: 3
-          command: |
-            COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-            CI_JOB_NAME="Build and Test / trigger-e2e-tests"
-            set -e
-            curl -f -X POST \
-                      https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
-                      -H "Accept: application/vnd.github.v3+json" \
-                      -H "Authorization: token ${{ secrets.CI_ACCESS_TOKEN }}" \
-                      --data \
-                        "{
-                          \"state\": \"success\",
-                          \"context\": \"$CI_JOB_NAME\",
-                          \"description\": \"The e2e test were triggered successfully\"
-                        }"
