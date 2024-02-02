@@ -2638,6 +2638,9 @@ impl Tenant {
             // reflect tenant state in metrics:
             // - global per tenant state: TENANT_STATE_METRIC
             // - "set" of broken tenants: BROKEN_TENANTS_SET
+            //
+            // set of broken tenants should not have zero counts so that it remains accessible for
+            // alerting.
 
             let tid = tenant_shard_id.to_string();
             let shard_id = tenant_shard_id.shard_slug().to_string();
