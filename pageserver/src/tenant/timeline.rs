@@ -756,7 +756,14 @@ impl Timeline {
                 self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
             }
             GetVectoredImpl::Vectored => {
-                self.get_vectored_impl(keyspace.clone(), lsn, ctx).await
+                let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
+
+                if cfg!(debug_assertions) {
+                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                        .await;
+                }
+
+                vectored_res
             }
         }
     }
@@ -819,6 +826,68 @@ impl Timeline {
         }
 
         Ok(results)
+    }
+
+    #[allow(unused)]
+    pub(super) async fn validate_get_vectored_impl(
+        &self,
+        vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) {
+        let sequential_res = self
+            .get_vectored_sequential_impl(keyspace.clone(), lsn, ctx)
+            .await;
+
+        fn errors_match(lhs: &GetVectoredError, rhs: &GetVectoredError) -> bool {
+            use GetVectoredError::*;
+            match (lhs, rhs) {
+                (Cancelled, Cancelled) => true,
+                (Oversized(l), Oversized(r)) => l == r,
+                (InvalidLsn(l), InvalidLsn(r)) => l == r,
+                (MissingKey(l), MissingKey(r)) => l == r,
+                (GetReadyAncestorError(_), GetReadyAncestorError(_)) => true,
+                (Other(_), Other(_)) => true,
+                _ => false,
+            }
+        }
+
+        match (&sequential_res, vectored_res) {
+            (Err(seq_err), Ok(_)) => {
+                panic!(concat!("Sequential get failed with {}, but vectored get did not",
+                               " - keyspace={:?} lsn={}"),
+                       seq_err, keyspace, lsn) },
+            (Ok(_), Err(vec_err)) => {
+                panic!(concat!("Vectored get failed with {}, but sequential get did not",
+                               " - keyspace={:?} lsn={}"),
+                       vec_err, keyspace, lsn) },
+            (Err(seq_err), Err(vec_err)) => {
+                assert!(errors_match(seq_err, vec_err),
+                        "Mismatched errors: {seq_err} != {vec_err} - keyspace={keyspace:?} lsn={lsn}")},
+            (Ok(seq_values), Ok(vec_values)) => {
+                seq_values.iter().zip(vec_values.iter()).for_each(|((seq_key, seq_res), (vec_key, vec_res))| {
+                    assert_eq!(seq_key, vec_key);
+                    match (seq_res, vec_res) {
+                        (Ok(seq_blob), Ok(vec_blob)) => {
+                            assert_eq!(seq_blob, vec_blob,
+                                       "Image mismatch for key {seq_key} - keyspace={keyspace:?} lsn={lsn}");
+                        },
+                        (Err(err), Ok(_)) => {
+                            panic!(
+                                concat!("Sequential get failed with {} for key {}, but vectored get did not",
+                                        " - keyspace={:?} lsn={}"),
+                                err, seq_key, keyspace, lsn) },
+                        (Ok(_), Err(err)) => {
+                            panic!(
+                                concat!("Vectored get failed with {} for key {}, but sequential get did not",
+                                        " - keyspace={:?} lsn={}"),
+                                err, seq_key, keyspace, lsn) },
+                        (Err(_), Err(_)) => {}
+                    }
+                })
+            }
+        }
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
