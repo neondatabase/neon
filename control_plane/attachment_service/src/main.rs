@@ -8,6 +8,7 @@ use anyhow::anyhow;
 use attachment_service::http::make_router;
 use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
+use aws_config::{self, BehaviorVersion, Region};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -55,6 +56,100 @@ struct Cli {
     database_url: String,
 }
 
+/// Secrets may either be provided on the command line (for testing), or loaded from AWS SecretManager: this
+/// type encapsulates the logic to decide which and do the loading.
+struct Secrets {
+    database_url: String,
+    public_key: Option<JwtAuth>,
+    jwt_token: Option<String>,
+}
+
+impl Secrets {
+    const DATABASE_URL_SECRET: &'static str = "rds-neon-storage-controller-url";
+    const JWT_TOKEN_SECRET: &'static str = "neon-storage-controller-pageserver-jwt-token";
+    const PUBLIC_KEY_SECRET: &'static str = "neon-storage-controller-public-key";
+
+    async fn load(args: &Cli) -> anyhow::Result<Self> {
+        if args.database_url.is_empty() {
+            Self::load_aws_sm().await
+        } else {
+            Self::load_cli(args)
+        }
+    }
+
+    async fn load_aws_sm() -> anyhow::Result<Self> {
+        let Ok(region) = std::env::var("AWS_REGION") else {
+            anyhow::bail!("AWS_REGION is not set, cannot load secrets automatically: either set this, or use CLI args to supply secrets");
+        };
+        let config = aws_config::defaults(BehaviorVersion::v2023_11_09())
+            .region(Region::new(region.clone()))
+            .load()
+            .await;
+
+        let asm = aws_sdk_secretsmanager::Client::new(&config);
+
+        let Some(database_url) = asm
+            .get_secret_value()
+            .secret_id(Self::DATABASE_URL_SECRET)
+            .send()
+            .await?
+            .secret_string()
+            .map(str::to_string)
+        else {
+            anyhow::bail!(
+                "Database URL secret not found at {region}/{}",
+                Self::DATABASE_URL_SECRET
+            )
+        };
+
+        let jwt_token = asm
+            .get_secret_value()
+            .secret_id(Self::JWT_TOKEN_SECRET)
+            .send()
+            .await?
+            .secret_string()
+            .map(str::to_string);
+        if jwt_token.is_none() {
+            tracing::warn!("No pageserver JWT token set: this will only work if authentication is disabled on the pageserver");
+        }
+
+        let public_key = asm
+            .get_secret_value()
+            .secret_id(Self::PUBLIC_KEY_SECRET)
+            .send()
+            .await?
+            .secret_string()
+            .map(str::to_string);
+        let public_key = match public_key {
+            Some(key) => Some(JwtAuth::from_key(key)?),
+            None => {
+                tracing::warn!(
+                    "No public key set: inccoming HTTP requests will not be authenticated"
+                );
+                None
+            }
+        };
+
+        Ok(Self {
+            database_url,
+            public_key,
+            jwt_token,
+        })
+    }
+
+    fn load_cli(args: &Cli) -> anyhow::Result<Self> {
+        let public_key = match &args.public_key {
+            None => None,
+            Some(key_path) => Some(JwtAuth::from_key_path(key_path)?),
+        };
+        Ok(Self {
+            database_url: args.database_url.clone(),
+            public_key,
+            jwt_token: args.jwt_token.clone(),
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let launch_ts = Box::leak(Box::new(LaunchTimestamp::generate()));
@@ -75,25 +170,24 @@ async fn main() -> anyhow::Result<()> {
         args.listen
     );
 
+    let secrets = Secrets::load(&args).await?;
+
     let config = Config {
-        jwt_token: args.jwt_token,
+        jwt_token: secrets.jwt_token,
         control_plane_jwt_token: args.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
     };
 
     let json_path = args.path;
-    let persistence = Arc::new(Persistence::new(args.database_url, json_path.clone()));
+    let persistence = Arc::new(Persistence::new(secrets.database_url, json_path.clone()));
 
     let service = Service::spawn(config, persistence.clone()).await?;
 
     let http_listener = tcp_listener::bind(args.listen)?;
 
-    let auth = if let Some(public_key_path) = &args.public_key {
-        let jwt_auth = JwtAuth::from_key_path(public_key_path)?;
-        Some(Arc::new(SwappableJwtAuth::new(jwt_auth)))
-    } else {
-        None
-    };
+    let auth = secrets
+        .public_key
+        .map(|jwt_auth| Arc::new(SwappableJwtAuth::new(jwt_auth)));
     let router = make_router(service, auth)
         .build()
         .map_err(|err| anyhow!(err))?;

@@ -20,6 +20,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::TimelineState;
+use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
@@ -362,6 +363,14 @@ impl WalRedoManager {
                 mgr.request_redo(key, lsn, base_img, records, pg_version)
                     .await
             }
+        }
+    }
+
+    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+        match self {
+            WalRedoManager::Prod(m) => m.status(),
+            #[cfg(test)]
+            WalRedoManager::Test(_) => None,
         }
     }
 }
@@ -1955,6 +1964,10 @@ impl Tenant {
 
     pub fn generation(&self) -> Generation {
         self.generation
+    }
+
+    pub(crate) fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
+        self.walredo_mgr.status()
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.

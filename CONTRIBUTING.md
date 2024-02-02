@@ -20,7 +20,7 @@ ln -s ../../pre-commit.py .git/hooks/pre-commit
 
 This will run following checks on staged files before each commit:
 - `rustfmt`
-- checks for python files, see [obligatory checks](/docs/sourcetree.md#obligatory-checks).
+- checks for Python files, see [obligatory checks](/docs/sourcetree.md#obligatory-checks).
 
 There is also a separate script `./run_clippy.sh` that runs `cargo clippy` on the whole project
 and `./scripts/reformat` that runs all formatting tools to ensure the project is up to date.

@@ -219,7 +219,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: CancellationToken,
-    ) -> anyhow::Result<()>;
+    ) -> Result<(), TimeTravelError>;
 }
 
 pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
@@ -268,6 +268,45 @@ impl std::fmt::Display for DownloadError {
 }
 
 impl std::error::Error for DownloadError {}
+
+#[derive(Debug)]
+pub enum TimeTravelError {
+    /// Validation or other error happened due to user input.
+    BadInput(anyhow::Error),
+    /// The used remote storage does not have time travel recovery implemented
+    Unimplemented,
+    /// The number of versions/deletion markers is above our limit.
+    TooManyVersions,
+    /// A cancellation token aborted the process, typically during
+    /// request closure or process shutdown.
+    Cancelled,
+    /// Other errors
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for TimeTravelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeTravelError::BadInput(e) => {
+                write!(
+                    f,
+                    "Failed to time travel recover a prefix due to user input: {e}"
+                )
+            }
+            TimeTravelError::Unimplemented => write!(
+                f,
+                "time travel recovery is not implemented for the current storage backend"
+            ),
+            TimeTravelError::Cancelled => write!(f, "Cancelled, shutting down"),
+            TimeTravelError::TooManyVersions => {
+                write!(f, "Number of versions/delete markers above limit")
+            }
+            TimeTravelError::Other(e) => write!(f, "Failed to time travel recover a prefix: {e:?}"),
+        }
+    }
+}
+
+impl std::error::Error for TimeTravelError {}
 
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
@@ -404,7 +443,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), TimeTravelError> {
         match self {
             Self::LocalFs(s) => {
                 s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
@@ -434,7 +473,12 @@ impl GenericRemoteStorage {
                 Self::LocalFs(LocalFs::new(root.clone())?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
-                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
+                // The profile and access key id are only printed here for debugging purposes,
+                // their values don't indicate the eventually taken choice for auth.
+                let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "<none>".into());
+                let access_key_id =
+                    std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "<none>".into());
+                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
             }

@@ -1,7 +1,11 @@
 import time
 from typing import Any, Dict, List, Optional, Union
 
-from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef, ObjectTypeDef
+from mypy_boto3_s3.type_defs import (
+    EmptyResponseMetadataTypeDef,
+    ListObjectsV2OutputTypeDef,
+    ObjectTypeDef,
+)
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -342,6 +346,27 @@ def list_prefix(
         Delimiter=delimiter,
         Bucket=remote.bucket_name,
         Prefix=prefix,
+    )
+    return response
+
+
+def enable_remote_storage_versioning(
+    remote: RemoteStorage,
+) -> EmptyResponseMetadataTypeDef:
+    """
+    Enable S3 versioning for the remote storage
+    """
+    # local_fs has no
+    assert isinstance(remote, S3Storage), "localfs is currently not supported"
+    assert remote.client is not None
+
+    # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
+    response = remote.client.put_bucket_versioning(
+        Bucket=remote.bucket_name,
+        VersioningConfiguration={
+            "MFADelete": "Disabled",
+            "Status": "Enabled",
+        },
     )
     return response
 

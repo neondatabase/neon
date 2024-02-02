@@ -1651,11 +1651,18 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+#[rustfmt::skip]
 pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_process_launch_duration",
         "Histogram of the duration of successful WalRedoProcess::launch calls",
-        redo_histogram_time_buckets!(),
+        vec![
+            0.0002, 0.0004, 0.0006, 0.0008, 0.0010,
+            0.0020, 0.0040, 0.0060, 0.0080, 0.0100,
+            0.0200, 0.0400, 0.0600, 0.0800, 0.1000,
+            0.2000, 0.4000, 0.6000, 0.8000, 1.0000,
+            1.5000, 2.0000, 2.5000, 3.0000, 4.0000, 10.0000
+        ],
     )
     .expect("failed to define a metric")
 });

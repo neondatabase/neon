@@ -140,9 +140,42 @@ static XLogReaderState *reader_state;
 #define TRACE DEBUG5
 
 #ifdef HAVE_LIBSECCOMP
+
+
+/*
+ * https://man7.org/linux/man-pages/man2/close_range.2.html
+ *
+ * The `close_range` syscall is available as of Linux 5.9.
+ *
+ * The `close_range` libc wrapper is only available in glibc >= 2.34.
+ * Debian Bullseye ships a libc package based on glibc 2.31.
+ * => write the wrapper ourselves, using the syscall number from the kernel headers.
+ *
+ * If the Linux uAPI headers don't define the system call number,
+ * fail the build deliberately rather than ifdef'ing it to ENOSYS.
+ * We prefer a compile time over a runtime error for walredo.
+ */
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <errno.h>
+int close_range(unsigned int start_fd, unsigned int count, unsigned int flags) {
+    return syscall(__NR_close_range, start_fd, count, flags);
+}
+
 static void
 enter_seccomp_mode(void)
 {
+
+	/*
+	 * The pageserver process relies on us to close all the file descriptors
+	 * it potentially leaked to us, _before_ we start processing potentially dangerous
+	 * wal records. See the comment in the Rust code that launches this process.
+	 */
+	int err;
+	if (err = close_range(3, ~0U, 0)) {
+		ereport(FATAL, (errcode(ERRCODE_SYSTEM_ERROR), errmsg("seccomp: could not close files >= fd 3")));
+	}
+
 	PgSeccompRule syscalls[] =
 	{
 		/* Hard requirements */

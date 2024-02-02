@@ -18,7 +18,9 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
-use crate::{Download, DownloadError, DownloadStream, Listing, ListingMode, RemotePath};
+use crate::{
+    Download, DownloadError, DownloadStream, Listing, ListingMode, RemotePath, TimeTravelError,
+};
 
 use super::{RemoteStorage, StorageMetadata};
 
@@ -430,8 +432,8 @@ impl RemoteStorage for LocalFs {
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
         _cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
-        unimplemented!()
+    ) -> Result<(), TimeTravelError> {
+        Err(TimeTravelError::Unimplemented)
     }
 }
 

@@ -14,8 +14,8 @@ Alternatively, compile and run the project [locally](#running-local-installation
 A Neon installation consists of compute nodes and the Neon storage engine. Compute nodes are stateless PostgreSQL nodes backed by the Neon storage engine.
 
 The Neon storage engine consists of two major components:
-- Pageserver. Scalable storage backend for the compute nodes.
-- Safekeepers. The safekeepers form a redundant WAL service that received WAL from the compute node, and stores it durably until it has been processed by the pageserver and uploaded to cloud storage.
+- Pageserver: Scalable storage backend for the compute nodes.
+- Safekeepers: The safekeepers form a redundant WAL service that received WAL from the compute node, and stores it durably until it has been processed by the pageserver and uploaded to cloud storage.
 
 See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more information.
 
@@ -81,9 +81,9 @@ The project uses [rust toolchain file](./rust-toolchain.toml) to define the vers
 
 This file is automatically picked up by [`rustup`](https://rust-lang.github.io/rustup/overrides.html#the-toolchain-file) that installs (if absent) and uses the toolchain version pinned in the file.
 
-rustup users who want to build with another toolchain can use [`rustup override`](https://rust-lang.github.io/rustup/overrides.html#directory-overrides) command to set a specific toolchain for the project's directory.
+rustup users who want to build with another toolchain can use the [`rustup override`](https://rust-lang.github.io/rustup/overrides.html#directory-overrides) command to set a specific toolchain for the project's directory.
 
-non-rustup users most probably are not getting the same toolchain automatically from the file, so are responsible to manually verify their toolchain matches the version in the file.
+non-rustup users most probably are not getting the same toolchain automatically from the file, so are responsible to manually verify that their toolchain matches the version in the file.
 Newer rustc versions most probably will work fine, yet older ones might not be supported due to some new features used by the project or the crates.
 
 #### Building on Linux
@@ -124,7 +124,7 @@ make -j`sysctl -n hw.logicalcpu` -s
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `pg_install/bin` and `pg_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
-Python (3.9 or higher), and install python3 packages using `./scripts/pysync` (requires [poetry>=1.3](https://python-poetry.org/)) in the project directory.
+Python (3.9 or higher), and install the python3 packages using `./scripts/pysync` (requires [poetry>=1.3](https://python-poetry.org/)) in the project directory.
 
 
 #### Running neon database
@@ -166,7 +166,7 @@ Starting postgres at 'postgresql://cloud_admin@127.0.0.1:55432/postgres'
 
 2. Now, it is possible to connect to postgres and run some queries:
 ```text
-> psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
+> psql -p 55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
 CREATE TABLE
 postgres=# insert into t values(1,1);
@@ -205,7 +205,7 @@ Starting postgres at 'postgresql://cloud_admin@127.0.0.1:55434/postgres'
 
 # this new postgres instance will have all the data from 'main' postgres,
 # but all modifications would not affect data in original postgres
-> psql -p55434 -h 127.0.0.1 -U cloud_admin postgres
+> psql -p 55434 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------
@@ -216,7 +216,7 @@ postgres=# insert into t values(2,2);
 INSERT 0 1
 
 # check that the new change doesn't affect the 'main' postgres
-> psql -p55432 -h 127.0.0.1 -U cloud_admin postgres
+> psql -p 55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# select * from t;
  key | value
 -----+-------
@@ -224,7 +224,7 @@ postgres=# select * from t;
 (1 row)
 ```
 
-4. If you want to run tests afterward (see below), you must stop all the running of the pageserver, safekeeper, and postgres instances
+4. If you want to run tests afterwards (see below), you must stop all the running pageserver, safekeeper, and postgres instances
    you have just started. You can terminate them all with one command:
 ```sh
 > cargo neon stop
@@ -243,7 +243,7 @@ CARGO_BUILD_FLAGS="--features=testing" make
 ```
 
 By default, this runs both debug and release modes, and all supported postgres versions. When
-testing locally, it is convenient to run just run one set of permutations, like this:
+testing locally, it is convenient to run just one set of permutations, like this:
 
 ```sh
 DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest
