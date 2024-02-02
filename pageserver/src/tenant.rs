@@ -2650,17 +2650,13 @@ impl Tenant {
             let mut tuple = inspect_state(&rx.borrow_and_update());
 
             let is_broken = tuple.1;
-            let mut counted_broken = if !is_broken {
-                // the tenant might be ignored and reloaded, so first remove any previous set
-                // element. it most likely has already been scraped, as these are manual operations
-                // right now. most likely we will add it back very soon.
-                drop(BROKEN_TENANTS_SET.remove_label_values(set_key));
-                false
-            } else {
+            let mut counted_broken = if is_broken {
                 // add the id to the set right away, there should not be any updates on the channel
-                // after
+                // after before tenant is removed, if ever
                 BROKEN_TENANTS_SET.with_label_values(set_key).set(1);
                 true
+            } else {
+                false
             };
 
             loop {
