@@ -215,8 +215,8 @@ pub struct Timeline {
     // Atomic would be more appropriate here.
     last_freeze_ts: RwLock<Instant>,
 
-    // WAL redo manager
-    walredo_mgr: Arc<super::WalRedoManager>,
+    // WAL redo manager. `None` only for broken tenants.
+    walredo_mgr: Option<Arc<super::WalRedoManager>>,
 
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
@@ -1421,7 +1421,7 @@ impl Timeline {
         tenant_shard_id: TenantShardId,
         generation: Generation,
         shard_identity: ShardIdentity,
-        walredo_mgr: Arc<super::WalRedoManager>,
+        walredo_mgr: Option<Arc<super::WalRedoManager>>,
         resources: TimelineResources,
         pg_version: u32,
         state: TimelineState,
@@ -4445,6 +4445,9 @@ impl Timeline {
 
                 let img = match self
                     .walredo_mgr
+                    .as_ref()
+                    .context("timeline has no walredo manager")
+                    .map_err(PageReconstructError::WalRedo)?
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
                     .await
                     .context("reconstruct a page image")
