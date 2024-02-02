@@ -74,7 +74,7 @@ pub struct EndpointConnPool {
     total_conns: usize,
     max_conns: usize,
     _guard: IntCounterPairGuard,
-    global_pool_conns: Arc<AtomicUsize>,
+    global_connections_count: Arc<AtomicUsize>,
     global_pool_size_max_conns: usize,
 }
 
@@ -83,11 +83,11 @@ impl EndpointConnPool {
         let Self {
             pools,
             total_conns,
-            global_pool_conns,
+            global_connections_count,
             ..
         } = self;
         pools.get_mut(&db_user).and_then(|pool_entries| {
-            pool_entries.get_conn_entry(total_conns, global_pool_conns.clone())
+            pool_entries.get_conn_entry(total_conns, global_connections_count.clone())
         })
     }
 
@@ -101,7 +101,7 @@ impl EndpointConnPool {
             let new_len = pool.conns.len();
             let removed = old_len - new_len;
             if removed > 0 {
-                self.global_pool_conns
+                self.global_connections_count
                     .fetch_sub(removed, atomic::Ordering::Relaxed);
                 NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(removed as i64);
             }
@@ -122,7 +122,7 @@ impl EndpointConnPool {
         let global_max_conn = pool.read().global_pool_size_max_conns;
         if pool
             .read()
-            .global_pool_conns
+            .global_connections_count
             .load(atomic::Ordering::Relaxed)
             >= global_max_conn
         {
@@ -147,7 +147,7 @@ impl EndpointConnPool {
                 per_db_size = pool_entries.conns.len();
 
                 pool.total_conns += 1;
-                pool.global_pool_conns
+                pool.global_connections_count
                     .fetch_add(1, atomic::Ordering::Relaxed);
                 NUM_OPEN_CLIENTS_IN_HTTP_POOL.inc();
             }
@@ -168,7 +168,7 @@ impl EndpointConnPool {
 
 impl Drop for EndpointConnPool {
     fn drop(&mut self) {
-        self.global_pool_conns
+        self.global_connections_count
             .fetch_sub(self.total_conns, atomic::Ordering::Relaxed);
         NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(self.total_conns as i64);
     }
@@ -195,16 +195,15 @@ impl DbUserConnPool {
     fn get_conn_entry(
         &mut self,
         conns: &mut usize,
-        global_pool_conns: Arc<AtomicUsize>,
+        global_connections_count: Arc<AtomicUsize>,
     ) -> Option<ConnPoolEntry> {
         let mut removed = self.clear_closed_clients(conns);
-        global_pool_conns.fetch_sub(removed, atomic::Ordering::Relaxed);
         let conn = self.conns.pop();
         if conn.is_some() {
             *conns -= 1;
-            global_pool_conns.fetch_sub(1, atomic::Ordering::Relaxed);
             removed += 1;
         }
+        global_connections_count.fetch_sub(removed, atomic::Ordering::Relaxed);
         NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(removed as i64);
         conn
     }
@@ -224,8 +223,8 @@ pub struct GlobalConnPool {
     /// It's only used for diagnostics.
     global_pool_size: AtomicUsize,
 
-    // total number of connections in the pool
-    total_conns: Arc<AtomicUsize>,
+    /// Total number of connections in the pool
+    global_connections_count: Arc<AtomicUsize>,
 
     config: &'static crate::config::HttpConfig,
 }
@@ -257,7 +256,7 @@ impl GlobalConnPool {
             global_pool: DashMap::with_shard_amount(shards),
             global_pool_size: AtomicUsize::new(0),
             config,
-            total_conns: Arc::new(AtomicUsize::new(0)),
+            global_connections_count: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -308,7 +307,11 @@ impl GlobalConnPool {
 
             true
         });
-        NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(clients_removed as i64);
+        if clients_removed > 0 {
+            self.global_connections_count
+                .fetch_sub(clients_removed, atomic::Ordering::Relaxed);
+            NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(clients_removed as i64);
+        }
 
         let new_len = shard.len();
         drop(shard);
@@ -375,7 +378,7 @@ impl GlobalConnPool {
             total_conns: 0,
             max_conns: self.config.pool_options.max_conns_per_endpoint,
             _guard: ENDPOINT_POOLS.guard(),
-            global_pool_conns: self.total_conns.clone(),
+            global_connections_count: self.global_connections_count.clone(),
             global_pool_size_max_conns: self.config.pool_options.max_total_conns,
         }));
 
