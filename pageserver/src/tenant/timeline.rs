@@ -456,6 +456,9 @@ pub(crate) enum GetVectoredError {
     #[error("Requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
 
+    #[error("Requested key {0} not found")]
+    MissingKey(Key),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
