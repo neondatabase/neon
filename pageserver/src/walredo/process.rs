@@ -10,11 +10,13 @@ use nix::poll::{PollFd, PollFlags};
 use pageserver_api::{reltag::RelTag, shard::TenantShardId};
 use postgres_ffi::BLCKSZ;
 use std::os::fd::AsRawFd;
+#[cfg(feature = "testing")]
+use std::sync::atomic::AtomicUsize;
 use std::{
     collections::VecDeque,
     io::{Read, Write},
     process::{ChildStdin, ChildStdout, Command, Stdio},
-    sync::{atomic::AtomicUsize, Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard},
     time::Duration,
 };
 use tracing::{debug, error, instrument, Instrument};

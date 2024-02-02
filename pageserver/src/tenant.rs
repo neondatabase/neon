@@ -277,7 +277,7 @@ pub struct Tenant {
     // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
     // timeout...
     gc_cs: tokio::sync::Mutex<()>,
-    walredo_mgr: Arc<WalRedoManager>,
+    walredo_mgr: Option<Arc<WalRedoManager>>,
 
     // provides access to timeline data sitting in the remote storage
     pub(crate) remote_storage: Option<GenericRemoteStorage>,
@@ -633,7 +633,7 @@ impl Tenant {
             conf,
             attached_conf,
             shard_identity,
-            wal_redo_manager,
+            Some(wal_redo_manager),
             tenant_shard_id,
             remote_storage.clone(),
             deletion_queue_client,
@@ -1187,10 +1187,6 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         reason: String,
     ) -> Arc<Tenant> {
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
-            conf,
-            tenant_shard_id,
-        )));
         Arc::new(Tenant::new(
             TenantState::Broken {
                 reason,
@@ -1201,7 +1197,7 @@ impl Tenant {
             // Shard identity isn't meaningful for a broken tenant: it's just a placeholder
             // to occupy the slot for this TenantShardId.
             ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
-            wal_redo_manager,
+            None,
             tenant_shard_id,
             None,
             DeletionQueueClient::broken(),
@@ -1970,7 +1966,7 @@ impl Tenant {
     }
 
     pub(crate) fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
-        self.walredo_mgr.status()
+        self.walredo_mgr.as_ref().and_then(|mgr| mgr.status())
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
@@ -2610,7 +2606,7 @@ impl Tenant {
             self.tenant_shard_id,
             self.generation,
             self.shard_identity,
-            Arc::clone(&self.walredo_mgr),
+            self.walredo_mgr.as_ref().map(Arc::clone),
             resources,
             pg_version,
             state,
@@ -2628,7 +2624,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         attached_conf: AttachedTenantConf,
         shard_identity: ShardIdentity,
-        walredo_mgr: Arc<WalRedoManager>,
+        walredo_mgr: Option<Arc<WalRedoManager>>,
         tenant_shard_id: TenantShardId,
         remote_storage: Option<GenericRemoteStorage>,
         deletion_queue_client: DeletionQueueClient,
@@ -4059,7 +4055,7 @@ pub(crate) mod harness {
                 .unwrap(),
                 // This is a legacy/test code path: sharding isn't supported here.
                 ShardIdentity::unsharded(),
-                walredo_mgr,
+                Some(walredo_mgr),
                 self.tenant_shard_id,
                 Some(self.remote_storage.clone()),
                 self.deletion_queue.new_client(),
