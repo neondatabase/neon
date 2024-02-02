@@ -471,7 +471,7 @@ pub(crate) async fn download_initdb_tar_zst(
                 Err(other) => Err(other)?,
             };
             let mut download = tokio_util::io::StreamReader::new(download.download_stream);
-            let mut writer = tokio::io::BufWriter::with_capacity(8 * 1024, file);
+            let mut writer = tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, file);
 
             // TODO: this consumption of the response body should be subject to timeout + cancellation, but
             // not without thinking carefully about how to recover safely from cancelling a write to
