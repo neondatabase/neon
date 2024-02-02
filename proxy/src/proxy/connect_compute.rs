@@ -105,7 +105,7 @@ where
     mechanism.update_connect_config(&mut node_info.config);
 
     // try once
-    let (config, err) = match mechanism
+    let err = match mechanism
         .connect_once(ctx, &node_info, CONNECT_TIMEOUT)
         .await
     {
@@ -113,28 +113,28 @@ where
             ctx.latency_timer.success();
             return Ok(res);
         }
-        Err(e) => {
-            error!(error = ?e, "could not connect to compute node");
-            (invalidate_cache(node_info), e)
-        }
+        Err(e) => e,
     };
 
-    ctx.latency_timer.cache_miss();
+    error!(error = ?err, "could not connect to compute node");
 
     let mut num_retries = 1;
 
-    // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
-    info!("compute node's state has likely changed; requesting a wake-up");
-    let mut node_info = match user_info {
+    match user_info {
         auth::BackendType::Console(api, info) => {
-            wake_compute(&mut num_retries, ctx, api, info).await?
+            // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
+            info!("compute node's state has likely changed; requesting a wake-up");
+
+            ctx.latency_timer.cache_miss();
+            let config = invalidate_cache(node_info);
+            node_info = wake_compute(&mut num_retries, ctx, api, info).await?;
+
+            node_info.config.reuse_password(&config);
+            mechanism.update_connect_config(&mut node_info.config);
         }
         // nothing to do?
-        auth::BackendType::Link(_) => return Err(err.into()),
+        auth::BackendType::Link(_) => {}
     };
-
-    node_info.config.reuse_password(&config);
-    mechanism.update_connect_config(&mut node_info.config);
 
     // now that we have a new node, try connect to it repeatedly.
     // this can error for a few reasons, for instance:
