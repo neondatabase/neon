@@ -1,31 +1,27 @@
-use std::{
-    collections::VecDeque,
-    io::{Read, Write},
-    process::{ChildStdin, ChildStdout, Command, Stdio},
-    sync::{Mutex, MutexGuard},
-    time::Duration,
-};
-
-use anyhow::Context;
-use bytes::Bytes;
-use nix::poll::{PollFd, PollFlags};
-use pageserver_api::{reltag::RelTag, shard::TenantShardId};
-use postgres_ffi::BLCKSZ;
-use tracing::{debug, error, instrument, Instrument};
-
+use self::no_leak_child::NoLeakChild;
 use crate::{
     config::PageServerConf,
     metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
     walrecord::NeonWalRecord,
 };
-
-use self::no_leak_child::NoLeakChild;
-
+use anyhow::Context;
+use bytes::Bytes;
+use nix::poll::{PollFd, PollFlags};
+use pageserver_api::{reltag::RelTag, shard::TenantShardId};
+use postgres_ffi::BLCKSZ;
+use std::os::fd::AsRawFd;
+use std::{
+    collections::VecDeque,
+    io::{Read, Write},
+    process::{ChildStdin, ChildStdout, Command, Stdio},
+    sync::{atomic::AtomicUsize, Mutex, MutexGuard},
+    time::Duration,
+};
+use tracing::{debug, error, instrument, Instrument};
 use utils::{lsn::Lsn, nonblock::set_nonblock};
 
-use std::os::fd::AsRawFd;
-
 mod no_leak_child;
+/// The IPC protocol that pageserver and walredo process speak over their shared pipe.
 mod protocol;
 
 pub struct WalRedoProcess {
@@ -364,6 +360,8 @@ impl WalRedoProcess {
 
     #[cfg(feature = "testing")]
     fn record_and_log(&self, writebuf: &[u8]) {
+        use std::sync::atomic::Ordering;
+
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap()

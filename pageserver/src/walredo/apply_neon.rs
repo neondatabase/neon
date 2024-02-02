@@ -1,25 +1,7 @@
-use bytes::BytesMut;
-
 use crate::walrecord::NeonWalRecord;
-
 use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
-
-
-
-
-
-
-
-use tracing::*;
-
-
-#[cfg(feature = "testing")]
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-
-
-
+use bytes::BytesMut;
 use pageserver_api::key::{key_to_rel_block, key_to_slru_block, Key};
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
@@ -29,6 +11,7 @@ use postgres_ffi::v14::nonrelfile_utils::{
     transaction_id_set_status,
 };
 use postgres_ffi::BLCKSZ;
+use tracing::*;
 
 /// Can this request be served by neon redo functions
 /// or we need to pass it to wal-redo postgres process?
@@ -50,7 +33,7 @@ pub(crate) fn apply_in_neon(
     key: Key,
     page: &mut BytesMut,
 ) -> Result<(), anyhow::Error> {
-    Ok(match record {
+    match record {
         NeonWalRecord::Postgres {
             will_init: _,
             rec: _,
@@ -247,5 +230,6 @@ pub(crate) fn apply_in_neon(
                 LittleEndian::write_u32(&mut page[memberoff..memberoff + 4], member.xid);
             }
         }
-    })
+    }
+    Ok(())
 }

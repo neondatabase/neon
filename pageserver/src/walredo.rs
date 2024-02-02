@@ -24,22 +24,6 @@ mod process;
 /// Code to apply [`NeonWalRecord`]s.
 mod apply_neon;
 
-use anyhow::Context;
-
-use bytes::{Bytes, BytesMut};
-
-use pageserver_api::models::WalRedoManagerStatus;
-use pageserver_api::shard::TenantShardId;
-
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
-use std::time::Instant;
-use tracing::*;
-use utils::lsn::Lsn;
-
-#[cfg(feature = "testing")]
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use crate::config::PageServerConf;
 use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
@@ -47,8 +31,16 @@ use crate::metrics::{
 };
 use crate::repository::Key;
 use crate::walrecord::NeonWalRecord;
-
+use anyhow::Context;
+use bytes::{Bytes, BytesMut};
 use pageserver_api::key::key_to_rel_block;
+use pageserver_api::models::WalRedoManagerStatus;
+use pageserver_api::shard::TenantShardId;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use std::time::Instant;
+use tracing::*;
+use utils::lsn::Lsn;
 
 ///
 /// This is the real implementation that uses a Postgres process to
