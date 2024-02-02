@@ -690,8 +690,8 @@ async fn get_lsn_by_timestamp_handler(
     let result = Result { lsn, kind };
     tracing::info!(
         lsn=?result.lsn,
-        kind=result.kind,
-        timestamp = timestamp_raw.into_owned(),
+        kind=%result.kind,
+        timestamp=%timestamp_raw,
         "lsn_by_timestamp finished"
     );
     json_response(StatusCode::OK, result)
