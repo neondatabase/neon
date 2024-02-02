@@ -761,10 +761,9 @@ impl Tenant {
                     },
                     (SpawnMode::Normal, Some(remote_storage)) => {
                         let _preload_timer = TENANT.preload.start_timer();
-                        let span = tracing::info_span!("attach_preload");
                         let res = tenant_clone
                             .preload(remote_storage, task_mgr::shutdown_token())
-                            .instrument(span)
+                            .instrument(tracing::info_span!("attach_preload"))
                             .await;
                         match res {
                             Ok(p) => Some(p),
