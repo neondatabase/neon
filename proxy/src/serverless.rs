@@ -3,6 +3,7 @@
 //! Handles both SQL over HTTP and SQL over Websockets.
 
 mod conn_pool;
+mod json;
 mod sql_over_http;
 mod websocket;
 
