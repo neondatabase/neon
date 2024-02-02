@@ -4,6 +4,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import requests
@@ -388,6 +389,20 @@ class PageserverHttpClient(requests.Session):
             headers={"Accept": "text/html"},
         )
         return res.text
+
+    def tenant_time_travel_remote_storage(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timestamp: datetime,
+        done_if_after: datetime,
+    ):
+        """
+        Issues a request to perform time travel operations on the remote storage
+        """
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/time_travel_remote_storage?travel_to={timestamp.isoformat()}Z&done_if_after={done_if_after.isoformat()}Z"
+        )
+        self.verbose_error(res)
 
     def timeline_list(
         self,
