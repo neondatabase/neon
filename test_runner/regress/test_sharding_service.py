@@ -320,16 +320,19 @@ def test_sharding_service_compute_hook(
         assert counts[node_id] == 0
 
     wait_until(10, 1, lambda: node_evacuated(env.pageservers[0].id))
-    time.sleep(5)
 
     # Additional notification from migration
     log.info(f"notifications: {notifications}")
-    assert len(notifications) == 2
     expect = {
         "tenant_id": str(env.initial_tenant),
         "shards": [{"node_id": int(env.pageservers[1].id), "shard_number": 0}],
     }
-    assert notifications[1] == expect
+
+    def received_migration_notification():
+        assert len(notifications) == 2
+        assert notifications[1] == expect
+
+    wait_until(20, 0.25, received_migration_notification)
 
     # When we restart, we should re-emit notifications for all tenants
     env.attachment_service.stop()
