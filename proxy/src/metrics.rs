@@ -1,7 +1,8 @@
 use ::metrics::{
     exponential_buckets, register_histogram, register_histogram_vec, register_hll_vec,
-    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge_vec, Histogram,
-    HistogramVec, HyperLogLogVec, IntCounterPairVec, IntCounterVec, IntGaugeVec,
+    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge,
+    register_int_gauge_vec, Histogram, HistogramVec, HyperLogLogVec, IntCounterPairVec,
+    IntCounterVec, IntGauge, IntGaugeVec,
 };
 use metrics::{register_int_counter_pair, IntCounterPair};
 
@@ -139,6 +140,14 @@ pub static ENDPOINT_POOLS: Lazy<IntCounterPair> = Lazy::new(|| {
         "Number of endpoints we have registered pools for",
         "proxy_http_pool_endpoints_unregistered_total",
         "Number of endpoints we have unregistered pools for",
+    )
+    .unwrap()
+});
+
+pub static NUM_OPEN_CLIENTS_IN_HTTP_POOL: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "proxy_http_pool_opened_connections",
+        "Number of opened connections to a database.",
     )
     .unwrap()
 });

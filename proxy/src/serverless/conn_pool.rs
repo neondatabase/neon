@@ -18,7 +18,7 @@ use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 
 use crate::console::messages::MetricsAuxInfo;
-use crate::metrics::{ENDPOINT_POOLS, GC_LATENCY};
+use crate::metrics::{ENDPOINT_POOLS, GC_LATENCY, NUM_OPEN_CLIENTS_IN_HTTP_POOL};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{
     auth::backend::ComputeUserInfo, context::RequestMonitoring, metrics::NUM_DB_CONNECTIONS_GAUGE,
@@ -74,7 +74,7 @@ pub struct EndpointConnPool {
     total_conns: usize,
     max_conns: usize,
     _guard: IntCounterPairGuard,
-    global_pool_size: Arc<AtomicUsize>,
+    global_pool_conns: Arc<AtomicUsize>,
     global_pool_size_max_conns: usize,
 }
 
@@ -83,11 +83,11 @@ impl EndpointConnPool {
         let Self {
             pools,
             total_conns,
-            global_pool_size,
+            global_pool_conns,
             ..
         } = self;
         pools.get_mut(&db_user).and_then(|pool_entries| {
-            pool_entries.get_conn_entry(total_conns, global_pool_size.clone())
+            pool_entries.get_conn_entry(total_conns, global_pool_conns.clone())
         })
     }
 
@@ -101,8 +101,9 @@ impl EndpointConnPool {
             let new_len = pool.conns.len();
             let removed = old_len - new_len;
             if removed > 0 {
-                self.global_pool_size
+                self.global_pool_conns
                     .fetch_sub(removed, atomic::Ordering::Relaxed);
+                NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(removed as i64);
             }
             *total_conns -= removed;
             removed > 0
@@ -119,7 +120,12 @@ impl EndpointConnPool {
             return Ok(());
         }
         let global_max_conn = pool.read().global_pool_size_max_conns;
-        if pool.read().global_pool_size.load(atomic::Ordering::Relaxed) >= global_max_conn {
+        if pool
+            .read()
+            .global_pool_conns
+            .load(atomic::Ordering::Relaxed)
+            >= global_max_conn
+        {
             info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full");
             return Ok(());
         }
@@ -141,8 +147,9 @@ impl EndpointConnPool {
                 per_db_size = pool_entries.conns.len();
 
                 pool.total_conns += 1;
-                pool.global_pool_size
+                pool.global_pool_conns
                     .fetch_add(1, atomic::Ordering::Relaxed);
+                NUM_OPEN_CLIENTS_IN_HTTP_POOL.inc();
             }
 
             pool.total_conns
@@ -161,8 +168,9 @@ impl EndpointConnPool {
 
 impl Drop for EndpointConnPool {
     fn drop(&mut self) {
-        self.global_pool_size
+        self.global_pool_conns
             .fetch_sub(self.total_conns, atomic::Ordering::Relaxed);
+        NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(self.total_conns as i64);
     }
 }
 
@@ -172,7 +180,7 @@ pub struct DbUserConnPool {
 }
 
 impl DbUserConnPool {
-    fn clear_closed_clients(&mut self, conns: &mut usize) {
+    fn clear_closed_clients(&mut self, conns: &mut usize) -> usize {
         let old_len = self.conns.len();
 
         self.conns
@@ -181,19 +189,23 @@ impl DbUserConnPool {
         let new_len = self.conns.len();
         let removed = old_len - new_len;
         *conns -= removed;
+        removed
     }
 
     fn get_conn_entry(
         &mut self,
         conns: &mut usize,
-        global_pool_size: Arc<AtomicUsize>,
+        global_pool_conns: Arc<AtomicUsize>,
     ) -> Option<ConnPoolEntry> {
-        self.clear_closed_clients(conns);
+        let mut removed = self.clear_closed_clients(conns);
+        global_pool_conns.fetch_sub(removed, atomic::Ordering::Relaxed);
         let conn = self.conns.pop();
         if conn.is_some() {
             *conns -= 1;
-            global_pool_size.fetch_sub(1, atomic::Ordering::Relaxed);
+            global_pool_conns.fetch_sub(1, atomic::Ordering::Relaxed);
+            removed += 1;
         }
+        NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(removed as i64);
         conn
     }
 }
@@ -273,6 +285,7 @@ impl GlobalConnPool {
 
         let timer = GC_LATENCY.start_timer();
         let current_len = shard.len();
+        let mut clients_removed = 0;
         shard.retain(|endpoint, x| {
             // if the current endpoint pool is unique (no other strong or weak references)
             // then it is currently not in use by any connections.
@@ -282,9 +295,9 @@ impl GlobalConnPool {
                 } = pool.get_mut();
 
                 // ensure that closed clients are removed
-                pools
-                    .iter_mut()
-                    .for_each(|(_, db_pool)| db_pool.clear_closed_clients(total_conns));
+                pools.iter_mut().for_each(|(_, db_pool)| {
+                    clients_removed += db_pool.clear_closed_clients(total_conns);
+                });
 
                 // we only remove this pool if it has no active connections
                 if *total_conns == 0 {
@@ -295,10 +308,11 @@ impl GlobalConnPool {
 
             true
         });
+        NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(clients_removed as i64);
+
         let new_len = shard.len();
         drop(shard);
         timer.observe_duration();
-
         let removed = current_len - new_len;
 
         if removed > 0 {
@@ -361,7 +375,7 @@ impl GlobalConnPool {
             total_conns: 0,
             max_conns: self.config.pool_options.max_conns_per_endpoint,
             _guard: ENDPOINT_POOLS.guard(),
-            global_pool_size: self.total_conns.clone(),
+            global_pool_conns: self.total_conns.clone(),
             global_pool_size_max_conns: self.config.pool_options.max_total_conns,
         }));
 
