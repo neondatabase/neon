@@ -1,4 +1,6 @@
 import time
+from random import choice
+from string import ascii_lowercase
 
 import pytest
 from fixtures.log_helper import log
@@ -9,6 +11,10 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.types import Lsn
 from fixtures.utils import query_scalar
+
+
+def random_string(n: int):
+    return "".join([choice(ascii_lowercase) for _ in range(n)])
 
 
 def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
@@ -236,6 +242,57 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
     assert vanilla_pg.safe_psql(
         "select sum(somedata) from replication_example"
     ) == endpoint.safe_psql("select sum(somedata) from replication_example")
+
+
+# Test that WAL redo works for fairly large records.
+#
+# See https://github.com/neondatabase/neon/pull/6534. That wasn't a
+# logical replication bug as such, but without logical replication,
+# records passed ot the WAL redo process are never large enough to hit
+# the bug.
+def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
+    env = neon_simple_env
+
+    env.neon_cli.create_branch("init")
+    endpoint = env.endpoints.create_start("init")
+
+    cur = endpoint.connect().cursor()
+    cur.execute("CREATE TABLE reptbl(id int, largeval text);")
+    cur.execute("alter table reptbl replica identity full")
+    cur.execute("create publication pub1 for table reptbl")
+
+    # now start subscriber
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("CREATE TABLE reptbl(id int, largeval text);")
+
+    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    connstr = endpoint.connstr().replace("'", "''")
+    vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
+
+    # Test simple insert, update, delete. But with very large values
+    value = random_string(10_000_000)
+    cur.execute(f"INSERT INTO reptbl VALUES (1, '{value}')")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(1, value)]
+
+    # Test delete, and reinsert another value
+    cur.execute("DELETE FROM reptbl WHERE id = 1")
+    cur.execute(f"INSERT INTO reptbl VALUES (2, '{value}')")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
+
+    value = random_string(10_000_000)
+    cur.execute(f"UPDATE reptbl SET largeval='{value}'")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
+
+    endpoint.stop()
+    endpoint.start()
+    cur = endpoint.connect().cursor()
+    value = random_string(10_000_000)
+    cur.execute(f"UPDATE reptbl SET largeval='{value}'")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
 
 
 #

@@ -804,6 +804,9 @@ ApplyRecord(StringInfo input_message)
 	ErrorContextCallback errcallback;
 #if PG_VERSION_NUM >= 150000
 	DecodedXLogRecord *decoded;
+#define STATIC_DECODEBUF_SIZE (64 * 1024)
+	static char *static_decodebuf = NULL;
+	size_t		required_space;
 #endif
 
 	/*
@@ -833,7 +836,19 @@ ApplyRecord(StringInfo input_message)
 	XLogBeginRead(reader_state, lsn);
 
 #if PG_VERSION_NUM >= 150000
-	decoded = (DecodedXLogRecord *) XLogReadRecordAlloc(reader_state, record->xl_tot_len, true);
+	/*
+	 * For reasonably small records, reuse a fixed size buffer to reduce
+	 * palloc overhead.
+	 */
+	required_space = DecodeXLogRecordRequiredSpace(record->xl_tot_len);
+	if (required_space <= STATIC_DECODEBUF_SIZE)
+	{
+		if (static_decodebuf == NULL)
+			static_decodebuf = MemoryContextAlloc(TopMemoryContext, STATIC_DECODEBUF_SIZE);
+		decoded = (DecodedXLogRecord *) static_decodebuf;
+	}
+	else
+		decoded = palloc(required_space);
 
 	if (!DecodeXLogRecord(reader_state, decoded, record, lsn, &errormsg))
 		elog(ERROR, "failed to decode WAL record: %s", errormsg);
@@ -843,36 +858,14 @@ ApplyRecord(StringInfo input_message)
 		decoded->next_lsn = reader_state->NextRecPtr;
 
 		/*
-		 * If it's in the decode buffer, mark the decode buffer space as
-		 * occupied.
-		 */
-		if (!decoded->oversized)
-		{
-			/* The new decode buffer head must be MAXALIGNed. */
-			Assert(decoded->size == MAXALIGN(decoded->size));
-			if ((char *) decoded == reader_state->decode_buffer)
-				reader_state->decode_buffer_tail = reader_state->decode_buffer + decoded->size;
-			else
-				reader_state->decode_buffer_tail += decoded->size;
-		}
-
-		/* Insert it into the queue of decoded records. */
-		Assert(reader_state->decode_queue_tail != decoded);
-		if (reader_state->decode_queue_tail)
-			reader_state->decode_queue_tail->next = decoded;
-		reader_state->decode_queue_tail = decoded;
-		if (!reader_state->decode_queue_head)
-			reader_state->decode_queue_head = decoded;
-
-		/*
 		 * Update the pointers to the beginning and one-past-the-end of this
 		 * record, again for the benefit of historical code that expected the
 		 * decoder to track this rather than accessing these fields of the record
 		 * itself.
 		 */
-		reader_state->record = reader_state->decode_queue_head;
-		reader_state->ReadRecPtr = reader_state->record->lsn;
-		reader_state->EndRecPtr = reader_state->record->next_lsn;
+		reader_state->record = decoded;
+		reader_state->ReadRecPtr = decoded->lsn;
+		reader_state->EndRecPtr = decoded->next_lsn;
 	}
 #else
 	/*
@@ -912,8 +905,9 @@ ApplyRecord(StringInfo input_message)
 
 	elog(TRACE, "applied WAL record with LSN %X/%X",
 		 (uint32) (lsn >> 32), (uint32) lsn);
+
 #if PG_VERSION_NUM >= 150000
-	if (decoded && decoded->oversized)
+	if ((char *) decoded != static_decodebuf)
 		pfree(decoded);
 #endif
 }
