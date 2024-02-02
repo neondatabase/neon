@@ -93,7 +93,7 @@ jobs:
                                                        --body-file "body.md" \
                                                        --head "${BRANCH}" \
                                                        --base "main" \
-                                                       --label "run-e2e-test-in-draft" \
+                                                       --label "run-e2e-tests-in-draft" \
                                                        --draft
           fi
 
