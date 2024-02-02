@@ -81,11 +81,14 @@ pub struct EndpointConnPool {
 impl EndpointConnPool {
     fn get_conn_entry(&mut self, db_user: (DbName, RoleName)) -> Option<ConnPoolEntry> {
         let Self {
-            pools, total_conns, ..
+            pools,
+            total_conns,
+            global_pool_size,
+            ..
         } = self;
-        pools
-            .get_mut(&db_user)
-            .and_then(|pool_entries| pool_entries.get_conn_entry(total_conns))
+        pools.get_mut(&db_user).and_then(|pool_entries| {
+            pool_entries.get_conn_entry(total_conns, global_pool_size.clone())
+        })
     }
 
     fn remove_client(&mut self, db_user: (DbName, RoleName), conn_id: uuid::Uuid) -> bool {
@@ -180,11 +183,16 @@ impl DbUserConnPool {
         *conns -= removed;
     }
 
-    fn get_conn_entry(&mut self, conns: &mut usize) -> Option<ConnPoolEntry> {
+    fn get_conn_entry(
+        &mut self,
+        conns: &mut usize,
+        global_pool_size: Arc<AtomicUsize>,
+    ) -> Option<ConnPoolEntry> {
         self.clear_closed_clients(conns);
         let conn = self.conns.pop();
         if conn.is_some() {
             *conns -= 1;
+            global_pool_size.fetch_sub(1, atomic::Ordering::Relaxed);
         }
         conn
     }

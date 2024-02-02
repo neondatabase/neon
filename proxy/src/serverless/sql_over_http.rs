@@ -36,6 +36,7 @@ use crate::auth::endpoint_sni;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
+use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
 use crate::RoleName;
@@ -79,6 +80,7 @@ fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::E
 where
     D: serde::de::Deserializer<'de>,
 {
+    // TODO: consider avoiding the allocation here.
     let json: Vec<Value> = serde::de::Deserialize::deserialize(deserializer)?;
     Ok(json_to_pg_text(json))
 }
@@ -88,23 +90,23 @@ where
 // as parameters.
 //
 fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
-    json.iter()
-        .map(|value| {
-            match value {
-                // special care for nulls
-                Value::Null => None,
+    json.iter().map(json_value_to_pg_text).collect()
+}
 
-                // convert to text with escaping
-                v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
+fn json_value_to_pg_text(value: &Value) -> Option<String> {
+    match value {
+        // special care for nulls
+        Value::Null => None,
 
-                // avoid escaping here, as we pass this as a parameter
-                Value::String(s) => Some(s.to_string()),
+        // convert to text with escaping
+        v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
 
-                // special care for arrays
-                Value::Array(_) => json_array_to_pg_array(value),
-            }
-        })
-        .collect()
+        // avoid escaping here, as we pass this as a parameter
+        Value::String(s) => Some(s.to_string()),
+
+        // special care for arrays
+        Value::Array(_) => json_array_to_pg_array(value),
+    }
 }
 
 //
@@ -417,6 +419,7 @@ async fn handle_inner(
     };
     drop(paused);
     info!(request_content_length, "request size in bytes");
+    HTTP_CONTENT_LENGTH.observe(request_content_length as f64);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
