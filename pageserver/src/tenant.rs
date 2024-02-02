@@ -761,7 +761,7 @@ impl Tenant {
                     },
                     (SpawnMode::Normal, Some(remote_storage)) => {
                         let _preload_timer = TENANT.preload.start_timer();
-                        let span = tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
+                        let span = tracing::info_span!("attach_preload");
                         let res = tenant_clone
                             .preload(remote_storage, task_mgr::shutdown_token())
                             .instrument(span)
@@ -883,6 +883,7 @@ impl Tenant {
         remote_storage: &GenericRemoteStorage,
         cancel: CancellationToken,
     ) -> anyhow::Result<TenantPreload> {
+        span::debug_assert_current_span_has_tenant_id();
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
