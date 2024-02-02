@@ -9,9 +9,13 @@ should be auto-generated too, but that's a TODO.
 
 The PostgreSQL on-disk file format is not portable across different
 CPU architectures and operating systems. It is also subject to change
-in each major PostgreSQL version. Currently, this module is based on
-PostgreSQL v14, but in the future we will probably need a separate
-copy for each PostgreSQL version.
+in each major PostgreSQL version. Currently, this module supports
+PostgreSQL v14, v15 and v16: bindings and code that depends on them are
+version-specific.
+This code is organized in modules `postgres_ffi::v14`, `postgres_ffi::v15` and
+`postgres_ffi::v16`. Version independent code is explicitly exported into
+shared `postgres_ffi`.
+
 
 TODO: Currently, there is also some code that deals with WAL records
 in pageserver/src/waldecoder.rs.  That should be moved into this

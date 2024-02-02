@@ -1,0 +1,15 @@
+[package]
+name = "consumption_metrics"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_with.workspace = true
+utils.workspace = true
+
+workspace_hack.workspace = true

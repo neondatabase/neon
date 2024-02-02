@@ -1,0 +1,40 @@
+[package]
+name = "storage_broker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+bench = []
+
+[dependencies]
+anyhow.workspace = true
+async-stream.workspace = true
+bytes.workspace = true
+clap = { workspace = true, features = ["derive"] }
+const_format.workspace = true
+futures.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+git-version.workspace = true
+humantime.workspace = true
+hyper = { workspace = true, features = ["full"] }
+once_cell.workspace = true
+parking_lot.workspace = true
+prost.workspace = true
+tonic.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-stream.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+utils.workspace = true
+
+workspace_hack.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[[bench]]
+name = "rps"
+harness = false
+

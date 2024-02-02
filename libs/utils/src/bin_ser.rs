@@ -265,7 +265,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::io::Cursor;
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ShortStruct {
         a: u8,
         b: u32,
@@ -286,7 +286,7 @@ mod tests {
     const SHORT2_ENC_LE: &[u8] = &[8, 0, 0, 3, 7];
     const SHORT2_ENC_LE_TRAILING: &[u8] = &[8, 0, 0, 3, 7, 0xff, 0xff, 0xff];
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub struct LongMsg {
         pub tag: u8,
         pub blockpos: u32,

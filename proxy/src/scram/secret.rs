@@ -5,6 +5,7 @@ use super::key::ScramKey;
 
 /// Server secret is produced from [password](super::password::SaltedPassword)
 /// and is used throughout the authentication process.
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ServerSecret {
     /// Number of iterations for `PBKDF2` function.
     pub iterations: u32,
@@ -14,6 +15,9 @@ pub struct ServerSecret {
     pub stored_key: ScramKey,
     /// Used by client to verify server's signature.
     pub server_key: ScramKey,
+    /// Should auth fail no matter what?
+    /// This is exactly the case for mocked secrets.
+    pub doomed: bool,
 }
 
 impl ServerSecret {
@@ -30,6 +34,7 @@ impl ServerSecret {
             salt_base64: salt.to_owned(),
             stored_key: base64_decode_array(stored_key)?.into(),
             server_key: base64_decode_array(server_key)?.into(),
+            doomed: false,
         };
 
         Some(secret)
@@ -38,16 +43,16 @@ impl ServerSecret {
     /// To avoid revealing information to an attacker, we use a
     /// mocked server secret even if the user doesn't exist.
     /// See `auth-scram.c : mock_scram_secret` for details.
-    #[allow(dead_code)]
-    pub fn mock(user: &str, nonce: &[u8; 32]) -> Self {
+    pub fn mock(user: &str, nonce: [u8; 32]) -> Self {
         // Refer to `auth-scram.c : scram_mock_salt`.
-        let mocked_salt = super::sha256([user.as_bytes(), nonce]);
+        let mocked_salt = super::sha256([user.as_bytes(), &nonce]);
 
         Self {
             iterations: 4096,
-            salt_base64: base64::encode(&mocked_salt),
+            salt_base64: base64::encode(mocked_salt),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
+            doomed: true,
         }
     }
 
@@ -64,9 +69,10 @@ impl ServerSecret {
 
         Some(Self {
             iterations,
-            salt_base64: base64::encode(&salt),
+            salt_base64: base64::encode(salt),
             stored_key: password.client_key().sha256(),
             server_key: password.server_key(),
+            doomed: false,
         })
     }
 }

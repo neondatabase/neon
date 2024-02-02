@@ -2,16 +2,16 @@ import statistics
 import threading
 import time
 import timeit
-from typing import Callable
+from typing import Any, Callable, List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnvBuilder, PgBin
-from fixtures.utils import lsn_from_hex
+from fixtures.types import Lsn
 
-from performance.test_perf_pgbench import (get_durations_matrix, get_scales_matrix)
+from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
 
 
 @pytest.fixture(params=["vanilla", "neon_off", "neon_on"])
@@ -30,8 +30,9 @@ def pg_compare(request) -> PgCompare:
 
         return fixture
     else:
-        assert len(x) == 2, f"request param ({request.param}) should have a format of \
-        `neon_{{safekeepers_enable_fsync}}`"
+        assert (
+            len(x) == 2
+        ), f"request param ({request.param}) should have a format of `neon_{{safekeepers_enable_fsync}}`"
 
         # `NeonCompare` interface
         neon_env_builder = request.getfixturevalue("neon_env_builder")
@@ -63,15 +64,14 @@ def start_heavy_write_workload(env: PgCompare, n_tables: int, scale: int, num_it
 
     def start_single_table_workload(table_id: int):
         for _ in range(num_iters):
-            with env.pg.connect().cursor() as cur:
+            with env.pg.connect(options="-cstatement_timeout=300s").cursor() as cur:
                 cur.execute(
                     f"INSERT INTO t{table_id} SELECT FROM generate_series(1,{new_rows_each_update})"
                 )
 
     with env.record_duration("run_duration"):
         threads = [
-            threading.Thread(target=start_single_table_workload, args=(i, ))
-            for i in range(n_tables)
+            threading.Thread(target=start_single_table_workload, args=(i,)) for i in range(n_tables)
         ]
 
         for thread in threads:
@@ -95,12 +95,14 @@ def test_heavy_write_workload(pg_compare: PgCompare, n_tables: int, scale: int, 
             )
             cur.execute(f"INSERT INTO t{i} (key) VALUES (0)")
 
-    workload_thread = threading.Thread(target=start_heavy_write_workload,
-                                       args=(env, n_tables, scale, num_iters))
+    workload_thread = threading.Thread(
+        target=start_heavy_write_workload, args=(env, n_tables, scale, num_iters)
+    )
     workload_thread.start()
 
-    record_thread = threading.Thread(target=record_lsn_write_lag,
-                                     args=(env, lambda: workload_thread.is_alive()))
+    record_thread = threading.Thread(
+        target=record_lsn_write_lag, args=(env, lambda: workload_thread.is_alive())
+    )
     record_thread.start()
 
     record_read_latency(env, lambda: workload_thread.is_alive(), "SELECT * from t0 where key = 0")
@@ -110,15 +112,16 @@ def test_heavy_write_workload(pg_compare: PgCompare, n_tables: int, scale: int, 
 
 def start_pgbench_simple_update_workload(env: PgCompare, duration: int):
     with env.record_duration("run_duration"):
-        env.pg_bin.run_capture([
-            'pgbench',
-            '-j10',
-            '-c10',
-            '-N',
-            f'-T{duration}',
-            '-Mprepared',
-            env.pg.connstr(options="-csynchronous_commit=off")
-        ])
+        env.pg_bin.run_capture(
+            [
+                "pgbench",
+                "-j10",
+                "-c10",
+                "-N",
+                f"-T{duration}",
+                env.pg.connstr(options="-csynchronous_commit=off"),
+            ]
+        )
         env.flush()
 
 
@@ -129,35 +132,41 @@ def test_pgbench_simple_update_workload(pg_compare: PgCompare, scale: int, durat
     env = pg_compare
 
     # initialize pgbench tables
-    env.pg_bin.run_capture(['pgbench', f'-s{scale}', '-i', env.pg.connstr()])
+    env.pg_bin.run_capture(["pgbench", f"-s{scale}", "-i", env.pg.connstr()])
     env.flush()
 
-    workload_thread = threading.Thread(target=start_pgbench_simple_update_workload,
-                                       args=(env, duration))
+    workload_thread = threading.Thread(
+        target=start_pgbench_simple_update_workload, args=(env, duration)
+    )
     workload_thread.start()
 
-    record_thread = threading.Thread(target=record_lsn_write_lag,
-                                     args=(env, lambda: workload_thread.is_alive()))
+    record_thread = threading.Thread(
+        target=record_lsn_write_lag, args=(env, lambda: workload_thread.is_alive())
+    )
     record_thread.start()
 
-    record_read_latency(env,
-                        lambda: workload_thread.is_alive(),
-                        "SELECT * from pgbench_accounts where aid = 1")
+    record_read_latency(
+        env, lambda: workload_thread.is_alive(), "SELECT * from pgbench_accounts where aid = 1"
+    )
     workload_thread.join()
     record_thread.join()
 
 
-def start_pgbench_intensive_initialization(env: PgCompare, scale: int):
+def start_pgbench_intensive_initialization(env: PgCompare, scale: int, done_event: threading.Event):
     with env.record_duration("run_duration"):
-        # Needs to increase the statement timeout (default: 120s) because the
+        # Disable statement timeout (default: 120s) because the
         # initialization step can be slow with a large scale.
-        env.pg_bin.run_capture([
-            'pgbench',
-            f'-s{scale}',
-            '-i',
-            '-Idtg',
-            env.pg.connstr(options='-cstatement_timeout=300s')
-        ])
+        env.pg_bin.run_capture(
+            [
+                "pgbench",
+                f"-s{scale}",
+                "-i",
+                "-Idtg",
+                env.pg.connstr(options="-cstatement_timeout=0"),
+            ]
+        )
+
+    done_event.set()
 
 
 @pytest.mark.timeout(1000)
@@ -167,15 +176,19 @@ def test_pgbench_intensive_init_workload(pg_compare: PgCompare, scale: int):
     with env.pg.connect().cursor() as cur:
         cur.execute("CREATE TABLE foo as select generate_series(1,100000)")
 
-    workload_thread = threading.Thread(target=start_pgbench_intensive_initialization,
-                                       args=(env, scale))
+    workload_done_event = threading.Event()
+
+    workload_thread = threading.Thread(
+        target=start_pgbench_intensive_initialization, args=(env, scale, workload_done_event)
+    )
     workload_thread.start()
 
-    record_thread = threading.Thread(target=record_lsn_write_lag,
-                                     args=(env, lambda: workload_thread.is_alive()))
+    record_thread = threading.Thread(
+        target=record_lsn_write_lag, args=(env, lambda: not workload_done_event.is_set())
+    )
     record_thread.start()
 
-    record_read_latency(env, lambda: workload_thread.is_alive(), "SELECT count(*) from foo")
+    record_read_latency(env, lambda: not workload_done_event.is_set(), "SELECT count(*) from foo")
     workload_thread.join()
     record_thread.join()
 
@@ -184,30 +197,33 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
     if not isinstance(env, NeonCompare):
         return
 
-    lsn_write_lags = []
-    last_received_lsn = 0
-    last_pg_flush_lsn = 0
+    lsn_write_lags: List[Any] = []
+    last_received_lsn = Lsn(0)
+    last_pg_flush_lsn = Lsn(0)
 
     with env.pg.connect().cursor() as cur:
         cur.execute("CREATE EXTENSION neon")
 
         while run_cond():
-            cur.execute('''
+            cur.execute(
+                """
             select pg_wal_lsn_diff(pg_current_wal_flush_lsn(),received_lsn),
             pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_flush_lsn(),received_lsn)),
             pg_current_wal_flush_lsn(),
             received_lsn
             from backpressure_lsns();
-            ''')
+            """
+            )
 
             res = cur.fetchone()
+            assert isinstance(res, tuple)
             lsn_write_lags.append(res[0])
 
-            curr_received_lsn = lsn_from_hex(res[3])
+            curr_received_lsn = Lsn(res[3])
             lsn_process_speed = (curr_received_lsn - last_received_lsn) / (1024**2)
             last_received_lsn = curr_received_lsn
 
-            curr_pg_flush_lsn = lsn_from_hex(res[2])
+            curr_pg_flush_lsn = Lsn(res[2])
             lsn_produce_speed = (curr_pg_flush_lsn - last_pg_flush_lsn) / (1024**2)
             last_pg_flush_lsn = curr_pg_flush_lsn
 
@@ -217,24 +233,29 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
 
             time.sleep(pool_interval)
 
-    env.zenbenchmark.record("lsn_write_lag_max",
-                            float(max(lsn_write_lags) / (1024**2)),
-                            "MB",
-                            MetricReport.LOWER_IS_BETTER)
-    env.zenbenchmark.record("lsn_write_lag_avg",
-                            float(statistics.mean(lsn_write_lags) / (1024**2)),
-                            "MB",
-                            MetricReport.LOWER_IS_BETTER)
-    env.zenbenchmark.record("lsn_write_lag_stdev",
-                            float(statistics.stdev(lsn_write_lags) / (1024**2)),
-                            "MB",
-                            MetricReport.LOWER_IS_BETTER)
+    env.zenbenchmark.record(
+        "lsn_write_lag_max",
+        float(max(lsn_write_lags) / (1024**2)),
+        "MB",
+        MetricReport.LOWER_IS_BETTER,
+    )
+    env.zenbenchmark.record(
+        "lsn_write_lag_avg",
+        float(statistics.mean(lsn_write_lags) / (1024**2)),
+        "MB",
+        MetricReport.LOWER_IS_BETTER,
+    )
+    env.zenbenchmark.record(
+        "lsn_write_lag_stdev",
+        float(statistics.stdev(lsn_write_lags) / (1024**2)),
+        "MB",
+        MetricReport.LOWER_IS_BETTER,
+    )
 
 
-def record_read_latency(env: PgCompare,
-                        run_cond: Callable[[], bool],
-                        read_query: str,
-                        read_interval: float = 1.0):
+def record_read_latency(
+    env: PgCompare, run_cond: Callable[[], bool], read_query: str, read_interval: float = 1.0
+):
     read_latencies = []
 
     with env.pg.connect().cursor() as cur:
@@ -253,15 +274,12 @@ def record_read_latency(env: PgCompare,
 
             time.sleep(read_interval)
 
-    env.zenbenchmark.record("read_latency_max",
-                            max(read_latencies),
-                            's',
-                            MetricReport.LOWER_IS_BETTER)
-    env.zenbenchmark.record("read_latency_avg",
-                            statistics.mean(read_latencies),
-                            's',
-                            MetricReport.LOWER_IS_BETTER)
-    env.zenbenchmark.record("read_latency_stdev",
-                            statistics.stdev(read_latencies),
-                            's',
-                            MetricReport.LOWER_IS_BETTER)
+    env.zenbenchmark.record(
+        "read_latency_max", max(read_latencies), "s", MetricReport.LOWER_IS_BETTER
+    )
+    env.zenbenchmark.record(
+        "read_latency_avg", statistics.mean(read_latencies), "s", MetricReport.LOWER_IS_BETTER
+    )
+    env.zenbenchmark.record(
+        "read_latency_stdev", statistics.stdev(read_latencies), "s", MetricReport.LOWER_IS_BETTER
+    )

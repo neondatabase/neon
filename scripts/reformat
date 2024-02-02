@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euox pipefail
+
+# Runs all formatting tools to ensure the project is up to date
+echo 'Reformatting Rust code'
+cargo fmt
+echo 'Reformatting Python code'
+poetry run ruff check --fix test_runner scripts
+poetry run ruff format test_runner scripts

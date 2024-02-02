@@ -1,23 +1,42 @@
 [package]
 name = "remote_storage"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-anyhow = { version = "1.0", features = ["backtrace"] }
-async-trait = "0.1"
-metrics = { version = "0.1", path = "../metrics" }
-once_cell = "1.8.0"
-rusoto_core = "0.48"
-rusoto_s3 = "0.48"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1.17", features = ["sync", "macros", "fs", "io-util"] }
-tokio-util = { version = "0.7", features = ["io"] }
-toml_edit = { version = "0.13", features = ["easy"] }
-tracing = "0.1.27"
-
-workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+anyhow.workspace = true
+async-trait.workspace = true
+once_cell.workspace = true
+aws-smithy-async.workspace = true
+aws-smithy-types.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+aws-credential-types.workspace = true
+bytes.workspace = true
+camino.workspace = true
+hyper = { workspace = true, features = ["stream"] }
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "fs", "io-util"] }
+tokio-util = { workspace = true, features = ["compat"] }
+toml_edit.workspace = true
+tracing.workspace = true
+scopeguard.workspace = true
+metrics.workspace = true
+utils.workspace = true
+pin-project-lite.workspace = true
+workspace_hack.workspace = true
+azure_core.workspace = true
+azure_identity.workspace = true
+azure_storage.workspace = true
+azure_storage_blobs.workspace = true
+futures-util.workspace = true
+http-types.workspace = true
+itertools.workspace = true
 
 [dev-dependencies]
-tempfile = "3.2"
+camino-tempfile.workspace = true
+test-context.workspace = true
+rand.workspace = true

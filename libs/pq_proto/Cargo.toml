@@ -1,0 +1,17 @@
+[package]
+name = "pq_proto"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+byteorder.workspace = true
+pin-project-lite.workspace = true
+postgres-protocol.workspace = true
+rand.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+workspace_hack.workspace = true

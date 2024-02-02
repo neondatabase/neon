@@ -1,0 +1,5 @@
+[book]
+language = "en"
+multilingual = false
+src = "."
+title = "Neon architecture"

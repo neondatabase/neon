@@ -1,27 +1,22 @@
 //!
 //! Misc constants, copied from PostgreSQL headers.
 //!
+//! Only place version-independent constants here.
+//!
 //! TODO: These probably should be auto-generated using bindgen,
 //! rather than copied by hand. Although on the other hand, it's nice
 //! to have them all here in one place, and have the ability to add
 //! comments on them.
 //!
 
-use crate::PageHeaderData;
+use crate::BLCKSZ;
+use crate::{PageHeaderData, XLogRecord};
 
 //
 // From pg_tablespace_d.h
 //
 pub const DEFAULTTABLESPACE_OID: u32 = 1663;
 pub const GLOBALTABLESPACE_OID: u32 = 1664;
-
-//
-// Fork numbers, from relpath.h
-//
-pub const MAIN_FORKNUM: u8 = 0;
-pub const FSM_FORKNUM: u8 = 1;
-pub const VISIBILITYMAP_FORKNUM: u8 = 2;
-pub const INIT_FORKNUM: u8 = 3;
 
 // From storage_xlog.h
 pub const XLOG_SMGR_CREATE: u8 = 0x10;
@@ -30,11 +25,6 @@ pub const XLOG_SMGR_TRUNCATE: u8 = 0x20;
 pub const SMGR_TRUNCATE_HEAP: u32 = 0x0001;
 pub const SMGR_TRUNCATE_VM: u32 = 0x0002;
 pub const SMGR_TRUNCATE_FSM: u32 = 0x0004;
-
-// from pg_config.h. These can be changed with configure options --with-blocksize=BLOCKSIZE and
-// --with-segsize=SEGSIZE, but assume the defaults for now.
-pub const BLCKSZ: u16 = 8192;
-pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 
 //
 // From bufpage.h
@@ -118,7 +108,6 @@ pub const XLOG_NEXTOID: u8 = 0x30;
 pub const XLOG_SWITCH: u8 = 0x40;
 pub const XLOG_FPI_FOR_HINT: u8 = 0xA0;
 pub const XLOG_FPI: u8 = 0xB0;
-pub const DB_SHUTDOWNED: u32 = 1;
 
 // From multixact.h
 pub const FIRST_MULTIXACT_ID: u32 = 1;
@@ -148,15 +137,22 @@ pub const XLOG_HEAP_INSERT: u8 = 0x00;
 pub const XLOG_HEAP_DELETE: u8 = 0x10;
 pub const XLOG_HEAP_UPDATE: u8 = 0x20;
 pub const XLOG_HEAP_HOT_UPDATE: u8 = 0x40;
+pub const XLOG_HEAP_LOCK: u8 = 0x60;
 pub const XLOG_HEAP_INIT_PAGE: u8 = 0x80;
 pub const XLOG_HEAP2_VISIBLE: u8 = 0x40;
 pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
+pub const XLOG_HEAP2_LOCK_UPDATED: u8 = 0x60;
+pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 0x01;
 pub const XLH_INSERT_ALL_FROZEN_SET: u8 = (1 << 5) as u8;
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = (1 << 1) as u8;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 
+// From replication/message.h
+pub const XLOG_LOGICAL_MESSAGE: u8 = 0x00;
+
+// From rmgrlist.h
 pub const RM_XLOG_ID: u8 = 0;
 pub const RM_XACT_ID: u8 = 1;
 pub const RM_SMGR_ID: u8 = 2;
@@ -168,19 +164,30 @@ pub const RM_RELMAP_ID: u8 = 7;
 pub const RM_STANDBY_ID: u8 = 8;
 pub const RM_HEAP2_ID: u8 = 9;
 pub const RM_HEAP_ID: u8 = 10;
+pub const RM_LOGICALMSG_ID: u8 = 21;
+
+// from neon_rmgr.h
+pub const RM_NEON_ID: u8 = 134;
+
+pub const XLOG_NEON_HEAP_INIT_PAGE: u8 = 0x80;
+
+pub const XLOG_NEON_HEAP_INSERT: u8 = 0x00;
+pub const XLOG_NEON_HEAP_DELETE: u8 = 0x10;
+pub const XLOG_NEON_HEAP_UPDATE: u8 = 0x20;
+pub const XLOG_NEON_HEAP_HOT_UPDATE: u8 = 0x30;
+pub const XLOG_NEON_HEAP_LOCK: u8 = 0x40;
+pub const XLOG_NEON_HEAP_MULTI_INSERT: u8 = 0x50;
+
+pub const XLOG_NEON_HEAP_VISIBLE: u8 = 0x40;
 
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;
 pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;
 
-// from dbcommands_xlog.h
-pub const XLOG_DBASE_CREATE: u8 = 0x00;
-pub const XLOG_DBASE_DROP: u8 = 0x10;
-
 pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
 pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
-pub const SIZEOF_XLOGRECORD: u32 = 24;
+pub const SIZEOF_XLOGRECORD: u32 = std::mem::size_of::<XLogRecord>() as u32;
 
 //
 // from xlogrecord.h
@@ -201,8 +208,6 @@ pub const BKPBLOCK_SAME_REL: u8 = 0x80; /* RelFileNode omitted, same as previous
 
 /* Information stored in bimg_info */
 pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
-pub const BKPIMAGE_IS_COMPRESSED: u8 = 0x02; /* page image is compressed */
-pub const BKPIMAGE_APPLY: u8 = 0x04; /* page image should be restored during replay */
 
 /* From transam.h */
 pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
@@ -210,15 +215,24 @@ pub const INVALID_TRANSACTION_ID: u32 = 0;
 pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
 pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
 
-/* FIXME: pageserver should request wal_seg_size from compute node */
-pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
-
-pub const XLOG_BLCKSZ: usize = 8192;
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
+pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
-pub const PG_MAJORVERSION: &str = "14";
+/* From replication/slot.h */
+pub const REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
+   + 64 /* NameData */  + 4*4;
+
+/* From fsm_internals.h */
+const FSM_NODES_PER_PAGE: usize = BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA - 4;
+const FSM_NON_LEAF_NODES_PER_PAGE: usize = BLCKSZ as usize / 2 - 1;
+const FSM_LEAF_NODES_PER_PAGE: usize = FSM_NODES_PER_PAGE - FSM_NON_LEAF_NODES_PER_PAGE;
+pub const SLOTS_PER_FSM_PAGE: u32 = FSM_LEAF_NODES_PER_PAGE as u32;
+
+/* From visibilitymap.c */
+pub const VM_HEAPBLOCKS_PER_PAGE: u32 =
+    (BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA) as u32 * (8 / 2); // MAPSIZE * (BITS_PER_BYTE / BITS_PER_HEAPBLOCK)
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c

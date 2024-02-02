@@ -4,7 +4,7 @@
 hakari-package = "workspace_hack"
 
 # Format for `workspace-hack = ...` lines in other Cargo.tomls. Requires cargo-hakari 0.9.8 or above.
-dep-format-version = "2"
+dep-format-version = "4"
 
 # Setting workspace.resolver = "2" in the root Cargo.toml is HIGHLY recommended.
 # Hakari works much better with the new feature resolver.
@@ -21,6 +21,12 @@ platforms = [
     # "x86_64-apple-darwin",
     # "x86_64-pc-windows-msvc",
 ]
+
+[final-excludes]
+# vm_monitor benefits from the same Cargo.lock as the rest of our artifacts, but
+# it is built primarly in separate repo neondatabase/autoscaling and thus is excluded
+# from depending on workspace-hack because most of the dependencies are not used.
+workspace-members = ["vm_monitor"]
 
 # Write out exact versions rather than a semver range. (Defaults to false.)
 # exact-versions = true

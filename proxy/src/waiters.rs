@@ -115,7 +115,7 @@ mod tests {
             Ok(())
         });
 
-        let () = waiter.await?;
+        waiter.await?;
         notifier.await?
     }
 }

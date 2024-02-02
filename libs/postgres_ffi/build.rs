@@ -2,8 +2,10 @@ extern crate bindgen;
 
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 
-use bindgen::callbacks::ParseCallbacks;
+use anyhow::{anyhow, Context};
+use bindgen::callbacks::{DeriveInfo, ParseCallbacks};
 
 #[derive(Debug)]
 struct PostgresFfiCallbacks;
@@ -18,7 +20,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
 
     // Add any custom #[derive] attributes to the data structures that bindgen
     // creates.
-    fn add_derives(&self, name: &str) -> Vec<String> {
+    fn add_derives(&self, derive_info: &DeriveInfo) -> Vec<String> {
         // This is the list of data structures that we want to serialize/deserialize.
         let serde_list = [
             "XLogRecord",
@@ -29,7 +31,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
             "ControlFileData",
         ];
 
-        if serde_list.contains(&name) {
+        if serde_list.contains(&derive_info.name) {
             vec![
                 "Default".into(), // Default allows us to easily fill the padding fields with 0.
                 "Serialize".into(),
@@ -41,64 +43,110 @@ impl ParseCallbacks for PostgresFfiCallbacks {
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
-    println!("cargo:rerun-if-changed=pg_control_ffi.h");
+    println!("cargo:rerun-if-changed=bindgen_deps.h");
 
-    // The bindgen::Builder is the main entry point
-    // to bindgen, and lets you build up options for
-    // the resulting bindings.
-    let bindings = bindgen::Builder::default()
-        //
-        // All the needed PostgreSQL headers are included from 'pg_control_ffi.h'
-        //
-        .header("pg_control_ffi.h")
-        //
-        // Tell cargo to invalidate the built crate whenever any of the
-        // included header files changed.
-        //
-        .parse_callbacks(Box::new(PostgresFfiCallbacks))
-        //
-        // These are the types and constants that we want to generate bindings for
-        //
-        .allowlist_type("BlockNumber")
-        .allowlist_type("OffsetNumber")
-        .allowlist_type("MultiXactId")
-        .allowlist_type("MultiXactOffset")
-        .allowlist_type("MultiXactStatus")
-        .allowlist_type("ControlFileData")
-        .allowlist_type("CheckPoint")
-        .allowlist_type("FullTransactionId")
-        .allowlist_type("XLogRecord")
-        .allowlist_type("XLogPageHeaderData")
-        .allowlist_type("XLogLongPageHeaderData")
-        .allowlist_var("XLOG_PAGE_MAGIC")
-        .allowlist_var("PG_CONTROL_FILE_SIZE")
-        .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
-        .allowlist_type("PageHeaderData")
-        .allowlist_type("DBState")
-        // Because structs are used for serialization, tell bindgen to emit
-        // explicit padding fields.
-        .explicit_padding(true)
-        //
-        // Path the server include dir. It is in tmp_install/include/server, if you did
-        // "configure --prefix=<path to tmp_install>". But if you used "configure --prefix=/",
-        // and used DESTDIR to move it into tmp_install, then it's in
-        // tmp_install/include/postgres/server
-        // 'pg_config --includedir-server' would perhaps be the more proper way to find it,
-        // but this will do for now.
-        //
-        .clang_arg("-I../../tmp_install/include/server")
-        .clang_arg("-I../../tmp_install/include/postgresql/server")
-        //
-        // Finish the builder and generate the bindings.
-        //
-        .generate()
-        .expect("Unable to generate bindings");
+    // Finding the location of C headers for the Postgres server:
+    // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/pg_install`
+    // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/{PG_MAJORVERSION}/include/postgresql/server`
+    let pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
+        postgres_install_dir.into()
+    } else {
+        PathBuf::from("pg_install")
+    };
 
-    // Write the bindings to the $OUT_DIR/bindings.rs file.
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings
-        .write_to_file(out_path.join("bindings.rs"))
-        .expect("Couldn't write bindings!");
+    for pg_version in &["v14", "v15", "v16"] {
+        let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
+        if pg_install_dir_versioned.is_relative() {
+            let cwd = env::current_dir().context("Failed to get current_dir")?;
+            pg_install_dir_versioned = cwd.join("..").join("..").join(pg_install_dir_versioned);
+        }
+
+        let pg_config_bin = pg_install_dir_versioned.join("bin").join("pg_config");
+        let inc_server_path: String = if pg_config_bin.exists() {
+            let output = Command::new(pg_config_bin)
+                .arg("--includedir-server")
+                .output()
+                .context("failed to execute `pg_config --includedir-server`")?;
+
+            if !output.status.success() {
+                panic!("`pg_config --includedir-server` failed")
+            }
+
+            String::from_utf8(output.stdout)
+                .context("pg_config output is not UTF-8")?
+                .trim_end()
+                .into()
+        } else {
+            let server_path = pg_install_dir_versioned
+                .join("include")
+                .join("postgresql")
+                .join("server")
+                .into_os_string();
+            server_path
+                .into_string()
+                .map_err(|s| anyhow!("Bad postgres server path {s:?}"))?
+        };
+
+        // The bindgen::Builder is the main entry point
+        // to bindgen, and lets you build up options for
+        // the resulting bindings.
+        let bindings = bindgen::Builder::default()
+            //
+            // All the needed PostgreSQL headers are included from 'bindgen_deps.h'
+            //
+            .header("bindgen_deps.h")
+            //
+            // Tell cargo to invalidate the built crate whenever any of the
+            // included header files changed.
+            //
+            .parse_callbacks(Box::new(PostgresFfiCallbacks))
+            //
+            // These are the types and constants that we want to generate bindings for
+            //
+            .allowlist_type("BlockNumber")
+            .allowlist_type("OffsetNumber")
+            .allowlist_type("XLogRecPtr")
+            .allowlist_type("XLogSegNo")
+            .allowlist_type("TimeLineID")
+            .allowlist_type("TimestampTz")
+            .allowlist_type("MultiXactId")
+            .allowlist_type("MultiXactOffset")
+            .allowlist_type("MultiXactStatus")
+            .allowlist_type("ControlFileData")
+            .allowlist_type("CheckPoint")
+            .allowlist_type("FullTransactionId")
+            .allowlist_type("XLogRecord")
+            .allowlist_type("XLogPageHeaderData")
+            .allowlist_type("XLogLongPageHeaderData")
+            .allowlist_var("XLOG_PAGE_MAGIC")
+            .allowlist_var("PG_CONTROL_FILE_SIZE")
+            .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
+            .allowlist_type("PageHeaderData")
+            .allowlist_type("DBState")
+            .allowlist_type("RelMapFile")
+            // Because structs are used for serialization, tell bindgen to emit
+            // explicit padding fields.
+            .explicit_padding(true)
+            //
+            .clang_arg(format!("-I{inc_server_path}"))
+            //
+            // Finish the builder and generate the bindings.
+            //
+            .generate()
+            .context("Unable to generate bindings")?;
+
+        // Write the bindings to the $OUT_DIR/bindings_$pg_version.rs file.
+        let out_path: PathBuf = env::var("OUT_DIR")
+            .context("Couldn't read OUT_DIR environment variable var")?
+            .into();
+        let filename = format!("bindings_{pg_version}.rs");
+
+        bindings
+            .write_to_file(out_path.join(filename))
+            .context("Couldn't write bindings")?;
+    }
+
+    Ok(())
 }

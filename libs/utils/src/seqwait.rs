@@ -4,25 +4,28 @@ use std::cmp::{Eq, Ordering, PartialOrd};
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
 use std::mem;
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::watch::{channel, Receiver, Sender};
+use tokio::time::timeout;
 
 /// An error happened while waiting for a number
-#[derive(Debug, PartialEq, thiserror::Error)]
-#[error("SeqWaitError")]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SeqWaitError {
     /// The wait timeout was reached
+    #[error("seqwait timeout was reached")]
     Timeout,
+
     /// [`SeqWait::shutdown`] was called
+    #[error("SeqWait::shutdown was called")]
     Shutdown,
 }
 
 /// Monotonically increasing value
 ///
-/// It is handy to store some other fields under the same mutex in SeqWait<S>
+/// It is handy to store some other fields under the same mutex in `SeqWait<S>`
 /// (e.g. store prev_record_lsn). So we allow SeqWait to be parametrized with
-/// any type that can expose counter. <V> is the type of exposed counter.
+/// any type that can expose counter. `V` is the type of exposed counter.
 pub trait MonotonicCounter<V> {
     /// Bump counter value and check that it goes forward
     /// N.B.: new_val is an actual new value, not a difference.
@@ -55,7 +58,7 @@ where
 // to get that.
 impl<T: Ord> PartialOrd for Waiter<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        other.wake_num.partial_cmp(&self.wake_num)
+        Some(self.cmp(other))
     }
 }
 
@@ -87,7 +90,7 @@ impl<T: Ord> Eq for Waiter<T> {}
 /// [`wait_for`]: SeqWait::wait_for
 /// [`advance`]: SeqWait::advance
 ///
-/// <S> means Storage, <V> is type of counter that this storage exposes.
+/// `S` means Storage, `V` is type of counter that this storage exposes.
 ///
 pub struct SeqWait<S, V>
 where
@@ -122,6 +125,9 @@ where
             // Wake everyone with an error.
             let mut internal = self.internal.lock().unwrap();
 
+            // Block any future waiters from starting
+            internal.shutdown = true;
+
             // This will steal the entire waiters map.
             // When we drop it all waiters will be woken.
             mem::take(&mut internal.waiters)
@@ -141,10 +147,12 @@ where
     ///
     /// This call won't complete until someone has called `advance`
     /// with a number greater than or equal to the one we're waiting for.
-    pub fn wait_for(&self, num: V) -> Result<(), SeqWaitError> {
+    ///
+    /// This function is async cancellation-safe.
+    pub async fn wait_for(&self, num: V) -> Result<(), SeqWaitError> {
         match self.queue_for_wait(num) {
             Ok(None) => Ok(()),
-            Ok(Some(rx)) => rx.recv().map_err(|_| SeqWaitError::Shutdown),
+            Ok(Some(mut rx)) => rx.changed().await.map_err(|_| SeqWaitError::Shutdown),
             Err(e) => Err(e),
         }
     }
@@ -156,13 +164,20 @@ where
     ///
     /// If that hasn't happened after the specified timeout duration,
     /// [`SeqWaitError::Timeout`] will be returned.
-    pub fn wait_for_timeout(&self, num: V, timeout_duration: Duration) -> Result<(), SeqWaitError> {
+    ///
+    /// This function is async cancellation-safe.
+    pub async fn wait_for_timeout(
+        &self,
+        num: V,
+        timeout_duration: Duration,
+    ) -> Result<(), SeqWaitError> {
         match self.queue_for_wait(num) {
             Ok(None) => Ok(()),
-            Ok(Some(rx)) => rx.recv_timeout(timeout_duration).map_err(|e| match e {
-                std::sync::mpsc::RecvTimeoutError::Timeout => SeqWaitError::Timeout,
-                std::sync::mpsc::RecvTimeoutError::Disconnected => SeqWaitError::Shutdown,
-            }),
+            Ok(Some(mut rx)) => match timeout(timeout_duration, rx.changed()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err(SeqWaitError::Shutdown),
+                Err(_) => Err(SeqWaitError::Timeout),
+            },
             Err(e) => Err(e),
         }
     }
@@ -179,7 +194,7 @@ where
         }
 
         // Create a new channel.
-        let (tx, rx) = channel();
+        let (tx, rx) = channel(());
         internal.waiters.push(Waiter {
             wake_num: num,
             wake_channel: tx,
@@ -234,8 +249,6 @@ where
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::thread::sleep;
-    use std::thread::spawn;
     use std::time::Duration;
 
     impl MonotonicCounter<i32> for i32 {
@@ -248,46 +261,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn seqwait() {
+    #[tokio::test]
+    async fn seqwait() {
         let seq = Arc::new(SeqWait::new(0));
         let seq2 = Arc::clone(&seq);
         let seq3 = Arc::clone(&seq);
-        spawn(move || {
-            seq2.wait_for(42).expect("wait_for 42");
+        let jh1 = tokio::task::spawn(async move {
+            seq2.wait_for(42).await.expect("wait_for 42");
             let old = seq2.advance(100);
             assert_eq!(old, 99);
-            seq2.wait_for(999).expect_err("no 999");
+            seq2.wait_for_timeout(999, Duration::from_millis(100))
+                .await
+                .expect_err("no 999");
         });
-        spawn(move || {
-            seq3.wait_for(42).expect("wait_for 42");
-            seq3.wait_for(0).expect("wait_for 0");
+        let jh2 = tokio::task::spawn(async move {
+            seq3.wait_for(42).await.expect("wait_for 42");
+            seq3.wait_for(0).await.expect("wait_for 0");
         });
-        sleep(Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let old = seq.advance(99);
         assert_eq!(old, 0);
-        seq.wait_for(100).expect("wait_for 100");
+        seq.wait_for(100).await.expect("wait_for 100");
 
         // Calling advance with a smaller value is a no-op
         assert_eq!(seq.advance(98), 100);
         assert_eq!(seq.load(), 100);
 
+        jh1.await.unwrap();
+        jh2.await.unwrap();
+
         seq.shutdown();
     }
 
-    #[test]
-    fn seqwait_timeout() {
+    #[tokio::test]
+    async fn seqwait_timeout() {
         let seq = Arc::new(SeqWait::new(0));
         let seq2 = Arc::clone(&seq);
-        spawn(move || {
+        let jh = tokio::task::spawn(async move {
             let timeout = Duration::from_millis(1);
-            let res = seq2.wait_for_timeout(42, timeout);
+            let res = seq2.wait_for_timeout(42, timeout).await;
             assert_eq!(res, Err(SeqWaitError::Timeout));
         });
-        sleep(Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_millis(200)).await;
         // This will attempt to wake, but nothing will happen
         // because the waiter already dropped its Receiver.
         let old = seq.advance(99);
-        assert_eq!(old, 0)
+        assert_eq!(old, 0);
+        jh.await.unwrap();
+
+        seq.shutdown();
     }
 }

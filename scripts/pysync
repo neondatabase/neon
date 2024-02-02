@@ -4,6 +4,10 @@
 # It is intended to be a primary endpoint for all the people who want to
 # just setup test environment without going into details of python package management
 
+# on ubuntu 22.04 based `six` fails to install without this, because something imports keyring.
+# null keyring is fine, which means no secrets should be accessed.
+export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
+
 poetry config --list
 
 if [ -z "${CI}" ]; then

@@ -6,80 +6,126 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceAccum};
-use crate::reltag::{RelTag, SlruKind};
+use super::tenant::{PageReconstructError, Timeline};
+use crate::context::RequestContext;
+use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
-use crate::repository::{Repository, Timeline};
-use crate::walrecord::ZenithWalRecord;
-use anyhow::{bail, ensure, Result};
-use bytes::{Buf, Bytes};
-use postgres_ffi::xlog_utils::TimestampTz;
-use postgres_ffi::{pg_constants, Oid, TransactionId};
+use crate::walrecord::NeonWalRecord;
+use anyhow::{ensure, Context};
+use bytes::{Buf, Bytes, BytesMut};
+use pageserver_api::key::{
+    dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
+    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
+    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+};
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::BLCKSZ;
+use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map, HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::ops::Range;
-use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{Arc, Mutex, RwLockReadGuard};
-use tracing::{debug, error, trace, warn};
+use strum::IntoEnumIterator;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, trace, warn};
+use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
-
-/// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
-pub type BlockNumber = u32;
-
-pub struct DatadirTimeline<R>
-where
-    R: Repository,
-{
-    /// The underlying key-value store. Callers should not read or modify the
-    /// data in the underlying store directly. However, it is exposed to have
-    /// access to information like last-LSN, ancestor, and operations like
-    /// compaction.
-    pub tline: Arc<R::Timeline>,
-
-    /// When did we last calculate the partitioning?
-    partitioning: Mutex<(KeyPartitioning, Lsn)>,
-
-    /// Configuration: how often should the partitioning be recalculated.
-    repartition_threshold: u64,
-
-    /// Current logical size of the "datadir", at the last LSN.
-    current_logical_size: AtomicIsize,
-}
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
+    /// Found commits both before and after the given timestamp
     Present(Lsn),
+
+    /// Found no commits after the given timestamp, this means
+    /// that the newest data in the branch is older than the given
+    /// timestamp.
+    ///
+    /// All commits <= LSN happened before the given timestamp
     Future(Lsn),
+
+    /// The queried timestamp is past our horizon we look back at (PITR)
+    ///
+    /// All commits > LSN happened after the given timestamp,
+    /// but any commits < LSN might have happened before or after
+    /// the given timestamp. We don't know because no data before
+    /// the given lsn is available.
     Past(Lsn),
+
+    /// We have found no commit with a timestamp,
+    /// so we can't return anything meaningful.
+    ///
+    /// The associated LSN is the lower bound value we can safely
+    /// create branches on, but no statement is made if it is
+    /// older or newer than the timestamp.
+    ///
+    /// This variant can e.g. be returned right after a
+    /// cluster import.
+    NoData(Lsn),
 }
 
-impl<R: Repository> DatadirTimeline<R> {
-    pub fn new(tline: Arc<R::Timeline>, repartition_threshold: u64) -> Self {
-        DatadirTimeline {
-            tline,
-            partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
-            current_logical_size: AtomicIsize::new(0),
-            repartition_threshold,
+#[derive(Debug, thiserror::Error)]
+pub enum CalculateLogicalSizeError {
+    #[error("cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CollectKeySpaceError {
+    #[error(transparent)]
+    Decode(#[from] DeserializeError),
+    #[error(transparent)]
+    PageRead(PageReconstructError),
+    #[error("cancelled")]
+    Cancelled,
+}
+
+impl From<PageReconstructError> for CollectKeySpaceError {
+    fn from(err: PageReconstructError) -> Self {
+        match err {
+            PageReconstructError::Cancelled => Self::Cancelled,
+            err => Self::PageRead(err),
         }
     }
+}
 
-    /// (Re-)calculate the logical size of the database at the latest LSN.
-    ///
-    /// This can be a slow operation.
-    pub fn init_logical_size(&self) -> Result<()> {
-        let last_lsn = self.tline.get_last_record_lsn();
-        self.current_logical_size.store(
-            self.get_current_logical_size_non_incremental(last_lsn)? as isize,
-            Ordering::SeqCst,
-        );
-        Ok(())
+impl From<PageReconstructError> for CalculateLogicalSizeError {
+    fn from(pre: PageReconstructError) -> Self {
+        match pre {
+            PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
+                Self::Cancelled
+            }
+            _ => Self::Other(pre.into()),
+        }
     }
+}
 
+#[derive(Debug, thiserror::Error)]
+pub enum RelationError {
+    #[error("Relation Already Exists")]
+    AlreadyExists,
+    #[error("invalid relnode")]
+    InvalidRelnode,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+///
+/// This impl provides all the functionality to store PostgreSQL relations, SLRUs,
+/// and other special kinds of files, in a versioned key-value store. The
+/// Timeline struct provides the key-value store.
+///
+/// This is a separate impl, so that we can easily include all these functions in a Timeline
+/// implementation, and might be moved into a separate struct later.
+impl Timeline {
     /// Start ingesting a WAL record, or other atomic modification of
     /// the timeline.
     ///
     /// This provides a transaction-like interface to perform a bunch
-    /// of modifications atomically, all stamped with one LSN.
+    /// of modifications atomically.
     ///
     /// To ingest a WAL record, call begin_modification(lsn) to get a
     /// DatadirModification object. Use the functions in the object to
@@ -87,18 +133,28 @@ impl<R: Repository> DatadirTimeline<R> {
     /// that the WAL record affects. When you're done, call commit() to
     /// commit the changes.
     ///
+    /// Lsn stored in modification is advanced by `ingest_record` and
+    /// is used by `commit()` to update `last_record_lsn`.
+    ///
+    /// Calling commit() will flush all the changes and reset the state,
+    /// so the `DatadirModification` struct can be reused to perform the next modification.
+    ///
     /// Note that any pending modifications you make through the
     /// modification object won't be visible to calls to the 'get' and list
     /// functions of the timeline until you finish! And if you update the
     /// same page twice, the last update wins.
     ///
-    pub fn begin_modification(&self, lsn: Lsn) -> DatadirModification<R> {
+    pub fn begin_modification(&self, lsn: Lsn) -> DatadirModification
+    where
+        Self: Sized,
+    {
         DatadirModification {
             tline: self,
-            lsn,
+            pending_lsns: Vec::new(),
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            lsn,
         }
     }
 
@@ -107,42 +163,76 @@ impl<R: Repository> DatadirTimeline<R> {
     //------------------------------------------------------------------------------
 
     /// Look up given page version.
-    pub fn get_rel_page_at_lsn(&self, tag: RelTag, blknum: BlockNumber, lsn: Lsn) -> Result<Bytes> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    pub(crate) async fn get_rel_page_at_lsn(
+        &self,
+        tag: RelTag,
+        blknum: BlockNumber,
+        version: Version<'_>,
+        latest: bool,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
+        }
 
-        let nblocks = self.get_rel_size(tag, lsn)?;
+        let nblocks = self.get_rel_size(tag, version, latest, ctx).await?;
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                tag, blknum, lsn, nblocks
+                tag,
+                blknum,
+                version.get_lsn(),
+                nblocks
             );
             return Ok(ZERO_PAGE.clone());
         }
 
         let key = rel_block_to_key(tag, blknum);
-        self.tline.get(key, lsn)
+        version.get(self, key, ctx).await
     }
 
     // Get size of a database in blocks
-    pub fn get_db_size(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<usize> {
+    pub(crate) async fn get_db_size(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        version: Version<'_>,
+        latest: bool,
+        ctx: &RequestContext,
+    ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
 
-        let rels = self.list_rels(spcnode, dbnode, lsn)?;
+        let rels = self.list_rels(spcnode, dbnode, version, ctx).await?;
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, lsn)?;
+            let n_blocks = self.get_rel_size(rel, version, latest, ctx).await?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
     }
 
     /// Get size of a relation file
-    pub fn get_rel_size(&self, tag: RelTag, lsn: Lsn) -> Result<BlockNumber> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    pub(crate) async fn get_rel_size(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        latest: bool,
+        ctx: &RequestContext,
+    ) -> Result<BlockNumber, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
+        }
 
-        if (tag.forknum == pg_constants::FSM_FORKNUM
-            || tag.forknum == pg_constants::VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, lsn)?
+        if let Some(nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
+            return Ok(nblocks);
+        }
+
+        if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
+            && !self.get_rel_exists(tag, version, latest, ctx).await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -152,75 +242,151 @@ impl<R: Repository> DatadirTimeline<R> {
         }
 
         let key = rel_size_to_key(tag);
-        let mut buf = self.tline.get(key, lsn)?;
-        Ok(buf.get_u32_le())
+        let mut buf = version.get(self, key, ctx).await?;
+        let nblocks = buf.get_u32_le();
+
+        if latest {
+            // Update relation size cache only if "latest" flag is set.
+            // This flag is set by compute when it is working with most recent version of relation.
+            // Typically master compute node always set latest=true.
+            // Please notice, that even if compute node "by mistake" specifies old LSN but set
+            // latest=true, then it can not cause cache corruption, because with latest=true
+            // pageserver choose max(request_lsn, last_written_lsn) and so cached value will be
+            // associated with most recent value of LSN.
+            self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
+        }
+        Ok(nblocks)
     }
 
     /// Does relation exist?
-    pub fn get_rel_exists(&self, tag: RelTag, lsn: Lsn) -> Result<bool> {
-        ensure!(tag.relnode != 0, "invalid relnode");
+    pub(crate) async fn get_rel_exists(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        _latest: bool,
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
+        if tag.relnode == 0 {
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
+        }
 
+        // first try to lookup relation in cache
+        if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
+            return Ok(true);
+        }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
-        let buf = self.tline.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf)?;
+        let buf = version.get(self, key, ctx).await?;
 
-        let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
-
-        Ok(exists)
+        match RelDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => {
+                let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
+                Ok(exists)
+            }
+            Err(e) => Err(PageReconstructError::from(e)),
+        }
     }
 
     /// Get a list of all existing relations in given tablespace and database.
-    pub fn list_rels(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<HashSet<RelTag>> {
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
+    pub(crate) async fn list_rels(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<HashSet<RelTag>, PageReconstructError> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
-        let buf = self.tline.get(key, lsn)?;
-        let dir = RelDirectory::des(&buf)?;
+        let buf = version.get(self, key, ctx).await?;
 
-        let rels: HashSet<RelTag> =
-            HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
-                spcnode,
-                dbnode,
-                relnode: *relnode,
-                forknum: *forknum,
-            }));
+        match RelDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => {
+                let rels: HashSet<RelTag> =
+                    HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
+                        spcnode,
+                        dbnode,
+                        relnode: *relnode,
+                        forknum: *forknum,
+                    }));
 
-        Ok(rels)
+                Ok(rels)
+            }
+            Err(e) => Err(PageReconstructError::from(e)),
+        }
+    }
+
+    /// Get the whole SLRU segment
+    pub(crate) async fn get_slru_segment(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        let n_blocks = self
+            .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
+            .await?;
+        let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
+        for blkno in 0..n_blocks {
+            let block = self
+                .get_slru_page_at_lsn(kind, segno, blkno, lsn, ctx)
+                .await?;
+            segment.extend_from_slice(&block[..BLCKSZ as usize]);
+        }
+        Ok(segment.freeze())
     }
 
     /// Look up given SLRU page version.
-    pub fn get_slru_page_at_lsn(
+    pub(crate) async fn get_slru_page_at_lsn(
         &self,
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
         lsn: Lsn,
-    ) -> Result<Bytes> {
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
         let key = slru_block_to_key(kind, segno, blknum);
-        self.tline.get(key, lsn)
+        self.get(key, lsn, ctx).await
     }
 
     /// Get size of an SLRU segment
-    pub fn get_slru_segment_size(
+    pub(crate) async fn get_slru_segment_size(
         &self,
         kind: SlruKind,
         segno: u32,
-        lsn: Lsn,
-    ) -> Result<BlockNumber> {
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<BlockNumber, PageReconstructError> {
         let key = slru_segment_size_to_key(kind, segno);
-        let mut buf = self.tline.get(key, lsn)?;
+        let mut buf = version.get(self, key, ctx).await?;
         Ok(buf.get_u32_le())
     }
 
     /// Get size of an SLRU segment
-    pub fn get_slru_segment_exists(&self, kind: SlruKind, segno: u32, lsn: Lsn) -> Result<bool> {
+    pub(crate) async fn get_slru_segment_exists(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
-        let buf = self.tline.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf)?;
+        let buf = version.get(self, key, ctx).await?;
 
-        let exists = dir.segments.get(&segno).is_some();
-        Ok(exists)
+        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => {
+                let exists = dir.segments.get(&segno).is_some();
+                Ok(exists)
+            }
+            Err(e) => Err(PageReconstructError::from(e)),
+        }
     }
 
     /// Locate LSN, such that all transactions that committed before
@@ -230,10 +396,19 @@ impl<R: Repository> DatadirTimeline<R> {
     /// so it's not well defined which LSN you get if there were multiple commits
     /// "in flight" at that point in time.
     ///
-    pub fn find_lsn_for_timestamp(&self, search_timestamp: TimestampTz) -> Result<LsnForTimestamp> {
-        let gc_cutoff_lsn_guard = self.tline.get_latest_gc_cutoff_lsn();
-        let min_lsn = *gc_cutoff_lsn_guard;
-        let max_lsn = self.tline.get_last_record_lsn();
+    pub(crate) async fn find_lsn_for_timestamp(
+        &self,
+        search_timestamp: TimestampTz,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> Result<LsnForTimestamp, PageReconstructError> {
+        let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
+        // We use this method to figure out the branching LSN for the new branch, but the
+        // GC cutoff could be before the branching point and we cannot create a new branch
+        // with LSN < `ancestor_lsn`. Thus, pick the maximum of these two to be
+        // on the safe side.
+        let min_lsn = std::cmp::max(*gc_cutoff_lsn_guard, self.get_ancestor_lsn());
+        let max_lsn = self.get_last_record_lsn();
 
         // LSNs are always 8-byte aligned. low/mid/high represent the
         // LSN divided by 8.
@@ -243,15 +418,21 @@ impl<R: Repository> DatadirTimeline<R> {
         let mut found_smaller = false;
         let mut found_larger = false;
         while low < high {
+            if cancel.is_cancelled() {
+                return Err(PageReconstructError::Cancelled);
+            }
             // cannot overflow, high and low are both smaller than u64::MAX / 2
             let mid = (high + low) / 2;
 
-            let cmp = self.is_latest_commit_timestamp_ge_than(
-                search_timestamp,
-                Lsn(mid * 8),
-                &mut found_smaller,
-                &mut found_larger,
-            )?;
+            let cmp = self
+                .is_latest_commit_timestamp_ge_than(
+                    search_timestamp,
+                    Lsn(mid * 8),
+                    &mut found_smaller,
+                    &mut found_larger,
+                    ctx,
+                )
+                .await?;
 
             if cmp {
                 high = mid;
@@ -259,151 +440,247 @@ impl<R: Repository> DatadirTimeline<R> {
                 low = mid + 1;
             }
         }
+        // If `found_smaller == true`, `low = t + 1` where `t` is the target LSN,
+        // so the LSN of the last commit record before or at `search_timestamp`.
+        // Remove one from `low` to get `t`.
+        //
+        // FIXME: it would be better to get the LSN of the previous commit.
+        // Otherwise, if you restore to the returned LSN, the database will
+        // include physical changes from later commits that will be marked
+        // as aborted, and will need to be vacuumed away.
+        let commit_lsn = Lsn((low - 1) * 8);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
                 // just after importing a cluster.
-                bail!("no commit timestamps found");
-            }
-            (true, false) => {
-                // Didn't find any commit timestamps larger than the request
-                Ok(LsnForTimestamp::Future(max_lsn))
+                Ok(LsnForTimestamp::NoData(min_lsn))
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
-                Ok(LsnForTimestamp::Past(max_lsn))
+                Ok(LsnForTimestamp::Past(min_lsn))
             }
-            (true, true) => {
-                // low is the LSN of the first commit record *after* the search_timestamp,
-                // Back off by one to get to the point just before the commit.
-                //
-                // FIXME: it would be better to get the LSN of the previous commit.
-                // Otherwise, if you restore to the returned LSN, the database will
-                // include physical changes from later commits that will be marked
-                // as aborted, and will need to be vacuumed away.
-                Ok(LsnForTimestamp::Present(Lsn((low - 1) * 8)))
+            (true, false) => {
+                // Only found commits with timestamps smaller than the request.
+                // It's still a valid case for branch creation, return it.
+                // And `update_gc_info()` ignores LSN for a `LsnForTimestamp::Future`
+                // case, anyway.
+                Ok(LsnForTimestamp::Future(commit_lsn))
             }
+            (true, true) => Ok(LsnForTimestamp::Present(commit_lsn)),
         }
     }
 
-    ///
     /// Subroutine of find_lsn_for_timestamp(). Returns true, if there are any
     /// commits that committed after 'search_timestamp', at LSN 'probe_lsn'.
     ///
     /// Additionally, sets 'found_smaller'/'found_Larger, if encounters any commits
     /// with a smaller/larger timestamp.
     ///
-    fn is_latest_commit_timestamp_ge_than(
+    pub(crate) async fn is_latest_commit_timestamp_ge_than(
         &self,
         search_timestamp: TimestampTz,
         probe_lsn: Lsn,
         found_smaller: &mut bool,
         found_larger: &mut bool,
-    ) -> Result<bool> {
-        for segno in self.list_slru_segments(SlruKind::Clog, probe_lsn)? {
-            let nblocks = self.get_slru_segment_size(SlruKind::Clog, segno, probe_lsn)?;
-            for blknum in (0..nblocks).rev() {
-                let clog_page =
-                    self.get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn)?;
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            if timestamp >= search_timestamp {
+                *found_larger = true;
+                return ControlFlow::Break(true);
+            } else {
+                *found_smaller = true;
+            }
+            ControlFlow::Continue(())
+        })
+        .await
+    }
 
-                if clog_page.len() == pg_constants::BLCKSZ as usize + 8 {
+    /// Obtain the possible timestamp range for the given lsn.
+    ///
+    /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
+    pub(crate) async fn get_timestamp_for_lsn(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Option<TimestampTz>, PageReconstructError> {
+        let mut max: Option<TimestampTz> = None;
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            if let Some(max_prev) = max {
+                max = Some(max_prev.max(timestamp));
+            } else {
+                max = Some(timestamp);
+            }
+            ControlFlow::Continue(())
+        })
+        .await?;
+
+        Ok(max)
+    }
+
+    /// Runs the given function on all the timestamps for a given lsn
+    ///
+    /// The return value is either given by the closure, or set to the `Default`
+    /// impl's output.
+    async fn map_all_timestamps<T: Default>(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+        mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
+    ) -> Result<T, PageReconstructError> {
+        for segno in self
+            .list_slru_segments(SlruKind::Clog, Version::Lsn(probe_lsn), ctx)
+            .await?
+        {
+            let nblocks = self
+                .get_slru_segment_size(SlruKind::Clog, segno, Version::Lsn(probe_lsn), ctx)
+                .await?;
+            for blknum in (0..nblocks).rev() {
+                let clog_page = self
+                    .get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn, ctx)
+                    .await?;
+
+                if clog_page.len() == BLCKSZ as usize + 8 {
                     let mut timestamp_bytes = [0u8; 8];
-                    timestamp_bytes.copy_from_slice(&clog_page[pg_constants::BLCKSZ as usize..]);
+                    timestamp_bytes.copy_from_slice(&clog_page[BLCKSZ as usize..]);
                     let timestamp = TimestampTz::from_be_bytes(timestamp_bytes);
 
-                    if timestamp >= search_timestamp {
-                        *found_larger = true;
-                        return Ok(true);
-                    } else {
-                        *found_smaller = true;
+                    match f(timestamp) {
+                        ControlFlow::Break(b) => return Ok(b),
+                        ControlFlow::Continue(()) => (),
                     }
                 }
             }
         }
-        Ok(false)
+        Ok(Default::default())
+    }
+
+    pub(crate) async fn get_slru_keyspace(
+        &self,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<KeySpace, PageReconstructError> {
+        let mut accum = KeySpaceAccum::new();
+
+        for kind in SlruKind::iter() {
+            let mut segments: Vec<u32> = self
+                .list_slru_segments(kind, version, ctx)
+                .await?
+                .into_iter()
+                .collect();
+            segments.sort_unstable();
+
+            for seg in segments {
+                let block_count = self.get_slru_segment_size(kind, seg, version, ctx).await?;
+
+                accum.add_range(
+                    slru_block_to_key(kind, seg, 0)..slru_block_to_key(kind, seg, block_count),
+                );
+            }
+        }
+
+        Ok(accum.to_keyspace())
     }
 
     /// Get a list of SLRU segments
-    pub fn list_slru_segments(&self, kind: SlruKind, lsn: Lsn) -> Result<HashSet<u32>> {
+    pub(crate) async fn list_slru_segments(
+        &self,
+        kind: SlruKind,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<HashSet<u32>, PageReconstructError> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
-        let buf = self.tline.get(key, lsn)?;
-        let dir = SlruSegmentDirectory::des(&buf)?;
-
-        Ok(dir.segments)
+        let buf = version.get(self, key, ctx).await?;
+        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => Ok(dir.segments),
+            Err(e) => Err(PageReconstructError::from(e)),
+        }
     }
 
-    pub fn get_relmap_file(&self, spcnode: Oid, dbnode: Oid, lsn: Lsn) -> Result<Bytes> {
+    pub(crate) async fn get_relmap_file(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
         let key = relmap_file_key(spcnode, dbnode);
 
-        let buf = self.tline.get(key, lsn)?;
+        let buf = version.get(self, key, ctx).await?;
         Ok(buf)
     }
 
-    pub fn list_dbdirs(&self, lsn: Lsn) -> Result<HashMap<(Oid, Oid), bool>> {
-        // fetch directory entry
-        let buf = self.tline.get(DBDIR_KEY, lsn)?;
-        let dir = DbDirectory::des(&buf)?;
-
-        Ok(dir.dbdirs)
-    }
-
-    pub fn get_twophase_file(&self, xid: TransactionId, lsn: Lsn) -> Result<Bytes> {
-        let key = twophase_file_key(xid);
-        let buf = self.tline.get(key, lsn)?;
-        Ok(buf)
-    }
-
-    pub fn list_twophase_files(&self, lsn: Lsn) -> Result<HashSet<TransactionId>> {
-        // fetch directory entry
-        let buf = self.tline.get(TWOPHASEDIR_KEY, lsn)?;
-        let dir = TwoPhaseDirectory::des(&buf)?;
-
-        Ok(dir.xids)
-    }
-
-    pub fn get_control_file(&self, lsn: Lsn) -> Result<Bytes> {
-        self.tline.get(CONTROLFILE_KEY, lsn)
-    }
-
-    pub fn get_checkpoint(&self, lsn: Lsn) -> Result<Bytes> {
-        self.tline.get(CHECKPOINT_KEY, lsn)
-    }
-
-    /// Get the LSN of the last ingested WAL record.
-    ///
-    /// This is just a convenience wrapper that calls through to the underlying
-    /// repository.
-    pub fn get_last_record_lsn(&self) -> Lsn {
-        self.tline.get_last_record_lsn()
-    }
-
-    /// Check that it is valid to request operations with that lsn.
-    ///
-    /// This is just a convenience wrapper that calls through to the underlying
-    /// repository.
-    pub fn check_lsn_is_in_scope(
+    pub(crate) async fn list_dbdirs(
         &self,
         lsn: Lsn,
-        latest_gc_cutoff_lsn: &RwLockReadGuard<Lsn>,
-    ) -> Result<()> {
-        self.tline.check_lsn_is_in_scope(lsn, latest_gc_cutoff_lsn)
+        ctx: &RequestContext,
+    ) -> Result<HashMap<(Oid, Oid), bool>, PageReconstructError> {
+        // fetch directory entry
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
+
+        match DbDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => Ok(dir.dbdirs),
+            Err(e) => Err(PageReconstructError::from(e)),
+        }
     }
 
-    /// Retrieve current logical size of the timeline
-    ///
-    /// NOTE: counted incrementally, includes ancestors,
-    pub fn get_current_logical_size(&self) -> usize {
-        let current_logical_size = self.current_logical_size.load(Ordering::Acquire);
-        match usize::try_from(current_logical_size) {
-            Ok(sz) => sz,
-            Err(_) => {
-                error!(
-                    "current_logical_size is out of range: {}",
-                    current_logical_size
-                );
-                0
+    pub(crate) async fn get_twophase_file(
+        &self,
+        xid: TransactionId,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        let key = twophase_file_key(xid);
+        let buf = self.get(key, lsn, ctx).await?;
+        Ok(buf)
+    }
+
+    pub(crate) async fn list_twophase_files(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashSet<TransactionId>, PageReconstructError> {
+        // fetch directory entry
+        let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
+
+        match TwoPhaseDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => Ok(dir.xids),
+            Err(e) => Err(PageReconstructError::from(e)),
+        }
+    }
+
+    pub(crate) async fn get_control_file(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.get(CONTROLFILE_KEY, lsn, ctx).await
+    }
+
+    pub(crate) async fn get_checkpoint(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.get(CHECKPOINT_KEY, lsn, ctx).await
+    }
+
+    pub(crate) async fn list_aux_files(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        match self.get(AUX_FILES_KEY, lsn, ctx).await {
+            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
+                Ok(dir) => Ok(dir.files),
+                Err(e) => Err(PageReconstructError::from(e)),
+            },
+            Err(e) => {
+                // This is expected: historical databases do not have the key.
+                debug!("Failed to get info about AUX files: {}", e);
+                Ok(HashMap::new())
             }
         }
     }
@@ -413,29 +690,49 @@ impl<R: Repository> DatadirTimeline<R> {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
-    pub fn get_current_logical_size_non_incremental(&self, lsn: Lsn) -> Result<usize> {
-        // Fetch list of database dirs and iterate them
-        let buf = self.tline.get(DBDIR_KEY, lsn)?;
-        let dbdir = DbDirectory::des(&buf)?;
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
+    pub async fn get_current_logical_size_non_incremental(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<u64, CalculateLogicalSizeError> {
+        crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let mut total_size: usize = 0;
+        // Fetch list of database dirs and iterate them
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
+        let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
+
+        let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self.list_rels(*spcnode, *dbnode, lsn)? {
+            for rel in self
+                .list_rels(*spcnode, *dbnode, Version::Lsn(lsn), ctx)
+                .await?
+            {
+                if self.cancel.is_cancelled() {
+                    return Err(CalculateLogicalSizeError::Cancelled);
+                }
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self.tline.get(relsize_key, lsn)?;
+                let mut buf = self.get(relsize_key, lsn, ctx).await?;
                 let relsize = buf.get_u32_le();
 
-                total_size += relsize as usize;
+                total_size += relsize as u64;
             }
         }
-        Ok(total_size * pg_constants::BLCKSZ as usize)
+        Ok(total_size * BLCKSZ as u64)
     }
 
     ///
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    fn collect_keyspace(&self, lsn: Lsn) -> Result<KeySpace> {
+    pub(crate) async fn collect_keyspace(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<KeySpace, CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -443,7 +740,7 @@ impl<R: Repository> DatadirTimeline<R> {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.tline.get(DBDIR_KEY, lsn)?;
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
         let dbdir = DbDirectory::des(&buf)?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
@@ -453,14 +750,14 @@ impl<R: Repository> DatadirTimeline<R> {
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
-                .list_rels(spcnode, dbnode, lsn)?
-                .iter()
-                .cloned()
+                .list_rels(spcnode, dbnode, Version::Lsn(lsn), ctx)
+                .await?
+                .into_iter()
                 .collect();
             rels.sort_unstable();
             for rel in rels {
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self.tline.get(relsize_key, lsn)?;
+                let mut buf = self.get(relsize_key, lsn, ctx).await?;
                 let relsize = buf.get_u32_le();
 
                 result.add_range(rel_block_to_key(rel, 0)..rel_block_to_key(rel, relsize));
@@ -476,13 +773,13 @@ impl<R: Repository> DatadirTimeline<R> {
         ] {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
-            let buf = self.tline.get(slrudir_key, lsn)?;
+            let buf = self.get(slrudir_key, lsn, ctx).await?;
             let dir = SlruSegmentDirectory::des(&buf)?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
                 let segsize_key = slru_segment_size_to_key(kind, segno);
-                let mut buf = self.tline.get(segsize_key, lsn)?;
+                let mut buf = self.get(segsize_key, lsn, ctx).await?;
                 let segsize = buf.get_u32_le();
 
                 result.add_range(
@@ -494,7 +791,7 @@ impl<R: Repository> DatadirTimeline<R> {
 
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
-        let buf = self.tline.get(TWOPHASEDIR_KEY, lsn)?;
+        let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
         let twophase_dir = TwoPhaseDirectory::des(&buf)?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
@@ -504,21 +801,49 @@ impl<R: Repository> DatadirTimeline<R> {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
-
+        if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
+            result.add_key(AUX_FILES_KEY);
+        }
         Ok(result.to_keyspace())
     }
 
-    pub fn repartition(&self, lsn: Lsn, partition_size: u64) -> Result<(KeyPartitioning, Lsn)> {
-        let mut partitioning_guard = self.partitioning.lock().unwrap();
-        if partitioning_guard.1 == Lsn(0)
-            || lsn.0 - partitioning_guard.1 .0 > self.repartition_threshold
-        {
-            let keyspace = self.collect_keyspace(lsn)?;
-            let partitioning = keyspace.partition(partition_size);
-            *partitioning_guard = (partitioning, lsn);
-            return Ok((partitioning_guard.0.clone(), lsn));
+    /// Get cached size of relation if it not updated after specified LSN
+    pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
+        let rel_size_cache = self.rel_size_cache.read().unwrap();
+        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
+            if lsn >= *cached_lsn {
+                return Some(*nblocks);
+            }
         }
-        Ok((partitioning_guard.0.clone(), partitioning_guard.1))
+        None
+    }
+
+    /// Update cached relation size if there is no more recent update
+    pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        match rel_size_cache.entry(tag) {
+            hash_map::Entry::Occupied(mut entry) => {
+                let cached_lsn = entry.get_mut();
+                if lsn >= cached_lsn.0 {
+                    *cached_lsn = (lsn, nblocks);
+                }
+            }
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert((lsn, nblocks));
+            }
+        }
+    }
+
+    /// Store cached relation size
+    pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        rel_size_cache.insert(tag, (lsn, nblocks));
+    }
+
+    /// Remove cached relation size
+    pub fn remove_cached_rel_size(&self, tag: &RelTag) {
+        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
+        rel_size_cache.remove(tag);
     }
 }
 
@@ -526,32 +851,57 @@ impl<R: Repository> DatadirTimeline<R> {
 /// updates to the repository. It is created by the 'begin_record'
 /// function. It is called for each WAL record, so that all the modifications
 /// by a one WAL record appear atomic.
-pub struct DatadirModification<'a, R: Repository> {
+pub struct DatadirModification<'a> {
     /// The timeline this modification applies to. You can access this to
     /// read the state, but note that any pending updates are *not* reflected
     /// in the state in 'tline' yet.
-    pub tline: &'a DatadirTimeline<R>,
+    pub tline: &'a Timeline,
 
+    /// Current LSN of the modification
     lsn: Lsn,
 
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
-    pending_updates: HashMap<Key, Value>,
-    pending_deletions: Vec<Range<Key>>,
-    pending_nblocks: isize,
+    pending_lsns: Vec<Lsn>,
+    pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
+    pending_deletions: Vec<(Range<Key>, Lsn)>,
+    pending_nblocks: i64,
 }
 
-impl<'a, R: Repository> DatadirModification<'a, R> {
+impl<'a> DatadirModification<'a> {
+    /// Get the current lsn
+    pub(crate) fn get_lsn(&self) -> Lsn {
+        self.lsn
+    }
+
+    /// Set the current lsn
+    pub(crate) fn set_lsn(&mut self, lsn: Lsn) -> anyhow::Result<()> {
+        ensure!(
+            lsn >= self.lsn,
+            "setting an older lsn {} than {} is not allowed",
+            lsn,
+            self.lsn
+        );
+        if lsn > self.lsn {
+            self.pending_lsns.push(self.lsn);
+            self.lsn = lsn;
+        }
+        Ok(())
+    }
+
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
     /// always exist.
-    pub fn init_empty(&mut self) -> Result<()> {
+    pub fn init_empty(&mut self) -> anyhow::Result<()> {
         let buf = DbDirectory::ser(&DbDirectory {
             dbdirs: HashMap::new(),
         })?;
         self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+        // Create AuxFilesDirectory
+        self.init_aux_dir()?;
 
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
@@ -570,6 +920,20 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn init_empty_test_timeline(&mut self) -> anyhow::Result<()> {
+        self.init_empty()?;
+        self.put_control_file(bytes::Bytes::from_static(
+            b"control_file contents do not matter",
+        ))
+        .context("put_control_file")?;
+        self.put_checkpoint(bytes::Bytes::from_static(
+            b"checkpoint_file contents do not matter",
+        ))
+        .context("put_checkpoint_file")?;
+        Ok(())
+    }
+
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// NOTE: this will *not* implicitly extend the relation, if the page is beyond the
@@ -579,9 +943,9 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         &mut self,
         rel: RelTag,
         blknum: BlockNumber,
-        rec: ZenithWalRecord,
-    ) -> Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+        rec: NeonWalRecord,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
         Ok(())
     }
@@ -592,8 +956,8 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
-        rec: ZenithWalRecord,
-    ) -> Result<()> {
+        rec: NeonWalRecord,
+    ) -> anyhow::Result<()> {
         self.put(
             slru_block_to_key(kind, segno, blknum),
             Value::WalRecord(rec),
@@ -607,8 +971,8 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         rel: RelTag,
         blknum: BlockNumber,
         img: Bytes,
-    ) -> Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
     }
@@ -619,26 +983,35 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         segno: u32,
         blknum: BlockNumber,
         img: Bytes,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         self.put(slru_block_to_key(kind, segno, blknum), Value::Image(img));
         Ok(())
     }
 
     /// Store a relmapper file (pg_filenode.map) in the repository
-    pub fn put_relmap_file(&mut self, spcnode: Oid, dbnode: Oid, img: Bytes) -> Result<()> {
+    pub async fn put_relmap_file(
+        &mut self,
+        spcnode: Oid,
+        dbnode: Oid,
+        img: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Add it to the directory (if it doesn't exist already)
-        let buf = self.get(DBDIR_KEY)?;
+        let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dbdir = DbDirectory::des(&buf)?;
 
         let r = dbdir.dbdirs.insert((spcnode, dbnode), true);
-        if r == None || r == Some(false) {
+        if r.is_none() || r == Some(false) {
             // The dbdir entry didn't exist, or it contained a
             // 'false'. The 'insert' call already updated it with
             // 'true', now write the updated 'dbdirs' map back.
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+            // Create AuxFilesDirectory as well
+            self.init_aux_dir()?;
         }
-        if r == None {
+        if r.is_none() {
             // Create RelDirectory
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
@@ -653,12 +1026,17 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         Ok(())
     }
 
-    pub fn put_twophase_file(&mut self, xid: TransactionId, img: Bytes) -> Result<()> {
+    pub async fn put_twophase_file(
+        &mut self,
+        xid: TransactionId,
+        img: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Add it to the directory entry
-        let buf = self.get(TWOPHASEDIR_KEY)?;
+        let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
         if !dir.xids.insert(xid) {
-            bail!("twophase file for xid {} already exists", xid);
+            anyhow::bail!("twophase file for xid {} already exists", xid);
         }
         self.put(
             TWOPHASEDIR_KEY,
@@ -669,23 +1047,29 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         Ok(())
     }
 
-    pub fn put_control_file(&mut self, img: Bytes) -> Result<()> {
+    pub fn put_control_file(&mut self, img: Bytes) -> anyhow::Result<()> {
         self.put(CONTROLFILE_KEY, Value::Image(img));
         Ok(())
     }
 
-    pub fn put_checkpoint(&mut self, img: Bytes) -> Result<()> {
+    pub fn put_checkpoint(&mut self, img: Bytes) -> anyhow::Result<()> {
         self.put(CHECKPOINT_KEY, Value::Image(img));
         Ok(())
     }
 
-    pub fn drop_dbdir(&mut self, spcnode: Oid, dbnode: Oid) -> Result<()> {
-        let req_lsn = self.tline.get_last_record_lsn();
-
-        let total_blocks = self.tline.get_db_size(spcnode, dbnode, req_lsn)?;
+    pub async fn drop_dbdir(
+        &mut self,
+        spcnode: Oid,
+        dbnode: Oid,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let total_blocks = self
+            .tline
+            .get_db_size(spcnode, dbnode, Version::Modified(self), true, ctx)
+            .await?;
 
         // Remove entry from dbdir
-        let buf = self.get(DBDIR_KEY)?;
+        let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dir = DbDirectory::des(&buf)?;
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
@@ -698,7 +1082,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         }
 
         // Update logical database size.
-        self.pending_nblocks -= total_blocks as isize;
+        self.pending_nblocks -= total_blocks as i64;
 
         // Delete all relations and metadata files for the spcnode/dnode
         self.delete(dbdir_key_range(spcnode, dbnode));
@@ -708,32 +1092,43 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     /// Create a relation fork.
     ///
     /// 'nblocks' is the initial size.
-    pub fn put_rel_creation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+    pub async fn put_rel_creation(
+        &mut self,
+        rel: RelTag,
+        nblocks: BlockNumber,
+        ctx: &RequestContext,
+    ) -> Result<(), RelationError> {
+        if rel.relnode == 0 {
+            return Err(RelationError::InvalidRelnode);
+        }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY)?)?;
+        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
+            .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
             // Didn't exist. Update dbdir
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
-            let buf = DbDirectory::ser(&dbdir)?;
+            let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // and create the RelDirectory
             RelDirectory::default()
         } else {
             // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key)?)?
+            RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
+                .context("deserialize db")?
         };
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            bail!("rel {} already exists", rel);
+            return Err(RelationError::AlreadyExists);
         }
         self.put(
             rel_dir_key,
-            Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
+            Value::Image(Bytes::from(
+                RelDirectory::ser(&rel_dir).context("serialize")?,
+            )),
         );
 
         // Put size
@@ -741,57 +1136,83 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         let buf = nblocks.to_le_bytes();
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
-        self.pending_nblocks += nblocks as isize;
+        self.pending_nblocks += nblocks as i64;
+
+        // Update relation size cache
+        self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
         // Even if nblocks > 0, we don't insert any actual blocks here. That's up to the
         // caller.
-
         Ok(())
     }
 
     /// Truncate relation
-    pub fn put_rel_truncation(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
-        let size_key = rel_size_to_key(rel);
+    pub async fn put_rel_truncation(
+        &mut self,
+        rel: RelTag,
+        nblocks: BlockNumber,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+        if self
+            .tline
+            .get_rel_exists(rel, Version::Modified(self), true, ctx)
+            .await?
+        {
+            let size_key = rel_size_to_key(rel);
+            // Fetch the old size first
+            let old_size = self.get(size_key, ctx).await?.get_u32_le();
 
-        // Fetch the old size first
-        let old_size = self.get(size_key)?.get_u32_le();
+            // Update the entry with the new size.
+            let buf = nblocks.to_le_bytes();
+            self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
-        // Update the entry with the new size.
-        let buf = nblocks.to_le_bytes();
-        self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
+            // Update relation size cache
+            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
-        // Update logical database size.
-        self.pending_nblocks -= old_size as isize - nblocks as isize;
+            // Update relation size cache
+            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
+
+            // Update logical database size.
+            self.pending_nblocks -= old_size as i64 - nblocks as i64;
+        }
         Ok(())
     }
 
     /// Extend relation
     /// If new size is smaller, do nothing.
-    pub fn put_rel_extend(&mut self, rel: RelTag, nblocks: BlockNumber) -> Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+    pub async fn put_rel_extend(
+        &mut self,
+        rel: RelTag,
+        nblocks: BlockNumber,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Put size
         let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key)?.get_u32_le();
+        let old_size = self.get(size_key, ctx).await?.get_u32_le();
 
         // only extend relation here. never decrease the size
         if nblocks > old_size {
             let buf = nblocks.to_le_bytes();
             self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
-            self.pending_nblocks += nblocks as isize - old_size as isize;
+            // Update relation size cache
+            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
+
+            self.pending_nblocks += nblocks as i64 - old_size as i64;
         }
         Ok(())
     }
 
     /// Drop a relation.
-    pub fn put_rel_drop(&mut self, rel: RelTag) -> Result<()> {
-        ensure!(rel.relnode != 0, "invalid relnode");
+    pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &RequestContext) -> anyhow::Result<()> {
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let buf = self.get(dir_key)?;
+        let buf = self.get(dir_key, ctx).await?;
         let mut dir = RelDirectory::des(&buf)?;
 
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
@@ -802,8 +1223,11 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
 
         // update logical size
         let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key)?.get_u32_le();
-        self.pending_nblocks -= old_size as isize;
+        let old_size = self.get(size_key, ctx).await?.get_u32_le();
+        self.pending_nblocks -= old_size as i64;
+
+        // Remove enty from relation size cache
+        self.tline.remove_cached_rel_size(&rel);
 
         // Delete size entry, as well as all blocks
         self.delete(rel_key_range(rel));
@@ -811,19 +1235,20 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         Ok(())
     }
 
-    pub fn put_slru_segment_creation(
+    pub async fn put_slru_segment_creation(
         &mut self,
         kind: SlruKind,
         segno: u32,
         nblocks: BlockNumber,
-    ) -> Result<()> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Add it to the directory entry
         let dir_key = slru_dir_to_key(kind);
-        let buf = self.get(dir_key)?;
+        let buf = self.get(dir_key, ctx).await?;
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.insert(segno) {
-            bail!("slru segment {:?}/{} already exists", kind, segno);
+            anyhow::bail!("slru segment {kind:?}/{segno} already exists");
         }
         self.put(
             dir_key,
@@ -846,7 +1271,7 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         kind: SlruKind,
         segno: u32,
         nblocks: BlockNumber,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         // Put size
         let size_key = slru_segment_size_to_key(kind, segno);
         let buf = nblocks.to_le_bytes();
@@ -855,10 +1280,15 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     /// This method is used for marking truncated SLRU files
-    pub fn drop_slru_segment(&mut self, kind: SlruKind, segno: u32) -> Result<()> {
+    pub async fn drop_slru_segment(
+        &mut self,
+        kind: SlruKind,
+        segno: u32,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Remove it from the directory entry
         let dir_key = slru_dir_to_key(kind);
-        let buf = self.get(dir_key)?;
+        let buf = self.get(dir_key, ctx).await?;
         let mut dir = SlruSegmentDirectory::des(&buf)?;
 
         if !dir.segments.remove(&segno) {
@@ -876,15 +1306,19 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
     }
 
     /// Drop a relmapper file (pg_filenode.map)
-    pub fn drop_relmap_file(&mut self, _spcnode: Oid, _dbnode: Oid) -> Result<()> {
+    pub fn drop_relmap_file(&mut self, _spcnode: Oid, _dbnode: Oid) -> anyhow::Result<()> {
         // TODO
         Ok(())
     }
 
     /// This method is used for marking truncated SLRU files
-    pub fn drop_twophase_file(&mut self, xid: TransactionId) -> Result<()> {
+    pub async fn drop_twophase_file(
+        &mut self,
+        xid: TransactionId,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Remove it from the directory entry
-        let buf = self.get(TWOPHASEDIR_KEY)?;
+        let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
         let mut dir = TwoPhaseDirectory::des(&buf)?;
 
         if !dir.xids.remove(&xid) {
@@ -901,66 +1335,217 @@ impl<'a, R: Repository> DatadirModification<'a, R> {
         Ok(())
     }
 
-    ///
-    /// Finish this atomic update, writing all the updated keys to the
-    /// underlying timeline.
-    ///
-    pub fn commit(self) -> Result<()> {
-        let writer = self.tline.tline.writer();
+    pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
+        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+            files: HashMap::new(),
+        })?;
+        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
+        Ok(())
+    }
 
+    pub async fn put_file(
+        &mut self,
+        path: &str,
+        content: &[u8],
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
+            Ok(buf) => AuxFilesDirectory::des(&buf)?,
+            Err(e) => {
+                // This is expected: historical databases do not have the key.
+                debug!("Failed to get info about AUX files: {}", e);
+                AuxFilesDirectory {
+                    files: HashMap::new(),
+                }
+            }
+        };
+        let path = path.to_string();
+        if content.is_empty() {
+            dir.files.remove(&path);
+        } else {
+            dir.files.insert(path, Bytes::copy_from_slice(content));
+        }
+        self.put(
+            AUX_FILES_KEY,
+            Value::Image(Bytes::from(
+                AuxFilesDirectory::ser(&dir).context("serialize")?,
+            )),
+        );
+        Ok(())
+    }
+
+    ///
+    /// Flush changes accumulated so far to the underlying repository.
+    ///
+    /// Usually, changes made in DatadirModification are atomic, but this allows
+    /// you to flush them to the underlying repository before the final `commit`.
+    /// That allows to free up the memory used to hold the pending changes.
+    ///
+    /// Currently only used during bulk import of a data directory. In that
+    /// context, breaking the atomicity is OK. If the import is interrupted, the
+    /// whole import fails and the timeline will be deleted anyway.
+    /// (Or to be precise, it will be left behind for debugging purposes and
+    /// ignored, see <https://github.com/neondatabase/neon/pull/1809>)
+    ///
+    /// Note: A consequence of flushing the pending operations is that they
+    /// won't be visible to subsequent operations until `commit`. The function
+    /// retains all the metadata, but data pages are flushed. That's again OK
+    /// for bulk import, where you are just loading data pages and won't try to
+    /// modify the same pages twice.
+    pub async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+        // Unless we have accumulated a decent amount of changes, it's not worth it
+        // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
-
-        for (key, value) in self.pending_updates {
-            writer.put(key, self.lsn, value)?;
-        }
-        for key_range in self.pending_deletions {
-            writer.delete(key_range.clone(), self.lsn)?;
+        if pending_nblocks < 10000 {
+            return Ok(());
         }
 
-        writer.finish_write(self.lsn);
+        let writer = self.tline.writer().await;
+
+        // Flush relation and  SLRU data blocks, keep metadata.
+        let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
+        for (key, values) in self.pending_updates.drain() {
+            for (lsn, value) in values {
+                if is_rel_block_key(&key) || is_slru_block_key(key) {
+                    // This bails out on first error without modifying pending_updates.
+                    // That's Ok, cf this function's doc comment.
+                    writer.put(key, lsn, &value, ctx).await?;
+                } else {
+                    retained_pending_updates
+                        .entry(key)
+                        .or_default()
+                        .push((lsn, value));
+                }
+            }
+        }
+
+        self.pending_updates = retained_pending_updates;
 
         if pending_nblocks != 0 {
-            self.tline.current_logical_size.fetch_add(
-                pending_nblocks * pg_constants::BLCKSZ as isize,
-                Ordering::SeqCst,
-            );
+            writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
+            self.pending_nblocks = 0;
         }
 
         Ok(())
     }
 
+    ///
+    /// Finish this atomic update, writing all the updated keys to the
+    /// underlying timeline.
+    /// All the modifications in this atomic update are stamped by the specified LSN.
+    ///
+    pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+        let writer = self.tline.writer().await;
+
+        let pending_nblocks = self.pending_nblocks;
+        self.pending_nblocks = 0;
+
+        if !self.pending_updates.is_empty() {
+            writer.put_batch(&self.pending_updates, ctx).await?;
+            self.pending_updates.clear();
+        }
+
+        if !self.pending_deletions.is_empty() {
+            writer.delete_batch(&self.pending_deletions).await?;
+            self.pending_deletions.clear();
+        }
+
+        self.pending_lsns.push(self.lsn);
+        for pending_lsn in self.pending_lsns.drain(..) {
+            // Ideally, we should be able to call writer.finish_write() only once
+            // with the highest LSN. However, the last_record_lsn variable in the
+            // timeline keeps track of the latest LSN and the immediate previous LSN
+            // so we need to record every LSN to not leave a gap between them.
+            writer.finish_write(pending_lsn);
+        }
+
+        if pending_nblocks != 0 {
+            writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.pending_updates.len() + self.pending_deletions.len()
+    }
+
     // Internal helper functions to batch the modifications
 
-    fn get(&self, key: Key) -> Result<Bytes> {
-        // Have we already updated the same key? Read the pending updated
+    async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
+        // Have we already updated the same key? Read the latest pending updated
         // version in that case.
         //
         // Note: we don't check pending_deletions. It is an error to request a
         // value that has been removed, deletion only avoids leaking storage.
-        if let Some(value) = self.pending_updates.get(&key) {
-            if let Value::Image(img) = value {
-                Ok(img.clone())
-            } else {
-                // Currently, we never need to read back a WAL record that we
-                // inserted in the same "transaction". All the metadata updates
-                // work directly with Images, and we never need to read actual
-                // data pages. We could handle this if we had to, by calling
-                // the walredo manager, but let's keep it simple for now.
-                bail!("unexpected pending WAL record");
+        if let Some(values) = self.pending_updates.get(&key) {
+            if let Some((_, value)) = values.last() {
+                return if let Value::Image(img) = value {
+                    Ok(img.clone())
+                } else {
+                    // Currently, we never need to read back a WAL record that we
+                    // inserted in the same "transaction". All the metadata updates
+                    // work directly with Images, and we never need to read actual
+                    // data pages. We could handle this if we had to, by calling
+                    // the walredo manager, but let's keep it simple for now.
+                    Err(PageReconstructError::from(anyhow::anyhow!(
+                        "unexpected pending WAL record"
+                    )))
+                };
             }
-        } else {
-            let last_lsn = self.tline.get_last_record_lsn();
-            self.tline.tline.get(key, last_lsn)
         }
+        let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+        self.tline.get(key, lsn, ctx).await
     }
 
     fn put(&mut self, key: Key, val: Value) {
-        self.pending_updates.insert(key, val);
+        let values = self.pending_updates.entry(key).or_default();
+        // Replace the previous value if it exists at the same lsn
+        if let Some((last_lsn, last_value)) = values.last_mut() {
+            if *last_lsn == self.lsn {
+                *last_value = val;
+                return;
+            }
+        }
+        values.push((self.lsn, val));
     }
 
     fn delete(&mut self, key_range: Range<Key>) {
         trace!("DELETE {}-{}", key_range.start, key_range.end);
-        self.pending_deletions.push(key_range);
+        self.pending_deletions.push((key_range, self.lsn));
+    }
+}
+
+/// This struct facilitates accessing either a committed key from the timeline at a
+/// specific LSN, or the latest uncommitted key from a pending modification.
+/// During WAL ingestion, the records from multiple LSNs may be batched in the same
+/// modification before being flushed to the timeline. Hence, the routines in WalIngest
+/// need to look up the keys in the modification first before looking them up in the
+/// timeline to not miss the latest updates.
+#[derive(Clone, Copy)]
+pub enum Version<'a> {
+    Lsn(Lsn),
+    Modified(&'a DatadirModification<'a>),
+}
+
+impl<'a> Version<'a> {
+    async fn get(
+        &self,
+        timeline: &Timeline,
+        key: Key,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        match self {
+            Version::Lsn(lsn) => timeline.get(key, *lsn, ctx).await,
+            Version::Modified(modification) => modification.get(key, ctx).await,
+        }
+    }
+
+    fn get_lsn(&self) -> Lsn {
+        match self {
+            Version::Lsn(lsn) => *lsn,
+            Version::Modified(modification) => modification.lsn,
+        }
     }
 }
 
@@ -986,6 +1571,11 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct AuxFilesDirectory {
+    files: HashMap<String, Bytes>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RelSizeEntry {
     nblocks: u32,
@@ -997,359 +1587,7 @@ struct SlruSegmentDirectory {
     segments: HashSet<u32>,
 }
 
-static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; pg_constants::BLCKSZ as usize]);
-
-// Layout of the Key address space
-//
-// The Key struct, used to address the underlying key-value store, consists of
-// 18 bytes, split into six fields. See 'Key' in repository.rs. We need to map
-// all the data and metadata keys into those 18 bytes.
-//
-// Principles for the mapping:
-//
-// - Things that are often accessed or modified together, should be close to
-//   each other in the key space. For example, if a relation is extended by one
-//   block, we create a new key-value pair for the block data, and update the
-//   relation size entry. Because of that, the RelSize key comes after all the
-//   RelBlocks of a relation: the RelSize and the last RelBlock are always next
-//   to each other.
-//
-// The key space is divided into four major sections, identified by the first
-// byte, and the form a hierarchy:
-//
-// 00 Relation data and metadata
-//
-//   DbDir    () -> (dbnode, spcnode)
-//   Filenodemap
-//   RelDir   -> relnode forknum
-//       RelBlocks
-//       RelSize
-//
-// 01 SLRUs
-//
-//   SlruDir  kind
-//   SlruSegBlocks segno
-//   SlruSegSize
-//
-// 02 pg_twophase
-//
-// 03 misc
-//    controlfile
-//    checkpoint
-//
-// Below is a full list of the keyspace allocation:
-//
-// DbDir:
-// 00 00000000 00000000 00000000 00   00000000
-//
-// Filenodemap:
-// 00 SPCNODE  DBNODE   00000000 00   00000000
-//
-// RelDir:
-// 00 SPCNODE  DBNODE   00000000 00   00000001 (Postgres never uses relfilenode 0)
-//
-// RelBlock:
-// 00 SPCNODE  DBNODE   RELNODE  FORK BLKNUM
-//
-// RelSize:
-// 00 SPCNODE  DBNODE   RELNODE  FORK FFFFFFFF
-//
-// SlruDir:
-// 01 kind     00000000 00000000 00   00000000
-//
-// SlruSegBlock:
-// 01 kind     00000001 SEGNO    00   BLKNUM
-//
-// SlruSegSize:
-// 01 kind     00000001 SEGNO    00   FFFFFFFF
-//
-// TwoPhaseDir:
-// 02 00000000 00000000 00000000 00   00000000
-//
-// TwoPhaseFile:
-// 02 00000000 00000000 00000000 00   XID
-//
-// ControlFile:
-// 03 00000000 00000000 00000000 00   00000000
-//
-// Checkpoint:
-// 03 00000000 00000000 00000000 00   00000001
-
-//-- Section 01: relation data and metadata
-
-const DBDIR_KEY: Key = Key {
-    field1: 0x00,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 0,
-};
-
-fn dbdir_key_range(spcnode: Oid, dbnode: Oid) -> Range<Key> {
-    Key {
-        field1: 0x00,
-        field2: spcnode,
-        field3: dbnode,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }..Key {
-        field1: 0x00,
-        field2: spcnode,
-        field3: dbnode,
-        field4: 0xffffffff,
-        field5: 0xff,
-        field6: 0xffffffff,
-    }
-}
-
-fn relmap_file_key(spcnode: Oid, dbnode: Oid) -> Key {
-    Key {
-        field1: 0x00,
-        field2: spcnode,
-        field3: dbnode,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }
-}
-
-fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
-    Key {
-        field1: 0x00,
-        field2: spcnode,
-        field3: dbnode,
-        field4: 0,
-        field5: 0,
-        field6: 1,
-    }
-}
-
-fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
-    Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum,
-        field6: blknum,
-    }
-}
-
-fn rel_size_to_key(rel: RelTag) -> Key {
-    Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum,
-        field6: 0xffffffff,
-    }
-}
-
-fn rel_key_range(rel: RelTag) -> Range<Key> {
-    Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum,
-        field6: 0,
-    }..Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum + 1,
-        field6: 0,
-    }
-}
-
-//-- Section 02: SLRUs
-
-fn slru_dir_to_key(kind: SlruKind) -> Key {
-    Key {
-        field1: 0x01,
-        field2: match kind {
-            SlruKind::Clog => 0x00,
-            SlruKind::MultiXactMembers => 0x01,
-            SlruKind::MultiXactOffsets => 0x02,
-        },
-        field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }
-}
-
-fn slru_block_to_key(kind: SlruKind, segno: u32, blknum: BlockNumber) -> Key {
-    Key {
-        field1: 0x01,
-        field2: match kind {
-            SlruKind::Clog => 0x00,
-            SlruKind::MultiXactMembers => 0x01,
-            SlruKind::MultiXactOffsets => 0x02,
-        },
-        field3: 1,
-        field4: segno,
-        field5: 0,
-        field6: blknum,
-    }
-}
-
-fn slru_segment_size_to_key(kind: SlruKind, segno: u32) -> Key {
-    Key {
-        field1: 0x01,
-        field2: match kind {
-            SlruKind::Clog => 0x00,
-            SlruKind::MultiXactMembers => 0x01,
-            SlruKind::MultiXactOffsets => 0x02,
-        },
-        field3: 1,
-        field4: segno,
-        field5: 0,
-        field6: 0xffffffff,
-    }
-}
-
-fn slru_segment_key_range(kind: SlruKind, segno: u32) -> Range<Key> {
-    let field2 = match kind {
-        SlruKind::Clog => 0x00,
-        SlruKind::MultiXactMembers => 0x01,
-        SlruKind::MultiXactOffsets => 0x02,
-    };
-
-    Key {
-        field1: 0x01,
-        field2,
-        field3: segno,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }..Key {
-        field1: 0x01,
-        field2,
-        field3: segno,
-        field4: 0,
-        field5: 1,
-        field6: 0,
-    }
-}
-
-//-- Section 03: pg_twophase
-
-const TWOPHASEDIR_KEY: Key = Key {
-    field1: 0x02,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 0,
-};
-
-fn twophase_file_key(xid: TransactionId) -> Key {
-    Key {
-        field1: 0x02,
-        field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: xid,
-    }
-}
-
-fn twophase_key_range(xid: TransactionId) -> Range<Key> {
-    let (next_xid, overflowed) = xid.overflowing_add(1);
-
-    Key {
-        field1: 0x02,
-        field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: xid,
-    }..Key {
-        field1: 0x02,
-        field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: if overflowed { 1 } else { 0 },
-        field6: next_xid,
-    }
-}
-
-//-- Section 03: Control file
-const CONTROLFILE_KEY: Key = Key {
-    field1: 0x03,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 0,
-};
-
-const CHECKPOINT_KEY: Key = Key {
-    field1: 0x03,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 1,
-};
-
-// Reverse mappings for a few Keys.
-// These are needed by WAL redo manager.
-
-pub fn key_to_rel_block(key: Key) -> Result<(RelTag, BlockNumber)> {
-    Ok(match key.field1 {
-        0x00 => (
-            RelTag {
-                spcnode: key.field2,
-                dbnode: key.field3,
-                relnode: key.field4,
-                forknum: key.field5,
-            },
-            key.field6,
-        ),
-        _ => bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
-}
-
-pub fn key_to_slru_block(key: Key) -> Result<(SlruKind, u32, BlockNumber)> {
-    Ok(match key.field1 {
-        0x01 => {
-            let kind = match key.field2 {
-                0x00 => SlruKind::Clog,
-                0x01 => SlruKind::MultiXactMembers,
-                0x02 => SlruKind::MultiXactOffsets,
-                _ => bail!("unrecognized slru kind 0x{:02x}", key.field2),
-            };
-            let segno = key.field4;
-            let blknum = key.field6;
-
-            (kind, segno, blknum)
-        }
-        _ => bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
-}
-
-//
-//-- Tests that should work the same with any Repository/Timeline implementation.
-//
-
-#[cfg(test)]
-pub fn create_test_timeline<R: Repository>(
-    repo: R,
-    timeline_id: utils::zid::ZTimelineId,
-) -> Result<Arc<crate::DatadirTimeline<R>>> {
-    let tline = repo.create_empty_timeline(timeline_id, Lsn(8))?;
-    let tline = DatadirTimeline::new(tline, 256 * 1024);
-    let mut m = tline.begin_modification(Lsn(8));
-    m.init_empty()?;
-    m.commit()?;
-    Ok(Arc::new(tline))
-}
+static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
@@ -1397,7 +1635,7 @@ mod tests {
         assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&TESTREL_A));
 
         // Create a branch, check that the relation is visible there
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        repo.branch_timeline(&tline, NEW_TIMELINE_ID, Lsn(0x30))?;
         let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
             Some(timeline) => timeline,
             None => panic!("Should have a local timeline"),
@@ -1421,7 +1659,7 @@ mod tests {
             .contains(&TESTREL_A));
 
         // Run checkpoint and garbage collection and check that it's still not visible
-        newtline.tline.checkpoint(CheckpointConfig::Forced)?;
+        newtline.checkpoint(CheckpointConfig::Forced)?;
         repo.gc_iteration(Some(NEW_TIMELINE_ID), 0, true)?;
 
         assert!(!newtline
@@ -1449,19 +1687,19 @@ mod tests {
         writer.finish()?;
 
         // Test read before rel creation. Should error out.
-        assert!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x10)).is_err());
+        assert!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x10), false).is_err());
 
         // Read block beyond end of relation at different points in time.
         // These reads should fall into different delta, image, and in-memory layers.
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x20))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x25))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x30))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x35))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x45))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x55))?, ZERO_PAGE);
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60))?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x20), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x25), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x30), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x35), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x45), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x55), false)?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false)?, ZERO_PAGE);
 
         // Test on an in-memory layer with no preceding layer
         let mut writer = tline.begin_record(Lsn(0x70));
@@ -1473,7 +1711,7 @@ mod tests {
         )?;
         writer.finish()?;
 
-        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_B, 1, Lsn(0x70))?, ZERO_PAGE);
+        assert_eq!(tline.get_rel_page_at_lsn(TESTREL_B, 1, Lsn(0x70), false)?6, ZERO_PAGE);
 
         Ok(())
     }

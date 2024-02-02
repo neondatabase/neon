@@ -23,7 +23,7 @@
 //! information. You can use PostgreSQL's pg_controldata utility to view its
 //! contents.
 //!
-use crate::{ControlFileData, PG_CONTROL_FILE_SIZE};
+use super::bindings::{ControlFileData, PG_CONTROL_FILE_SIZE};
 
 use anyhow::{bail, Result};
 use bytes::{Bytes, BytesMut};

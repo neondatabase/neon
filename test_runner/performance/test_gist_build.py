@@ -1,9 +1,6 @@
-import os
 from contextlib import closing
-from fixtures.benchmark_fixture import MetricReport
-from fixtures.neon_fixtures import NeonEnv
-from fixtures.compare_fixtures import PgCompare, VanillaCompare, NeonCompare
-from fixtures.log_helper import log
+
+from fixtures.compare_fixtures import PgCompare
 
 
 #
@@ -16,7 +13,6 @@ def test_gist_buffering_build(neon_with_baseline: PgCompare):
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
-
             # Create test table.
             cur.execute("create table gist_point_tbl(id int4, p point)")
             cur.execute(
@@ -24,8 +20,8 @@ def test_gist_buffering_build(neon_with_baseline: PgCompare):
             )
 
             # Build the index.
-            with env.record_pageserver_writes('pageserver_writes'):
-                with env.record_duration('build'):
+            with env.record_pageserver_writes("pageserver_writes"):
+                with env.record_duration("build"):
                     cur.execute(
                         "create index gist_pointidx2 on gist_point_tbl using gist(p) with (buffering = on)"
                     )

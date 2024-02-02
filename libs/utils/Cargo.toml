@@ -1,44 +1,71 @@
 [package]
 name = "utils"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
+# which adds some runtime cost to run tests on outage conditions
+testing = ["fail/failpoints"]
 
 [dependencies]
-anyhow = "1.0"
-bincode = "1.3"
-bytes = "1.0.1"
-hyper = { version = "0.14.7", features = ["full"] }
-lazy_static = "1.4.0"
-pin-project-lite = "0.2.7"
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-routerify = "3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1"
-thiserror = "1.0"
-tokio = { version = "1.17", features = ["macros"]}
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-nix = "0.23.0"
-signal-hook = "0.3.10"
-rand = "0.8.3"
-jsonwebtoken = "8"
-hex = { version = "0.4.3", features = ["serde"] }
-rustls = "0.20.2"
-rustls-split = "0.3.0"
-git-version = "0.3.5"
-serde_with = "1.12.0"
+arc-swap.workspace = true
+sentry.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
+bytes.workspace = true
+camino.workspace = true
+chrono.workspace = true
+heapless.workspace = true
+hex = { workspace = true, features = ["serde"] }
+hyper = { workspace = true, features = ["full"] }
+fail.workspace = true
+futures = { workspace = true}
+jsonwebtoken.workspace = true
+nix.workspace = true
+once_cell.workspace = true
+pin-project-lite.workspace = true
+regex.workspace = true
+routerify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-error.workspace = true
+tracing-subscriber = { workspace = true, features = ["json", "registry"] }
+rand.workspace = true
+serde_with.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+url.workspace = true
+uuid.workspace = true
 
-metrics = { path = "../metrics" }
-workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+pq_proto.workspace = true
+postgres_connection.workspace = true
+metrics.workspace = true
+workspace_hack.workspace = true
+
+const_format.workspace = true
+
+# to use tokio channels as streams, this is faster to compile than async_stream
+# why is it only here? no other crate should use it, streams are rarely needed.
+tokio-stream = { version = "0.1.14" }
+
+serde_path_to_error.workspace = true
 
 [dev-dependencies]
-byteorder = "1.4.3"
-bytes = "1.0.1"
-hex-literal = "0.3"
-tempfile = "3.2"
-criterion = "0.3"
-rustls-pemfile = "0.2.1"
+byteorder.workspace = true
+bytes.workspace = true
+criterion.workspace = true
+hex-literal.workspace = true
+camino-tempfile.workspace = true
+serde_assert.workspace = true
 
 [[bench]]
 name = "benchmarks"

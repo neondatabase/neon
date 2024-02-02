@@ -1,0 +1,18 @@
+[package]
+name = "compute_api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_with.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+
+utils = { path = "../utils" }
+remote_storage = { version = "0.1", path = "../remote_storage/" }
+
+workspace_hack.workspace = true

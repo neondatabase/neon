@@ -9,13 +9,6 @@
 #  * https://github.com/taiki-e/cargo-llvm-cov
 #  * https://github.com/llvm/llvm-project/tree/main/llvm/test/tools/llvm-cov
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from textwrap import dedent
-from typing import Any, Dict, Iterator, Iterable, List, Optional
-
 import argparse
 import hashlib
 import json
@@ -24,6 +17,12 @@ import shutil
 import socket
 import subprocess
 import sys
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from textwrap import dedent
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 
 def file_mtime_or_zero(path: Path) -> int:
@@ -76,8 +75,6 @@ class Cargo:
     def rustlib_dir(self) -> Path:
         if not self._rustlib_dir:
             cmd = [
-                'cargo',
-                '-Zunstable-options',
                 'rustc',
                 '--print=target-libdir',
             ]
@@ -159,7 +156,9 @@ class LLVM:
              profdata: Path,
              objects: List[str],
              sources: List[str],
-             demangler: Optional[Path] = None) -> None:
+             demangler: Optional[Path] = None,
+             output_file: Optional[Path] = None,
+             ) -> None:
 
         cwd = self.cargo.cwd
         objects = list(intersperse('-object', objects))
@@ -183,14 +182,18 @@ class LLVM:
             *objects,
             *sources,
         ]
-        subprocess.check_call(cmd, cwd=cwd)
+        if output_file is not None:
+            with output_file.open('w') as outfile:
+                subprocess.check_call(cmd, cwd=cwd, stdout=outfile)
+        else:
+            subprocess.check_call(cmd, cwd=cwd)
 
     def cov_report(self, **kwargs) -> None:
         self._cov(subcommand='report', **kwargs)
 
-    def cov_export(self, *, kind: str, **kwargs) -> None:
+    def cov_export(self, *, kind: str, output_file: Optional[Path], **kwargs) -> None:
         extras = (f'-format={kind}', )
-        self._cov(subcommand='export', *extras, **kwargs)
+        self._cov(subcommand='export', *extras, output_file=output_file, **kwargs)
 
     def cov_show(self, *, kind: str, output_dir: Optional[Path] = None, **kwargs) -> None:
         extras = [f'-format={kind}']
@@ -286,9 +289,12 @@ class TextReport(Report):
         self.llvm.cov_show(kind='text', **self._common_kwargs())
 
 
+@dataclass
 class LcovReport(Report):
+    output_file: Path
+
     def generate(self) -> None:
-        self.llvm.cov_export(kind='lcov', **self._common_kwargs())
+        self.llvm.cov_export(kind='lcov',  output_file=self.output_file, **self._common_kwargs())
 
 
 @dataclass
@@ -398,7 +404,7 @@ class State:
             # Enable LLVM's source-based coverage
             # see: https://clang.llvm.org/docs/SourceBasedCodeCoverage.html
             # see: https://blog.rust-lang.org/inside-rust/2020/11/12/source-based-code-coverage.html
-            '-Zinstrument-coverage',
+            '-Cinstrument-coverage',
             # Link every bit of code to prevent "holes" in coverage report
             # see: https://doc.rust-lang.org/rustc/codegen-options/index.html#link-dead-code
             '-Clink-dead-code',
@@ -410,10 +416,6 @@ class State:
             # but we won't include them in report by default (but see `--all`).
             f'--remap-path-prefix {self.cwd}=',
         ])
-
-        # XXX: God, have mercy on our souls...
-        # see: https://github.com/rust-lang/rust/pull/90132
-        os.environ['RUSTC_BOOTSTRAP'] = '1'
 
     def _merge_profraw(self) -> bool:
         profdata_path = self.profdata_dir / '-'.join([
@@ -482,7 +484,7 @@ class State:
             'text':
             lambda: TextReport(**params),
             'lcov':
-            lambda: LcovReport(**params),
+            lambda: LcovReport(**params, output_file=self.report_dir / 'lcov.info'),
             'summary':
             lambda: SummaryReport(**params),
             'github':

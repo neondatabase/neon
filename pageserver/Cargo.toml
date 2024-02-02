@@ -1,68 +1,100 @@
 [package]
 name = "pageserver"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
 
 [features]
-# It is simpler infra-wise to have failpoints enabled by default
-# It shouldn't affect performance in any way because failpoints
-# are not placed in hot code paths
-default = ["failpoints"]
-profiling = ["pprof"]
-failpoints = ["fail/failpoints"]
+default = []
+# Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
+# which adds some runtime cost to run tests on outage conditions
+testing = ["fail/failpoints"]
 
 [dependencies]
-chrono = "0.4.19"
-rand = "0.8.3"
-regex = "1.4.5"
-bytes = { version = "1.0.1", features = ['serde'] }
-byteorder = "1.4.3"
-futures = "0.3.13"
-hex = "0.4.3"
-hyper = "0.14"
-itertools = "0.10.3"
-lazy_static = "1.4.0"
-clap = "3.0"
-daemonize = "0.4.1"
-tokio = { version = "1.17", features = ["process", "sync", "macros", "fs", "rt", "io-util", "time"] }
-postgres-types = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-postgres-protocol = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-tokio-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-tokio-stream = "0.1.8"
-anyhow = { version = "1.0", features = ["backtrace"] }
-crc32c = "0.6.0"
-thiserror = "1.0"
-tar = "0.4.33"
-humantime = "2.1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1"
-serde_with = "1.12.0"
-humantime-serde = "1.1.1"
-
-pprof = { git = "https://github.com/neondatabase/pprof-rs.git", branch = "wallclock-profiling", features = ["flamegraph"], optional = true }
-
-toml_edit = { version = "0.13", features = ["easy"] }
-scopeguard = "1.1.0"
-const_format = "0.2.21"
-tracing = "0.1.27"
-signal-hook = "0.3.10"
-url = "2"
-nix = "0.23"
-once_cell = "1.8.0"
-crossbeam-utils = "0.8.5"
-fail = "0.5.0"
-git-version = "0.3.5"
-
-postgres_ffi = { path = "../libs/postgres_ffi" }
-etcd_broker = { path = "../libs/etcd_broker" }
-metrics = { path = "../libs/metrics" }
-utils = { path = "../libs/utils" }
-remote_storage = { path = "../libs/remote_storage" }
-workspace_hack = { version = "0.1", path = "../workspace_hack" }
-close_fds = "0.3.2"
-walkdir = "2.3.2"
+anyhow.workspace = true
+async-compression.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+byteorder.workspace = true
+bytes.workspace = true
+camino.workspace = true
+camino-tempfile.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["string"] }
+const_format.workspace = true
+consumption_metrics.workspace = true
+crc32c.workspace = true
+crossbeam-utils.workspace = true
+either.workspace = true
+flate2.workspace = true
+fail.workspace = true
+futures.workspace = true
+git-version.workspace = true
+hex.workspace = true
+humantime.workspace = true
+humantime-serde.workspace = true
+hyper.workspace = true
+itertools.workspace = true
+md5.workspace = true
+nix.workspace = true
+# hack to get the number of worker threads tokio uses
+num_cpus = { version = "1.15" }
+num-traits.workspace = true
+once_cell.workspace = true
+pin-project-lite.workspace = true
+postgres.workspace = true
+postgres_backend.workspace = true
+postgres-protocol.workspace = true
+postgres-types.workspace = true
+rand.workspace = true
+regex.workspace = true
+scopeguard.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+serde_path_to_error.workspace = true
+serde_with.workspace = true
+signal-hook.workspace = true
+smallvec = { workspace = true, features = ["write"] }
+svg_fmt.workspace = true
+sync_wrapper.workspace = true
+tokio-tar.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
+tokio-epoll-uring.workspace = true
+tokio-io-timeout.workspace = true
+tokio-postgres.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+toml_edit = { workspace = true, features = [ "serde" ] }
+tracing.workspace = true
+url.workspace = true
+walkdir.workspace = true
+metrics.workspace = true
+pageserver_api.workspace = true
+postgres_connection.workspace = true
+postgres_ffi.workspace = true
+pq_proto.workspace = true
+remote_storage.workspace = true
+storage_broker.workspace = true
+tenant_size_model.workspace = true
+utils.workspace = true
+workspace_hack.workspace = true
+reqwest.workspace = true
+rpds.workspace = true
+enum-map.workspace = true
+enumset.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 
 [dev-dependencies]
-hex-literal = "0.3"
-tempfile = "3.2"
+criterion.workspace = true
+hex-literal.workspace = true
+tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
+
+[[bench]]
+name = "bench_layer_map"
+harness = false
+
+[[bench]]
+name = "bench_walredo"
+harness = false

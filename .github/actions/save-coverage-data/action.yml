@@ -1,0 +1,22 @@
+name: 'Merge and upload coverage data'
+description: 'Compresses and uploads the coverage data as an artifact'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Merge coverage data
+      shell: bash -euxo pipefail {0}
+      run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
+
+    - name: Download previous coverage data into the same directory
+      uses: ./.github/actions/download
+      with:
+        name: coverage-data-artifact
+        path: /tmp/coverage
+        skip-if-does-not-exist: true # skip if there's no previous coverage to download
+
+    - name: Upload coverage data
+      uses: ./.github/actions/upload
+      with:
+        name: coverage-data-artifact
+        path: /tmp/coverage

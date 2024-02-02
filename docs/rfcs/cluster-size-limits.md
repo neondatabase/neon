@@ -15,7 +15,7 @@ The stateless compute node that performs validation is separate from the storage
 
 Limit the maximum size of a PostgreSQL instance to limit free tier users (and other tiers in the future).
 First of all, this is needed to control our free tier production costs.
-Another reason to limit resources is risk management — we haven't (fully) tested and optimized zenith for big clusters,
+Another reason to limit resources is risk management — we haven't (fully) tested and optimized neon for big clusters,
 so we don't want to give users access to the functionality that we don't think is ready.
 
 ## Components
@@ -43,20 +43,20 @@ Then this size should be reported to compute node.
 
 `current_timeline_size` value is included in the walreceiver's custom feedback message: `ReplicationFeedback.`
 
-(PR about protocol changes https://github.com/zenithdb/zenith/pull/1037).
+(PR about protocol changes https://github.com/neondatabase/neon/pull/1037).
 
 This message is received by the safekeeper and propagated to compute node as a part of `AppendResponse`.
 
 Finally, when compute node receives the `current_timeline_size` from safekeeper (or from pageserver directly), it updates the global variable.
 
-And then every zenith_extend() operation checks if limit is reached `(current_timeline_size > neon.max_cluster_size)` and throws `ERRCODE_DISK_FULL` error if so.
+And then every neon_extend() operation checks if limit is reached `(current_timeline_size > neon.max_cluster_size)` and throws `ERRCODE_DISK_FULL` error if so.
 (see Postgres error codes [https://www.postgresql.org/docs/devel/errcodes-appendix.html](https://www.postgresql.org/docs/devel/errcodes-appendix.html))
 
 TODO:
 We can allow autovacuum processes to bypass this check, simply checking `IsAutoVacuumWorkerProcess()`.
 It would be nice to allow manual VACUUM and VACUUM FULL to bypass the check, but it's uneasy to distinguish these operations at the low level.
 See issues https://github.com/neondatabase/neon/issues/1245
-https://github.com/zenithdb/zenith/issues/1445
+https://github.com/neondatabase/neon/issues/1445
 
 TODO:
 We should warn users if the limit is soon to be reached.

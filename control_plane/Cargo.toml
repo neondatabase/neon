@@ -1,23 +1,45 @@
 [package]
 name = "control_plane"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-tar = "0.4.38"
-postgres = { git = "https://github.com/zenithdb/rust-postgres.git", rev="d052ee8b86fff9897c77b0fe89ea9daba0e1fa38" }
-serde = { version = "1.0", features = ["derive"] }
-serde_with = "1.12.0"
-toml = "0.5"
-lazy_static = "1.4"
-regex = "1"
-anyhow = "1.0"
-thiserror = "1"
-nix = "0.23"
-url = "2.2.2"
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+anyhow.workspace = true
+async-trait.workspace = true
+camino.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+diesel = { version = "2.1.4", features = ["postgres"]}
+diesel_migrations = { version = "2.1.0", features = ["postgres"]}
+futures.workspace = true
+git-version.workspace = true
+nix.workspace = true
+once_cell.workspace = true
+postgres.workspace = true
+hex.workspace = true
+hyper.workspace = true
+regex.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json"] }
+scopeguard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-util.workspace = true
+url.workspace = true
+pageserver_api.workspace = true
+pageserver_client.workspace = true
+postgres_backend.workspace = true
+safekeeper_api.workspace = true
+postgres_connection.workspace = true
+storage_broker.workspace = true
+utils.workspace = true
 
-pageserver = { path = "../pageserver" }
-safekeeper = { path = "../safekeeper" }
-utils = { path = "../libs/utils" }
-workspace_hack = { version = "0.1", path = "../workspace_hack" }
+compute_api.workspace = true
+workspace_hack.workspace = true
+tracing.workspace = true

@@ -1,6 +1,6 @@
 use std::io::{Read, Result, Write};
 
-/// A wrapper for an object implementing [Read](std::io::Read)
+/// A wrapper for an object implementing [Read]
 /// which allows a closure to observe the amount of bytes read.
 /// This is useful in conjunction with metrics (e.g. [IntCounter](crate::IntCounter)).
 ///
@@ -10,13 +10,13 @@ use std::io::{Read, Result, Write};
 /// # use std::io::{Result, Read};
 /// # use metrics::{register_int_counter, IntCounter};
 /// # use metrics::CountedReader;
+/// # use once_cell::sync::Lazy;
 /// #
-/// # lazy_static::lazy_static! {
-/// #     static ref INT_COUNTER: IntCounter = register_int_counter!(
+/// # static INT_COUNTER: Lazy<IntCounter> = Lazy::new( || { register_int_counter!(
 /// #         "int_counter",
 /// #         "let's count something!"
-/// #     ).unwrap();
-/// # }
+/// #     ).unwrap()
+/// # });
 /// #
 /// fn do_some_reads(stream: impl Read, count: usize) -> Result<Vec<u8>> {
 ///     let mut reader = CountedReader::new(stream, |cnt| {
@@ -51,17 +51,17 @@ impl<'a, T> CountedReader<'a, T> {
         }
     }
 
-    /// Get an immutable reference to the underlying [Read](std::io::Read) implementor
+    /// Get an immutable reference to the underlying [Read] implementor
     pub fn inner(&self) -> &T {
         &self.reader
     }
 
-    /// Get a mutable reference to the underlying [Read](std::io::Read) implementor
+    /// Get a mutable reference to the underlying [Read] implementor
     pub fn inner_mut(&mut self) -> &mut T {
         &mut self.reader
     }
 
-    /// Consume the wrapper and return the underlying [Read](std::io::Read) implementor
+    /// Consume the wrapper and return the underlying [Read] implementor
     pub fn into_inner(self) -> T {
         self.reader
     }
@@ -75,7 +75,7 @@ impl<T: Read> Read for CountedReader<'_, T> {
     }
 }
 
-/// A wrapper for an object implementing [Write](std::io::Write)
+/// A wrapper for an object implementing [Write]
 /// which allows a closure to observe the amount of bytes written.
 /// This is useful in conjunction with metrics (e.g. [IntCounter](crate::IntCounter)).
 ///
@@ -85,13 +85,13 @@ impl<T: Read> Read for CountedReader<'_, T> {
 /// # use std::io::{Result, Write};
 /// # use metrics::{register_int_counter, IntCounter};
 /// # use metrics::CountedWriter;
+/// # use once_cell::sync::Lazy;
 /// #
-/// # lazy_static::lazy_static! {
-/// #     static ref INT_COUNTER: IntCounter = register_int_counter!(
+/// # static INT_COUNTER: Lazy<IntCounter> = Lazy::new( || { register_int_counter!(
 /// #         "int_counter",
 /// #         "let's count something!"
-/// #     ).unwrap();
-/// # }
+/// #     ).unwrap()
+/// # });
 /// #
 /// fn do_some_writes(stream: impl Write, payload: &[u8]) -> Result<()> {
 ///     let mut writer = CountedWriter::new(stream, |cnt| {
@@ -122,17 +122,17 @@ impl<'a, T> CountedWriter<'a, T> {
         }
     }
 
-    /// Get an immutable reference to the underlying [Write](std::io::Write) implementor
+    /// Get an immutable reference to the underlying [Write] implementor
     pub fn inner(&self) -> &T {
         &self.writer
     }
 
-    /// Get a mutable reference to the underlying [Write](std::io::Write) implementor
+    /// Get a mutable reference to the underlying [Write] implementor
     pub fn inner_mut(&mut self) -> &mut T {
         &mut self.writer
     }
 
-    /// Consume the wrapper and return the underlying [Write](std::io::Write) implementor
+    /// Consume the wrapper and return the underlying [Write] implementor
     pub fn into_inner(self) -> T {
         self.writer
     }

@@ -1,0 +1,22 @@
+[package]
+name = "pagectl"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+camino.workspace = true
+clap = { workspace = true, features = ["string"] }
+git-version.workspace = true
+pageserver = { path = ".." }
+postgres_ffi.workspace = true
+tokio.workspace = true
+utils.workspace = true
+svg_fmt.workspace = true
+workspace_hack.workspace = true
+serde.workspace = true
+serde_json.workspace = true

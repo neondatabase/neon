@@ -1,11 +1,12 @@
+/pg_install
 /target
 /tmp_check
-/tmp_install
 /tmp_check_cli
 __pycache__/
 test_output/
 .vscode
 .idea
+neon.iml
 /.neon
 /integration_tests/.neon
 
@@ -15,3 +16,9 @@ test_output/
 
 *.key
 *.crt
+*.o
+*.so
+*.Po
+
+# pgindent typedef lists
+*.list

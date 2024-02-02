@@ -1,0 +1,251 @@
+{
+    "format_version": 1.0,
+
+    "timestamp": "2021-05-23T18:25:43.511Z",
+    "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8b",
+
+    "cluster": {
+        "cluster_id": "test-cluster-42",
+        "name": "Zenith Test",
+        "state": "restarted",
+        "roles": [
+            {
+                "name": "postgres",
+                "encrypted_password": "6b1d16b78004bbd51fa06af9eda75972",
+                "options": null
+            },
+            {
+                "name": "alexk",
+                "encrypted_password": null,
+                "options": null
+            },
+            {
+                "name": "zenith \"new\"",
+                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972",
+                "options": null
+            },
+            {
+                "name": "zen",
+                "encrypted_password": "9b1d16b78004bbd51fa06af9eda75972"
+            },
+            {
+                "name": "\"name\";\\n select 1;",
+                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972"
+            },
+            {
+                "name": "MyRole",
+                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972"
+            }
+        ],
+        "databases": [
+            {
+                "name": "DB2",
+                "owner": "alexk",
+                "options": [
+                    {
+                        "name": "LC_COLLATE",
+                        "value": "C",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "LC_CTYPE",
+                        "value": "C",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "TEMPLATE",
+                        "value": "template0",
+                        "vartype": "enum"
+                    }
+                ]
+            },
+            {
+                "name": "zenith",
+                "owner": "MyRole"
+            },
+            {
+                "name": "zen",
+                "owner": "zen"
+            }
+        ],
+        "settings": [
+            {
+                "name": "fsync",
+                "value": "off",
+                "vartype": "bool"
+            },
+            {
+                "name": "wal_level",
+                "value": "logical",
+                "vartype": "enum"
+            },
+            {
+                "name": "hot_standby",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "neon.safekeepers",
+                "value": "127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501",
+                "vartype": "string"
+            },
+            {
+                "name": "wal_log_hints",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "log_connections",
+                "value": "on",
+                "vartype": "bool"
+            },
+            {
+                "name": "shared_buffers",
+                "value": "32768",
+                "vartype": "integer"
+            },
+            {
+                "name": "port",
+                "value": "55432",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_connections",
+                "value": "100",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_wal_senders",
+                "value": "10",
+                "vartype": "integer"
+            },
+            {
+                "name": "listen_addresses",
+                "value": "0.0.0.0",
+                "vartype": "string"
+            },
+            {
+                "name": "wal_sender_timeout",
+                "value": "0",
+                "vartype": "integer"
+            },
+            {
+                "name": "password_encryption",
+                "value": "md5",
+                "vartype": "enum"
+            },
+            {
+                "name": "maintenance_work_mem",
+                "value": "65536",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_parallel_workers",
+                "value": "8",
+                "vartype": "integer"
+            },
+            {
+                "name": "max_worker_processes",
+                "value": "8",
+                "vartype": "integer"
+            },
+            {
+                "name": "neon.tenant_id",
+                "value": "b0554b632bd4d547a63b86c3630317e8",
+                "vartype": "string"
+            },
+            {
+                "name": "max_replication_slots",
+                "value": "10",
+                "vartype": "integer"
+            },
+            {
+                "name": "neon.timeline_id",
+                "value": "2414a61ffc94e428f14b5758fe308e13",
+                "vartype": "string"
+            },
+            {
+                "name": "shared_preload_libraries",
+                "value": "neon",
+                "vartype": "string"
+            },
+            {
+                "name": "synchronous_standby_names",
+                "value": "walproposer",
+                "vartype": "string"
+            },
+            {
+                "name": "neon.pageserver_connstring",
+                "value": "host=127.0.0.1 port=6400",
+                "vartype": "string"
+            },
+            {
+                "name": "test.escaping",
+                "value": "here's a backslash \\ and a quote ' and a double-quote \" hooray",
+                "vartype": "string"
+            }
+        ]
+    },
+    "delta_operations": [
+        {
+            "action": "delete_db",
+            "name": "zenith_test"
+        },
+        {
+            "action": "rename_db",
+            "name": "DB",
+            "new_name": "DB2"
+        },
+        {
+            "action": "delete_role",
+            "name": "zenith2"
+        },
+        {
+            "action": "rename_role",
+            "name": "zenith new",
+            "new_name": "zenith \"new\""
+        }
+    ],
+    "remote_extensions": {
+        "library_index": {
+          "anon": "anon",
+          "postgis-3": "postgis",
+          "libpgrouting-3.4": "postgis",
+          "postgis_raster-3": "postgis",
+          "postgis_sfcgal-3": "postgis",
+          "postgis_topology-3": "postgis",
+          "address_standardizer-3": "postgis"
+        },
+        "extension_data": {
+          "anon": {
+            "archive_path": "5834329303/v15/extensions/anon.tar.zst",
+            "control_data": {
+              "anon.control": "# PostgreSQL Anonymizer (anon) extension\ncomment = ''Data anonymization tools''\ndefault_version = ''1.1.0''\ndirectory=''extension/anon''\nrelocatable = false\nrequires = ''pgcrypto''\nsuperuser = false\nmodule_pathname = ''$libdir/anon''\ntrusted = true\n"
+            }
+          },
+          "postgis": {
+            "archive_path": "5834329303/v15/extensions/postgis.tar.zst",
+            "control_data": {
+              "postgis.control": "# postgis extension\ncomment = ''PostGIS geometry and geography spatial types and functions''\ndefault_version = ''3.3.2''\nmodule_pathname = ''$libdir/postgis-3''\nrelocatable = false\ntrusted = true\n",
+              "pgrouting.control": "# pgRouting Extension\ncomment = ''pgRouting Extension''\ndefault_version = ''3.4.2''\nmodule_pathname = ''$libdir/libpgrouting-3.4''\nrelocatable = true\nrequires = ''plpgsql''\nrequires = ''postgis''\ntrusted = true\n",
+              "postgis_raster.control": "# postgis_raster extension\ncomment = ''PostGIS raster types and functions''\ndefault_version = ''3.3.2''\nmodule_pathname = ''$libdir/postgis_raster-3''\nrelocatable = false\nrequires = postgis\ntrusted = true\n",
+              "postgis_sfcgal.control": "# postgis topology extension\ncomment = ''PostGIS SFCGAL functions''\ndefault_version = ''3.3.2''\nrelocatable = true\nrequires = postgis\ntrusted = true\n",
+              "postgis_topology.control": "# postgis topology extension\ncomment = ''PostGIS topology spatial types and functions''\ndefault_version = ''3.3.2''\nrelocatable = false\nschema = topology\nrequires = postgis\ntrusted = true\n",
+              "address_standardizer.control": "# address_standardizer extension\ncomment = ''Used to parse an address into constituent elements. Generally used to support geocoding address normalization step.''\ndefault_version = ''3.3.2''\nrelocatable = true\ntrusted = true\n",
+              "postgis_tiger_geocoder.control": "# postgis tiger geocoder extension\ncomment = ''PostGIS tiger geocoder and reverse geocoder''\ndefault_version = ''3.3.2''\nrelocatable = false\nschema = tiger\nrequires = ''postgis,fuzzystrmatch''\nsuperuser= false\ntrusted = true\n",
+              "address_standardizer_data_us.control": "# address standardizer us dataset\ncomment = ''Address Standardizer US dataset example''\ndefault_version = ''3.3.2''\nrelocatable = true\ntrusted = true\n"
+            }
+          }
+        },
+        "custom_extensions": [
+          "anon"
+        ],
+        "public_extensions": [
+          "postgis"
+        ]
+      },
+      "pgbouncer_settings": {
+        "default_pool_size": "42",
+        "pool_mode": "session"
+      }
+}

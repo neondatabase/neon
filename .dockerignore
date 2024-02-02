@@ -1,18 +1,28 @@
-**/.git/
-**/__pycache__
-**/.pytest_cache
+*
 
-.git
-target
-tmp_check
-tmp_install
-tmp_check_cli
-test_output
-.vscode
-.neon
-integration_tests/.neon
-.mypy_cache
+# Files
+!Cargo.lock
+!Cargo.toml
+!Makefile
+!rust-toolchain.toml
+!scripts/combine_control_files.py
+!scripts/ninstall.sh
+!vm-cgconfig.conf
 
-Dockerfile
-.dockerignore
-
+# Directories
+!.cargo/
+!.config/
+!compute_tools/
+!control_plane/
+!libs/
+!neon_local/
+!pageserver/
+!patches/
+!pgxn/
+!proxy/
+!s3_scrubber/
+!safekeeper/
+!storage_broker/
+!trace/
+!vendor/postgres-*/
+!workspace_hack/

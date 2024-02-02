@@ -1,0 +1,7 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@neondatabase/serverless": "0.4.18",
+    "ws": "8.13.0"
+  }
+}

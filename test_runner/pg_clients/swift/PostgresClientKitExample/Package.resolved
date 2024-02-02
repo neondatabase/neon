@@ -1,0 +1,41 @@
+{
+  "pins" : [
+    {
+      "identity" : "bluesocket",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Kitura/BlueSocket.git",
+      "state" : {
+        "revision" : "7b23a867008e0027bfd6f4d398d44720707bc8ca",
+        "version" : "2.0.4"
+      }
+    },
+    {
+      "identity" : "bluesslservice",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Kitura/BlueSSLService",
+      "state" : {
+        "revision" : "b27a94d063962dfa1bba9f79814c4ef202cf33a4",
+        "version" : "2.0.2"
+      }
+    },
+    {
+      "identity" : "openssl",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Kitura/OpenSSL.git",
+      "state" : {
+        "revision" : "5dc8cb4f971135c17343e3c6df4f28904a0600e2",
+        "version" : "2.3.1"
+      }
+    },
+    {
+      "identity" : "postgresclientkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/codewinsdotcom/PostgresClientKit.git",
+      "state" : {
+        "branch" : "v1.5.0",
+        "revision" : "356ffe0c43722f192d796300557b3b530a0baebc"
+      }
+    }
+  ],
+  "version" : 2
+}

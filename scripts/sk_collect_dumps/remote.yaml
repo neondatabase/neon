@@ -1,0 +1,37 @@
+- name: Fetch state dumps from safekeepers
+  hosts: safekeeper
+  gather_facts: False
+    
+  tasks:
+    - name: Dump file
+      get_url:
+        url: "http://{{ inventory_hostname }}:7676/v1/debug_dump?dump_all=true&dump_disk_content=false"
+        dest: "/tmp/{{ inventory_hostname }}-dump.json"
+        headers:
+          Authorization: "Bearer {{ auth_token }}"
+
+    - name: install rsync
+      ansible.builtin.apt:
+        name: rsync
+        update_cache: yes
+      become: yes
+      ignore_errors: true # it can be already installed and we don't always have sudo
+
+    - name: Fetch file from remote hosts (works only with ssm)
+      fetch:
+        src: "/tmp/{{ inventory_hostname }}-dump.json"
+        dest: "./result/{{ inventory_hostname }}-dump.json"
+        flat: yes
+        fail_on_missing: no
+      when: ansible_connection == "aws_ssm"
+
+    # xxx not sure how to make ansible 'synchronize' work with tsh
+    - name: Fetch file from remote hosts
+      shell: rsync -e 'tsh ssh' -azvP "developer@{{ inventory_hostname }}:/tmp/{{ inventory_hostname }}-dump.json"  "./result/{{ inventory_hostname }}-dump.json"
+      delegate_to: localhost
+      when: ansible_connection != "aws_ssm"
+
+    - name: remove remote dumps
+      ansible.builtin.file:
+        path: "/tmp/{{ inventory_hostname }}-dump.json"
+        state: absent

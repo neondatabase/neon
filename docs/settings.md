@@ -10,14 +10,13 @@ the values in the config file, if any are specified for the same key and get int
 
 ```toml
 # Initial configuration file created by 'pageserver --init'
-
 listen_pg_addr = '127.0.0.1:64000'
 listen_http_addr = '127.0.0.1:9898'
 
 checkpoint_distance = '268435456' # in bytes
-checkpoint_period = '1 s'
+checkpoint_timeout = '10m'
 
-gc_period = '100 s'
+gc_period = '1 hour'
 gc_horizon = '67108864'
 
 max_file_descriptors = '100'
@@ -25,13 +24,12 @@ max_file_descriptors = '100'
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'cloud_admin'
 
-broker_etcd_prefix = 'neon'
-broker_endpoints = ['some://etcd']
+broker_endpoint = 'http://127.0.0.1:50051'
 
 # [remote_storage]
 ```
 
-The config above shows default values for all basic pageserver settings, besides `broker_endpoints`: that one has to be set by the user,
+The config above shows default values for all basic pageserver settings, besides `broker_endpoint`: that one has to be set by the user,
 see the corresponding section below.
 Pageserver uses default values for all files that are missing in the config, so it's not a hard error to leave the config blank.
 Yet, it validates the config values it can (e.g. postgres install dir) and errors if the validation fails, refusing to start.
@@ -46,20 +44,14 @@ Note the `[remote_storage]` section: it's a [table](https://toml.io/en/v1.0.0#ta
 
 All values can be passed as an argument to the pageserver binary, using the `-c` parameter and specified as a valid TOML string. All tables should be passed in the inline form.
 
-Example: `${PAGESERVER_BIN} -c "checkpoint_period = '100 s'" -c "remote_storage={local_path='/some/local/path/'}"`
+Example: `${PAGESERVER_BIN} -c "checkpoint_timeout = '10 m'" -c "remote_storage={local_path='/some/local/path/'}"`
 
 Note that TOML distinguishes between strings and integers, the former require single or double quotes around them.
 
-#### broker_endpoints
+#### broker_endpoint
 
-A list of endpoints (etcd currently) to connect and pull the information from.
-Mandatory, does not have a default, since requires etcd to be started as a separate process,
-and its connection url should be specified separately.
-
-#### broker_etcd_prefix
-
-A prefix to add for every etcd key used, to separate one group of related instances from another, in the same cluster.
-Default is `neon`.
+A storage broker endpoint to connect and pull the information from. Default is
+`'http://127.0.0.1:50051'`. 
 
 #### checkpoint_distance
 
@@ -82,6 +74,14 @@ S3.
 
 The unit is # of bytes.
 
+#### checkpoint_timeout
+
+Apart from `checkpoint_distance`, open layer flushing is also triggered
+`checkpoint_timeout` after the last flush. This makes WAL eventually uploaded to
+s3 when activity is stopped.
+
+The default is 10m.
+
 #### compaction_period
 
 Every `compaction_period` seconds, the page server checks if
@@ -101,7 +101,7 @@ away.
 
 #### gc_period
 
-Interval at which garbage collection is triggered. Default is 100 s.
+Interval at which garbage collection is triggered. Default is 1 hour.
 
 #### image_creation_threshold
 
@@ -109,7 +109,7 @@ L0 delta layer threshold for L1 image layer creation. Default is 3.
 
 #### pitr_interval
 
-WAL retention duration for PITR branching. Default is 30 days.
+WAL retention duration for PITR branching. Default is 7 days.
 
 #### walreceiver_connect_timeout
 
@@ -147,9 +147,11 @@ for other files and for sockets for incoming connections.
 #### pg_distrib_dir
 
 A directory with Postgres installation to use during pageserver activities.
+Since pageserver supports several postgres versions, `pg_distrib_dir` contains
+a subdirectory for each version with naming convention `v{PG_MAJOR_VERSION}/`.
 Inside that dir, a `bin/postgres` binary should be present.
 
-The default distrib dir is `./tmp_install/`.
+The default distrib dir is `./pg_install/`.
 
 #### workdir (-D)
 

@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 # If you save this in your path under the name "cargo-zclippy" (or whatever
 # name you like), then you can run it as "cargo zclippy" from the shell prompt.
@@ -8,15 +9,11 @@
 # warnings and errors right in the editor.
 # In vscode, this setting is Rust-analyzer>Check On Save:Command
 
+# NB: the CI runs the full feature powerset, so, it catches slightly more errors
+# at the expense of longer runtime. This script is used by developers, so, don't
+# do that here.
 
-# Not every feature is supported in macOS builds, e.g. `profiling`,
-# avoid running regular linting script that checks every feature.
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    # no extra features to test currently, add more here when needed
-    cargo clippy --all --all-targets -- -A unknown_lints -D warnings
-else
-    # * `-A unknown_lints` – do not warn about unknown lint suppressions
-    #                        that people with newer toolchains might use
-    # * `-D warnings`      - fail on any warnings (`cargo` returns non-zero exit status)
-    cargo clippy --all --all-targets --all-features -- -A unknown_lints -D warnings
-fi
+thisscript="${BASH_SOURCE[0]}"
+thisscript_dir="$(dirname "$thisscript")"
+CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
+exec cargo clippy --all-features $CLIPPY_COMMON_ARGS

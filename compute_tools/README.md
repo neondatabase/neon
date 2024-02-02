@@ -19,6 +19,11 @@ Also `compute_ctl` spawns two separate service threads:
 - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
   last activity requests.
 
+If `AUTOSCALING` environment variable is set, `compute_ctl` will start the
+`vm-monitor` located in [`neon/libs/vm_monitor`]. For VM compute nodes,
+`vm-monitor` communicates with the VM autoscaling system. It coordinates
+downscaling and requests immediate upscaling under resource pressure.
+
 Usage example:
 ```sh
 compute_ctl -D /var/db/postgres/compute \

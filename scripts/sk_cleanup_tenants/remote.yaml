@@ -1,0 +1,80 @@
+- name: Test safekeepers
+  hosts: safekeepers
+  gather_facts: False
+  remote_user: "{{ remote_user }}"
+
+  vars:
+    script_dir: /storage/ansible_sk_cleanup
+    tenants_file: "{{ script_dir }}/tenants.txt"
+    trash_dir: /storage/neon-trash/2023-01-01--changeme
+    
+  tasks:
+
+    - name: create script directory
+      file:
+        path: "{{ script_dir }}"
+        state: directory
+        mode: 0755
+      tags:
+      - safekeeper
+
+    - name: create trash dir
+      file:
+        path: "{{ trash_dir }}"
+        state: directory
+        mode: 0755
+      tags:
+      - safekeeper
+
+    - name: collect all tenant_ids to tenants.txt
+      shell:
+        cmd: ls /storage/safekeeper/data/ | grep -v safekeeper > {{ tenants_file }}
+      tags:
+      - safekeeper
+
+    - name: count tenants
+      shell:
+        cmd: wc -l {{ tenants_file }}
+      register: tenants_count
+      tags:
+      - safekeeper
+
+    - debug: msg="{{ tenants_count.stdout }}"
+
+    - name: fetch safekeeper_id
+      shell:
+        cmd: cat /storage/safekeeper/data/safekeeper.id
+      register: safekeeper_id
+      tags:
+      - safekeeper
+
+    - debug: msg="{{ safekeeper_id.stdout }}"
+
+    - name: copy script.py to safekeeper
+      copy:
+        src: script.py
+        dest: "{{ script_dir }}"
+        mode: 0755
+      tags:
+      - safekeeper
+
+    - name: Run an async task
+      shell:
+        chdir: "{{ script_dir }}"
+        cmd: "cat tenants.txt | python3 script.py --trash-dir {{ trash_dir }} --safekeeper-id $(cat /storage/safekeeper/data/safekeeper.id) --safekeeper-host $HOSTNAME |& cat > {{ script_dir }}/run-`date +%Y-%m-%d-%H.%M.%S`.log"
+      args:
+        executable: /bin/bash
+      environment:
+        CONSOLE_API_TOKEN: "{{ api_token }}"
+      async: 30000
+      poll: 0
+      register: bg_async_task
+
+    - name: Check on an async task
+      async_status:
+        jid: "{{ bg_async_task.ansible_job_id }}"
+      become: true
+      register: job_result
+      until: job_result.finished
+      retries: 3000
+      delay: 10
