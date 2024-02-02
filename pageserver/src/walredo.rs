@@ -21,6 +21,8 @@
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
 
+mod process_pool;
+
 /// Code to apply [`NeonWalRecord`]s.
 mod apply_neon;
 
@@ -146,6 +148,7 @@ impl PostgresRedoManager {
     pub fn new(
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
+        pool: process_pool::Pool,
     ) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {

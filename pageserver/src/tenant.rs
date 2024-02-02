@@ -614,10 +614,7 @@ impl Tenant {
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
-            conf,
-            tenant_shard_id,
-        )));
+        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(conf)));
 
         let TenantSharedResources {
             broker_client,

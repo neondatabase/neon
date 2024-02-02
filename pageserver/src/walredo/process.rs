@@ -52,12 +52,8 @@ impl WalRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    #[instrument(skip_all,fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), pg_version=pg_version))]
-    pub(crate) fn launch(
-        conf: &'static PageServerConf,
-        tenant_shard_id: TenantShardId,
-        pg_version: u32,
-    ) -> anyhow::Result<Self> {
+    #[instrument(skip_all,fields(pg_version=pg_version))]
+    pub(crate) fn launch(conf: &'static PageServerConf, pg_version: u32) -> anyhow::Result<Self> {
         let pg_bin_dir_path = conf.pg_bin_dir(pg_version).context("pg_bin_dir")?; // TODO these should be infallible.
         let pg_lib_dir_path = conf.pg_lib_dir(pg_version).context("pg_lib_dir")?;
 
@@ -66,9 +62,6 @@ impl WalRedoProcess {
         let child = Command::new(pg_bin_dir_path.join("postgres"))
             // the first arg must be --wal-redo so the child process enters into walredo mode
             .arg("--wal-redo")
-            // the child doesn't process this arg, but, having it in the argv helps indentify the
-            // walredo process for a particular tenant when debugging a pagserver
-            .args(["--tenant-shard-id", &format!("{tenant_shard_id}")])
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
@@ -83,7 +76,7 @@ impl WalRedoProcess {
             //    the files it opens, and
             // 2. to use seccomp to sandbox itself before processing the first
             //    walredo request.
-            .spawn_no_leak_child(tenant_shard_id)
+            .spawn_no_leak_child()
             .context("spawn process")?;
         WAL_REDO_PROCESS_COUNTERS.started.inc();
         let mut child = scopeguard::guard(child, |child| {
@@ -144,12 +137,11 @@ impl WalRedoProcess {
                     error!(error=?e, "failed to read from walredo stderr");
                 }
             }
-        }.instrument(tracing::info_span!(parent: None, "wal-redo-postgres-stderr", pid = child.id(), tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %pg_version))
+        }.instrument(tracing::info_span!(parent: None, "wal-redo-postgres-stderr", pid = child.id(), %pg_version))
     );
 
         Ok(Self {
             conf,
-            tenant_shard_id,
             child: Some(child),
             stdin: Mutex::new(ProcessInput {
                 stdin,
@@ -175,7 +167,7 @@ impl WalRedoProcess {
     // Apply given WAL records ('records') over an old page image. Returns
     // new page image.
     //
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
+    #[instrument(skip_all, fields(pid=%self.id()))]
     pub(crate) fn apply_wal_records(
         &self,
         rel: RelTag,

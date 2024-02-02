@@ -20,7 +20,6 @@ use pageserver_api::shard::TenantShardId;
 /// Wrapper type around `std::process::Child` which guarantees that the child
 /// will be killed and waited-for by this process before being dropped.
 pub(crate) struct NoLeakChild {
-    pub(crate) tenant_id: TenantShardId,
     pub(crate) child: Option<Child>,
 }
 
@@ -39,12 +38,9 @@ impl DerefMut for NoLeakChild {
 }
 
 impl NoLeakChild {
-    pub(crate) fn spawn(tenant_id: TenantShardId, command: &mut Command) -> io::Result<Self> {
+    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
         let child = command.spawn()?;
-        Ok(NoLeakChild {
-            tenant_id,
-            child: Some(child),
-        })
+        Ok(NoLeakChild { child: Some(child) })
     }
 
     pub(crate) fn kill_and_wait(mut self, cause: WalRedoKillCause) {
