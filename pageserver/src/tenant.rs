@@ -755,24 +755,19 @@ impl Tenant {
                     AttachType::Normal
                 };
 
-                let preload_timer = TENANT.preload.start_timer();
                 let preload = match (&mode, &remote_storage) {
                     (SpawnMode::Create, _) => {
-                        // Don't count the skipped preload into the histogram of preload durations
-                        preload_timer.stop_and_discard();
                         None
                     },
                     (SpawnMode::Normal, Some(remote_storage)) => {
+                        let _preload_timer = TENANT.preload.start_timer();
                         let span = tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
                         let res = tenant_clone
                             .preload(remote_storage, task_mgr::shutdown_token())
                             .instrument(span)
                             .await;
                         match res {
-                            Ok(p) => {
-                                preload_timer.observe_duration();
-                                Some(p)
-                            },
+                            Ok(p) => Some(p),
                             Err(e) => {
                                 make_broken(&tenant_clone, anyhow::anyhow!(e));
                                 return Ok(());
@@ -780,6 +775,7 @@ impl Tenant {
                         }
                     }
                     (SpawnMode::Normal, None) => {
+                        let _preload_timer = TENANT.preload.start_timer();
                         None
                     }
                 };
