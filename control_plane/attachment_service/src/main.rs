@@ -62,11 +62,15 @@ struct Secrets {
     database_url: String,
     public_key: Option<JwtAuth>,
     jwt_token: Option<String>,
+    control_plane_jwt_token: Option<String>,
 }
 
 impl Secrets {
     const DATABASE_URL_SECRET: &'static str = "rds-neon-storage-controller-url";
-    const JWT_TOKEN_SECRET: &'static str = "neon-storage-controller-pageserver-jwt-token";
+    const PAGESERVER_JWT_TOKEN_SECRET: &'static str =
+        "neon-storage-controller-pageserver-jwt-token";
+    const CONTROL_PLANE_JWT_TOKEN_SECRET: &'static str =
+        "neon-storage-controller-control-plane-jwt-token";
     const PUBLIC_KEY_SECRET: &'static str = "neon-storage-controller-public-key";
 
     async fn load(args: &Cli) -> anyhow::Result<Self> {
@@ -104,13 +108,24 @@ impl Secrets {
 
         let jwt_token = asm
             .get_secret_value()
-            .secret_id(Self::JWT_TOKEN_SECRET)
+            .secret_id(Self::PAGESERVER_JWT_TOKEN_SECRET)
             .send()
             .await?
             .secret_string()
             .map(str::to_string);
         if jwt_token.is_none() {
             tracing::warn!("No pageserver JWT token set: this will only work if authentication is disabled on the pageserver");
+        }
+
+        let control_plane_jwt_token = asm
+            .get_secret_value()
+            .secret_id(Self::CONTROL_PLANE_JWT_TOKEN_SECRET)
+            .send()
+            .await?
+            .secret_string()
+            .map(str::to_string);
+        if jwt_token.is_none() {
+            tracing::warn!("No control plane JWT token set: this will only work if authentication is disabled on the pageserver");
         }
 
         let public_key = asm
@@ -134,6 +149,7 @@ impl Secrets {
             database_url,
             public_key,
             jwt_token,
+            control_plane_jwt_token,
         })
     }
 
@@ -146,6 +162,7 @@ impl Secrets {
             database_url: args.database_url.clone(),
             public_key,
             jwt_token: args.jwt_token.clone(),
+            control_plane_jwt_token: args.control_plane_jwt_token.clone(),
         })
     }
 }
@@ -174,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config {
         jwt_token: secrets.jwt_token,
-        control_plane_jwt_token: args.control_plane_jwt_token,
+        control_plane_jwt_token: secrets.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
     };
 
