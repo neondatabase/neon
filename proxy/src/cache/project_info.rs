@@ -15,15 +15,15 @@ use crate::{
     auth::IpPattern,
     config::ProjectInfoCacheOptions,
     console::AuthSecret,
-    intern::{EndpointIdInt, ProjectIdInt, RoleNameInt, ENDPOINT_IDS, PROJECT_IDS, ROLE_NAMES},
+    intern::{EndpointIdInt, ProjectIdInt, RoleNameInt},
     EndpointId, ProjectId, RoleName,
 };
 
 use super::{Cache, Cached};
 
 pub trait ProjectInfoCache {
-    fn invalidate_allowed_ips_for_project(&self, project_id: &ProjectId);
-    fn invalidate_role_secret_for_project(&self, project_id: &ProjectId, role_name: &RoleName);
+    fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt);
+    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
     fn enable_ttl(&self);
     fn disable_ttl(&self);
 }
@@ -119,11 +119,8 @@ pub struct ProjectInfoCacheImpl {
 }
 
 impl ProjectInfoCache for ProjectInfoCacheImpl {
-    fn invalidate_allowed_ips_for_project(&self, project_id: &ProjectId) {
+    fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt) {
         info!("invalidating allowed ips for project `{}`", project_id);
-        let Some(project_id) = PROJECT_IDS.get(project_id) else {
-            return;
-        };
         let endpoints = self
             .project2ep
             .get(&project_id)
@@ -135,17 +132,11 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-    fn invalidate_role_secret_for_project(&self, project_id: &ProjectId, role_name: &RoleName) {
+    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt) {
         info!(
             "invalidating role secret for project_id `{}` and role_name `{}`",
             project_id, role_name,
         );
-        let Some(project_id) = PROJECT_IDS.get(project_id) else {
-            return;
-        };
-        let Some(role_name) = ROLE_NAMES.get(role_name) else {
-            return;
-        };
         let endpoints = self
             .project2ep
             .get(&project_id)
@@ -185,8 +176,8 @@ impl ProjectInfoCacheImpl {
         endpoint_id: &EndpointId,
         role_name: &RoleName,
     ) -> Option<Cached<&Self, Option<AuthSecret>>> {
-        let endpoint_id = ENDPOINT_IDS.get(endpoint_id)?;
-        let role_name = ROLE_NAMES.get(role_name)?;
+        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
+        let role_name = RoleNameInt::get(role_name)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(&endpoint_id)?;
         let (value, ignore_cache) =
@@ -207,7 +198,7 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &EndpointId,
     ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
-        let endpoint_id = ENDPOINT_IDS.get(endpoint_id)?;
+        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         let endpoint_info = self.cache.get(&endpoint_id)?;
         let value = endpoint_info.get_allowed_ips(valid_since, ignore_cache_since);
@@ -228,9 +219,9 @@ impl ProjectInfoCacheImpl {
         role_name: &RoleName,
         secret: Option<AuthSecret>,
     ) {
-        let project_id = PROJECT_IDS.get_or_intern(project_id);
-        let endpoint_id = ENDPOINT_IDS.get_or_intern(endpoint_id);
-        let role_name = ROLE_NAMES.get_or_intern(role_name);
+        let project_id = ProjectIdInt::from(project_id);
+        let endpoint_id = EndpointIdInt::from(endpoint_id);
+        let role_name = RoleNameInt::from(role_name);
         if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
             return;
@@ -247,8 +238,8 @@ impl ProjectInfoCacheImpl {
         endpoint_id: &EndpointId,
         allowed_ips: Arc<Vec<IpPattern>>,
     ) {
-        let project_id = PROJECT_IDS.get_or_intern(project_id);
-        let endpoint_id = ENDPOINT_IDS.get_or_intern(endpoint_id);
+        let project_id = ProjectIdInt::from(project_id);
+        let endpoint_id = EndpointIdInt::from(endpoint_id);
         if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
             return;
@@ -474,7 +465,7 @@ mod tests {
         assert_eq!(cached.value, secret2);
 
         // The only way to invalidate this value is to invalidate via the api.
-        cache.invalidate_role_secret_for_project(&project_id, &user2);
+        cache.invalidate_role_secret_for_project((&project_id).into(), (&user2).into());
         assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
 
         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
