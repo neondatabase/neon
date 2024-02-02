@@ -676,7 +676,7 @@ async fn get_lsn_by_timestamp_handler(
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
-    #[derive(serde::Serialize)]
+    #[derive(serde::Serialize, Debug)]
     struct Result {
         lsn: Lsn,
         kind: &'static str,
@@ -687,7 +687,14 @@ async fn get_lsn_by_timestamp_handler(
         LsnForTimestamp::Past(lsn) => (lsn, "past"),
         LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
     };
-    json_response(StatusCode::OK, Result { lsn, kind })
+    let result = Result { lsn, kind };
+    tracing::info!(
+        lsn=?result.lsn,
+        kind=result.kind,
+        timestamp = timestamp_raw.into_owned(),
+        "lsn_by_timestamp finished"
+    );
+    json_response(StatusCode::OK, result)
 }
 
 async fn get_timestamp_of_lsn_handler(
