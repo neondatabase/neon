@@ -600,7 +600,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug ]
+        build_type: [ debug, release ]
     outputs:
         coverage-html: ${{ steps.upload-coverage-report-new.outputs.report-url }}
         coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
