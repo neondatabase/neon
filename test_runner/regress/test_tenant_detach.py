@@ -782,7 +782,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
 
     client.tenant_ignore(env.initial_tenant)
 
-    found_broken = False
+    found_cleaned = False
     broken, broken_set = ([], [])
     for _ in range(10):
         m = client.get_metrics()
@@ -790,12 +790,12 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         broken_set = m.query_all(
             "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
         )
-        found_broken = only_int(broken) == 0 and only_int(broken_set) == 1
+        found_cleaned = only_int(broken) == 0 and len(broken_set) == 0
 
-        if found_broken:
+        if found_cleaned:
             break
         time.sleep(0.5)
-    assert found_broken, f"broken should still be in set, but it is not in the tenant state count: broken={broken}, broken_set={broken_set}"
+    assert found_cleaned, f"broken should had been cleaned up: broken={broken}, broken_set={broken_set}"
 
     env.pageserver.tenant_load(env.initial_tenant)
 
@@ -813,4 +813,4 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
             break
         time.sleep(0.5)
 
-    assert found_active, f"reloaded tenant should be active, and broken tenant set item removed: active={active}, broken_set={broken_set}"
+    assert found_active, f"reloaded tenant should be active, no broken tenant set item should exist: active={active}, broken_set={broken_set}"

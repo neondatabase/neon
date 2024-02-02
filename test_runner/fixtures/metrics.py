@@ -95,6 +95,6 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_written_persistent_bytes_total",
     "pageserver_evictions_total",
     "pageserver_evictions_with_low_residence_duration_total",
+    "pageserver_broken_tenants_count",
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
-    # pageserver_broken_tenants_count is a leaked "metric" which is "cleared" on restart or reload
 )
