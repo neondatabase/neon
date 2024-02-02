@@ -50,7 +50,6 @@ pub enum FeStartupPacket {
     },
 }
 
-#[derive(Debug)]
 pub struct StartupMessageParams {
     data: String,
     pairs: SmallVec<[Range<u32>; 4]>,
@@ -59,6 +58,12 @@ pub struct StartupMessageParams {
     database: Option<Range<u32>>,
     options: Option<Range<u32>>,
     replication: Option<Range<u32>>,
+}
+
+impl fmt::Debug for StartupMessageParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
 }
 
 impl StartupMessageParams {
