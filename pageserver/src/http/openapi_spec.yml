@@ -1443,7 +1443,8 @@ components:
         node_id:
           description: Pageserver node ID where this shard is attached
           type: integer
-        shard_id: Tenant shard ID of the shard
+        shard_id:
+          description: Tenant shard ID of the shard
           type: string
     SecondaryConfig:
       type: object

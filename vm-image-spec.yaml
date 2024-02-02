@@ -174,11 +174,10 @@ build: |
           libtool \
           pkg-config
 
-  # Note, we use pgbouncer from neondatabase/pgbouncer fork, which could contain extra commits.
   # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
-  ENV PGBOUNCER_TAG pgbouncer_1_21_0-neon-1
+  ENV PGBOUNCER_TAG pgbouncer_1_22_0
   RUN set -e \
-      && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/neondatabase/pgbouncer.git pgbouncer \
+      && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
       && cd pgbouncer \
       && ./autogen.sh \
       && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
