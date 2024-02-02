@@ -2635,10 +2635,12 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            // Strings for metric labels
+            // reflect tenant state in metrics:
+            // - global per tenant state: TENANT_STATE_METRIC
+            // - "set" of broken tenants: BROKEN_TENANTS_SET
+
             let tid = tenant_shard_id.to_string();
             let shard_id = tenant_shard_id.shard_slug().to_string();
-
             let set_key = &[tid.as_str(), shard_id.as_str()][..];
 
             fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
