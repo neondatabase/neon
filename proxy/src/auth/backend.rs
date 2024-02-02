@@ -12,8 +12,7 @@ use crate::console::errors::GetAuthInfoError;
 use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::AuthSecret;
 use crate::context::RequestMonitoring;
-use crate::proxy::connect_compute::handle_try_wake;
-use crate::proxy::retry::retry_after;
+use crate::proxy::wake_compute::wake_compute;
 use crate::proxy::NeonOptions;
 use crate::stream::Stream;
 use crate::{
@@ -28,11 +27,26 @@ use crate::{
 };
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 use futures::TryFutureExt;
-use std::borrow::Cow;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, warn};
+use tracing::info;
+
+/// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
+pub enum MaybeOwned<'a, T> {
+    Owned(T),
+    Borrowed(&'a T),
+}
+
+impl<T> std::ops::Deref for MaybeOwned<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            MaybeOwned::Owned(t) => t,
+            MaybeOwned::Borrowed(t) => t,
+        }
+    }
+}
 
 /// This type serves two purposes:
 ///
@@ -44,12 +58,9 @@ use tracing::{error, info, warn};
 ///   backends which require them for the authentication process.
 pub enum BackendType<'a, T> {
     /// Cloud API (V2).
-    Console(Cow<'a, ConsoleBackend>, T),
+    Console(MaybeOwned<'a, ConsoleBackend>, T),
     /// Authentication via a web browser.
-    Link(Cow<'a, url::ApiUrl>),
-    #[cfg(test)]
-    /// Test backend.
-    Test(&'a dyn TestBackend),
+    Link(MaybeOwned<'a, url::ApiUrl>),
 }
 
 pub trait TestBackend: Send + Sync + 'static {
@@ -68,14 +79,14 @@ impl std::fmt::Display for BackendType<'_, ()> {
                 ConsoleBackend::Console(endpoint) => {
                     fmt.debug_tuple("Console").field(&endpoint.url()).finish()
                 }
-                #[cfg(feature = "testing")]
+                #[cfg(any(test, feature = "testing"))]
                 ConsoleBackend::Postgres(endpoint) => {
                     fmt.debug_tuple("Postgres").field(&endpoint.url()).finish()
                 }
+                #[cfg(test)]
+                ConsoleBackend::Test(_) => fmt.debug_tuple("Test").finish(),
             },
             Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
-            #[cfg(test)]
-            Test(_) => fmt.debug_tuple("Test").finish(),
         }
     }
 }
@@ -86,10 +97,8 @@ impl<T> BackendType<'_, T> {
     pub fn as_ref(&self) -> BackendType<'_, &T> {
         use BackendType::*;
         match self {
-            Console(c, x) => Console(Cow::Borrowed(c), x),
-            Link(c) => Link(Cow::Borrowed(c)),
-            #[cfg(test)]
-            Test(x) => Test(*x),
+            Console(c, x) => Console(MaybeOwned::Borrowed(c), x),
+            Link(c) => Link(MaybeOwned::Borrowed(c)),
         }
     }
 }
@@ -103,8 +112,6 @@ impl<'a, T> BackendType<'a, T> {
         match self {
             Console(c, x) => Console(c, f(x)),
             Link(c) => Link(c),
-            #[cfg(test)]
-            Test(x) => Test(x),
         }
     }
 }
@@ -117,8 +124,6 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
         match self {
             Console(c, x) => x.map(|x| Console(c, x)),
             Link(c) => Ok(Link(c)),
-            #[cfg(test)]
-            Test(x) => Ok(Test(x)),
         }
     }
 }
@@ -148,7 +153,7 @@ impl ComputeUserInfo {
 }
 
 pub enum ComputeCredentialKeys {
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
 }
@@ -278,42 +283,6 @@ async fn authenticate_with_secret(
     classic::authenticate(info, client, config, &mut ctx.latency_timer, secret).await
 }
 
-/// wake a compute (or retrieve an existing compute session from cache)
-async fn wake_compute(
-    ctx: &mut RequestMonitoring,
-    api: &impl console::Api,
-    compute_credentials: ComputeCredentials<ComputeCredentialKeys>,
-) -> auth::Result<(CachedNodeInfo, ComputeUserInfo)> {
-    let mut num_retries = 0;
-    let mut node = loop {
-        let wake_res = api.wake_compute(ctx, &compute_credentials.info).await;
-        match handle_try_wake(wake_res, num_retries) {
-            Err(e) => {
-                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
-                return Err(e.into());
-            }
-            Ok(ControlFlow::Continue(e)) => {
-                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-            }
-            Ok(ControlFlow::Break(n)) => break n,
-        }
-
-        let wait_duration = retry_after(num_retries);
-        num_retries += 1;
-        tokio::time::sleep(wait_duration).await;
-    };
-
-    ctx.set_project(node.aux.clone());
-
-    match compute_credentials.keys {
-        #[cfg(feature = "testing")]
-        ComputeCredentialKeys::Password(password) => node.config.password(password),
-        ComputeCredentialKeys::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
-    };
-
-    Ok((node, compute_credentials.info))
-}
-
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
     /// Get compute endpoint name from the credentials.
     pub fn get_endpoint(&self) -> Option<EndpointId> {
@@ -322,8 +291,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
         match self {
             Console(_, user_info) => user_info.endpoint_id.clone(),
             Link(_) => Some("link".into()),
-            #[cfg(test)]
-            Test(_) => Some("test".into()),
         }
     }
 
@@ -334,8 +301,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
         match self {
             Console(_, user_info) => &user_info.user,
             Link(_) => "link",
-            #[cfg(test)]
-            Test(_) => "test",
         }
     }
 
@@ -360,8 +325,20 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
 
                 let compute_credentials =
                     auth_quirks(ctx, &*api, user_info, client, allow_cleartext, config).await?;
-                let (cache_info, user_info) = wake_compute(ctx, &*api, compute_credentials).await?;
-                (cache_info, BackendType::Console(api, user_info))
+
+                let mut num_retries = 0;
+                let mut node =
+                    wake_compute(&mut num_retries, ctx, &api, &compute_credentials.info).await?;
+
+                ctx.set_project(node.aux.clone());
+
+                match compute_credentials.keys {
+                    #[cfg(any(test, feature = "testing"))]
+                    ComputeCredentialKeys::Password(password) => node.config.password(password),
+                    ComputeCredentialKeys::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
+                };
+
+                (node, BackendType::Console(api, compute_credentials.info))
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
@@ -373,10 +350,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
                     CachedNodeInfo::new_uncached(node_info),
                     BackendType::Link(url),
                 )
-            }
-            #[cfg(test)]
-            Test(_) => {
-                unreachable!("this function should never be called in the test backend")
             }
         };
 
@@ -407,8 +380,6 @@ impl BackendType<'_, ComputeUserInfo> {
         match self {
             Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             Link(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
-            #[cfg(test)]
-            Test(x) => x.get_allowed_ips_and_secret(),
         }
     }
 
@@ -423,8 +394,6 @@ impl BackendType<'_, ComputeUserInfo> {
         match self {
             Console(api, user_info) => api.wake_compute(ctx, user_info).map_ok(Some).await,
             Link(_) => Ok(None),
-            #[cfg(test)]
-            Test(x) => x.wake_compute().map(Some),
         }
     }
 }

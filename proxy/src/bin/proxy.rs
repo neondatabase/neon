@@ -1,5 +1,6 @@
 use futures::future::Either;
 use proxy::auth;
+use proxy::auth::backend::MaybeOwned;
 use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
@@ -17,9 +18,9 @@ use proxy::usage_metrics;
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
 use proxy::serverless;
+use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
-use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -263,18 +264,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
-        match &**api {
-            proxy::console::provider::ConsoleBackend::Console(api) => {
-                let cache = api.caches.project_info.clone();
-                if let Some(url) = args.redis_notifications {
-                    info!("Starting redis notifications listener ({url})");
-                    maintenance_tasks
-                        .spawn(notifications::task_main(url.to_owned(), cache.clone()));
-                }
-                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+        if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
+            let cache = api.caches.project_info.clone();
+            if let Some(url) = args.redis_notifications {
+                info!("Starting redis notifications listener ({url})");
+                maintenance_tasks.spawn(notifications::task_main(url.to_owned(), cache.clone()));
             }
-            #[cfg(feature = "testing")]
-            proxy::console::provider::ConsoleBackend::Postgres(_) => {}
+            maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
         }
     }
 
@@ -373,18 +369,18 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             let api = console::provider::ConsoleBackend::Console(api);
-            auth::BackendType::Console(Cow::Owned(api), ())
+            auth::BackendType::Console(MaybeOwned::Owned(api), ())
         }
         #[cfg(feature = "testing")]
         AuthBackend::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = console::provider::mock::Api::new(url);
             let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::BackendType::Console(Cow::Owned(api), ())
+            auth::BackendType::Console(MaybeOwned::Owned(api), ())
         }
         AuthBackend::Link => {
             let url = args.uri.parse()?;
-            auth::BackendType::Link(Cow::Owned(url))
+            auth::BackendType::Link(MaybeOwned::Owned(url))
         }
     };
     let http_config = HttpConfig {

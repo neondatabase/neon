@@ -127,6 +127,10 @@ impl JwtAuth {
         Ok(Self::new(decoding_keys))
     }
 
+    pub fn from_key(key: String) -> Result<Self> {
+        Ok(Self::new(vec![DecodingKey::from_ed_pem(key.as_bytes())?]))
+    }
+
     /// Attempt to decode the token with the internal decoding keys.
     ///
     /// The function tries the stored decoding keys in succession,

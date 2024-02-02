@@ -172,7 +172,7 @@ pub(crate) fn validate_password_and_exchange(
     secret: AuthSecret,
 ) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
     match secret {
-        #[cfg(feature = "testing")]
+        #[cfg(any(test, feature = "testing"))]
         AuthSecret::Md5(_) => {
             // test only
             Ok(sasl::Outcome::Success(ComputeCredentialKeys::Password(
