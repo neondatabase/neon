@@ -795,7 +795,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                     &endpoint.timeline_id.to_string(),
                     branch_name,
                     lsn_str.as_str(),
-                    endpoint.status(),
+                    &format!("{}", endpoint.status()),
                 ]);
             }
 

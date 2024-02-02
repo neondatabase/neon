@@ -457,6 +457,12 @@ impl AttachmentService {
             args.push(format!("--public-key={public_key_path}"));
         }
 
+        if let Some(control_plane_compute_hook_api) = &self.env.control_plane_compute_hook_api {
+            args.push(format!(
+                "--compute-hook-url={control_plane_compute_hook_api}"
+            ));
+        }
+
         background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,

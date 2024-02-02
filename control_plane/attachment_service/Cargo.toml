@@ -16,6 +16,7 @@ hyper.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
