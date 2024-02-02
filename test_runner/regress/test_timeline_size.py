@@ -20,7 +20,7 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
@@ -40,7 +40,7 @@ def test_timeline_size(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size", "empty")
 
     client = env.pageserver.http_client()
-    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
+    client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
 
     endpoint_main = env.endpoints.create_start("test_timeline_size")
     log.info("postgres is running on 'test_timeline_size' branch")
@@ -73,7 +73,7 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_createdropdb", "empty")
 
     client = env.pageserver.http_client()
-    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
+    client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
     timeline_details = client.timeline_detail(
         env.initial_tenant, new_timeline_id, include_non_incremental_logical_size=True
     )
@@ -153,7 +153,7 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota_on_startup")
 
-    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
+    client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
 
     endpoint_main = env.endpoints.create(
         "test_timeline_size_quota_on_startup",
@@ -219,7 +219,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota")
 
-    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
+    client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
 
     endpoint_main = env.endpoints.create(
         "test_timeline_size_quota",
@@ -713,28 +713,6 @@ def assert_physical_size_invariants(sizes: TimelinePhysicalSizeValues):
     assert sizes.api_current_physical == sizes.prometheus_resident_physical
     assert sizes.prometheus_resident_physical == sizes.prometheus_remote_physical
     # XXX would be nice to assert layer file physical storage utilization here as well, but we can only do that for LocalFS
-
-
-# Timeline logical size initialization is an asynchronous background task that runs once,
-# try a few times to ensure it's activated properly
-def wait_for_timeline_size_init(
-    client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
-):
-    for i in range(10):
-        timeline_details = client.timeline_detail(
-            tenant, timeline, include_non_incremental_logical_size=True
-        )
-        current_logical_size = timeline_details["current_logical_size"]
-        non_incremental = timeline_details["current_logical_size_non_incremental"]
-        if current_logical_size == non_incremental:
-            return
-        log.info(
-            f"waiting for current_logical_size of a timeline to be calculated, iteration {i}: {current_logical_size} vs {non_incremental}"
-        )
-        time.sleep(1)
-    raise Exception(
-        f"timed out while waiting for current_logical_size of a timeline to reach its non-incremental value, details: {timeline_details}"
-    )
 
 
 def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
