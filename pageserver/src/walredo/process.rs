@@ -23,12 +23,11 @@ use self::no_leak_child::NoLeakChild;
 
 use utils::{lsn::Lsn, nonblock::set_nonblock};
 
-use super::BufferTag;
-
 use std::os::fd::AsRawFd;
 
+use super::protocol;
+
 mod no_leak_child;
-mod protocol;
 
 pub struct WalRedoProcess {
     #[allow(dead_code)]
@@ -184,7 +183,7 @@ impl WalRedoProcess {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
     pub(crate) fn apply_wal_records(
         &self,
-        tag: BufferTag,
+        tag: protocol::BufferTag,
         base_img: &Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,

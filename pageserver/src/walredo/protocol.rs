@@ -1,8 +1,20 @@
 use bytes::BufMut;
+use pageserver_api::reltag::RelTag;
+use serde::Serialize;
+use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
 
-use super::BufferTag;
-use utils::bin_ser::BeSer;
+///
+/// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
+///
+/// In Postgres `BufferTag` structure is used for exactly the same purpose.
+/// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
+///
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize)]
+pub(crate) struct BufferTag {
+    pub rel: RelTag,
+    pub blknum: u32,
+}
 
 pub(crate) fn build_begin_redo_for_block_msg(tag: BufferTag, buf: &mut Vec<u8>) {
     let len = 4 + 1 + 4 * 4;

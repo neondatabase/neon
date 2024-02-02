@@ -24,7 +24,6 @@ use bytes::{Bytes, BytesMut};
 
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::TenantShardId;
-use serde::Serialize;
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -44,7 +43,7 @@ use crate::repository::Key;
 use crate::walrecord::NeonWalRecord;
 
 use pageserver_api::key::{key_to_rel_block, key_to_slru_block};
-use pageserver_api::reltag::{RelTag, SlruKind};
+use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::v14::nonrelfile_utils::{
@@ -54,19 +53,8 @@ use postgres_ffi::v14::nonrelfile_utils::{
 use postgres_ffi::BLCKSZ;
 
 mod process;
+mod protocol;
 use process::WalRedoProcess;
-
-///
-/// `RelTag` + block number (`blknum`) gives us a unique id of the page in the cluster.
-///
-/// In Postgres `BufferTag` structure is used for exactly the same purpose.
-/// [See more related comments here](https://github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/buf_internals.h#L91).
-///
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Serialize)]
-pub(crate) struct BufferTag {
-    pub rel: RelTag,
-    pub blknum: u32,
-}
 
 ///
 /// This is the real implementation that uses a Postgres process to
@@ -272,7 +260,7 @@ impl PostgresRedoManager {
             let started_at = std::time::Instant::now();
 
             // Relational WAL records are applied using wal-redo-postgres
-            let buf_tag = BufferTag { rel, blknum };
+            let buf_tag = protocol::BufferTag { rel, blknum };
             let result = proc
                 .apply_wal_records(buf_tag, &base_img, records, wal_redo_timeout)
                 .context("apply_wal_records");
