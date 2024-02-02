@@ -3229,8 +3229,6 @@ impl Tenant {
                 .context("branch initial metadata upload")?;
         }
 
-        info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
-
         Ok(new_timeline)
     }
 
@@ -3447,12 +3445,6 @@ impl Tenant {
 
         // All done!
         let timeline = raw_timeline.finish_creation()?;
-
-        info!(
-            "created root timeline {} timeline.lsn {}",
-            timeline_id,
-            timeline.get_last_record_lsn()
-        );
 
         Ok(timeline)
     }

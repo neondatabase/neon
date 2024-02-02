@@ -489,6 +489,12 @@ async fn timeline_create_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
+        if let Some(ancestor_id) = request_data.ancestor_timeline_id.as_ref() {
+            tracing::info!(%ancestor_id, "starting to branch");
+        } else {
+            tracing::info!("bootstrapping");
+        }
+
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
