@@ -829,18 +829,20 @@ impl Tenant {
                 }
 
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
-                let attach_timer = match mode {
-                    SpawnMode::Create => None,
-                    SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
+                let attached = {
+                    let _attach_timer = match mode {
+                        SpawnMode::Create => None,
+                        SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
+                    };
+                    tenant_clone.attach(preload, mode, &ctx).await
                 };
-                match tenant_clone.attach(preload, mode, &ctx).await {
+
+                match attached {
                     Ok(()) => {
                         info!("attach finished, activating");
-                        if let Some(t)=  attach_timer {t.observe_duration();}
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
-                        if let Some(t)=  attach_timer {t.observe_duration();}
                         make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
