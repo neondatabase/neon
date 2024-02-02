@@ -34,7 +34,6 @@ itertools.workspace = true
 md5.workspace = true
 metrics.workspace = true
 once_cell.workspace = true
-opentelemetry.workspace = true
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true
@@ -69,7 +68,6 @@ tokio-postgres.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
-tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 tracing.workspace = true
