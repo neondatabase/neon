@@ -482,6 +482,7 @@ class NeonEnvBuilder:
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
+        self.control_plane_compute_hook_api: Optional[str] = None
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
@@ -1007,6 +1008,9 @@ class NeonEnv:
         # The base URL of the attachment service
         self.attachment_service_api: str = f"http://127.0.0.1:{self.attachment_service_port}"
 
+        # For testing this with a fake HTTP server, enable passing through a URL from config
+        self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
+
         self.attachment_service: NeonAttachmentService = NeonAttachmentService(
             self, config.auth_enabled
         )
@@ -1025,6 +1029,9 @@ class NeonEnv:
 
         if self.control_plane_api is not None:
             cfg["control_plane_api"] = self.control_plane_api
+
+        if self.control_plane_compute_hook_api is not None:
+            cfg["control_plane_compute_hook_api"] = self.control_plane_compute_hook_api
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -1904,7 +1911,7 @@ class Pagectl(AbstractNeonCli):
 
 
 class NeonAttachmentService:
-    def __init__(self, env: NeonEnv, auth_enabled):
+    def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
         self.auth_enabled = auth_enabled

@@ -1,28 +1,27 @@
 *
 
-# Files
-!Cargo.lock
-!Cargo.toml
-!Makefile
 !rust-toolchain.toml
-!scripts/combine_control_files.py
-!scripts/ninstall.sh
-!vm-cgconfig.conf
+!Cargo.toml
+!Cargo.lock
+!Makefile
 
-# Directories
 !.cargo/
 !.config/
-!compute_tools/
 !control_plane/
+!compute_tools/
 !libs/
-!neon_local/
 !pageserver/
-!patches/
 !pgxn/
 !proxy/
-!s3_scrubber/
 !safekeeper/
+!s3_scrubber/
 !storage_broker/
 !trace/
-!vendor/postgres-*/
+!vendor/postgres-v14/
+!vendor/postgres-v15/
+!vendor/postgres-v16/
 !workspace_hack/
+!neon_local/
+!scripts/ninstall.sh
+!scripts/combine_control_files.py
+!vm-cgconfig.conf

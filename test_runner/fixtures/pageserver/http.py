@@ -831,3 +831,16 @@ class PageserverHttpClient(requests.Session):
         self.put(
             f"http://localhost:{self.port}/v1/deletion_queue/flush?execute={'true' if execute else 'false'}"
         ).raise_for_status()
+
+    def timeline_wait_logical_size(self, tenant_id: TenantId, timeline_id: TimelineId) -> int:
+        detail = self.timeline_detail(
+            tenant_id,
+            timeline_id,
+            include_non_incremental_logical_size=True,
+            force_await_initial_logical_size=True,
+        )
+        current_logical_size = detail["current_logical_size"]
+        non_incremental = detail["current_logical_size_non_incremental"]
+        assert current_logical_size == non_incremental
+        assert isinstance(current_logical_size, int)
+        return current_logical_size
