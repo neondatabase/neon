@@ -90,6 +90,7 @@ impl Generation {
         }
     }
 
+    #[track_caller]
     pub fn next(&self) -> Generation {
         match self {
             Self::Valid(n) => Self::Valid(*n + 1),
