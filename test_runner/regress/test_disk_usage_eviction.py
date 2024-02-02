@@ -183,9 +183,15 @@ class EvictionEnv:
             ),
         )
 
+        # we now do initial logical size calculation on startup, which on debug builds can fight with the every second task
+        for tenant_id, timeline_id in self.timelines:
+            pageserver_http = self.neon_env.get_tenant_pageserver(tenant_id).http_client()
+            pageserver_http.timeline_wait_logical_size(tenant_id, timeline_id)
+
         def statvfs_called():
             assert pageserver.log_contains(".*running mocked statvfs.*")
 
+        # we most likely have already completed multiple runs
         wait_until(10, 1, statvfs_called)
 
 
