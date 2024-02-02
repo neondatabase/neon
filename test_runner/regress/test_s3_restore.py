@@ -32,7 +32,6 @@ def test_tenant_s3_restore(
         remote_storage = neon_env_builder.pageserver_remote_storage
         assert remote_storage, "remote storage not configured"
         enable_remote_storage_versioning(remote_storage)
-        pytest.skip("moto doesn't support self-copy: https://github.com/getmoto/moto/issues/7300")
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
     env.pageserver.allowed_errors.extend(
