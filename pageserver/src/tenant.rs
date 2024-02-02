@@ -811,21 +811,20 @@ impl Tenant {
                         info!("ready for backgound jobs barrier");
                     }
 
-                    match DeleteTenantFlow::resume_from_attach(
+                    let deleted = DeleteTenantFlow::resume_from_attach(
                         deletion,
                         &tenant_clone,
                         preload,
                         tenants,
                         &ctx,
                     )
-                    .await
-                    {
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
-                            return Ok(());
-                        }
-                        Ok(()) => return Ok(()),
+                    .await;
+
+                    if let Err(e) = deleted {
+                        make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
+
+                    return Ok(());
                 }
 
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
