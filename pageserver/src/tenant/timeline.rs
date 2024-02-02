@@ -726,15 +726,19 @@ impl Timeline {
 
                 let block = self.get(key, lsn, ctx).await;
 
-                if matches!(
-                    block,
-                    Err(PageReconstructError::Cancelled | PageReconstructError::AncestorStopping(_))
-                ) {
-                    return Err(GetVectoredError::Cancelled);
+                use PageReconstructError::*;
+                match block {
+                    Err(Cancelled | AncestorStopping(_)) => {
+                        return Err(GetVectoredError::Cancelled)
+                    }
+                    Err(Other(err)) if err.to_string().contains("could not find data for key") => {
+                        return Err(GetVectoredError::MissingKey(key))
+                    }
+                    _ => {
+                        values.insert(key, block);
+                        key = key.next();
+                    }
                 }
-
-                values.insert(key, block);
-                key = key.next();
             }
         }
 
@@ -3476,11 +3480,7 @@ impl Timeline {
                             || key.next() == range.end
                         {
                             let results = self
-                                .get_vectored(
-                                    key_request_accum.consume_keyspace(),
-                                    lsn,
-                                    ctx,
-                                )
+                                .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
                                 .await?;
 
                             for (img_key, img) in results {
