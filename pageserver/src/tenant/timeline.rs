@@ -60,7 +60,7 @@ use crate::{
     tenant::storage_layer::{
         AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
         LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
-        ValueReconstructState,
+        ValueReconstructState, ValuesReconstructState,
     },
 };
 use crate::{
@@ -104,11 +104,14 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
-use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::{config::TenantConf, storage_layer::ReadableLayerDesc};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{
+    remote_timeline_client::index::{IndexLayerMetadata, IndexPart},
+    storage_layer::LayerFringe,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -458,6 +461,9 @@ pub(crate) enum GetVectoredError {
 
     #[error("Requested key {0} not found")]
     MissingKey(Key),
+
+    #[error(transparent)]
+    GetReadyAncestorError(GetReadyAncestorError),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -2557,6 +2563,155 @@ impl Timeline {
                 continue 'outer;
             }
         }
+    }
+
+    /// Get the data needed to reconstruct all keys in the provided keyspace
+    ///
+    /// Maintain a fringe (LayerFringe) which tracks all the layers that intersect
+    /// the current keyspace. At each iteration pop the top of the fringe (the layer
+    /// with the highest Lsn) and get all the required reconstruct data from the layer
+    /// in one go.
+    ///
+    /// More granulary, the algorithm is as follows:
+    // 1.   While some keys are still not done and there's a timeline to visit:
+    // 2.   Visit the timeline:
+    // 2.1: Build the fringe for the current keyspace
+    // 2.2  Visit the newest layer from the fringe to collect all values for the range it
+    //      intersects
+    // 2.3. Pop the timeline from the fringe
+    // 2.4. If the fringe is empty, go back to 1
+    async fn get_vectored_reconstruct_data(
+        &self,
+        mut keyspace: KeySpace,
+        request_lsn: Lsn,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        let mut timeline_owned: Arc<Timeline>;
+        let mut timeline = self;
+
+        let mut cont_lsn = Lsn(request_lsn.0 + 1);
+
+        loop {
+            if self.cancel.is_cancelled() {
+                return Err(GetVectoredError::Cancelled);
+            }
+
+            let completed = self
+                .get_vectored_reconstruct_data_inner(
+                    timeline,
+                    keyspace.clone(),
+                    cont_lsn,
+                    reconstruct_state,
+                    ctx,
+                )
+                .await?;
+
+            keyspace.remove_overlapping_with(&completed);
+            if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
+                break;
+            }
+
+            cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
+            timeline_owned = timeline
+                .get_ready_ancestor_timeline(ctx)
+                .await
+                .map_err(GetVectoredError::GetReadyAncestorError)?;
+            timeline = &*timeline_owned;
+        }
+
+        if keyspace.total_size() != 0 {
+            return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
+        }
+
+        Ok(())
+    }
+
+    async fn get_vectored_reconstruct_data_inner(
+        &self,
+        timeline: &Timeline,
+        keyspace: KeySpace,
+        mut cont_lsn: Lsn,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<KeySpace, GetVectoredError> {
+        let mut unmapped_keyspace = keyspace.clone();
+        let mut fringe = LayerFringe::new();
+
+        let mut completed_keyspace = KeySpace { ranges: Vec::new() };
+
+        'outer: loop {
+            if self.cancel.is_cancelled() {
+                return Err(GetVectoredError::Cancelled);
+            }
+
+            let keys_done_last_step = reconstruct_state.consume_done_keys();
+            unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
+            completed_keyspace.merge(&keys_done_last_step);
+
+            let guard = timeline.layers.read().await;
+            let layers = guard.layer_map();
+
+            let in_memory_layer = layers.find_in_memory_layer(|l| {
+                let start_lsn = l.get_lsn_range().start;
+                cont_lsn > start_lsn
+            });
+
+            match in_memory_layer {
+                Some(l) => {
+                    fringe.update(
+                        ReadableLayerDesc::InMemory {
+                            handle: l,
+                            lsn_ceil: cont_lsn,
+                        },
+                        unmapped_keyspace.clone(),
+                    );
+                }
+                None => {
+                    for range in unmapped_keyspace.ranges.iter() {
+                        let results = match layers.range_search(range.clone(), cont_lsn) {
+                            Some(res) => res,
+                            None => {
+                                break 'outer;
+                            }
+                        };
+
+                        results
+                            .found
+                            .into_iter()
+                            .map(|(res, accum)| {
+                                (
+                                    ReadableLayerDesc::Persistent {
+                                        desc: (*res.layer).clone(),
+                                        lsn_floor: res.lsn_floor,
+                                        lsn_ceil: cont_lsn,
+                                    },
+                                    accum.to_keyspace(),
+                                )
+                            })
+                            .for_each(|(layer, keyspace)| fringe.update(layer, keyspace));
+                    }
+                }
+            }
+
+            if let Some((layer_to_read, keyspace_to_read)) = fringe.next_layer() {
+                layer_to_read
+                    .get_values_reconstruct_data(
+                        &guard,
+                        keyspace_to_read.clone(),
+                        reconstruct_state,
+                        ctx,
+                    )
+                    .await?;
+
+                unmapped_keyspace = keyspace_to_read;
+                cont_lsn = layer_to_read.get_lsn_floor();
+            } else {
+                break;
+            }
+        }
+
+        Ok(completed_keyspace)
     }
 
     /// # Cancel-safety
