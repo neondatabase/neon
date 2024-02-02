@@ -7,7 +7,8 @@ pub mod framed;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{borrow::Cow, collections::HashMap, fmt, io, str};
+use smallvec::SmallVec;
+use std::{borrow::Cow, fmt, io, ops::Range, str};
 
 // re-export for use in utils pageserver_feedback.rs
 pub use postgres_protocol::PG_EPOCH;
@@ -51,27 +52,60 @@ pub enum FeStartupPacket {
 
 #[derive(Debug)]
 pub struct StartupMessageParams {
-    params: HashMap<String, String>,
+    data: String,
+    pairs: SmallVec<[Range<u32>; 4]>,
+    // for easy access
+    user: Option<Range<u32>>,
+    database: Option<Range<u32>>,
+    options: Option<Range<u32>>,
+    replication: Option<Range<u32>>,
 }
 
 impl StartupMessageParams {
     /// Get parameter's value by its name.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.params.get(name).map(|s| s.as_str())
+        self.pairs
+            .iter()
+            .map(|r| &self.data[r.start as usize..r.end as usize])
+            .find_map(|pair| pair.strip_prefix(name).and_then(|x| x.strip_prefix('\0')))
+    }
+
+    pub fn user(&self) -> Option<&str> {
+        self.user
+            .clone()
+            .and_then(|r| self.data.get(r.start as usize..r.end as usize))
+    }
+
+    pub fn database(&self) -> Option<&str> {
+        self.database
+            .clone()
+            .and_then(|r| self.data.get(r.start as usize..r.end as usize))
+    }
+
+    pub(crate) fn options_str(&self) -> Option<&str> {
+        self.options
+            .clone()
+            .and_then(|r| self.data.get(r.start as usize..r.end as usize))
+    }
+
+    pub fn replication(&self) -> Option<&str> {
+        self.replication
+            .clone()
+            .and_then(|r| self.data.get(r.start as usize..r.end as usize))
     }
 
     /// Split command-line options according to PostgreSQL's logic,
     /// taking into account all escape sequences but leaving them as-is.
     /// [`None`] means that there's no `options` in [`Self`].
     pub fn options_raw(&self) -> Option<impl Iterator<Item = &str>> {
-        self.get("options").map(Self::parse_options_raw)
+        self.options_str().map(Self::parse_options_raw)
     }
 
     /// Split command-line options according to PostgreSQL's logic,
     /// applying all escape sequences (using owned strings as needed).
     /// [`None`] means that there's no `options` in [`Self`].
     pub fn options_escaped(&self) -> Option<impl Iterator<Item = Cow<'_, str>>> {
-        self.get("options").map(Self::parse_options_escaped)
+        self.options_str().map(Self::parse_options_escaped)
     }
 
     /// Split command-line options according to PostgreSQL's logic,
@@ -111,15 +145,44 @@ impl StartupMessageParams {
 
     /// Iterate through key-value pairs in an arbitrary order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.params.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+        self.pairs
+            .iter()
+            .map(|r| &self.data[r.start as usize..r.end as usize])
+            .flat_map(|pair| pair.split_once('\0'))
     }
 
     // This function is mostly useful in tests.
     #[doc(hidden)]
     pub fn new<'a, const N: usize>(pairs: [(&'a str, &'a str); N]) -> Self {
-        Self {
-            params: pairs.map(|(k, v)| (k.to_owned(), v.to_owned())).into(),
+        let mut this = Self {
+            data: Default::default(),
+            pairs: Default::default(),
+            user: Default::default(),
+            database: Default::default(),
+            options: Default::default(),
+            replication: Default::default(),
+        };
+        for (k, v) in pairs {
+            let start = this.data.len();
+            this.data.push_str(k);
+            this.data.push('\0');
+            let value_offset = this.data.len();
+            this.data.push_str(v);
+            let end = this.data.len();
+            this.data.push('\0');
+            let range = start as u32..end as u32;
+            this.pairs.push(range);
+            let value_range = value_offset as u32..end as u32;
+            match k {
+                "user" => this.user = Some(value_range),
+                "database" => this.database = Some(value_range),
+                "options" => this.options = Some(value_range),
+                "replication" => this.replication = Some(value_range),
+                _ => {}
+            }
         }
+        this.data.push('\0');
+        this
     }
 }
 
@@ -346,33 +409,62 @@ impl FeStartupPacket {
 
                 // Parse pairs of null-terminated strings (key, value).
                 // See `postgres: ProcessStartupPacket, build_startup_packet`.
-                let mut tokens = str::from_utf8(&msg)
+                let data = str::from_utf8(&msg)
                     .map_err(|_e| {
                         ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
                     })?
-                    .strip_suffix('\0') // drop packet's own null
-                    .ok_or_else(|| {
-                        ProtocolError::Protocol(
+                    .to_owned();
+
+                let mut params = StartupMessageParams {
+                    data,
+                    pairs: Default::default(),
+                    user: Default::default(),
+                    database: Default::default(),
+                    options: Default::default(),
+                    replication: Default::default(),
+                };
+
+                let mut offset = 0;
+                let mut rest = params.data.as_str();
+                loop {
+                    let Some((key, rest1)) = rest.split_once('\0') else {
+                        return Err(ProtocolError::Protocol(
                             "StartupMessage params: missing null terminator".to_string(),
-                        )
-                    })?
-                    .split_terminator('\0');
+                        ));
+                    };
+                    // pairs terminated
+                    if key.is_empty() {
+                        params.data.truncate(offset + 1);
+                        params.data.shrink_to_fit();
+                        break;
+                    }
+                    let Some((value, rest2)) = rest1.split_once('\0') else {
+                        return Err(ProtocolError::Protocol(
+                            "StartupMessage params: missing null terminator".to_string(),
+                        ));
+                    };
+                    rest = rest2;
 
-                let mut params = HashMap::new();
-                while let Some(name) = tokens.next() {
-                    let value = tokens.next().ok_or_else(|| {
-                        ProtocolError::Protocol(
-                            "StartupMessage params: key without value".to_string(),
-                        )
-                    })?;
+                    let start = offset;
+                    let value_offset = offset + key.len() + 1;
+                    let end = value_offset + value.len();
+                    offset = end + 1;
 
-                    params.insert(name.to_owned(), value.to_owned());
+                    params.pairs.push(start as u32..end as u32);
+                    let value_range = value_offset as u32..end as u32;
+                    match key {
+                        "user" => params.user = Some(value_range),
+                        "database" => params.database = Some(value_range),
+                        "options" => params.options = Some(value_range),
+                        "replication" => params.replication = Some(value_range),
+                        _ => {}
+                    }
                 }
 
                 FeStartupPacket::StartupMessage {
                     major_version,
                     minor_version,
-                    params: StartupMessageParams { params },
+                    params,
                 }
             }
         };

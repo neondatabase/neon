@@ -3903,6 +3903,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol",
  "rand 0.8.5",
+ "smallvec",
  "thiserror",
  "tokio",
  "tracing",

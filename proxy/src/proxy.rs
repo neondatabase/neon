@@ -237,7 +237,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     {
         Ok(auth_result) => auth_result,
         Err(e) => {
-            let db = params.get("database");
+            let db = params.database();
             let app = params.get("application_name");
             let params_span = tracing::info_span!("", ?user, ?db, ?app);
 

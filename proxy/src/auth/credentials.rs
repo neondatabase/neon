@@ -83,8 +83,7 @@ impl ComputeUserInfoMaybeEndpoint {
         use ComputeUserInfoParseError::*;
 
         // Some parameters are stored in the startup message.
-        let get_param = |key| params.get(key).ok_or(MissingKey(key));
-        let user: RoleName = get_param("user")?.into();
+        let user: RoleName = params.user().ok_or(MissingKey("user"))?.into();
 
         // record the values if we have them
         ctx.set_application(params.get("application_name").map(SmolStr::from));

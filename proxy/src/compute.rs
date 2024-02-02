@@ -89,13 +89,13 @@ impl ConnCfg {
     pub fn set_startup_params(&mut self, params: &StartupMessageParams) {
         // Only set `user` if it's not present in the config.
         // Link auth flow takes username from the console's response.
-        if let (None, Some(user)) = (self.get_user(), params.get("user")) {
+        if let (None, Some(user)) = (self.get_user(), params.user()) {
             self.user(user);
         }
 
         // Only set `dbname` if it's not present in the config.
         // Link auth flow takes dbname from the console's response.
-        if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
+        if let (None, Some(dbname)) = (self.get_dbname(), params.database()) {
             self.dbname(dbname);
         }
 
@@ -110,7 +110,7 @@ impl ConnCfg {
         }
 
         // TODO: This is especially ugly...
-        if let Some(replication) = params.get("replication") {
+        if let Some(replication) = params.replication() {
             use tokio_postgres::config::ReplicationMode;
             match replication {
                 "true" | "on" | "yes" | "1" => {
