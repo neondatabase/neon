@@ -808,7 +808,7 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
         post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
         assert post_eviction_total_size < 0.33 * total_size, "we requested max 33% usage"
 
-    wait_until(10, 1, less_than_max_usage_pct)
+    wait_until(2, 2, less_than_max_usage_pct)
 
 
 def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
@@ -854,7 +854,7 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
             total_size - post_eviction_total_size >= min_avail_bytes
         ), f"we requested at least {min_avail_bytes} worth of free space"
 
-    wait_until(10, 1, more_than_min_avail_bytes_freed)
+    wait_until(2, 2, more_than_min_avail_bytes_freed)
 
 
 def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
