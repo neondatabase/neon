@@ -101,6 +101,14 @@ impl From<&Exact> for u64 {
     }
 }
 
+impl Approximate {
+    /// For use in situations where we don't have a sane logical size value but need
+    /// to return something, e.g. in HTTP API on shard >0 of a sharded tenant.
+    pub(crate) fn zero() -> Self {
+        Self(0)
+    }
+}
+
 impl CurrentLogicalSize {
     pub(crate) fn size_dont_care_about_accuracy(&self) -> u64 {
         match self {
