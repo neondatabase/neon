@@ -855,15 +855,9 @@ impl Tenant {
                 // logical size calculations: if logical size calculation semaphore is saturated,
                 // then warmup will wait for that before proceeding to the next tenant.
                 if let AttachType::Warmup(_permit) = attach_type {
-                    let mut futs = FuturesUnordered::new();
-                    let timelines: Vec<_> = tenant_clone.timelines.lock().unwrap().values().cloned().collect();
-                    for t in timelines {
-                        futs.push(t.await_initial_logical_size())
-                    }
+                    let mut futs: FuturesUnordered<_> = tenant_clone.timelines.lock().unwrap().values().cloned().map(|t| t.await_initial_logical_size()).collect();
                     tracing::info!("Waiting for initial logical sizes while warming up...");
-                    while futs.next().await.is_some() {
-
-                    }
+                    while futs.next().await.is_some() {}
                     tracing::info!("Warm-up complete");
                 }
 
