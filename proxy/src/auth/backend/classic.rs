@@ -20,7 +20,7 @@ pub(super) async fn authenticate(
 ) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
     let flow = AuthFlow::new(client);
     let scram_keys = match secret {
-        #[cfg(feature = "testing")]
+        #[cfg(any(test, feature = "testing"))]
         AuthSecret::Md5(_) => {
             info!("auth endpoint chooses MD5");
             return Err(auth::AuthError::bad_auth_method("MD5"));
