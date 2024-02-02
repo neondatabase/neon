@@ -1,7 +1,6 @@
 import time
 from datetime import datetime, timezone
 
-import pytest
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
