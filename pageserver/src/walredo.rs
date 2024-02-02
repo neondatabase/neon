@@ -127,7 +127,7 @@ impl PostgresRedoManager {
         }
     }
 
-    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+    pub(crate) async fn status(&self) -> Option<WalRedoManagerStatus> {
         Some(WalRedoManagerStatus {
             last_redo_at: {
                 let at = *self.last_redo_at.lock().unwrap();
@@ -137,7 +137,7 @@ impl PostgresRedoManager {
                     chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
                 })
             },
-            pid: self.redo_process.get().map(|p| p.id()),
+            pid: self.redo_process.get_mut().await.map(|p| p.id()),
         })
     }
 }
@@ -162,19 +162,27 @@ impl PostgresRedoManager {
     /// This type doesn't have its own background task to check for idleness: we
     /// rely on our owner calling this function periodically in its own housekeeping
     /// loops.
-    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+    pub(crate) async fn maybe_quiesce(&self, idle_timeout: Duration) {
         if let Ok(g) = self.last_redo_at.try_lock() {
             if let Some(last_redo_at) = *g {
                 if last_redo_at.elapsed() >= idle_timeout {
                     drop(g);
-                    drop(
-                        self.redo_process
-                            .get()
-                            .map(|mut guard| guard.take_and_deinit()),
-                    );
+                    // fallthrough
+                } else {
+                    return;
                 }
+            } else {
+                return;
             }
+        } else {
+            return;
         }
+        drop(
+            self.redo_process
+                .get_mut()
+                .await
+                .map(|mut guard| guard.take_and_deinit()),
+        );
     }
 
     ///
@@ -268,7 +276,7 @@ impl PostgresRedoManager {
                 // Avoid concurrent callers hitting the same issue.
                 // We can't prevent it from happening because we want to enable parallelism.
                 {
-                    match self.redo_process.get() {
+                    match self.redo_process.get_mut().await {
                         Some(mut guard) => {
                             if Arc::ptr_eq(&*guard, &proc) {
                                 // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
