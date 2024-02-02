@@ -181,7 +181,7 @@ impl Service {
             // Populate each tenant's intent state
             let mut scheduler = Scheduler::new(&locked.tenants, &nodes);
             for (tenant_shard_id, tenant_state) in locked.tenants.iter_mut() {
-                tenant_state.intent_from_observed();
+                tenant_state.intent_from_observed(&scheduler);
                 if let Err(e) = tenant_state.schedule(&mut scheduler) {
                     // Non-fatal error: we are unable to properly schedule the tenant, perhaps because
                     // not enough pageservers are available.  The tenant may well still be available
@@ -259,6 +259,8 @@ impl Service {
 
         let mut tenants = BTreeMap::new();
 
+        let scheduler = Scheduler::new(&nodes);
+
         for tsp in tenant_shard_persistence {
             let tenant_shard_id = TenantShardId {
                 tenant_id: TenantId::from_str(tsp.tenant_id.as_str())?,
@@ -279,7 +281,8 @@ impl Service {
             // it with what we can infer: the node for which a generation was most recently issued.
             let mut intent = IntentState::new();
             if tsp.generation_pageserver != i64::MAX {
-                intent.attached = Some(NodeId(tsp.generation_pageserver as u64))
+                intent.attached =
+                    Some(scheduler.node_reference_attached(tsp.generation_pageserver as u64))
             }
 
             let new_tenant = TenantState {
@@ -1468,7 +1471,10 @@ impl Service {
                     observed_loc.conf = None;
                 }
 
-                if tenant_state.intent.notify_offline(config_req.node_id) {
+                if tenant_state
+                    .intent
+                    .notify_offline(&scheduler, config_req.node_id)
+                {
                     tenant_state.sequence = tenant_state.sequence.next();
                     match tenant_state.schedule(&mut scheduler) {
                         Err(e) => {

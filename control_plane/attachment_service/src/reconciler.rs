@@ -18,6 +18,23 @@ use crate::compute_hook::ComputeHook;
 use crate::node::Node;
 use crate::tenant_state::{IntentState, ObservedState, ObservedStateLocation};
 
+/// This is a snapshot of [`crate::tenant_state::IntentState`], but it holds NodeId instead of
+/// Rc<> references to the scheduler.
+#[derive(Debug)]
+pub(crate) struct TargetState {
+    pub(crate) attached: Option<NodeId>,
+    pub(crate) secondary: Vec<NodeId>,
+}
+
+impl TargetState {
+    pub(crate) fn new(intent: &IntentState) -> Self {
+        Self {
+            attached: intent.attached.map(|n| n.id()),
+            secondary: intent.secondary.iter().map(|n| n.id()).collect(),
+        }
+    }
+}
+
 /// Object with the lifetime of the background reconcile task that is created
 /// for tenants which have a difference between their intent and observed states.
 pub(super) struct Reconciler {
@@ -26,7 +43,7 @@ pub(super) struct Reconciler {
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
     pub(crate) generation: Generation,
-    pub(crate) intent: IntentState,
+    pub(crate) intent: TargetState,
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
 

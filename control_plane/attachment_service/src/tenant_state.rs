@@ -17,8 +17,10 @@ use crate::{
     compute_hook::ComputeHook,
     node::Node,
     persistence::Persistence,
-    reconciler::{attached_location_conf, secondary_location_conf, ReconcileError, Reconciler},
-    scheduler::{ScheduleError, Scheduler},
+    reconciler::{
+        self, attached_location_conf, secondary_location_conf, ReconcileError, Reconciler,
+    },
+    scheduler::{NodeAttached, NodeSecondary, ScheduleError, Scheduler, ShardConstraints},
     service, PlacementPolicy, Sequence,
 };
 
@@ -73,10 +75,14 @@ pub(crate) struct TenantState {
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
-#[derive(Default, Clone, Debug)]
+/// This is like a NodeId, but carries an Rc reference to a SchedulingNode, so that
+/// its existence implicitly keeps the
+struct NodeSchedulingRef {}
+
+#[derive(Default, Debug)]
 pub(crate) struct IntentState {
-    pub(crate) attached: Option<NodeId>,
-    pub(crate) secondary: Vec<NodeId>,
+    pub(crate) attached: Option<NodeAttached>,
+    pub(crate) secondary: Vec<NodeSecondary>,
 }
 
 #[derive(Default, Clone)]
@@ -176,10 +182,10 @@ impl IntentState {
     pub(crate) fn all_pageservers(&self) -> Vec<NodeId> {
         let mut result = Vec::new();
         if let Some(p) = self.attached {
-            result.push(p)
+            result.push(p.id())
         }
 
-        result.extend(self.secondary.iter().copied());
+        result.extend(self.secondary.iter().map(|s| s.id()));
 
         result
     }
@@ -188,13 +194,13 @@ impl IntentState {
     /// as their attached pageserver.
     ///
     /// Returns true if a change was made
-    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
-        if self.attached == Some(node_id) {
-            self.attached = None;
-            self.secondary.push(node_id);
-            true
-        } else {
-            false
+    pub(crate) fn notify_offline(&mut self, scheduler: &Scheduler, node_id: NodeId) -> bool {
+        match self.attached.take() {
+            Some(node_attached) if node_attached.id() == node_id => {
+                self.secondary.push(scheduler.node_downgrade(node_attached));
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -233,7 +239,7 @@ impl TenantState {
     /// [`ObservedState`], even if it violates my [`PlacementPolicy`].  Call [`Self::schedule`] next,
     /// to get an intent state that complies with placement policy.  The overall goal is to do scheduling
     /// in a way that makes use of any configured locations that already exist in the outside world.
-    pub(crate) fn intent_from_observed(&mut self) {
+    pub(crate) fn intent_from_observed(&mut self, scheduler: &Scheduler) {
         // Choose an attached location by filtering observed locations, and then sorting to get the highest
         // generation
         let mut attached_locs = self
@@ -258,15 +264,17 @@ impl TenantState {
 
         attached_locs.sort_by_key(|i| i.1);
         if let Some((node_id, _gen)) = attached_locs.into_iter().last() {
-            self.intent.attached = Some(*node_id);
+            self.intent.attached = Some(scheduler.node_reference_attached(*node_id));
         }
 
         // All remaining observed locations generate secondary intents.  This includes None
         // observations, as these may well have some local content on disk that is usable (this
         // is an edge case that might occur if we restarted during a migration or other change)
         self.observed.locations.keys().for_each(|node_id| {
-            if Some(*node_id) != self.intent.attached {
-                self.intent.secondary.push(*node_id);
+            if Some(*node_id) != self.intent.attached.map(|a| a.id()) {
+                self.intent
+                    .secondary
+                    .push(scheduler.node_reference_secondary(*node_id));
             }
         });
     }
@@ -278,7 +286,8 @@ impl TenantState {
 
         // Build the set of pageservers already in use by this tenant, to avoid scheduling
         // more work on the same pageservers we're already using.
-        let mut used_pageservers = self.intent.all_pageservers();
+        let mut constraints = ShardConstraints::new();
+        constraints.push_anti_affinity(self.intent.all_pageservers());
         let mut modified = false;
 
         use PlacementPolicy::*;
@@ -286,9 +295,9 @@ impl TenantState {
             Single => {
                 // Should have exactly one attached, and zero secondaries
                 if self.intent.attached.is_none() {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
+                    let node_id = scheduler.schedule_shard_attached(&constraints)?;
+                    constraints.push_anti_attached(&node_id);
                     self.intent.attached = Some(node_id);
-                    used_pageservers.push(node_id);
                     modified = true;
                 }
                 if !self.intent.secondary.is_empty() {
@@ -299,16 +308,16 @@ impl TenantState {
             Double(secondary_count) => {
                 // Should have exactly one attached, and N secondaries
                 if self.intent.attached.is_none() {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
+                    let node_id = scheduler.schedule_shard_attached(&constraints)?;
+                    constraints.push_anti_attached(&node_id);
                     self.intent.attached = Some(node_id);
-                    used_pageservers.push(node_id);
                     modified = true;
                 }
 
                 while self.intent.secondary.len() < secondary_count {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
+                    let node_id = scheduler.schedule_shard_secondary(&constraints)?;
+                    constraints.push_anti_secondary(&node_id);
                     self.intent.secondary.push(node_id);
-                    used_pageservers.push(node_id);
                     modified = true;
                 }
             }
@@ -334,9 +343,9 @@ impl TenantState {
     }
 
     fn dirty(&self) -> bool {
-        if let Some(node_id) = self.intent.attached {
+        if let Some(node_attached) = self.intent.attached {
             let wanted_conf = attached_location_conf(self.generation, &self.shard, &self.config);
-            match self.observed.locations.get(&node_id) {
+            match self.observed.locations.get(&node_attached.id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
                     return true;
@@ -344,9 +353,9 @@ impl TenantState {
             }
         }
 
-        for node_id in &self.intent.secondary {
+        for node_secondary in &self.intent.secondary {
             let wanted_conf = secondary_location_conf(&self.shard, &self.config);
-            match self.observed.locations.get(node_id) {
+            match self.observed.locations.get(&node_secondary.id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
                     return true;
@@ -407,7 +416,7 @@ impl TenantState {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
             generation: self.generation,
-            intent: self.intent.clone(),
+            intent: reconciler::TargetState::new(&self.intent),
             config: self.config.clone(),
             observed: self.observed.clone(),
             pageservers: pageservers.clone(),
