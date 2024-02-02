@@ -53,7 +53,6 @@ use postgres_ffi::v14::nonrelfile_utils::{
 use postgres_ffi::BLCKSZ;
 
 mod process;
-mod protocol;
 use process::WalRedoProcess;
 
 ///
@@ -260,9 +259,8 @@ impl PostgresRedoManager {
             let started_at = std::time::Instant::now();
 
             // Relational WAL records are applied using wal-redo-postgres
-            let buf_tag = protocol::BufferTag { rel, blknum };
             let result = proc
-                .apply_wal_records(buf_tag, &base_img, records, wal_redo_timeout)
+                .apply_wal_records(rel, blknum, &base_img, records, wal_redo_timeout)
                 .context("apply_wal_records");
 
             let duration = started_at.elapsed();

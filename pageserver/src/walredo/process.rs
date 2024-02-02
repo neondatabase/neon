@@ -9,7 +9,7 @@ use std::{
 use anyhow::Context;
 use bytes::Bytes;
 use nix::poll::{PollFd, PollFlags};
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{reltag::RelTag, shard::TenantShardId};
 use postgres_ffi::BLCKSZ;
 use tracing::{debug, error, instrument, Instrument};
 
@@ -25,9 +25,8 @@ use utils::{lsn::Lsn, nonblock::set_nonblock};
 
 use std::os::fd::AsRawFd;
 
-use super::protocol;
-
 mod no_leak_child;
+mod protocol;
 
 pub struct WalRedoProcess {
     #[allow(dead_code)]
@@ -183,11 +182,13 @@ impl WalRedoProcess {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
     pub(crate) fn apply_wal_records(
         &self,
-        tag: protocol::BufferTag,
+        rel: RelTag,
+        blknum: u32,
         base_img: &Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
     ) -> anyhow::Result<Bytes> {
+        let tag = protocol::BufferTag { rel, blknum };
         let input = self.stdin.lock().unwrap();
 
         // Serialize all the messages to send the WAL redo process first.
