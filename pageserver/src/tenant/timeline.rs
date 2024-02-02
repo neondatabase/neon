@@ -739,11 +739,26 @@ impl Timeline {
             }
         }
 
+        trace!(
+            "get vectored request for {:?}@{} from task kind {:?} will use {} implementation",
+            keyspace,
+            lsn,
+            ctx.task_kind(),
+            self.conf.get_vectored_impl
+        );
+
         let _timer = crate::metrics::GET_VECTORED_LATENCY
             .for_task_kind(ctx.task_kind())
             .map(|t| t.start_timer());
 
-        self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
+        match self.conf.get_vectored_impl {
+            GetVectoredImpl::Sequential => {
+                self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
+            }
+            GetVectoredImpl::Vectored => {
+                self.get_vectored_impl(keyspace.clone(), lsn, ctx).await
+            }
+        }
     }
 
     pub(super) async fn get_vectored_sequential_impl(
