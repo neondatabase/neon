@@ -49,11 +49,12 @@ azure_storage_blobs = "0.18"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
-aws-config = { version = "1.0", default-features = false, features=["rustls"] }
-aws-sdk-s3 = "1.0"
-aws-smithy-async = { version = "1.0", default-features = false, features=["rt-tokio"] }
-aws-smithy-types = "1.0"
-aws-credential-types = "1.0"
+aws-config = { version = "1.1.4", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "1.14"
+aws-sdk-secretsmanager = { version = "1.14.0" }
+aws-smithy-async = { version = "1.1.4", default-features = false, features=["rt-tokio"] }
+aws-smithy-types = "1.1.4"
+aws-credential-types = "1.1.4"
 axum = { version = "0.6.20", features = ["ws"] }
 base64 = "0.13.0"
 bincode = "1.3"

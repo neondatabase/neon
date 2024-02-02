@@ -365,13 +365,11 @@ impl WalRedoProcess {
         // these files will be collected to an allure report
         let filename = format!("walredo-{millis}-{}-{seq}.walredo", writebuf.len());
 
-        let path = self.conf.tenant_path(&self.tenant_shard_id).join(&filename);
-
         let res = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .read(true)
-            .open(path)
+            .open(&filename)
             .and_then(|mut f| f.write_all(writebuf));
 
         // trip up allowed_errors

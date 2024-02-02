@@ -333,9 +333,9 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
-    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+    pub(crate) async fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
-            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
+            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout).await,
             #[cfg(test)]
             Self::Test(_) => {
                 // Not applicable to test redo manager
@@ -367,9 +367,9 @@ impl WalRedoManager {
         }
     }
 
-    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+    pub(crate) async fn status(&self) -> Option<WalRedoManagerStatus> {
         match self {
-            WalRedoManager::Prod(m) => m.status(),
+            WalRedoManager::Prod(m) => m.status().await,
             #[cfg(test)]
             WalRedoManager::Test(_) => None,
         }
@@ -620,7 +620,7 @@ impl Tenant {
             broker_client,
             remote_storage,
             deletion_queue_client,
-        } = resources ;
+        } = resources;
 
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
@@ -1965,8 +1965,11 @@ impl Tenant {
         self.generation
     }
 
-    pub(crate) fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
-        self.walredo_mgr.as_ref().and_then(|mgr| mgr.status())
+    pub(crate) async fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
+        let Some(mgr) = self.walredo_mgr.as_ref() else {
+            return None;
+        };
+        mgr.status().await
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.

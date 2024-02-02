@@ -19,7 +19,6 @@ use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
-#[derive(Clone)]
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
