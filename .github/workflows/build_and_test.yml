@@ -692,7 +692,7 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ (!github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-test-in-draft')) && !cancelled() }}
+    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-test-in-draft') }}
     needs: [ check-permissions, promote-images, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     with:
