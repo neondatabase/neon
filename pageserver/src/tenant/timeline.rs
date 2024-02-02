@@ -714,16 +714,31 @@ impl Timeline {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
+        for range in &keyspace.ranges {
+            let mut key = range.start;
+            while key != range.end {
+                assert!(!self.shard_identity.is_key_disposable(&key));
+                key = key.next();
+            }
+        }
+
         let _timer = crate::metrics::GET_VECTORED_LATENCY
             .for_task_kind(ctx.task_kind())
             .map(|t| t.start_timer());
 
+        self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
+    }
+
+    pub(super) async fn get_vectored_sequential_impl(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let mut values = BTreeMap::new();
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                assert!(!self.shard_identity.is_key_disposable(&key));
-
                 let block = self.get(key, lsn, ctx).await;
 
                 use PageReconstructError::*;
