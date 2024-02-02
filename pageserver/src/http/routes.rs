@@ -500,7 +500,7 @@ async fn timeline_create_handler(
 
         match tenant.create_timeline(
             new_timeline_id,
-            request_data.ancestor_timeline_id.map(TimelineId::from),
+            request_data.ancestor_timeline_id,
             request_data.ancestor_start_lsn,
             request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
             request_data.existing_initdb_timeline_id,
