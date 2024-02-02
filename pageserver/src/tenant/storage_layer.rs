@@ -20,7 +20,9 @@ use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::models::{
     LayerAccessKind, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
+use std::collections::hash_map::Entry;
+use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -209,6 +211,94 @@ pub(crate) enum ReadableLayerDesc {
         lsn_ceil: Lsn,
     },
 }
+
+/// Wraper for 'ReadableLayerDesc' sorted by Lsn
+#[derive(Debug)]
+struct ReadableLayerDescOrdered(ReadableLayerDesc);
+
+/// Data structure which maintains a fringe of layers for the
+/// read path. The fringe is the set of layers which intersects
+/// the current keyspace that the search is descending on.
+/// Each layer tracks the keyspace that intersects it.
+///
+/// The fringe must appear sorted by Lsn. Hence, it uses
+/// a two layer indexing scheme.
+#[derive(Debug)]
+pub(crate) struct LayerFringe {
+    layers_by_lsn: BinaryHeap<ReadableLayerDescOrdered>,
+    layers: HashMap<ReadableLayerDesc, KeySpace>,
+}
+
+impl LayerFringe {
+    pub(crate) fn new() -> Self {
+        LayerFringe {
+            layers_by_lsn: BinaryHeap::new(),
+            layers: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayerDesc, KeySpace)> {
+        let handle = match self.layers_by_lsn.pop() {
+            Some(h) => h,
+            None => return None,
+        };
+
+        let removed = self.layers.remove_entry(&handle.0);
+        match removed {
+            Some((layer, keyspace)) => Some((layer, keyspace)),
+            None => panic!(),
+        }
+    }
+
+    pub(crate) fn update(&mut self, layer: ReadableLayerDesc, keyspace: KeySpace) {
+        let entry = self.layers.entry(layer.clone());
+        match entry {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().merge(&keyspace);
+            }
+            Entry::Vacant(entry) => {
+                self.layers_by_lsn
+                    .push(ReadableLayerDescOrdered(entry.key().clone()));
+                entry.insert(keyspace);
+            }
+        }
+    }
+}
+
+impl Default for LayerFringe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Ord for ReadableLayerDescOrdered {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let ord = self.0.get_lsn_ceil().cmp(&other.0.get_lsn_ceil());
+        if ord == std::cmp::Ordering::Equal {
+            self.0
+                .get_lsn_floor()
+                .cmp(&other.0.get_lsn_floor())
+                .reverse()
+        } else {
+            ord
+        }
+    }
+}
+
+impl PartialOrd for ReadableLayerDescOrdered {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for ReadableLayerDescOrdered {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get_lsn_floor() == other.0.get_lsn_floor()
+            && self.0.get_lsn_ceil() == other.0.get_lsn_ceil()
+    }
+}
+
+impl Eq for ReadableLayerDescOrdered {}
 
 impl ReadableLayerDesc {
     pub(crate) fn get_lsn_floor(&self) -> Lsn {
