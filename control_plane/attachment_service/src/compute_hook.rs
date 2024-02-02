@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use control_plane::endpoint::ComputeControlPlane;
+use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use hyper::{Method, StatusCode};
 use pageserver_api::shard::{ShardCount, ShardIndex, ShardNumber, TenantShardId};
@@ -154,7 +154,7 @@ impl ComputeHook {
             .collect::<Vec<_>>();
 
         for (endpoint_name, endpoint) in &cplane.endpoints {
-            if endpoint.tenant_id == tenant_id && endpoint.status() == "running" {
+            if endpoint.tenant_id == tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("🔁 Reconfiguring endpoint {}", endpoint_name,);
                 endpoint.reconfigure(compute_pageservers.clone()).await?;
             }
