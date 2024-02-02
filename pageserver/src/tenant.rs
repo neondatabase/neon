@@ -332,9 +332,9 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
-    pub(crate) async fn maybe_quiesce(&self, idle_timeout: Duration) {
+    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
-            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout).await,
+            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
             #[cfg(test)]
             Self::Test(_) => {
                 // Not applicable to test redo manager
@@ -366,9 +366,9 @@ impl WalRedoManager {
         }
     }
 
-    pub(crate) async fn status(&self) -> Option<WalRedoManagerStatus> {
+    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         match self {
-            WalRedoManager::Prod(m) => m.status().await,
+            WalRedoManager::Prod(m) => m.status(),
             #[cfg(test)]
             WalRedoManager::Test(_) => None,
         }
@@ -1962,11 +1962,8 @@ impl Tenant {
         self.generation
     }
 
-    pub(crate) async fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
-        let Some(mgr) = self.walredo_mgr.as_ref() else {
-            return None;
-        };
-        mgr.status().await
+    pub(crate) fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
+        self.walredo_mgr.as_ref().and_then(|mgr| mgr.status())
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
