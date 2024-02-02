@@ -763,7 +763,6 @@ impl Tenant {
                         let _preload_timer = TENANT.preload.start_timer();
                         let res = tenant_clone
                             .preload(remote_storage, task_mgr::shutdown_token())
-                            .instrument(tracing::info_span!("attach_preload"))
                             .await;
                         match res {
                             Ok(p) => Some(p),
@@ -877,6 +876,7 @@ impl Tenant {
         Ok(tenant)
     }
 
+    #[instrument(skip_all)]
     pub(crate) async fn preload(
         self: &Arc<Tenant>,
         remote_storage: &GenericRemoteStorage,
@@ -4097,6 +4097,7 @@ pub(crate) mod harness {
         }
 
         #[cfg(test)]
+        #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), ?mode))]
         async fn do_try_load(
             &self,
             ctx: &RequestContext,
@@ -4123,20 +4124,13 @@ pub(crate) mod harness {
 
             match mode {
                 LoadMode::Local => {
-                    tenant
-                        .load_local(ctx)
-                        .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
-                        .await?;
+                    tenant.load_local(ctx).await?;
                 }
                 LoadMode::Remote => {
                     let preload = tenant
                         .preload(&self.remote_storage, CancellationToken::new())
-                        .instrument(info_span!("try_load_preload", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
-                    tenant
-                        .attach(Some(preload), SpawnMode::Normal, ctx)
-                        .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
-                        .await?;
+                    tenant.attach(Some(preload), SpawnMode::Normal, ctx).await?;
                 }
             }
 
