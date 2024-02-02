@@ -496,11 +496,7 @@ impl DeleteTenantFlow {
                 };
                 Ok(())
             }
-            .instrument({
-                let span = tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
-                span.follows_from(Span::current());
-                span
-            }),
+            .instrument(tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
         );
     }
 
