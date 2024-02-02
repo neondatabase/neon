@@ -21,6 +21,7 @@ hex.workspace = true
 thiserror.workspace = true
 humantime-serde.workspace = true
 chrono.workspace = true
+itertools.workspace = true
 
 workspace_hack.workspace = true
 

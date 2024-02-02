@@ -2,6 +2,7 @@ use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 
 use crate::key::Key;
+use itertools::Itertools;
 
 ///
 /// Represents a set of Keys, in a compact form.
@@ -61,6 +62,34 @@ impl KeySpace {
         }
 
         KeyPartitioning { parts }
+    }
+
+    /// Merge another keyspace into the current one.
+    /// Note: the keyspaces must not ovelap (enforced via assertions)
+    pub fn merge(&mut self, other: &KeySpace) {
+        let all_ranges = self
+            .ranges
+            .iter()
+            .merge_by(other.ranges.iter(), |lhs, rhs| lhs.start < rhs.start);
+
+        let mut accum = KeySpaceAccum::new();
+        let mut prev: Option<&Range<Key>> = None;
+        for range in all_ranges {
+            if let Some(prev) = prev {
+                let overlap =
+                    std::cmp::max(range.start, prev.start) < std::cmp::min(range.end, prev.end);
+                assert!(
+                    !overlap,
+                    "Attempt to merge ovelapping keyspaces: {:?} overlaps {:?}",
+                    prev, range
+                );
+            }
+
+            accum.add_range(range.clone());
+            prev = Some(range);
+        }
+
+        self.ranges = accum.to_keyspace().ranges;
     }
 
     /// Update the keyspace such that it doesn't contain any range
