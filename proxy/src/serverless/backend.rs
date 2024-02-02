@@ -68,8 +68,10 @@ impl PoolingBackend {
         force_new: bool,
     ) -> anyhow::Result<Client> {
         let maybe_client = if !force_new {
+            info!("pool: looking for an existing connection");
             self.pool.get(ctx, &conn_info).await?
         } else {
+            info!("pool: pool is disabled");
             None
         };
 

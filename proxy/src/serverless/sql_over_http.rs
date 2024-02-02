@@ -25,6 +25,7 @@ use tokio_postgres::ReadyForQueryStatus;
 use tokio_postgres::Row;
 use tokio_postgres::Transaction;
 use tracing::error;
+use tracing::info;
 use tracing::instrument;
 use url::Url;
 use utils::http::error::ApiError;
@@ -358,8 +359,12 @@ async fn handle_inner(
     backend: Arc<PoolingBackend>,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
-        .with_label_values(&["http"])
+        .with_label_values(&[ctx.protocol])
         .guard();
+    info!(
+        protocol = ctx.protocol,
+        "handling interactive connection from client"
+    );
 
     //
     // Determine the destination and connection params
@@ -372,6 +377,11 @@ async fn handle_inner(
         sni_hostname,
         config.tls_config.as_ref().unwrap(),
     )?;
+    info!(
+        user = conn_info.user_info.user.as_str(),
+        project = conn_info.user_info.endpoint.as_str(),
+        "credentials"
+    );
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
@@ -406,6 +416,7 @@ async fn handle_inner(
         None => MAX_REQUEST_SIZE + 1,
     };
     drop(paused);
+    info!(request_content_length, "request size in bytes");
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
