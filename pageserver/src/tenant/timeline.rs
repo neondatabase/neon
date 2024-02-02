@@ -455,6 +455,9 @@ pub(crate) enum GetVectoredError {
 
     #[error("Requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
