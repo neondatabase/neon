@@ -827,4 +827,5 @@ class PageserverHttpClient(requests.Session):
         current_logical_size = detail["current_logical_size"]
         non_incremental = detail["current_logical_size_non_incremental"]
         assert current_logical_size == non_incremental
+        assert isinstance(current_logical_size, int)
         return current_logical_size
