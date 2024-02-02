@@ -158,7 +158,10 @@ static XLogReaderState *reader_state;
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <errno.h>
-int close_range(unsigned int start_fd, unsigned int count, unsigned int flags) {
+
+static int
+close_range_syscall(unsigned int start_fd, unsigned int count, unsigned int flags)
+{
     return syscall(__NR_close_range, start_fd, count, flags);
 }
 
@@ -172,7 +175,7 @@ enter_seccomp_mode(void)
 	 * wal records. See the comment in the Rust code that launches this process.
 	 */
 	int err;
-	if (err = close_range(3, ~0U, 0)) {
+	if (err = close_range_syscall(3, ~0U, 0)) {
 		ereport(FATAL, (errcode(ERRCODE_SYSTEM_ERROR), errmsg("seccomp: could not close files >= fd 3")));
 	}
 
