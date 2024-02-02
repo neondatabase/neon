@@ -155,6 +155,15 @@ class EvictionEnv:
         mock_behavior,
         eviction_order: EvictionOrder,
     ):
+        """
+        Starts pageserver up with mocked statvfs setup. The startup is
+        problematic because of dueling initial logical size calculations
+        requiring layers and disk usage based task evicting.
+
+        Returns after initial logical sizes are complete, but the phase of disk
+        usage eviction task is unknown; it might need to run one more iteration
+        before assertions can be made.
+        """
         disk_usage_config = {
             "period": period,
             "max_usage_pct": max_usage_pct,
@@ -183,7 +192,7 @@ class EvictionEnv:
             ),
         )
 
-        # we now do initial logical size calculation on startup, which on debug builds can fight with the every second task
+        # we now do initial logical size calculation on startup, which on debug builds can fight with disk usage based eviction
         for tenant_id, timeline_id in self.timelines:
             pageserver_http = self.neon_env.get_tenant_pageserver(tenant_id).http_client()
             pageserver_http.timeline_wait_logical_size(tenant_id, timeline_id)
