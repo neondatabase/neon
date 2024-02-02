@@ -4373,10 +4373,6 @@ impl Timeline {
 
             guard.finish_gc_timeline(&gc_layers);
 
-            if result.layers_removed != 0 {
-                fail_point!("after-timeline-gc-removed-layers");
-            }
-
             #[cfg(feature = "testing")]
             {
                 result.doomed_layers = gc_layers;
