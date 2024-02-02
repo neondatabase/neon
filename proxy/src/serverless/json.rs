@@ -9,23 +9,23 @@ use tokio_postgres::Row;
 // as parameters.
 //
 pub fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
-    json.iter()
-        .map(|value| {
-            match value {
-                // special care for nulls
-                Value::Null => None,
+    json.iter().map(json_value_to_pg_text).collect()
+}
 
-                // convert to text with escaping
-                v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
+fn json_value_to_pg_text(value: &Value) -> Option<String> {
+    match value {
+        // special care for nulls
+        Value::Null => None,
 
-                // avoid escaping here, as we pass this as a parameter
-                Value::String(s) => Some(s.to_string()),
+        // convert to text with escaping
+        v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
 
-                // special care for arrays
-                Value::Array(_) => json_array_to_pg_array(value),
-            }
-        })
-        .collect()
+        // avoid escaping here, as we pass this as a parameter
+        Value::String(s) => Some(s.to_string()),
+
+        // special care for arrays
+        Value::Array(_) => json_array_to_pg_array(value),
+    }
 }
 
 //

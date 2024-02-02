@@ -39,8 +39,8 @@ use crate::RoleName;
 
 use super::backend::PoolingBackend;
 use super::conn_pool::ConnInfo;
-use super::conn_pool::GlobalConnPool;
-use super::json::{json_to_pg_text, pg_text_row_to_json};
+use super::json::json_to_pg_text;
+use super::json::pg_text_row_to_json;
 use super::SERVERLESS_DRIVER_SNI;
 
 #[derive(serde::Deserialize)]
