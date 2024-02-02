@@ -36,7 +36,7 @@ use bytes::{Bytes, BytesMut};
 use pageserver_api::key::key_to_rel_block;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::TenantShardId;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
@@ -53,7 +53,7 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    redo_process: RwLock<Option<Arc<process::WalRedoProcess>>>,
+    redo_process: tokio::sync::RwLock<Option<Arc<process::WalRedoProcess>>>,
 }
 
 ///
@@ -101,6 +101,7 @@ impl PostgresRedoManager {
                         self.conf.wal_redo_timeout,
                         pg_version,
                     )
+                    .await
                 };
                 img = Some(result?);
 
@@ -121,10 +122,11 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
+            .await
         }
     }
 
-    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+    pub(crate) async fn status(&self) -> Option<WalRedoManagerStatus> {
         Some(WalRedoManagerStatus {
             last_redo_at: {
                 let at = *self.last_redo_at.lock().unwrap();
@@ -134,7 +136,7 @@ impl PostgresRedoManager {
                     chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
                 })
             },
-            pid: self.redo_process.read().unwrap().as_ref().map(|p| p.id()),
+            pid: self.redo_process.read().await.as_ref().map(|p| p.id()),
         })
     }
 }
@@ -152,30 +154,37 @@ impl PostgresRedoManager {
             tenant_shard_id,
             conf,
             last_redo_at: std::sync::Mutex::default(),
-            redo_process: RwLock::new(None),
+            redo_process: tokio::sync::RwLock::new(None),
         }
     }
 
     /// This type doesn't have its own background task to check for idleness: we
     /// rely on our owner calling this function periodically in its own housekeeping
     /// loops.
-    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+    pub(crate) async fn maybe_quiesce(&self, idle_timeout: Duration) {
         if let Ok(g) = self.last_redo_at.try_lock() {
             if let Some(last_redo_at) = *g {
                 if last_redo_at.elapsed() >= idle_timeout {
                     drop(g);
-                    let mut guard = self.redo_process.write().unwrap();
-                    *guard = None;
+                    // fallthrough
+                } else {
+                    return;
                 }
+            } else {
+                return;
             }
+        } else {
+            return;
         }
+        let mut guard = self.redo_process.write().await;
+        *guard = None;
     }
 
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
     #[allow(clippy::too_many_arguments)]
-    fn apply_batch_postgres(
+    async fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
@@ -193,12 +202,12 @@ impl PostgresRedoManager {
         loop {
             // launch the WAL redo process on first use
             let proc: Arc<process::WalRedoProcess> = {
-                let proc_guard = self.redo_process.read().unwrap();
+                let proc_guard = self.redo_process.read().await;
                 match &*proc_guard {
                     None => {
                         // "upgrade" to write lock to launch the process
                         drop(proc_guard);
-                        let mut proc_guard = self.redo_process.write().unwrap();
+                        let mut proc_guard = self.redo_process.write().await;
                         match &*proc_guard {
                             None => {
                                 let start = Instant::now();
@@ -275,7 +284,7 @@ impl PostgresRedoManager {
                 // Avoid concurrent callers hitting the same issue.
                 // We can't prevent it from happening because we want to enable parallelism.
                 {
-                    let mut guard = self.redo_process.write().unwrap();
+                    let mut guard = self.redo_process.write().await;
                     match &*guard {
                         Some(current_field_value) => {
                             if Arc::ptr_eq(current_field_value, &proc) {
