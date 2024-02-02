@@ -22,6 +22,7 @@
 mod process;
 
 mod process_pool;
+pub(crate) use process_pool::Pool as ProcessPool;
 
 /// Code to apply [`NeonWalRecord`]s.
 mod apply_neon;
@@ -44,6 +45,8 @@ use std::time::Instant;
 use tracing::*;
 use utils::lsn::Lsn;
 
+use self::process::WalRedoProcess;
+
 ///
 /// This is the real implementation that uses a Postgres process to
 /// perform WAL replay. Only one thread can use the process at a time,
@@ -55,7 +58,7 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    redo_process: RwLock<Option<Arc<process::WalRedoProcess>>>,
+    redo_process: RwLock<Option<Arc<TaintedProcess>>>,
 }
 
 ///
@@ -141,6 +144,21 @@ impl PostgresRedoManager {
     }
 }
 
+struct TaintedProcess {
+    tenant_shard_id: TenantShardId,
+    process: Option<Box<WalRedoProcess>>,
+}
+
+impl Drop for TaintedProcess {
+    fn drop(&mut self) {
+        // ensure tenant_id and span_id are in span
+        let span = info_span!("walredo", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug());
+        let _entered = span.enter();
+        let process = self.process.take().expect("we are the only takers");
+        drop(process);
+    }
+}
+
 impl PostgresRedoManager {
     ///
     /// Create a new PostgresRedoManager.
@@ -205,14 +223,11 @@ impl PostgresRedoManager {
                         match &*proc_guard {
                             None => {
                                 let start = Instant::now();
-                                let proc = Arc::new(
-                                    process::WalRedoProcess::launch(
-                                        self.conf,
-                                        self.tenant_shard_id,
-                                        pg_version,
-                                    )
-                                    .context("launch walredo process")?,
-                                );
+                                let pool: Arc<process_pool::Pool> = todo!();
+                                let proc = Arc::new(TaintedProcess {
+                                    tenant_shard_id: self.tenant_shard_id,
+                                    process: Some(pool.get(pg_version))?,
+                                });
                                 let duration = start.elapsed();
                                 WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM
                                     .observe(duration.as_secs_f64());

@@ -7,9 +7,9 @@ use crate::config::PageServerConf;
 use super::process::WalRedoProcess;
 
 pub struct Pool {
-    v14: pre_spawned_pool::Client<Arc<WalRedoProcess>>,
-    v15: pre_spawned_pool::Client<Arc<WalRedoProcess>>,
-    v16: pre_spawned_pool::Client<Arc<WalRedoProcess>>,
+    v14: pre_spawned_pool::Client<Box<WalRedoProcess>>,
+    v15: pre_spawned_pool::Client<Box<WalRedoProcess>>,
+    v16: pre_spawned_pool::Client<Box<WalRedoProcess>>,
 }
 
 struct Launcher {
@@ -17,8 +17,8 @@ struct Launcher {
     conf: &'static PageServerConf,
 }
 
-impl utils::pre_spawned_pool::Launcher<Arc<WalRedoProcess>> for Launcher {
-    fn create(&self) -> anyhow::Result<Arc<WalRedoProcess>> {
+impl utils::pre_spawned_pool::Launcher<Box<WalRedoProcess>> for Launcher {
+    fn create(&self) -> anyhow::Result<Box<WalRedoProcess>> {
         Ok(Arc::new(WalRedoProcess::launch(
             self.conf,
             self.pg_version,
@@ -49,7 +49,7 @@ impl Pool {
     pub fn get(
         &self,
         pg_version: usize,
-    ) -> Result<Arc<WalRedoProcess>, pre_spawned_pool::GetError> {
+    ) -> Result<Box<WalRedoProcess>, pre_spawned_pool::GetError> {
         let pool = match pg_version {
             14 => &self.v14,
             15 => &self.v15,

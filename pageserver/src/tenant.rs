@@ -187,6 +187,7 @@ pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 /// as the shared remote storage client and process initialization state.
 #[derive(Clone)]
 pub struct TenantSharedResources {
+    pub walredo_process_pool: Arc<walredo::ProcessPool>,
     pub broker_client: storage_broker::BrokerClientChannel,
     pub remote_storage: Option<GenericRemoteStorage>,
     pub deletion_queue_client: DeletionQueueClient,
@@ -614,13 +615,18 @@ impl Tenant {
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(conf)));
-
         let TenantSharedResources {
+            walredo_process_pool,
             broker_client,
             remote_storage,
             deletion_queue_client,
         } = resources;
+
+        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
+            conf,
+            tenant_shard_id,
+            resources.walredo_process_pool,
+        )));
 
         let tenant = Arc::new(Tenant::new(
             TenantState::Attaching,
