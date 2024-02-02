@@ -744,6 +744,35 @@ impl Timeline {
         Ok(values)
     }
 
+    pub(super) async fn get_vectored_impl(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        let mut reconstruct_state = ValuesReconstructState::new();
+
+        self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
+            .await?;
+
+        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
+        for (key, res) in reconstruct_state.keys {
+            match res {
+                Err(err) => {
+                    results.insert(key, Err(err));
+                }
+                Ok(state) => {
+                    let state = ValueReconstructState::from(state);
+
+                    let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
+                    results.insert(key, reconstruct_res);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
     pub(crate) fn get_last_record_lsn(&self) -> Lsn {
         self.last_record_lsn.load().last
