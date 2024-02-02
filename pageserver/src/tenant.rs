@@ -3976,6 +3976,8 @@ pub(crate) mod harness {
         }
     }
 
+    #[cfg(test)]
+    #[derive(Debug)]
     enum LoadMode {
         Local,
         Remote,
@@ -4058,7 +4060,8 @@ pub(crate) mod harness {
             info_span!("TenantHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
         }
 
-        pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
+        #[cfg(test)]
+        pub(crate) async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
                 self.try_load(&ctx)
@@ -4068,31 +4071,33 @@ pub(crate) mod harness {
             )
         }
 
-        fn remote_empty(&self) -> bool {
-            let tenant_path = self.conf.tenant_path(&self.tenant_shard_id);
-            let remote_tenant_dir = self
-                .remote_fs_dir
-                .join(tenant_path.strip_prefix(&self.conf.workdir).unwrap());
-            if std::fs::metadata(&remote_tenant_dir).is_err() {
-                return true;
-            }
-
-            match std::fs::read_dir(remote_tenant_dir)
-                .unwrap()
-                .flatten()
-                .next()
-            {
-                Some(entry) => {
-                    tracing::debug!(
-                        "remote_empty: not empty, found file {}",
-                        entry.file_name().to_string_lossy(),
-                    );
-                    false
-                }
-                None => true,
-            }
+        /// For tests that specifically want to exercise the local load path, which does
+        /// not use remote storage.
+        #[cfg(test)]
+        pub(crate) async fn try_load_local(
+            &self,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<Arc<Tenant>> {
+            self.do_try_load(ctx, LoadMode::Local).await
         }
 
+        /// The 'load' in this function is either a local load or a normal attachment,
+        #[cfg(test)]
+        pub(crate) async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
+            // If we have nothing in remote storage, must use load_local instead of attach: attach
+            // will error out if there are no timelines.
+            //
+            // See https://github.com/neondatabase/neon/issues/5456 for how we will eliminate
+            // this weird state of a Tenant which exists but doesn't have any timelines.
+            let mode = match self.remote_empty() {
+                true => LoadMode::Local,
+                false => LoadMode::Remote,
+            };
+
+            self.do_try_load(ctx, mode).await
+        }
+
+        #[cfg(test)]
         async fn do_try_load(
             &self,
             ctx: &RequestContext,
@@ -4143,25 +4148,30 @@ pub(crate) mod harness {
             Ok(tenant)
         }
 
-        /// For tests that specifically want to exercise the local load path, which does
-        /// not use remote storage.
-        pub async fn try_load_local(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
-            self.do_try_load(ctx, LoadMode::Local).await
-        }
+        #[cfg(test)]
+        fn remote_empty(&self) -> bool {
+            let tenant_path = self.conf.tenant_path(&self.tenant_shard_id);
+            let remote_tenant_dir = self
+                .remote_fs_dir
+                .join(tenant_path.strip_prefix(&self.conf.workdir).unwrap());
+            if std::fs::metadata(&remote_tenant_dir).is_err() {
+                return true;
+            }
 
-        /// The 'load' in this function is either a local load or a normal attachment,
-        pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
-            // If we have nothing in remote storage, must use load_local instead of attach: attach
-            // will error out if there are no timelines.
-            //
-            // See https://github.com/neondatabase/neon/issues/5456 for how we will eliminate
-            // this weird state of a Tenant which exists but doesn't have any timelines.
-            let mode = match self.remote_empty() {
-                true => LoadMode::Local,
-                false => LoadMode::Remote,
-            };
-
-            self.do_try_load(ctx, mode).await
+            match std::fs::read_dir(remote_tenant_dir)
+                .unwrap()
+                .flatten()
+                .next()
+            {
+                Some(entry) => {
+                    tracing::debug!(
+                        "remote_empty: not empty, found file {}",
+                        entry.file_name().to_string_lossy(),
+                    );
+                    false
+                }
+                None => true,
+            }
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> Utf8PathBuf {
@@ -4170,6 +4180,7 @@ pub(crate) mod harness {
     }
 
     // Mock WAL redo manager that doesn't do much
+    #[cfg(test)]
     pub(crate) struct TestRedoManager;
 
     impl TestRedoManager {
