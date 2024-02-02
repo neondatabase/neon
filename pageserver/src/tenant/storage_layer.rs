@@ -38,6 +38,9 @@ pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 
 pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 
+use super::layer_map::InMemoryLayerHandle;
+use super::timeline::layer_manager::LayerManager;
+use super::timeline::GetVectoredError;
 use super::PageReconstructError;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
@@ -189,6 +192,64 @@ impl ValuesReconstructState {
 impl Default for ValuesReconstructState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Description of layer to be read - the layer map can turn
+/// this description into the actual layer.
+#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+pub(crate) enum ReadableLayerDesc {
+    Persistent {
+        desc: PersistentLayerDesc,
+        lsn_floor: Lsn,
+        lsn_ceil: Lsn,
+    },
+    InMemory {
+        handle: InMemoryLayerHandle,
+        lsn_ceil: Lsn,
+    },
+}
+
+impl ReadableLayerDesc {
+    pub(crate) fn get_lsn_floor(&self) -> Lsn {
+        match self {
+            ReadableLayerDesc::Persistent { lsn_floor, .. } => *lsn_floor,
+            ReadableLayerDesc::InMemory { handle, .. } => handle.get_lsn_floor(),
+        }
+    }
+
+    pub(crate) fn get_lsn_ceil(&self) -> Lsn {
+        match self {
+            ReadableLayerDesc::Persistent { lsn_ceil, .. } => *lsn_ceil,
+            ReadableLayerDesc::InMemory { lsn_ceil, .. } => *lsn_ceil,
+        }
+    }
+
+    pub(crate) async fn get_values_reconstruct_data(
+        &self,
+        layer_manager: &LayerManager,
+        keyspace: KeySpace,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        match self {
+            ReadableLayerDesc::Persistent { desc, lsn_ceil, .. } => {
+                let layer = layer_manager.get_from_desc(desc);
+                layer
+                    .get_values_reconstruct_data(keyspace, *lsn_ceil, reconstruct_state, ctx)
+                    .await
+            }
+            ReadableLayerDesc::InMemory { handle, lsn_ceil } => {
+                let layer = layer_manager
+                    .layer_map()
+                    .get_in_memory_layer(handle)
+                    .unwrap();
+
+                layer
+                    .get_values_reconstruct_data(keyspace, *lsn_ceil, reconstruct_state, ctx)
+                    .await
+            }
+        }
     }
 }
 
