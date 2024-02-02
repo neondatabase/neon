@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use utils::pre_spawned_pool;
 
 use crate::config::PageServerConf;
@@ -19,7 +20,7 @@ struct Launcher {
 
 impl utils::pre_spawned_pool::Launcher<Box<WalRedoProcess>> for Launcher {
     fn create(&self) -> anyhow::Result<Box<WalRedoProcess>> {
-        Ok(Arc::new(WalRedoProcess::launch(
+        Ok(Box::new(WalRedoProcess::launch(
             self.conf,
             self.pg_version,
         )?))
@@ -46,16 +47,13 @@ impl Pool {
             .await,
         }
     }
-    pub fn get(
-        &self,
-        pg_version: usize,
-    ) -> Result<Box<WalRedoProcess>, pre_spawned_pool::GetError> {
+    pub async fn get(&self, pg_version: u32) -> anyhow::Result<Box<WalRedoProcess>> {
         let pool = match pg_version {
             14 => &self.v14,
             15 => &self.v15,
             16 => &self.v16,
             x => anyhow::bail!("unknown pg version: {x}"),
         };
-        pool.get()
+        pool.get().await.context("get pre-spawned walredo process")
     }
 }

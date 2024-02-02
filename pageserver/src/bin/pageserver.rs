@@ -309,6 +309,9 @@ fn start_pageserver(
     info!("Starting pageserver pg protocol handler on {pg_addr}");
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
+    let walredo_process_pool =
+        Arc::new(COMPUTE_REQUEST_RUNTIME.block_on(pageserver::walredo::ProcessPool::launch(conf)));
+
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
     let broker_client = WALRECEIVER_RUNTIME
@@ -414,6 +417,7 @@ fn start_pageserver(
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         TenantSharedResources {
+            walredo_process_pool: walredo_process_pool.clone(),
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
@@ -545,6 +549,7 @@ fn start_pageserver(
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
                 secondary_controller,
+                walredo_process_pool,
             )
             .context("Failed to initialize router state")?,
         );

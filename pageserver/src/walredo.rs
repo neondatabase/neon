@@ -22,14 +22,15 @@
 mod process;
 
 mod process_pool;
-pub(crate) use process_pool::Pool as ProcessPool;
+pub use process_pool::Pool as ProcessPool;
+use utils::sync::heavier_once_cell;
 
 /// Code to apply [`NeonWalRecord`]s.
 mod apply_neon;
 
 use crate::config::PageServerConf;
 use crate::metrics::{
-    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
+    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_ACQUISITION_LATENCY_HISTO,
     WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_TIME,
 };
 use crate::repository::Key;
@@ -58,7 +59,8 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    redo_process: RwLock<Option<Arc<TaintedProcess>>>,
+    redo_process: heavier_once_cell::OnceCell<Arc<TaintedProcess>>,
+    pool: Arc<ProcessPool>,
 }
 
 ///
@@ -106,6 +108,7 @@ impl PostgresRedoManager {
                         self.conf.wal_redo_timeout,
                         pg_version,
                     )
+                    .await
                 };
                 img = Some(result?);
 
@@ -126,6 +129,7 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
+            .await
         }
     }
 
@@ -149,6 +153,16 @@ struct TaintedProcess {
     process: Option<Box<WalRedoProcess>>,
 }
 
+impl std::ops::Deref for TaintedProcess {
+    type Target = WalRedoProcess;
+
+    fn deref(&self) -> &Self::Target {
+        self.process
+            .as_ref()
+            .expect("only Self::drop sets it to None")
+    }
+}
+
 impl Drop for TaintedProcess {
     fn drop(&mut self) {
         // ensure tenant_id and span_id are in span
@@ -166,7 +180,7 @@ impl PostgresRedoManager {
     pub fn new(
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
-        pool: process_pool::Pool,
+        pool: Arc<process_pool::Pool>,
     ) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
@@ -196,7 +210,7 @@ impl PostgresRedoManager {
     /// Process one request for WAL redo using wal-redo postgres
     ///
     #[allow(clippy::too_many_arguments)]
-    fn apply_batch_postgres(
+    async fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
@@ -213,37 +227,24 @@ impl PostgresRedoManager {
         let mut n_attempts = 0u32;
         loop {
             // launch the WAL redo process on first use
-            let proc: Arc<process::WalRedoProcess> = {
-                let proc_guard = self.redo_process.read().unwrap();
-                match &*proc_guard {
-                    None => {
-                        // "upgrade" to write lock to launch the process
-                        drop(proc_guard);
-                        let mut proc_guard = self.redo_process.write().unwrap();
-                        match &*proc_guard {
-                            None => {
-                                let start = Instant::now();
-                                let pool: Arc<process_pool::Pool> = todo!();
-                                let proc = Arc::new(TaintedProcess {
-                                    tenant_shard_id: self.tenant_shard_id,
-                                    process: Some(pool.get(pg_version))?,
-                                });
-                                let duration = start.elapsed();
-                                WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM
-                                    .observe(duration.as_secs_f64());
-                                info!(
-                                    duration_ms = duration.as_millis(),
-                                    pid = proc.id(),
-                                    "launched walredo process"
-                                );
-                                *proc_guard = Some(Arc::clone(&proc));
-                                proc
-                            }
-                            Some(proc) => Arc::clone(proc),
-                        }
-                    }
-                    Some(proc) => Arc::clone(proc),
-                }
+            let proc = {
+                let proc = self
+                    .redo_process
+                    .get_or_init(async move {
+                        let start = Instant::now();
+                        let proc = Arc::new(TaintedProcess {
+                            tenant_shard_id: self.tenant_shard_id,
+                            process: Some(self.pool.get(pg_version).await?),
+                        });
+                        let duration = start.elapsed();
+                        WAL_REDO_PROCESS_ACQUISITION_LATENCY_HISTO.observe(duration.as_secs_f64());
+                        info!(
+                            duration_ms = duration.as_millis(),
+                            pid = proc.id(),
+                            "acquired pre-spawned walredo process"
+                        );
+                    })
+                    .await?;
             };
 
             let started_at = std::time::Instant::now();
@@ -397,7 +398,7 @@ mod tests {
     async fn short_v14_redo() {
         let expected = std::fs::read("test_data/short_v14_redo.page").unwrap();
 
-        let h = RedoHarness::new().unwrap();
+        let h = RedoHarness::new().await.unwrap();
 
         let page = h
             .manager
@@ -423,7 +424,7 @@ mod tests {
 
     #[tokio::test]
     async fn short_v14_fails_for_wrong_key_but_returns_zero_page() {
-        let h = RedoHarness::new().unwrap();
+        let h = RedoHarness::new().await.unwrap();
 
         let page = h
             .manager
@@ -452,7 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr() {
-        let h = RedoHarness::new().unwrap();
+        let h = RedoHarness::new().await.unwrap();
         h
             .manager
             .request_redo(
@@ -493,7 +494,7 @@ mod tests {
     }
 
     impl RedoHarness {
-        fn new() -> anyhow::Result<Self> {
+        async fn new() -> anyhow::Result<Self> {
             crate::tenant::harness::setup_logging();
 
             let repo_dir = camino_tempfile::tempdir()?;
@@ -501,7 +502,9 @@ mod tests {
             let conf = Box::leak(Box::new(conf));
             let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
 
-            let manager = PostgresRedoManager::new(conf, tenant_shard_id);
+            let pool = crate::walredo::process_pool::Pool::launch(conf).await;
+
+            let manager = PostgresRedoManager::new(conf, tenant_shard_id, pool);
 
             Ok(RedoHarness {
                 _repo_dir: repo_dir,

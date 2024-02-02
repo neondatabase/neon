@@ -55,7 +55,9 @@ use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::SpawnMode;
+use crate::tenant::TenantSharedResources;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
+use crate::walredo;
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
@@ -97,6 +99,7 @@ pub struct State {
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
     secondary_controller: SecondaryController,
+    walredo_process_pool: Arc<walredo::ProcessPool>,
 }
 
 impl State {
@@ -110,6 +113,7 @@ impl State {
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
         secondary_controller: SecondaryController,
+        walredo_process_pool: Arc<walredo::ProcessPool>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
@@ -125,7 +129,17 @@ impl State {
             disk_usage_eviction_state,
             deletion_queue_client,
             secondary_controller,
+            walredo_process_pool,
         })
+    }
+
+    pub(crate) fn tenant_shared_resources(&self) -> TenantSharedResources {
+        TenantSharedResources {
+            walredo_process_pool: Arc::clone(&self.walredo_process_pool),
+            broker_client: self.broker_client.clone(),
+            remote_storage: self.remote_storage.clone(),
+            deletion_queue_client: self.deletion_queue_client.clone(),
+        }
     }
 }
 
@@ -890,9 +904,7 @@ async fn tenant_load_handler(
         state.conf,
         tenant_id,
         generation,
-        state.broker_client.clone(),
-        state.remote_storage.clone(),
-        state.deletion_queue_client.clone(),
+        state.tenant_shared_resources(),
         &ctx,
     )
     .instrument(info_span!("load", %tenant_id))

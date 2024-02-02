@@ -1668,9 +1668,7 @@ pub(crate) async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     generation: Generation,
-    broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: Option<GenericRemoteStorage>,
-    deletion_queue_client: DeletionQueueClient,
+    resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
@@ -1688,12 +1686,6 @@ pub(crate) async fn load_tenant(
             )
         })?;
     }
-
-    let resources = TenantSharedResources {
-        broker_client,
-        remote_storage,
-        deletion_queue_client,
-    };
 
     let mut location_conf =
         Tenant::load_tenant_config(conf, &tenant_shard_id).map_err(TenantMapInsertError::Other)?;

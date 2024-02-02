@@ -23,7 +23,9 @@ enum Command {
     SetSlotCount(usize),
 }
 
+#[derive(thiserror::Error, Debug)]
 pub enum GetError {
+    #[error("shutting down")]
     ShuttingDown,
 }
 

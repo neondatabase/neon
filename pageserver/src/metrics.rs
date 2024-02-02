@@ -1652,7 +1652,7 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 #[rustfmt::skip]
-pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+pub(crate) static WAL_REDO_PROCESS_ACQUISITION_LATENCY_HISTO: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_process_launch_duration",
         "Histogram of the duration of successful WalRedoProcess::launch calls",
@@ -2452,7 +2452,7 @@ pub fn preinitialize_metrics() {
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
-        &WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
+        &WAL_REDO_PROCESS_ACQUISITION_LATENCY_HISTO,
     ]
     .into_iter()
     .for_each(|h| {
