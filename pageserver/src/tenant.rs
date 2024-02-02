@@ -644,10 +644,10 @@ impl Tenant {
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
         // we shut down while attaching.
-        let Ok(attach_gate_guard) = tenant.gate.enter() else {
-            // We just created the Tenant: nothing else can have shut it down yet
-            unreachable!();
-        };
+        let attach_gate_guard = tenant
+            .gate
+            .enter()
+            .expect("We just created the Tenant: nothing else can have shut it down yet");
 
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
