@@ -2682,7 +2682,7 @@ impl Tenant {
                     counted_broken = true;
                     // insert the tenant_id (back) into the set while avoiding needless counter
                     // access
-                    BROKEN_TENANTS_SET.with_label_values(set_key).inc();
+                    BROKEN_TENANTS_SET.with_label_values(set_key).set(1);
                 }
             }
         });
