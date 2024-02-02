@@ -1,6 +1,8 @@
+pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use self::split_state::SplitState;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
@@ -384,7 +386,7 @@ impl Persistence {
                         // Carry the parent's generation into the child
                         shard.generation = parent.generation;
 
-                        debug_assert!(shard.splitting > 0);
+                        debug_assert!(shard.splitting == SplitState::Splitting);
                         diesel::insert_into(tenant_shards)
                             .values(shard)
                             .execute(conn)?;
@@ -456,7 +458,7 @@ pub(crate) struct TenantShardPersistence {
     #[serde(default)]
     pub(crate) placement_policy: String,
     #[serde(default)]
-    pub(crate) splitting: i32,
+    pub(crate) splitting: SplitState,
     #[serde(default)]
     pub(crate) config: String,
 }

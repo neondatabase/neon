@@ -39,7 +39,10 @@ use utils::{
 use crate::{
     compute_hook::ComputeHook,
     node::Node,
-    persistence::{DatabaseError, NodePersistence, Persistence, TenantShardPersistence},
+    persistence::{
+        split_state::SplitState, DatabaseError, NodePersistence, Persistence,
+        TenantShardPersistence,
+    },
     reconciler::attached_location_conf,
     scheduler::Scheduler,
     tenant_state::{
@@ -400,7 +403,7 @@ impl Service {
                 generation_pageserver: i64::MAX,
                 placement_policy: serde_json::to_string(&PlacementPolicy::default()).unwrap(),
                 config: serde_json::to_string(&TenantConfig::default()).unwrap(),
-                splitting: 0,
+                splitting: SplitState::default(),
             };
 
             match self.persistence.insert_tenant_shards(vec![tsp]).await {
@@ -643,7 +646,7 @@ impl Service {
                 generation_pageserver: i64::MAX,
                 placement_policy: serde_json::to_string(&placement_policy).unwrap(),
                 config: serde_json::to_string(&create_req.config).unwrap(),
-                splitting: 0,
+                splitting: SplitState::default(),
             })
             .collect();
         self.persistence
@@ -1418,7 +1421,7 @@ impl Service {
                     placement_policy: serde_json::to_string(&policy).unwrap(),
                     // TODO: get the config out of the map
                     config: serde_json::to_string(&TenantConfig::default()).unwrap(),
-                    splitting: 1,
+                    splitting: SplitState::Splitting,
                 });
             }
 
