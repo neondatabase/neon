@@ -23,7 +23,7 @@ enum Command {
     SetSlotCount(usize),
 }
 
-enum GetError {
+pub enum GetError {
     ShuttingDown,
 }
 

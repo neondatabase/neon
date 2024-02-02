@@ -90,7 +90,6 @@ impl Drop for NoLeakChild {
             Some(child) => child,
             None => return,
         };
-        let tenant_shard_id = self.tenant_id;
         // Offload the kill+wait of the child process into the background.
         // If someone stops the runtime, we'll leak the child process.
         // We can ignore that case because we only stop the runtime on pageserver exit.
@@ -98,11 +97,7 @@ impl Drop for NoLeakChild {
             tokio::task::spawn_blocking(move || {
                 // Intentionally don't inherit the tracing context from whoever is dropping us.
                 // This thread here is going to outlive of our dropper.
-                let span = tracing::info_span!(
-                    "walredo",
-                    tenant_id = %tenant_shard_id.tenant_id,
-                    shard_id = %tenant_shard_id.shard_slug()
-                );
+                let span = tracing::info_span!("walredo");
                 let _entered = span.enter();
                 Self::kill_and_wait_impl(child, WalRedoKillCause::NoLeakChildDrop);
             })
@@ -112,11 +107,11 @@ impl Drop for NoLeakChild {
 }
 
 pub(crate) trait NoLeakChildCommandExt {
-    fn spawn_no_leak_child(&mut self, tenant_id: TenantShardId) -> io::Result<NoLeakChild>;
+    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild>;
 }
 
 impl NoLeakChildCommandExt for Command {
-    fn spawn_no_leak_child(&mut self, tenant_id: TenantShardId) -> io::Result<NoLeakChild> {
-        NoLeakChild::spawn(tenant_id, self)
+    fn spawn_no_leak_child(&mut self) -> io::Result<NoLeakChild> {
+        NoLeakChild::spawn(self)
     }
 }

@@ -27,7 +27,6 @@ mod protocol;
 pub struct WalRedoProcess {
     #[allow(dead_code)]
     conf: &'static PageServerConf,
-    tenant_shard_id: TenantShardId,
     // Some() on construction, only becomes None on Drop.
     child: Option<NoLeakChild>,
     stdout: Mutex<ProcessOutput>,

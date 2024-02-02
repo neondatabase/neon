@@ -7,9 +7,9 @@ use crate::config::PageServerConf;
 use super::process::WalRedoProcess;
 
 pub struct Pool {
-    v14: pre_spawned_pool::Pool<Arc<WalRedoProcess>, Launcher>,
-    v15: pre_spawned_pool::Pool<Arc<WalRedoProcess>, Launcher>,
-    v16: pre_spawned_pool::Pool<Arc<WalRedoProcess>, Launcher>,
+    v14: pre_spawned_pool::Client<Arc<WalRedoProcess>>,
+    v15: pre_spawned_pool::Client<Arc<WalRedoProcess>>,
+    v16: pre_spawned_pool::Client<Arc<WalRedoProcess>>,
 }
 
 struct Launcher {
@@ -17,14 +17,39 @@ struct Launcher {
     conf: &'static PageServerConf,
 }
 
-impl utils::pre_spawned_pool::Launcher<Arc<WalRedoProcess>> for Launcher{
+impl utils::pre_spawned_pool::Launcher<Arc<WalRedoProcess>> for Launcher {
     fn create(&self) -> anyhow::Result<Arc<WalRedoProcess>> {
-        WalRedoProcess::launch(self.conf, self.pg_version)
+        Ok(Arc::new(WalRedoProcess::launch(
+            self.conf,
+            self.pg_version,
+        )?))
     }
 }
 
 impl Pool {
-    pub fn get(&self, pg_version: usize) -> anyhow::Result<Arc<WalRedoProcess>> {
+    pub async fn launch(conf: &'static PageServerConf) -> Self {
+        Self {
+            v14: pre_spawned_pool::Pool::launch(Launcher {
+                pg_version: 14,
+                conf,
+            })
+            .await,
+            v15: pre_spawned_pool::Pool::launch(Launcher {
+                pg_version: 15,
+                conf,
+            })
+            .await,
+            v16: pre_spawned_pool::Pool::launch(Launcher {
+                pg_version: 16,
+                conf,
+            })
+            .await,
+        }
+    }
+    pub fn get(
+        &self,
+        pg_version: usize,
+    ) -> Result<Arc<WalRedoProcess>, pre_spawned_pool::GetError> {
         let pool = match pg_version {
             14 => &self.v14,
             15 => &self.v15,
