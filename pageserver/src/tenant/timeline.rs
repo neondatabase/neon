@@ -14,7 +14,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::{
-    keyspace::{key_range_size, KeySpaceAccum},
+    keyspace::KeySpaceAccum,
     models::{
         DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
         LayerMapInfo, TimelineState,
@@ -701,7 +701,7 @@ impl Timeline {
     /// which actually vectorizes the read path.
     pub(crate) async fn get_vectored(
         &self,
-        key_ranges: &[Range<Key>],
+        keyspace: KeySpace,
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
@@ -709,10 +709,7 @@ impl Timeline {
             return Err(GetVectoredError::InvalidLsn(lsn));
         }
 
-        let key_count = key_ranges
-            .iter()
-            .map(|range| key_range_size(range) as u64)
-            .sum();
+        let key_count = keyspace.total_size().try_into().unwrap();
         if key_count > Timeline::MAX_GET_VECTORED_KEYS {
             return Err(GetVectoredError::Oversized(key_count));
         }
@@ -722,7 +719,7 @@ impl Timeline {
             .map(|t| t.start_timer());
 
         let mut values = BTreeMap::new();
-        for range in key_ranges {
+        for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
                 assert!(!self.shard_identity.is_key_disposable(&key));
@@ -3480,7 +3477,7 @@ impl Timeline {
                         {
                             let results = self
                                 .get_vectored(
-                                    &key_request_accum.consume_keyspace().ranges,
+                                    key_request_accum.consume_keyspace(),
                                     lsn,
                                     ctx,
                                 )
