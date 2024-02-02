@@ -818,16 +818,13 @@ class PageserverHttpClient(requests.Session):
         ).raise_for_status()
 
     def timeline_wait_logical_size(self, tenant_id: TenantId, timeline_id: TimelineId) -> int:
-        def sizes_are_equal():
-            timeline_details = self.timeline_detail(
-                tenant_id, timeline_id, include_non_incremental_logical_size=True
-            )
-            current_logical_size = timeline_details["current_logical_size"]
-            non_incremental = timeline_details["current_logical_size_non_incremental"]
-
-            assert current_logical_size == non_incremental
-            return non_incremental
-
-        last_size = wait_until(20, 0.5, sizes_are_equal)
-        assert last_size is not None
-        return last_size
+        detail = self.timeline_detail(
+            tenant_id,
+            timeline_id,
+            include_non_incremental_logical_size=True,
+            force_await_initial_logical_size=True,
+        )
+        current_logical_size = detail["current_logical_size"]
+        non_incremental = detail["current_logical_size_non_incremental"]
+        assert current_logical_size == non_incremental
+        return current_logical_size
