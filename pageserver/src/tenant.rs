@@ -764,11 +764,12 @@ impl Tenant {
                     },
                     (SpawnMode::Normal, Some(remote_storage)) => {
                         let span = tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
-                        Some(
-                            match tenant_clone
+                        let res = tenant_clone
                                 .preload(remote_storage, task_mgr::shutdown_token())
                                 .instrument(span)
-                                .await {
+                                .await;
+                        Some(
+                            match res {
                                     Ok(p) => {
                                         preload_timer.observe_duration();
                                         p
