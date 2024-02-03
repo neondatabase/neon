@@ -638,7 +638,7 @@ impl RemoteStorage for S3Bucket {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         let kind = RequestKind::TimeTravel;
         let _guard = self.permit(kind).await;

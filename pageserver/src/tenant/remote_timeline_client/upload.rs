@@ -188,7 +188,7 @@ pub(crate) async fn time_travel_recover_tenant(
         backoff::retry(
             || async {
                 storage
-                    .time_travel_recover(Some(prefix), timestamp, done_if_after, cancel.clone())
+                    .time_travel_recover(Some(prefix), timestamp, done_if_after, cancel)
                     .await
             },
             |e| !matches!(e, TimeTravelError::Other(_)),
