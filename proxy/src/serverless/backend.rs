@@ -93,7 +93,7 @@ impl PoolingBackend {
             .context("missing cache entry from wake_compute")?;
 
         match keys {
-            #[cfg(feature = "testing")]
+            #[cfg(any(test, feature = "testing"))]
             ComputeCredentialKeys::Password(password) => node_info.config.password(password),
             ComputeCredentialKeys::AuthKeys(auth_keys) => node_info.config.auth_keys(auth_keys),
         };

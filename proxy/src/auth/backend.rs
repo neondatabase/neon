@@ -367,8 +367,6 @@ impl BackendType<'_, ComputeUserInfo> {
         match self {
             Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
             Link(_) => Ok(Cached::new_uncached(None)),
-            #[cfg(test)]
-            Test(x) => x.get_role_secret(),
         }
     }
 
