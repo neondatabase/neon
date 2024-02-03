@@ -464,11 +464,14 @@ impl Service {
         let result_task_this = this.clone();
         tokio::task::spawn(async move {
             while let Some(result) = result_rx.recv().await {
-                tracing::info!(
-                    "Reconcile result for sequence {}, ok={}",
-                    result.sequence,
-                    result.result.is_ok()
+                let span = tracing::span!(tracing::Level::INFO, "reconcile_result",
+                        tenant_id=%result.tenant_shard_id.tenant_id,
+                        shard_id=%result.tenant_shard_id.shard_slug(),
+                        sequence=%result.sequence,
                 );
+                let _span = span.enter();
+
+                tracing::info!("Handling ReconcileResult, ok={}", result.result.is_ok());
                 let mut locked = result_task_this.inner.write().unwrap();
                 let Some(tenant) = locked.tenants.get_mut(&result.tenant_shard_id) else {
                     // A reconciliation result might race with removing a tenant: drop results for
@@ -1993,6 +1996,7 @@ impl Service {
         let new_nodes = Arc::new(new_nodes);
 
         if offline_transition {
+            let mut tenants_affected: usize = 0;
             for (tenant_shard_id, tenant_state) in tenants {
                 if let Some(observed_loc) =
                     tenant_state.observed.locations.get_mut(&config_req.node_id)
@@ -2012,17 +2016,27 @@ impl Service {
                             tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", config_req.node_id);
                         }
                         Ok(()) => {
-                            tenant_state.maybe_reconcile(
-                                result_tx.clone(),
-                                &new_nodes,
-                                &compute_hook,
-                                &self.config,
-                                &self.persistence,
-                            );
+                            if tenant_state
+                                .maybe_reconcile(
+                                    result_tx.clone(),
+                                    &new_nodes,
+                                    &compute_hook,
+                                    &self.config,
+                                    &self.persistence,
+                                )
+                                .is_some()
+                            {
+                                tenants_affected += 1;
+                            };
                         }
                     }
                 }
             }
+            tracing::info!(
+                "Launched {} reconciler tasks for tenants affected by node {} going offline",
+                tenants_affected,
+                config_req.node_id
+            )
         }
 
         if active_transition {
