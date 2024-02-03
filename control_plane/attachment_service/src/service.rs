@@ -117,7 +117,9 @@ impl From<DatabaseError> for ApiError {
         match err {
             DatabaseError::Query(e) => ApiError::InternalServerError(e.into()),
             // FIXME: ApiError doesn't have an Unavailable variant, but ShuttingDown maps to 503.
-            DatabaseError::Connection(_e) => ApiError::ShuttingDown,
+            DatabaseError::Connection(_) | DatabaseError::ConnectionPool(_) => {
+                ApiError::ShuttingDown
+            }
             DatabaseError::Logical(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
