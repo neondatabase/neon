@@ -1,8 +1,6 @@
-use pageserver_api::shard::TenantShardId;
-use std::collections::{BTreeMap, HashMap};
+use crate::node::Node;
+use std::collections::HashMap;
 use utils::{http::error::ApiError, id::NodeId};
-
-use crate::{node::Node, tenant_state::TenantState};
 
 /// Scenarios in which we cannot find a suitable location for a tenant shard
 #[derive(thiserror::Error, Debug)]
@@ -19,52 +17,88 @@ impl From<ScheduleError> for ApiError {
     }
 }
 
+struct SchedulerNode {
+    /// How many shards are currently scheduled on this node, via their [`crate::tenant_state::IntentState`].
+    shard_count: usize,
+
+    /// Whether this node is currently elegible to have new shards scheduled (this is derived
+    /// from a node's availability state and scheduling policy).
+    may_schedule: bool,
+}
+
 pub(crate) struct Scheduler {
-    tenant_counts: HashMap<NodeId, usize>,
+    nodes: HashMap<NodeId, SchedulerNode>,
 }
 
 impl Scheduler {
-    pub(crate) fn new(
-        tenants: &BTreeMap<TenantShardId, TenantState>,
-        nodes: &HashMap<NodeId, Node>,
-    ) -> Self {
-        let mut tenant_counts = HashMap::new();
-        for node_id in nodes.keys() {
-            tenant_counts.insert(*node_id, 0);
-        }
-
-        for tenant in tenants.values() {
-            if let Some(ps) = tenant.intent.attached {
-                let entry = tenant_counts.entry(ps).or_insert(0);
-                *entry += 1;
-            }
-        }
-
+    pub(crate) fn new(nodes: &HashMap<NodeId, Node>) -> Self {
+        let mut scheduler_nodes = HashMap::new();
         for (node_id, node) in nodes {
-            if !node.may_schedule() {
-                tenant_counts.remove(node_id);
-            }
+            scheduler_nodes.insert(
+                *node_id,
+                SchedulerNode {
+                    shard_count: 0,
+                    may_schedule: node.may_schedule(),
+                },
+            );
         }
 
-        Self { tenant_counts }
+        Self {
+            nodes: scheduler_nodes,
+        }
+    }
+
+    pub(crate) fn node_ref(&mut self, node_id: NodeId) {
+        let Some(node) = self.nodes.get_mut(&node_id) else {
+            debug_assert!(false);
+            tracing::error!("Scheduler missing node {node_id}");
+            return;
+        };
+
+        node.shard_count += 1;
+    }
+
+    pub(crate) fn node_deref(&mut self, node_id: NodeId) {
+        let Some(node) = self.nodes.get_mut(&node_id) else {
+            debug_assert!(false);
+            tracing::error!("Scheduler missing node {node_id}");
+            return;
+        };
+
+        node.shard_count -= 1;
+    }
+
+    pub(crate) fn node_upsert(&mut self, node_id: NodeId, may_schedule: bool) {
+        use std::collections::hash_map::Entry::*;
+        match self.nodes.entry(node_id) {
+            Occupied(mut entry) => {
+                entry.get_mut().may_schedule = may_schedule;
+            }
+            Vacant(entry) => {
+                entry.insert(SchedulerNode {
+                    shard_count: 0,
+                    may_schedule,
+                });
+            }
+        }
     }
 
     pub(crate) fn schedule_shard(
         &mut self,
         hard_exclude: &[NodeId],
     ) -> Result<NodeId, ScheduleError> {
-        if self.tenant_counts.is_empty() {
+        if self.nodes.is_empty() {
             return Err(ScheduleError::NoPageservers);
         }
 
         let mut tenant_counts: Vec<(NodeId, usize)> = self
-            .tenant_counts
+            .nodes
             .iter()
             .filter_map(|(k, v)| {
-                if hard_exclude.contains(k) {
+                if hard_exclude.contains(k) || !v.may_schedule {
                     None
                 } else {
-                    Some((*k, *v))
+                    Some((*k, v.shard_count))
                 }
             })
             .collect();
@@ -83,7 +117,10 @@ impl Scheduler {
 
         let node_id = tenant_counts.first().unwrap().0;
         tracing::info!("scheduler selected node {node_id}");
-        *self.tenant_counts.get_mut(&node_id).unwrap() += 1;
+
+        // Note that we do not update shard count here to reflect the scheduling: that
+        // is IntentState's job when the scheduled location is used.
+
         Ok(node_id)
     }
 }

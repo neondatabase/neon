@@ -17,7 +17,9 @@ use crate::{
     compute_hook::ComputeHook,
     node::Node,
     persistence::Persistence,
-    reconciler::{attached_location_conf, secondary_location_conf, ReconcileError, Reconciler},
+    reconciler::{
+        attached_location_conf, secondary_location_conf, ReconcileError, Reconciler, TargetState,
+    },
     scheduler::{ScheduleError, Scheduler},
     service, PlacementPolicy, Sequence,
 };
@@ -81,8 +83,97 @@ pub(crate) struct TenantState {
 
 #[derive(Default, Clone, Debug)]
 pub(crate) struct IntentState {
-    pub(crate) attached: Option<NodeId>,
-    pub(crate) secondary: Vec<NodeId>,
+    attached: Option<NodeId>,
+    secondary: Vec<NodeId>,
+}
+
+impl IntentState {
+    pub(crate) fn set_attached(&mut self, scheduler: &mut Scheduler, new_attached: Option<NodeId>) {
+        if self.attached != new_attached {
+            if let Some(old_attached) = self.attached.take() {
+                scheduler.node_deref(old_attached);
+            }
+            if let Some(new_attached) = &new_attached {
+                scheduler.node_ref(*new_attached);
+            }
+            self.attached = new_attached;
+        }
+    }
+
+    pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
+        debug_assert!(!self.secondary.contains(&new_secondary));
+        scheduler.node_ref(new_secondary);
+        self.secondary.push(new_secondary);
+    }
+
+    /// It is legal to call this with a node that is not currently a secondary: that is a no-op
+    pub(crate) fn remove_secondary(&mut self, scheduler: &mut Scheduler, node_id: NodeId) {
+        let index = self.secondary.iter().position(|n| *n == node_id);
+        if let Some(index) = index {
+            scheduler.node_deref(node_id);
+            self.secondary.remove(index);
+        }
+    }
+
+    pub(crate) fn clear_secondary(&mut self, scheduler: &mut Scheduler) {
+        for secondary in self.secondary.drain(..) {
+            scheduler.node_deref(secondary);
+        }
+    }
+
+    pub(crate) fn clear(&mut self, scheduler: &mut Scheduler) {
+        if let Some(old_attached) = self.attached.take() {
+            scheduler.node_deref(old_attached);
+        }
+
+        self.clear_secondary(scheduler);
+    }
+
+    pub(crate) fn new() -> Self {
+        Self {
+            attached: None,
+            secondary: vec![],
+        }
+    }
+    pub(crate) fn all_pageservers(&self) -> Vec<NodeId> {
+        let mut result = Vec::new();
+        if let Some(p) = self.attached {
+            result.push(p)
+        }
+
+        result.extend(self.secondary.iter().copied());
+
+        result
+    }
+
+    pub(crate) fn get_attached(&self) -> &Option<NodeId> {
+        &self.attached
+    }
+
+    pub(crate) fn get_secondary(&self) -> &Vec<NodeId> {
+        &self.secondary
+    }
+
+    /// When a node goes offline, we update intents to avoid using it
+    /// as their attached pageserver.
+    ///
+    /// Returns true if a change was made
+    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
+        if self.attached == Some(node_id) {
+            self.attached = None;
+            self.secondary.push(node_id);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for IntentState {
+    fn drop(&mut self) {
+        // Must clear before dropping, to avoid leaving stale refcounts in the Scheduler
+        debug_assert!(self.attached.is_none() && self.secondary.is_empty());
+    }
 }
 
 #[derive(Default, Clone)]
@@ -175,39 +266,6 @@ pub(crate) struct ReconcileResult {
     pub(crate) pending_compute_notification: bool,
 }
 
-impl IntentState {
-    pub(crate) fn new() -> Self {
-        Self {
-            attached: None,
-            secondary: vec![],
-        }
-    }
-    pub(crate) fn all_pageservers(&self) -> Vec<NodeId> {
-        let mut result = Vec::new();
-        if let Some(p) = self.attached {
-            result.push(p)
-        }
-
-        result.extend(self.secondary.iter().copied());
-
-        result
-    }
-
-    /// When a node goes offline, we update intents to avoid using it
-    /// as their attached pageserver.
-    ///
-    /// Returns true if a change was made
-    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
-        if self.attached == Some(node_id) {
-            self.attached = None;
-            self.secondary.push(node_id);
-            true
-        } else {
-            false
-        }
-    }
-}
-
 impl ObservedState {
     pub(crate) fn new() -> Self {
         Self {
@@ -297,12 +355,12 @@ impl TenantState {
                 // Should have exactly one attached, and zero secondaries
                 if self.intent.attached.is_none() {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.attached = Some(node_id);
+                    self.intent.set_attached(scheduler, Some(node_id));
                     used_pageservers.push(node_id);
                     modified = true;
                 }
                 if !self.intent.secondary.is_empty() {
-                    self.intent.secondary.clear();
+                    self.intent.clear_secondary(scheduler);
                     modified = true;
                 }
             }
@@ -310,14 +368,14 @@ impl TenantState {
                 // Should have exactly one attached, and N secondaries
                 if self.intent.attached.is_none() {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.attached = Some(node_id);
+                    self.intent.set_attached(scheduler, Some(node_id));
                     used_pageservers.push(node_id);
                     modified = true;
                 }
 
                 while self.intent.secondary.len() < secondary_count {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.secondary.push(node_id);
+                    self.intent.push_secondary(scheduler, node_id);
                     used_pageservers.push(node_id);
                     modified = true;
                 }
@@ -325,12 +383,12 @@ impl TenantState {
             Detached => {
                 // Should have no attached or secondary pageservers
                 if self.intent.attached.is_some() {
-                    self.intent.attached = None;
+                    self.intent.set_attached(scheduler, None);
                     modified = true;
                 }
 
                 if !self.intent.secondary.is_empty() {
-                    self.intent.secondary.clear();
+                    self.intent.clear_secondary(scheduler);
                     modified = true;
                 }
             }
@@ -455,7 +513,7 @@ impl TenantState {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
             generation: self.generation,
-            intent: self.intent.clone(),
+            intent: TargetState::from_intent(&self.intent),
             config: self.config.clone(),
             observed: self.observed.clone(),
             pageservers: pageservers.clone(),
