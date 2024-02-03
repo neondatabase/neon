@@ -3293,11 +3293,11 @@ impl Tenant {
             3,
             u32::MAX,
             "persist_initdb_tar_zst",
-            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
+            &self.cancel,
         )
-        .await?;
-
-        Ok(())
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .and_then(|x| x)
     }
 
     /// - run initdb to init temporary instance and get bootstrap data

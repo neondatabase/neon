@@ -299,9 +299,11 @@ async fn upload(
         warn_after,
         max_attempts,
         "upload consumption_metrics",
-        utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
+        cancel,
     )
-    .await;
+    .await
+    .ok_or_else(|| UploadError::Cancelled)
+    .and_then(|x| x);
 
     match &res {
         Ok(_) => {}

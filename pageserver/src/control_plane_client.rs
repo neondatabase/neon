@@ -112,15 +112,17 @@ impl ControlPlaneClient {
             3,
             u32::MAX,
             "calling control plane generation validation API",
-            backoff::Cancel::new(self.cancel.clone(), || RemoteAttemptError::Shutdown),
+            &self.cancel,
         )
         .await
+        .ok_or_else(|| RemoteAttemptError::Shutdown)
+        .and_then(|x| x)
         {
+            Ok(r) => Ok(r),
             Err(RemoteAttemptError::Shutdown) => Err(RetryForeverError::ShuttingDown),
             Err(RemoteAttemptError::Remote(_)) => {
                 panic!("We retry forever, this should never be reached");
             }
-            Ok(r) => Ok(r),
         }
     }
 }

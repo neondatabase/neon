@@ -244,9 +244,11 @@ impl ComputeHook {
             3,
             10,
             "Send compute notification",
-            backoff::Cancel::new(cancel.clone(), || NotifyError::ShuttingDown),
+            cancel,
         )
         .await
+        .ok_or_else(|| NotifyError::ShuttingDown)
+        .and_then(|x| x)
     }
 
     /// Call this to notify the compute (postgres) tier of new pageservers to use

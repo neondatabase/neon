@@ -56,9 +56,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
             warn_threshold,
             max_retries,
             "test retry",
-            backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            &CancellationToken::new(),
         )
         .await
+        .expect("never cancelled")
     }
 
     async fn time_point() -> SystemTime {
