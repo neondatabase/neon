@@ -1572,12 +1572,13 @@ threshold = "20m"
                 eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
             })
         );
+
         match &conf.default_tenant_conf.eviction_policy {
-            EvictionPolicy::NoEviction => panic!("Unexpected eviction opolicy tenant settings"),
-            EvictionPolicy::LayerAccessThreshold(eviction_thresold) => {
-                assert_eq!(eviction_thresold.period, Duration::from_secs(20 * 60));
-                assert_eq!(eviction_thresold.threshold, Duration::from_secs(20 * 60));
+            EvictionPolicy::LayerAccessThreshold(eviction_threshold) => {
+                assert_eq!(eviction_threshold.period, Duration::from_secs(20 * 60));
+                assert_eq!(eviction_threshold.threshold, Duration::from_secs(20 * 60));
             }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
 
         Ok(())
