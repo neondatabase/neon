@@ -147,7 +147,7 @@ Separating corrupt writes from non-corrupt ones is a hard problem in general,
 and if the application was involved in making the corrupt write, a recovery
 would also involve the application. Therefore, corruption that has made it into
 the WAL is outside of the scope of this feature. However, the WAL replay can be
-issued to right before the point in time where the corruption occured. Then the
+issued to right before the point in time where the corruption occurred. Then the
 data loss is isolated to post-corruption writes only.
 
 ## Impacted components (e.g. pageserver, safekeeper, console, etc)
@@ -161,7 +161,7 @@ limits and billing we apply to existing timelines.
 
 ## Proposed implementation
 
-The first problem to keep in mind is the reproducability of `initdb`.
+The first problem to keep in mind is the reproducibility of `initdb`.
 So an initial step would be to upload `initdb` snapshots to S3.
 
 After that, we'd have the endpoint spawn a background process which
