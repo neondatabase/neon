@@ -93,7 +93,10 @@ impl EndpointConnPool {
 
     fn remove_client(&mut self, db_user: (DbName, RoleName), conn_id: uuid::Uuid) -> bool {
         let Self {
-            pools, total_conns, ..
+            pools,
+            total_conns,
+            global_connections_count,
+            ..
         } = self;
         if let Some(pool) = pools.get_mut(&db_user) {
             let old_len = pool.conns.len();
@@ -101,8 +104,7 @@ impl EndpointConnPool {
             let new_len = pool.conns.len();
             let removed = old_len - new_len;
             if removed > 0 {
-                self.global_connections_count
-                    .fetch_sub(removed, atomic::Ordering::Relaxed);
+                global_connections_count.fetch_sub(removed, atomic::Ordering::Relaxed);
                 NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(removed as i64);
             }
             *total_conns -= removed;
@@ -115,7 +117,7 @@ impl EndpointConnPool {
     fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInner) -> anyhow::Result<()> {
         let conn_id = client.conn_id;
 
-        if client.postgres_client.is_closed() {
+        if client.is_closed() {
             info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
             return Ok(());
         }
@@ -168,9 +170,11 @@ impl EndpointConnPool {
 
 impl Drop for EndpointConnPool {
     fn drop(&mut self) {
-        self.global_connections_count
-            .fetch_sub(self.total_conns, atomic::Ordering::Relaxed);
-        NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(self.total_conns as i64);
+        if self.total_conns > 0 {
+            self.global_connections_count
+                .fetch_sub(self.total_conns, atomic::Ordering::Relaxed);
+            NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(self.total_conns as i64);
+        }
     }
 }
 
@@ -184,7 +188,7 @@ impl DbUserConnPool {
         let old_len = self.conns.len();
 
         self.conns
-            .retain(|conn| !conn.conn.postgres_client.is_closed());
+            .retain(|conn| !conn.conn.is_closed());
 
         let new_len = self.conns.len();
         let removed = old_len - new_len;
@@ -307,15 +311,20 @@ impl GlobalConnPool {
 
             true
         });
-        if clients_removed > 0 {
-            self.global_connections_count
-                .fetch_sub(clients_removed, atomic::Ordering::Relaxed);
-            NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(clients_removed as i64);
-        }
 
         let new_len = shard.len();
         drop(shard);
         timer.observe_duration();
+
+        // Do logging outside of the lock.
+        if clients_removed > 0 {
+            let size = self
+                .global_connections_count
+                .fetch_sub(clients_removed, atomic::Ordering::Relaxed)
+                - clients_removed;
+            NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(clients_removed as i64);
+            info!("pool: performed global pool gc. removed {clients_removed} clients, total number of clients in pool is {size}");
+        }
         let removed = current_len - new_len;
 
         if removed > 0 {
@@ -345,7 +354,7 @@ impl GlobalConnPool {
 
         // ok return cached connection if found and establish a new one otherwise
         if let Some(client) = client {
-            if client.postgres_client.is_closed() {
+            if client.is_closed() {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
                 return Ok(None);
             } else {
@@ -353,7 +362,7 @@ impl GlobalConnPool {
                 client.session.send(ctx.session_id)?;
                 tracing::Span::current().record(
                     "pid",
-                    &tracing::field::display(client.postgres_client.get_process_id()),
+                    &tracing::field::display(client.inner.get_process_id()),
                 );
                 ctx.latency_timer.pool_hit();
                 ctx.latency_timer.success();
@@ -493,7 +502,7 @@ impl GlobalConnPool {
         }
         .instrument(span));
         let inner = ClientInner {
-            postgres_client: client,
+            inner: client,
             session: tx,
             aux,
             conn_id,
@@ -503,10 +512,16 @@ impl GlobalConnPool {
 }
 
 struct ClientInner {
-    postgres_client: tokio_postgres::Client,
+    inner: tokio_postgres::Client,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     aux: MetricsAuxInfo,
     conn_id: uuid::Uuid,
+}
+
+impl ClientInner {
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
 }
 
 impl Client {
@@ -554,7 +569,7 @@ impl Client {
         } = self;
         let inner = inner.as_mut().expect("client inner should not be removed");
         (
-            &mut inner.postgres_client,
+            &mut inner.inner,
             Discard {
                 pool,
                 conn_info,
@@ -594,7 +609,7 @@ impl Deref for Client {
             .inner
             .as_ref()
             .expect("client inner should not be removed")
-            .postgres_client
+            .inner
     }
 }
 
