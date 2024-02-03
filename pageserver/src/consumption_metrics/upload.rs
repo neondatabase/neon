@@ -262,35 +262,33 @@ async fn upload(
 ) -> Result<(), UploadError> {
     let warn_after = 3;
     let max_attempts = 10;
+
+    // this is used only with tests so far
+    let last_value = if is_last { "true" } else { "false" };
+
     let res = utils::backoff::retry(
-        move || {
-            let body = body.clone();
-            async move {
-                let res = client
-                    .post(metric_collection_endpoint.clone())
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .header(
-                        LAST_IN_BATCH.clone(),
-                        if is_last { "true" } else { "false" },
-                    )
-                    .body(body)
-                    .send()
-                    .await;
+        || async {
+            let res = client
+                .post(metric_collection_endpoint.clone())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(LAST_IN_BATCH.clone(), last_value)
+                .body(body.clone())
+                .send()
+                .await;
 
-                let res = res.and_then(|res| res.error_for_status());
+            let res = res.and_then(|res| res.error_for_status());
 
-                // 10 redirects are normally allowed, so we don't need worry about 3xx
-                match res {
-                    Ok(_response) => Ok(()),
-                    Err(e) => {
-                        let status = e.status().filter(|s| s.is_client_error());
-                        if let Some(status) = status {
-                            // rejection used to be a thing when the server could reject a
-                            // whole batch of metrics if one metric was bad.
-                            Err(UploadError::Rejected(status))
-                        } else {
-                            Err(UploadError::Reqwest(e))
-                        }
+            // 10 redirects are normally allowed, so we don't need worry about 3xx
+            match res {
+                Ok(_response) => Ok(()),
+                Err(e) => {
+                    let status = e.status().filter(|s| s.is_client_error());
+                    if let Some(status) = status {
+                        // rejection used to be a thing when the server could reject a
+                        // whole batch of metrics if one metric was bad.
+                        Err(UploadError::Rejected(status))
+                    } else {
+                        Err(UploadError::Reqwest(e))
                     }
                 }
             }
