@@ -17,7 +17,6 @@
 !libs/
 !neon_local/
 !pageserver/
-!patches/
 !pgxn/
 !proxy/
 !s3_scrubber/
