@@ -609,7 +609,19 @@ impl DeltaLayerWriter {
         key_end: Key,
         timeline: &Arc<Timeline>,
     ) -> anyhow::Result<ResidentLayer> {
-        self.inner.take().unwrap().finish(key_end, timeline).await
+        let inner = self.inner.take().unwrap();
+        let temp_path = inner.path.clone();
+        let result = inner.finish(key_end, timeline).await;
+        // The delta layer files can sometimes be really large. Clean them up.
+        if result.is_err() {
+            tracing::warn!(
+                "Cleaning up temporary delta file {temp_path} after error during writing"
+            );
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                tracing::warn!("Error cleaning up temporary delta layer file {temp_path}: {e:?}")
+            }
+        }
+        result
     }
 }
 
