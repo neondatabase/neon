@@ -849,7 +849,6 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-  # TODO: merge with `compute-node-image` maybe?
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
     runs-on: [ self-hosted, gen3, large ]
@@ -864,6 +863,14 @@ jobs:
       VM_BUILDER_VERSION: v0.23.2
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Downloading vm-builder
+        run: |
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
+          chmod +x vm-builder
+
       # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
       # The default value is ~/.docker
       - name: Set custom docker config directory
@@ -875,16 +882,6 @@ jobs:
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-
-      - name: Checkout
-        uses: actions/checkout@v1
-        with:
-          fetch-depth: 0
-
-      - name: Downloading vm-builder
-        run: |
-          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
-          chmod +x vm-builder
 
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
       # it won't have the proper authentication (written at v0.6.0)
