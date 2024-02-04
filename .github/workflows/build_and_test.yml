@@ -660,7 +660,7 @@ jobs:
             })
 
   trigger-e2e-tests:
-    needs: [ check-permissions, promote-images, tag ]
+    needs: [ check-permissions, test-images, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
@@ -951,14 +951,14 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml logs || 0
           docker compose -f ./docker-compose/docker-compose.yml down
 
-  # DO NOT MERGE!
-  # TODO: update this job
   promote-images:
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
+    if: github.ref_name == 'main' || github.ref_name == 'release'
     runs-on: [ self-hosted, gen3, small ]
     container: golang:1.19-bullseye
-    # Don't add if-condition here.
-    # The job should always be run because we have dependant other jobs that shouldn't be skipped
+    env:
+      ECR_ACCOUNT: ${{ github.ref_name == 'release' && '093970136003' || '369495373322' }}
+      IMAGES: neon compute-tools compute-node-v14 compute-node-v15 compute-node-v16 vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16
 
     steps:
       - name: Install Crane & ECR helper
@@ -966,64 +966,41 @@ jobs:
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
 
-      - name: Configure ECR login
-        run: |
-          mkdir /github/home/.docker/
-          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
-
-      - name: Copy vm-compute-node images to Docker Hub
-        run: |
-          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
-          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
-          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} vm-compute-node-v16
-
-      - name: Add latest tag to images
-        if: github.ref_name == 'main' || github.ref_name == 'release'
-        run: |
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
-
-      - name: Push images to production ECR
-        if: github.ref_name == 'main' || github.ref_name == 'release'
-        run: |
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:latest
-
       - name: Configure Docker Hub login
         run: |
           # ECR Credential Helper & Docker Hub don't work together in config, hence reset
           echo "" > /github/home/.docker/config.json
           crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
 
-      - name: Push vm-compute-node to Docker Hub
+      - name: Tag Docker Hub images as latest
+        if: github.ref_name == 'main'
         run: |
-          crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
-          crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
-          crane push vm-compute-node-v16 neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}}
+          for image in $IMAGES; do
+            crane tag neondatabase/$image:${{needs.tag.outputs.build-tag}} latest
+          done
 
-      - name: Push latest tags to Docker Hub
-        if: github.ref_name == 'main' || github.ref_name == 'release'
+      - name: Download images from Docker Hub
         run: |
-          crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v16:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
+          for image in $IMAGES; do
+            crane pull neondatabase/$image:${{needs.tag.outputs.build-tag}} $image
+          done
+
+      - name: Configure ECR login
+        run: |
+          mkdir /github/home/.docker/
+          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
+
+      - name: Push images to ECR
+        run: |
+          for image in $IMAGES; do
+            crane push $image "$ECR_ACCOUNT.dkr.ecr.eu-central-1.amazonaws.com/$image:${{needs.tag.outputs.build-tag}}"
+          done
+
+      - name: Tag ECR images as latest
+        run: |
+          for image in $IMAGES; do
+            crane tag "$ECR_ACCOUNT.dkr.ecr.eu-central-1.amazonaws.com/$image:${{needs.tag.outputs.build-tag}}" latest
+          done
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
