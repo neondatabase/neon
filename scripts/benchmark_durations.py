@@ -20,7 +20,7 @@ BENCHMARKS_DURATION_QUERY = """
     FROM results
     WHERE
         started_at > CURRENT_DATE - INTERVAL '%s' day
-        AND parent_suite = 'test_runner.performance'
+        AND starts_with(parent_suite, 'test_runner.performance')
         AND status = 'passed'
     GROUP BY
         parent_suite, suite, name
