@@ -61,6 +61,8 @@ jobs:
   trigger-e2e-tests:
     needs: [ tag ]
     runs-on: [ self-hosted, gen3, small ]
+    env:
+      TAG=${{ github.event.inputs.build-tag }}
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -68,7 +70,6 @@ jobs:
       - name: check if ecr image are present
         id: check-ecr-image-present
         run: |
-          TAG=${{ github.event.inputs.build-tag }}
           REPO=neon
           OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
           if [ "$OUTPUT" == "" ]; then
