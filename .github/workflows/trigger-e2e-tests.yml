@@ -68,8 +68,9 @@ jobs:
         with:
             ref: ${{ github.ref }}
             running-workflow-name: 'neon-image'
-            repo-token: ${{ secret.GITHUB_TOKEN }}
+            repo-token: ${{ secrets.GITHUB_TOKEN }}
             wait-interval: 20
+
       - name: Wait for compute-node-image to be build
         uses: lewagon/wait-on-check-action@v1.3.1
         with:
@@ -77,20 +78,23 @@ jobs:
           running-workflow-name: 'compute-node-image'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 20
+
       - name: Wait for vm-compute-node-image to be build
         uses: lewagon/wait-on-check-action@v1.3.1
         with:
           ref: ${{ github.ref }}
           running-workflow-name: 'vm-compute-node-image'
-          repo-token: ${{ secret.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 20
+
       - name: Wait for compute-tools-image to be build
         uses: lewagon/wait-on-check-action@v1.3.1
         with:
           ref: ${{ github.ref }}
           running-workflow-name: 'compute-tools-image'
-          repo-token: ${{ secret.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 20
+
       - name: Set PR's status to pending and request a remote CI test
         run: |
           # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
