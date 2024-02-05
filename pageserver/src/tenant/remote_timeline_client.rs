@@ -942,7 +942,7 @@ impl RemoteTimelineClient {
             tracing::error!("RemoteTimelineClient::shutdown was cancelled; this should not happen, do not make this into an allowed_error")
         });
 
-        let fut = {
+        let sem = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = match &mut *guard {
                 UploadQueue::Stopped(_) => return Ok(()),
@@ -964,10 +964,10 @@ impl RemoteTimelineClient {
                 self.launch_queued_tasks(upload_queue);
             }
 
-            upload_queue.shutdown_ready.clone().acquire_owned()
+            upload_queue.shutdown_ready.clone()
         };
 
-        let res = fut.await;
+        let res = sem.acquire().await;
 
         scopeguard::ScopeGuard::into_inner(sg);
 
