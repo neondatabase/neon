@@ -1,13 +1,9 @@
-use std::{
-    collections::VecDeque,
-    num::NonZeroUsize,
-    sync::{Arc, RwLock},
-    thread::JoinHandle,
-};
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, OwnedSemaphorePermit};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
+
+use crate::backoff;
 
 pub struct Client<T> {
     cmds_tx: mpsc::UnboundedSender<Command>,
@@ -15,6 +11,7 @@ pub struct Client<T> {
 }
 
 pub trait Launcher<T> {
+    fn what() -> &'static str;
     fn create(&self) -> anyhow::Result<T>;
 }
 
@@ -42,7 +39,9 @@ impl<T> Client<T> {
     }
 
     pub fn set_slot_count_nowait(&self, count: usize) {
-        self.cmds_tx.send(Command::SetSlotCount(count));
+        self.cmds_tx
+            .send(Command::SetSlotCount(count))
+            .expect("while cmds_tx is open, the pool task doesn't exit");
     }
 }
 
@@ -86,14 +85,46 @@ where
     async fn task(mut self) {
         let initial = 0;
         let mut configured = initial;
-        let mut pending_items = Arc::new(tokio::sync::Semaphore::new(initial));
+        let pending_items = Arc::new(tokio::sync::Semaphore::new(initial));
         let mut need_forget = 0;
+        let mut last_launcher_failure_at = None;
         loop {
             debug!(
                 configured,
                 need_forget,
                 available = pending_items.available_permits(),
+                last_launcher_failure_secs_ago =
+                    last_launcher_failure_at.map(|at| at.elapsed().as_secs_f64()),
                 "iteration"
+            );
+            let try_launch_once = || async {
+                let permit = Arc::clone(&pending_items)
+                    .acquire_owned()
+                    .expect("we never close this semaphore");
+                if need_forget > 0 {
+                    debug!("fogetting permit to reduce semaphore count");
+                    need_forget -= 1;
+                    permit.forget();
+                    continue;
+                }
+                debug!("creating item");
+                let item = match self.launcher.create() {
+                    Ok(item) => item,
+                    Err(e) => {
+                        error!(
+                            "launcher failed to create item: {}",
+                            report_compact_sources(&e)
+                        );
+                    }
+                };
+            };
+            let try_launch_retrying = backoff::retry(
+                try_launch_once,
+                |_| false,
+                0,
+                u32::MAX,
+                L::what(),
+                CancellationToken::new(),
             );
             let cmd = tokio::select! {
                 res = self.cmds_rx.recv() => {
@@ -102,19 +133,7 @@ where
                         None => return, // dropping tx acts as cancellation
                     }
                 }
-                permit = Arc::clone(&pending_items).acquire_owned() => {
-                    let permit = permit.expect("we never close this semaphore");
-                    if need_forget > 0 {
-                        debug!("fogetting permit to reduce semaphore count");
-                        need_forget  -= 1;
-                        permit.forget();
-                        continue;
-                    }
-                    debug!("creating item");
-                    let item = match self.launcher.create() {
-                        Ok(item) => item,
-                        Err(e) => todo!(),
-                    };
+                item = try_launch => {
                     match self.items_tx.send(CreatedItem { permit, item }).await {
                         Ok(()) => continue,
                         Err(_) => {

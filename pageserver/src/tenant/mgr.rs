@@ -21,7 +21,6 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
-use remote_storage::GenericRemoteStorage;
 use utils::crashsafe;
 
 use crate::config::PageServerConf;

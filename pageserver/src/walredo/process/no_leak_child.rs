@@ -15,7 +15,6 @@ use std::ops::Deref;
 
 use std::process::Child;
 
-use pageserver_api::shard::TenantShardId;
 
 /// Wrapper type around `std::process::Child` which guarantees that the child
 /// will be killed and waited-for by this process before being dropped.

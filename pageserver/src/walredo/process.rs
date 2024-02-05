@@ -7,7 +7,7 @@ use crate::{
 use anyhow::Context;
 use bytes::Bytes;
 use nix::poll::{PollFd, PollFlags};
-use pageserver_api::{reltag::RelTag, shard::TenantShardId};
+use pageserver_api::reltag::RelTag;
 use postgres_ffi::BLCKSZ;
 use std::os::fd::AsRawFd;
 #[cfg(feature = "testing")]
