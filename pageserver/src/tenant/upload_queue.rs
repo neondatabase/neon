@@ -292,7 +292,7 @@ pub(crate) enum UploadOp {
 
     /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
     /// this is the same as a Barrier.
-    Shutdown,
+    Shutdown { since: std::time::Instant },
 }
 
 impl std::fmt::Display for UploadOp {
@@ -314,7 +314,7 @@ impl std::fmt::Display for UploadOp {
                 write!(f, "Delete({} layers)", delete.layers.len())
             }
             UploadOp::Barrier(_) => write!(f, "Barrier"),
-            UploadOp::Shutdown => write!(f, "Shutdown"),
+            UploadOp::Shutdown { since } => write!(f, "Shutdown(since: {:?})", since.elapsed()),
         }
     }
 }

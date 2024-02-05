@@ -958,7 +958,11 @@ impl RemoteTimelineClient {
             // made cancellable.
             if !upload_queue.shutting_down {
                 upload_queue.shutting_down = true;
-                upload_queue.queued_operations.push_back(UploadOp::Shutdown);
+                upload_queue
+                    .queued_operations
+                    .push_back(UploadOp::Shutdown {
+                        since: std::time::Instant::now(),
+                    });
                 // this operation is not counted similar to Barrier
 
                 self.launch_queued_tasks(upload_queue);
@@ -1249,8 +1253,7 @@ impl RemoteTimelineClient {
                     // Wait for preceding uploads to finish. Concurrent deletions are OK, though.
                     upload_queue.num_inprogress_deletions == upload_queue.inprogress_tasks.len()
                 }
-
-                UploadOp::Barrier(_) | UploadOp::Shutdown => {
+                UploadOp::Barrier(_) | UploadOp::Shutdown { .. } => {
                     upload_queue.inprogress_tasks.is_empty()
                 }
             };
@@ -1265,10 +1268,11 @@ impl RemoteTimelineClient {
                 break;
             }
 
-            if let UploadOp::Shutdown = next_op {
+            if let UploadOp::Shutdown { since } = next_op {
                 // leave the op in the queue but do not start more tasks; it will be dropped when
                 // the stop is called.
-                upload_queue.shutdown_ready.close();
+                assert!(upload_queue.shutting_down);
+                Self::communicate_shutdown(&upload_queue.shutdown_ready, since);
                 break;
             }
 
@@ -1292,7 +1296,9 @@ impl RemoteTimelineClient {
                     sender.send_replace(());
                     continue;
                 }
-                UploadOp::Shutdown => unreachable!("shutdown is intentionally never popped off"),
+                UploadOp::Shutdown { .. } => {
+                    unreachable!("shutdown is intentionally never popped off")
+                }
             };
 
             // Assign unique ID to this task
@@ -1331,7 +1337,24 @@ impl RemoteTimelineClient {
         }
     }
 
-    ///
+    fn communicate_shutdown(
+        shutdown_ready: &tokio::sync::Semaphore,
+        shutting_down_since: &std::time::Instant,
+    ) {
+        if shutdown_ready.is_closed() {
+            return;
+        }
+        // there cannot be any races because the semaphore is from &mut UploadQueueInitialized
+        shutdown_ready.close();
+        let elapsed = shutting_down_since.elapsed();
+        if elapsed > std::time::Duration::from_secs(1) {
+            tracing::warn!(
+                elapsed_ms = elapsed.as_millis(),
+                "it took longer than expected to shutdown RemoteTimelineClient"
+            );
+        }
+    }
+
     /// Perform an upload task.
     ///
     /// The task is in the `inprogress_tasks` list. This function will try to
@@ -1341,7 +1364,6 @@ impl RemoteTimelineClient {
     ///
     /// The task can be shut down, however. That leads to stopping the whole
     /// queue.
-    ///
     async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
         // Loop to retry until it completes.
         loop {
@@ -1428,7 +1450,7 @@ impl RemoteTimelineClient {
                         .await
                         .map_err(|e| anyhow::anyhow!(e))
                 }
-                unexpected @ UploadOp::Barrier(_) | unexpected @ UploadOp::Shutdown => {
+                unexpected @ UploadOp::Barrier(_) | unexpected @ UploadOp::Shutdown { .. } => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
                     warn!("unexpected {unexpected:?} operation in perform_upload_task");
@@ -1525,7 +1547,7 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_deletions -= 1;
                     None
                 }
-                UploadOp::Barrier(..) | UploadOp::Shutdown => unreachable!(),
+                UploadOp::Barrier(..) | UploadOp::Shutdown { .. } => unreachable!(),
             };
 
             // Launch any queued tasks that were unblocked by this one.
@@ -1580,7 +1602,7 @@ impl RemoteTimelineClient {
                     reason: "should we track deletes? positive or negative sign?",
                 },
             ),
-            UploadOp::Barrier(..) | UploadOp::Shutdown => {
+            UploadOp::Barrier(..) | UploadOp::Shutdown { .. } => {
                 // we do not account these
                 return None;
             }
