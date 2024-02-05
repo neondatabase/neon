@@ -71,7 +71,7 @@ jobs:
         id: check-ecr-image-present
         run: |
           REPO=neon
-          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --image-ids imageTag=${TAG} --region eu-central-1 --query 'imageDetails[*].imagePushedAt' --output text)
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --image-ids imageTag=${TAG} --region eu-central-1 --output text)
           if [ "$OUTPUT" == "" ]; then
             echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
             exit 1
