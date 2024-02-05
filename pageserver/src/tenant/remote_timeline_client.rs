@@ -1709,6 +1709,13 @@ impl RemoteTimelineClient {
                 // Tear down queued ops
                 for op in qi.queued_operations.into_iter() {
                     self.calls_unfinished_metric_end(&op);
+
+                    if let UploadOp::Shutdown { since } = &op {
+                        // just in case we have a waiter on the RemoteTimelineClient::shutdown
+                        assert!(qi.shutting_down);
+                        Self::communicate_shutdown(&qi.shutdown_ready, since);
+                    }
+
                     // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
                     // which is exactly what we want to happen.
                     drop(op);
