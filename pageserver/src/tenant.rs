@@ -67,7 +67,9 @@ use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT;
-use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
+use crate::metrics::{
+    remove_tenant_metrics, BROKEN_TENANTS_SET, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
+};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
@@ -2637,9 +2639,16 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            // Strings for metric labels
+            // reflect tenant state in metrics:
+            // - global per tenant state: TENANT_STATE_METRIC
+            // - "set" of broken tenants: BROKEN_TENANTS_SET
+            //
+            // set of broken tenants should not have zero counts so that it remains accessible for
+            // alerting.
+
             let tid = tenant_shard_id.to_string();
-            let shard_id_str = format!("{}", tenant_shard_id.shard_slug());
+            let shard_id = tenant_shard_id.shard_slug().to_string();
+            let set_key = &[tid.as_str(), shard_id.as_str()][..];
 
             fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
                 ([state.into()], matches!(state, TenantState::Broken { .. }))
@@ -2648,21 +2657,13 @@ impl Tenant {
             let mut tuple = inspect_state(&rx.borrow_and_update());
 
             let is_broken = tuple.1;
-            let mut counted_broken = if !is_broken {
-                // the tenant might be ignored and reloaded, so first remove any previous set
-                // element. it most likely has already been scraped, as these are manual operations
-                // right now. most likely we will add it back very soon.
-                drop(
-                    crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid, &shard_id_str]),
-                );
-                false
-            } else {
+            let mut counted_broken = if is_broken {
                 // add the id to the set right away, there should not be any updates on the channel
-                // after
-                crate::metrics::BROKEN_TENANTS_SET
-                    .with_label_values(&[&tid, &shard_id_str])
-                    .set(1);
+                // after before tenant is removed, if ever
+                BROKEN_TENANTS_SET.with_label_values(set_key).set(1);
                 true
+            } else {
+                false
             };
 
             loop {
@@ -2671,10 +2672,9 @@ impl Tenant {
                 current.inc();
 
                 if rx.changed().await.is_err() {
-                    // tenant has been dropped; decrement the counter because a tenant with that
-                    // state is no longer in tenant map, but allow any broken set item to exist
-                    // still.
+                    // tenant has been dropped
                     current.dec();
+                    drop(BROKEN_TENANTS_SET.remove_label_values(set_key));
                     break;
                 }
 
@@ -2684,10 +2684,9 @@ impl Tenant {
                 let is_broken = tuple.1;
                 if is_broken && !counted_broken {
                     counted_broken = true;
-                    // insert the tenant_id (back) into the set
-                    crate::metrics::BROKEN_TENANTS_SET
-                        .with_label_values(&[&tid, &shard_id_str])
-                        .inc();
+                    // insert the tenant_id (back) into the set while avoiding needless counter
+                    // access
+                    BROKEN_TENANTS_SET.with_label_values(set_key).set(1);
                 }
             }
         });
