@@ -76,7 +76,7 @@ pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 impl Persistence {
     // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
     // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
-    const MAX_CONNECTIONS: u32 = 99;
+    pub const MAX_CONNECTIONS: u32 = 99;
 
     // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
     const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);

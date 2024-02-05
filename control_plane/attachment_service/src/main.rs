@@ -167,8 +167,18 @@ impl Secrets {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        // We use spawn_blocking for database operations, so require approximately
+        // as many blocking threads as we will open database connections.
+        .max_blocking_threads(Persistence::MAX_CONNECTIONS as usize)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let launch_ts = Box::leak(Box::new(LaunchTimestamp::generate()));
 
     logging::init(
