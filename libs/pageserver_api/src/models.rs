@@ -305,6 +305,7 @@ pub struct ThrottleConfig {
     pub task_kinds: Vec<String>, // TaskKind
     pub initial: usize,
     pub interval_millis: NonZeroU64,
+    pub interval_refill: NonZeroUsize,
     pub max: usize,
     pub fair: bool,
 }
@@ -315,6 +316,7 @@ impl ThrottleConfig {
             task_kinds: vec![], // disables the rate limit
             initial: 0,
             interval_millis: NonZeroU64::try_from(1).unwrap(),
+            interval_refill: NonZeroUsize::try_from(1).unwrap(),
             max: 1,
             fair: true,
         }

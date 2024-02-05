@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
@@ -23,12 +23,13 @@ impl Throttle {
             task_kinds,
             initial,
             interval_millis,
+            interval_refill,
             max,
             fair,
         } = config;
         let task_kinds: EnumSet<TaskKind> = task_kinds
             .into_iter()
-            .filter_map(|s| match serde_json::from_str::<'_, TaskKind>(&s) {
+            .filter_map(|s| match TaskKind::from_str(&s) {
                 Ok(v) => Some(v),
                 Err(e) => {
                     // TODO: avoid this failure mode
@@ -47,6 +48,7 @@ impl Throttle {
                     leaky_bucket::RateLimiter::builder()
                         .initial(initial)
                         .interval(Duration::from_millis(interval_millis.get()))
+                        .refill(interval_refill.get())
                         .max(max)
                         .fair(fair)
                         .build(),
@@ -59,7 +61,6 @@ impl Throttle {
         self.inner.store(ArcSwap::into_inner(new.inner));
     }
 
-    #[inline(always)]
     pub async fn throttle(&self, ctx: &RequestContext) {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
         if !inner.task_kinds.contains(ctx.task_kind()) {

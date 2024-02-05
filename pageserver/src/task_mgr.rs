@@ -192,6 +192,7 @@ task_local! {
     serde::Serialize,
     serde::Deserialize,
     strum_macros::IntoStaticStr,
+    strum_macros::EnumString,
 )]
 pub enum TaskKind {
     // Pageserver startup, i.e., `main`
