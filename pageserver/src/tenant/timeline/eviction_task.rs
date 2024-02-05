@@ -319,6 +319,13 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
+        if !self.tenant_shard_id.is_zero() {
+            // Shards !=0 do not maintain accurate relation sizes, and do not need to calculate logical size
+            // for consumption metrics (consumption metrics are only sent from shard 0).  We may therefore
+            // skip imitating logical size accesses for eviction purposes.
+            return ControlFlow::Continue(());
+        }
+
         let mut state = self.eviction_task_timeline_state.lock().await;
 
         // Only do the imitate_layer accesses approximately as often as the threshold.  A little

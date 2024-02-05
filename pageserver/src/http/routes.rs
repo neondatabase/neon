@@ -26,6 +26,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
+use remote_storage::TimeTravelError;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -47,6 +48,7 @@ use crate::tenant::mgr::{
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
 use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
+use crate::tenant::remote_timeline_client;
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
@@ -77,7 +79,13 @@ use utils::{
 // For APIs that require an Active tenant, how long should we block waiting for that state?
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
 // failed API calls while tenants are activating.
+#[cfg(not(feature = "testing"))]
 const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
+
+// Tests run on slow/oversubscribed nodes, and may need to wait much longer for tenants to
+// finish attaching, if calls to remote storage are slow.
+#[cfg(feature = "testing")]
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 pub struct State {
     conf: &'static PageServerConf,
@@ -481,6 +489,12 @@ async fn timeline_create_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
+        if let Some(ancestor_id) = request_data.ancestor_timeline_id.as_ref() {
+            tracing::info!(%ancestor_id, "starting to branch");
+        } else {
+            tracing::info!("bootstrapping");
+        }
+
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -674,7 +688,7 @@ async fn get_lsn_by_timestamp_handler(
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
-    #[derive(serde::Serialize)]
+    #[derive(serde::Serialize, Debug)]
     struct Result {
         lsn: Lsn,
         kind: &'static str,
@@ -685,7 +699,14 @@ async fn get_lsn_by_timestamp_handler(
         LsnForTimestamp::Past(lsn) => (lsn, "past"),
         LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
     };
-    json_response(StatusCode::OK, Result { lsn, kind })
+    let result = Result { lsn, kind };
+    tracing::info!(
+        lsn=?result.lsn,
+        kind=%result.kind,
+        timestamp=%timestamp_raw,
+        "lsn_by_timestamp finished"
+    );
+    json_response(StatusCode::OK, result)
 }
 
 async fn get_timestamp_of_lsn_handler(
@@ -959,6 +980,7 @@ async fn tenant_status(
                 attachment_status: state.attachment_status(),
                 generation: tenant.generation().into(),
             },
+            walredo: tenant.wal_redo_manager_status(),
             timelines: tenant.list_timeline_ids(),
         })
     }
@@ -1421,6 +1443,79 @@ async fn list_location_config_handler(
             .collect(),
     };
     json_response(StatusCode::OK, result)
+}
+
+// Do a time travel recovery on the given tenant/tenant shard. Tenant needs to be detached
+// (from all pageservers) as it invalidates consistency assumptions.
+async fn tenant_time_travel_remote_storage_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let timestamp_raw = must_get_query_param(&request, "travel_to")?;
+    let timestamp = humantime::parse_rfc3339(&timestamp_raw)
+        .with_context(|| format!("Invalid time for travel_to: {timestamp_raw:?}"))
+        .map_err(ApiError::BadRequest)?;
+
+    let done_if_after_raw = must_get_query_param(&request, "done_if_after")?;
+    let done_if_after = humantime::parse_rfc3339(&done_if_after_raw)
+        .with_context(|| format!("Invalid time for done_if_after: {done_if_after_raw:?}"))
+        .map_err(ApiError::BadRequest)?;
+
+    // This is just a sanity check to fend off naive wrong usages of the API:
+    // the tenant needs to be detached *everywhere*
+    let state = get_state(&request);
+    let we_manage_tenant = state.tenant_manager.manages_tenant_shard(tenant_shard_id);
+    if we_manage_tenant {
+        return Err(ApiError::BadRequest(anyhow!(
+            "Tenant {tenant_shard_id} is already attached at this pageserver"
+        )));
+    }
+
+    let Some(storage) = state.remote_storage.as_ref() else {
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "remote storage not configured, cannot run time travel"
+        )));
+    };
+
+    if timestamp > done_if_after {
+        return Err(ApiError::BadRequest(anyhow!(
+            "The done_if_after timestamp comes before the timestamp to recover to"
+        )));
+    }
+
+    tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}");
+
+    remote_timeline_client::upload::time_travel_recover_tenant(
+        storage,
+        &tenant_shard_id,
+        timestamp,
+        done_if_after,
+        &cancel,
+    )
+    .await
+    .map_err(|e| match e {
+        TimeTravelError::BadInput(e) => {
+            warn!("bad input error: {e}");
+            ApiError::BadRequest(anyhow!("bad input error"))
+        }
+        TimeTravelError::Unimplemented => {
+            ApiError::BadRequest(anyhow!("unimplemented for the configured remote storage"))
+        }
+        TimeTravelError::Cancelled => ApiError::InternalServerError(anyhow!("cancelled")),
+        TimeTravelError::TooManyVersions => {
+            ApiError::InternalServerError(anyhow!("too many versions in remote storage"))
+        }
+        TimeTravelError::Other(e) => {
+            warn!("internal error: {e}");
+            ApiError::InternalServerError(anyhow!("internal error"))
+        }
+    })?;
+
+    json_response(StatusCode::OK, ())
 }
 
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
@@ -1968,6 +2063,10 @@ pub fn make_router(
         .get("/v1/location_config", |r| {
             api_handler(r, list_location_config_handler)
         })
+        .put(
+            "/v1/tenant/:tenant_shard_id/time_travel_remote_storage",
+            |r| api_handler(r, tenant_time_travel_remote_storage_handler),
+        )
         .get("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_list_handler)
         })

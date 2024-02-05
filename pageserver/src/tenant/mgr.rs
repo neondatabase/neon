@@ -607,13 +607,6 @@ pub(crate) fn tenant_spawn(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
-    info!(
-        tenant_id = %tenant_shard_id.tenant_id,
-        shard_id = %tenant_shard_id.shard_slug(),
-        generation = ?location_conf.location.generation,
-        attach_mode = ?location_conf.location.attach_mode,
-        "Attaching tenant"
-    );
     let tenant = match Tenant::spawn(
         conf,
         tenant_shard_id,
@@ -896,6 +889,17 @@ impl TenantManager {
             Some(TenantSlot::Secondary(s)) => Some(s.clone()),
             _ => None,
         }
+    }
+
+    /// Whether the `TenantManager` is responsible for the tenant shard
+    pub(crate) fn manages_tenant_shard(&self, tenant_shard_id: TenantShardId) -> bool {
+        let locked = self.tenants.read().unwrap();
+
+        let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
+            .ok()
+            .flatten();
+
+        peek_slot.is_some()
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]

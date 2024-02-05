@@ -155,6 +155,15 @@ class EvictionEnv:
         mock_behavior,
         eviction_order: EvictionOrder,
     ):
+        """
+        Starts pageserver up with mocked statvfs setup. The startup is
+        problematic because of dueling initial logical size calculations
+        requiring layers and disk usage based task evicting.
+
+        Returns after initial logical sizes are complete, but the phase of disk
+        usage eviction task is unknown; it might need to run one more iteration
+        before assertions can be made.
+        """
         disk_usage_config = {
             "period": period,
             "max_usage_pct": max_usage_pct,
@@ -183,9 +192,15 @@ class EvictionEnv:
             ),
         )
 
+        # we now do initial logical size calculation on startup, which on debug builds can fight with disk usage based eviction
+        for tenant_id, timeline_id in self.timelines:
+            pageserver_http = self.neon_env.get_tenant_pageserver(tenant_id).http_client()
+            pageserver_http.timeline_wait_logical_size(tenant_id, timeline_id)
+
         def statvfs_called():
             assert pageserver.log_contains(".*running mocked statvfs.*")
 
+        # we most likely have already completed multiple runs
         wait_until(10, 1, statvfs_called)
 
 
@@ -789,9 +804,11 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
 
     wait_until(10, 1, relieved_log_message)
 
-    post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
+    def less_than_max_usage_pct():
+        post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
+        assert post_eviction_total_size < 0.33 * total_size, "we requested max 33% usage"
 
-    assert post_eviction_total_size <= 0.33 * total_size, "we requested max 33% usage"
+    wait_until(2, 2, less_than_max_usage_pct)
 
 
 def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
@@ -831,11 +848,13 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
 
     wait_until(10, 1, relieved_log_message)
 
-    post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
+    def more_than_min_avail_bytes_freed():
+        post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
+        assert (
+            total_size - post_eviction_total_size >= min_avail_bytes
+        ), f"we requested at least {min_avail_bytes} worth of free space"
 
-    assert (
-        total_size - post_eviction_total_size >= min_avail_bytes
-    ), "we requested at least min_avail_bytes worth of free space"
+    wait_until(2, 2, more_than_min_avail_bytes_freed)
 
 
 def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):

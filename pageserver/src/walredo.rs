@@ -22,6 +22,7 @@ use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
+use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -29,7 +30,6 @@ use std::io;
 use std::io::prelude::*;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::AsRawFd;
-use std::os::unix::prelude::CommandExt;
 use std::process::Stdio;
 use std::process::{Child, ChildStdin, ChildStdout, Command};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -179,6 +179,20 @@ impl PostgresRedoManager {
             )
         }
     }
+
+    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+        Some(WalRedoManagerStatus {
+            last_redo_at: {
+                let at = *self.last_redo_at.lock().unwrap();
+                at.and_then(|at| {
+                    let age = at.elapsed();
+                    // map any chrono errors silently to None here
+                    chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
+                })
+            },
+            pid: self.redo_process.read().unwrap().as_ref().map(|p| p.id()),
+        })
+    }
 }
 
 impl PostgresRedoManager {
@@ -243,8 +257,7 @@ impl PostgresRedoManager {
                         let mut proc_guard = self.redo_process.write().unwrap();
                         match &*proc_guard {
                             None => {
-                                let timer =
-                                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.start_timer();
+                                let start = Instant::now();
                                 let proc = Arc::new(
                                     WalRedoProcess::launch(
                                         self.conf,
@@ -253,7 +266,14 @@ impl PostgresRedoManager {
                                     )
                                     .context("launch walredo process")?,
                                 );
-                                timer.observe_duration();
+                                let duration = start.elapsed();
+                                WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM
+                                    .observe(duration.as_secs_f64());
+                                info!(
+                                    duration_ms = duration.as_millis(),
+                                    pid = proc.id(),
+                                    "launched walredo process"
+                                );
                                 *proc_guard = Some(Arc::clone(&proc));
                                 proc
                             }
@@ -607,40 +627,6 @@ impl PostgresRedoManager {
     }
 }
 
-///
-/// Command with ability not to give all file descriptors to child process
-///
-trait CloseFileDescriptors: CommandExt {
-    ///
-    /// Close file descriptors (other than stdin, stdout, stderr) in child process
-    ///
-    fn close_fds(&mut self) -> &mut Command;
-}
-
-impl<C: CommandExt> CloseFileDescriptors for C {
-    fn close_fds(&mut self) -> &mut Command {
-        // SAFETY: Code executed inside pre_exec should have async-signal-safety,
-        // which means it should be safe to execute inside a signal handler.
-        // The precise meaning depends on platform. See `man signal-safety`
-        // for the linux definition.
-        //
-        // The set_fds_cloexec_threadsafe function is documented to be
-        // async-signal-safe.
-        //
-        // Aside from this function, the rest of the code is re-entrant and
-        // doesn't make any syscalls. We're just passing constants.
-        //
-        // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
-        // which is not async-signal-safe. Be careful.
-        unsafe {
-            self.pre_exec(move || {
-                close_fds::set_fds_cloexec_threadsafe(3, &[]);
-                Ok(())
-            })
-        }
-    }
-}
-
 struct WalRedoProcess {
     #[allow(dead_code)]
     conf: &'static PageServerConf,
@@ -670,23 +656,25 @@ impl WalRedoProcess {
 
         // Start postgres itself
         let child = Command::new(pg_bin_dir_path.join("postgres"))
+            // the first arg must be --wal-redo so the child process enters into walredo mode
             .arg("--wal-redo")
+            // the child doesn't process this arg, but, having it in the argv helps indentify the
+            // walredo process for a particular tenant when debugging a pagserver
+            .args(["--tenant-shard-id", &format!("{tenant_shard_id}")])
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .stdout(Stdio::piped())
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
-            // The redo process is not trusted, and runs in seccomp mode that
-            // doesn't allow it to open any files. We have to also make sure it
-            // doesn't inherit any file descriptors from the pageserver, that
-            // would allow an attacker to read any files that happen to be open
-            // in the pageserver.
-            //
-            // The Rust standard library makes sure to mark any file descriptors with
-            // as close-on-exec by default, but that's not enough, since we use
-            // libraries that directly call libc open without setting that flag.
-            .close_fds()
+            // NB: The redo process is not trusted after we sent it the first
+            // walredo work. Before that, it is trusted. Specifically, we trust
+            // it to
+            // 1. close all file descriptors except stdin, stdout, stderr because
+            //    pageserver might not be 100% diligent in setting FD_CLOEXEC on all
+            //    the files it opens, and
+            // 2. to use seccomp to sandbox itself before processing the first
+            //    walredo request.
             .spawn_no_leak_child(tenant_shard_id)
             .context("spawn process")?;
         WAL_REDO_PROCESS_COUNTERS.started.inc();

@@ -1719,6 +1719,11 @@ pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
+fn remote_timelines_path_unsharded(tenant_id: &TenantId) -> RemotePath {
+    let path = format!("tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}");
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
 pub fn remote_timeline_path(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
