@@ -75,7 +75,7 @@ jobs:
         with:
           ref: ${{ github.ref }}
           running-workflow-name: 'compute-node-image'
-          repo-token: ${{ secret.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 20
       - name: Wait for vm-compute-node-image to be build
         uses: lewagon/wait-on-check-action@v1.3.1
