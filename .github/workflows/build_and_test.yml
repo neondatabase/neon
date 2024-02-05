@@ -112,11 +112,10 @@ jobs:
           fetch-depth: 1
 
       - name: Cache poetry deps
-        id: cache_poetry
         uses: actions/cache@v3
         with:
           path: ~/.cache/pypoetry/virtualenvs
-          key: v1-codestyle-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
         run: ./scripts/pysync
