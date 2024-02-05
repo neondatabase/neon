@@ -971,16 +971,19 @@ impl RemoteTimelineClient {
             upload_queue.shutdown_ready.clone()
         };
 
-        let res = sem.acquire().await;
+        let mut closed = std::pin::pin!(sem.acquire());
+
+        let res = tokio::select! {
+            res = &mut closed => res,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                tracing::warn!("still waiting for UploadQueueInitialized to shutdown");
+                closed.await
+            }
+        };
 
         scopeguard::ScopeGuard::into_inner(sg);
 
-        match res {
-            Ok(_permit) => unreachable!("shutdown_ready should not have been added permits"),
-            Err(_closed) => {
-                // expected
-            }
-        }
+        res.expect_err("shutdown_ready should not have been added permits, only closed");
 
         self.stop()
     }
