@@ -343,6 +343,16 @@ pub(super) async fn handle_walreceiver_connection(
                             modification.commit(&ctx).await?;
                             uncommitted_records = 0;
                             filtered_records = 0;
+
+                            timeline
+                                .check_checkpoint_distance()
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to check checkpoint distance for timeline {}",
+                                        timeline.timeline_id
+                                    )
+                                })?;
                         }
                     }
 
