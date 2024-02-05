@@ -39,7 +39,7 @@ use crate::tenant::Timeline;
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
@@ -488,17 +488,6 @@ impl DeltaLayerWriterInner {
             .metadata()
             .await
             .context("get file metadata to determine size")?;
-
-        // 5GB limit for objects without multipart upload (which we don't want to use)
-        // Make it a little bit below to account for differing GB units
-        // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
-        const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
-        ensure!(
-            metadata.len() <= S3_UPLOAD_LIMIT,
-            "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
-            file.path,
-            metadata.len()
-        );
 
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't

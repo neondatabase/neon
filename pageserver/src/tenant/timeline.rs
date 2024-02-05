@@ -2907,6 +2907,17 @@ impl Timeline {
                 // `create_delta_layer` will not modify the layer map.
                 // We will remove frozen layer and add delta layer in one atomic operation later.
                 let layer = self.create_delta_layer(&frozen_layer, ctx).await?;
+                // 5GB limit for objects without multipart upload (which we don't want to use)
+                // Make it a little bit below to account for differing GB units
+                // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
+                const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
+                if layer.metadata().file_size() > S3_UPLOAD_LIMIT {
+                    return Err(FlushLayerError::Other(anyhow::anyhow!(
+                        "Created delta layer {} of size {} above limit {S3_UPLOAD_LIMIT}!",
+                        layer,
+                        layer.metadata().file_size(),
+                    )));
+                }
                 (
                     // FIXME: even though we have a single image and single delta layer assumption
                     // we push them to vec
