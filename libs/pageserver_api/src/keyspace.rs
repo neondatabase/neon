@@ -279,6 +279,13 @@ impl KeySpaceRandomAccum {
         }
         KeySpace { ranges }
     }
+
+    pub fn consume_keyspace(&mut self) -> KeySpace {
+        let mut prev_accum = KeySpaceRandomAccum::new();
+        std::mem::swap(self, &mut prev_accum);
+
+        prev_accum.to_keyspace()
+    }
 }
 
 pub fn key_range_size(key_range: &Range<Key>) -> u32 {
