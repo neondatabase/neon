@@ -273,7 +273,7 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
-    pub timeline_get_rate_limit: Option<TimelineGetRateLimitConfig>,
+    pub timeline_get_rate_limit: Option<ThrottleConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,20 +301,20 @@ pub struct EvictionPolicyLayerAccessThreshold {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct TimelineGetRateLimitConfig {
-    pub task_kind: Vec<String>, // TaskKind
+pub struct ThrottleConfig {
+    pub task_kinds: Vec<String>, // TaskKind
     pub initial: usize,
-    pub interval_millis: NonZeroUsize,
+    pub interval_millis: NonZeroU64,
     pub max: usize,
     pub fair: bool,
 }
 
-impl TimelineGetRateLimitConfig {
+impl ThrottleConfig {
     pub fn disabled() -> Self {
         Self {
-            task_kind: vec![], // disables the rate limit
+            task_kinds: vec![], // disables the rate limit
             initial: 0,
-            interval_millis: NonZeroUsize::try_from(1).unwrap(),
+            interval_millis: NonZeroU64::try_from(1).unwrap(),
             max: 1,
             fair: true,
         }

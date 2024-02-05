@@ -10,12 +10,12 @@
 //!
 use anyhow::bail;
 use pageserver_api::models::EvictionPolicy;
-use pageserver_api::models::{self, TimelineGetRateLimitConfig};
+use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 use std::time::Duration;
 use utils::generation::Generation;
 
@@ -492,6 +492,7 @@ impl TenantConfOpt {
                 .unwrap_or(global_conf.lazy_slru_download),
             timeline_get_rate_limit: self
                 .timeline_get_rate_limit
+                .clone()
                 .unwrap_or(global_conf.timeline_get_rate_limit),
         }
     }
@@ -605,9 +606,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             gc_feedback: value.gc_feedback,
             heatmap_period: value.heatmap_period.map(humantime),
             lazy_slru_download: value.lazy_slru_download,
-            timeline_get_rate_limit: value
-                .timeline_get_rate_limit
-                .unwrap_or(crate::tenant::throttle::Config::disabled()),
+            timeline_get_rate_limit: value.timeline_get_rate_limit.map(ThrottleConfig::from),
         }
     }
 }
