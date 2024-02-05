@@ -5242,7 +5242,7 @@ mod tests {
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
                 .shutdown()
-                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, timeline_id=%TIMELINE_ID))
+                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, shard_id=%raw_tline.tenant_shard_id.shard_slug(), timeline_id=%TIMELINE_ID))
                 .await;
             std::mem::forget(tline);
         }
