@@ -53,7 +53,7 @@ struct Cli {
 
     /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
     #[arg(long)]
-    database_url: String,
+    database_url: Option<String>,
 }
 
 /// Secrets may either be provided on the command line (for testing), or loaded from AWS SecretManager: this
@@ -74,10 +74,9 @@ impl Secrets {
     const PUBLIC_KEY_SECRET: &'static str = "neon-storage-controller-public-key";
 
     async fn load(args: &Cli) -> anyhow::Result<Self> {
-        if args.database_url.is_empty() {
-            Self::load_aws_sm().await
-        } else {
-            Self::load_cli(args)
+        match &args.database_url {
+            Some(url) => Self::load_cli(url, args),
+            None => Self::load_aws_sm().await,
         }
     }
 
@@ -153,13 +152,13 @@ impl Secrets {
         })
     }
 
-    fn load_cli(args: &Cli) -> anyhow::Result<Self> {
+    fn load_cli(database_url: &str, args: &Cli) -> anyhow::Result<Self> {
         let public_key = match &args.public_key {
             None => None,
             Some(key_path) => Some(JwtAuth::from_key_path(key_path)?),
         };
         Ok(Self {
-            database_url: args.database_url.clone(),
+            database_url: database_url.to_owned(),
             public_key,
             jwt_token: args.jwt_token.clone(),
             control_plane_jwt_token: args.control_plane_jwt_token.clone(),
