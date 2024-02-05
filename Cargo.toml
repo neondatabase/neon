@@ -153,8 +153,8 @@ tikv-jemallocator = "0.5"
 tikv-jemalloc-ctl = "0.5"
 tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
 tokio = { version = "1.17", features = ["macros"] }
-tokio-epoll-uring = { path = "../tokio-epoll-uring/tokio-epoll-uring" }
-#tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "problame/more-ops" }
+#tokio-epoll-uring = { path = "../tokio-epoll-uring/tokio-epoll-uring" }
+tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "problame/more-ops" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.10.0"
 tokio-rustls = "0.24"

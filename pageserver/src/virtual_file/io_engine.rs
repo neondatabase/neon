@@ -65,7 +65,7 @@ pub(super) fn get() -> &'static IoEngineKind {
 
 use std::os::unix::prelude::FileExt;
 
-use super::FileGuard;
+use super::{FileGuard, Metadata};
 
 fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
     match e {
@@ -141,16 +141,24 @@ impl IoEngineKind {
             }
         }
     }
-    pub(super) async fn metadata(&self, file_guard: FileGuard) -> std::io::Result<std::fs::Metadata> {
+    pub(super) async fn metadata(
+        &self,
+        file_guard: FileGuard,
+    ) -> (FileGuard, std::io::Result<Metadata>) {
         match self {
             IoEngineKind::StdFs => {
-                let res = file_guard.with_std_file(|std_file| std_file.metadata());
+                let res =
+                    file_guard.with_std_file(|std_file| std_file.metadata().map(Metadata::from));
                 (file_guard, res)
-            },
+            }
             IoEngineKind::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
-                let (resources, res) = system.statx();
-            },
+                let (resources, res) = system.statx(file_guard).await;
+                (
+                    resources,
+                    res.map_err(epoll_uring_error_to_std).map(Metadata::from),
+                )
+            }
         }
     }
 }

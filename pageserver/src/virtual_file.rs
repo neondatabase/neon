@@ -17,7 +17,7 @@ use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use tokio_epoll_uring::IoBufMut;
 
@@ -29,8 +29,10 @@ use tokio::time::Instant;
 use utils::fs_ext;
 
 mod io_engine;
+mod metadata;
 mod open_options;
 pub use io_engine::IoEngineKind;
+pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 
 ///
@@ -461,9 +463,10 @@ impl VirtualFile {
         })
     }
 
-    pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
+    pub async fn metadata(&self) -> Result<Metadata, Error> {
         with_file!(self, StorageIoOperation::Metadata, |file_guard| {
-            io_engine::get().metadata(file_guard).await;
+            let (_file_guard, res) = io_engine::get().metadata(file_guard).await;
+            res
         })
     }
 
