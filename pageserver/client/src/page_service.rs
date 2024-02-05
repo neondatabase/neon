@@ -156,7 +156,8 @@ impl PagestreamClient {
             PagestreamBeMessage::Error(e) => anyhow::bail!("Error: {:?}", e),
             PagestreamBeMessage::Exists(_)
             | PagestreamBeMessage::Nblocks(_)
-            | PagestreamBeMessage::DbSize(_) => {
+            | PagestreamBeMessage::DbSize(_)
+            | PagestreamBeMessage::GetSlruSegment(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",
                     msg.kind()

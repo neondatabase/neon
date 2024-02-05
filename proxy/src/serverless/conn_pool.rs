@@ -540,7 +540,7 @@ async fn connect_to_compute(
         .map(|_| conn_info.user_info.clone());
 
     if !config.disable_ip_check_for_http {
-        let allowed_ips = backend.get_allowed_ips(ctx).await?;
+        let (allowed_ips, _) = backend.get_allowed_ips_and_secret(ctx).await?;
         if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
             return Err(auth::AuthError::ip_address_not_allowed().into());
         }

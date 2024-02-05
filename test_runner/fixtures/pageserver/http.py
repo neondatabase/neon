@@ -4,6 +4,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import requests
@@ -389,6 +390,20 @@ class PageserverHttpClient(requests.Session):
         )
         return res.text
 
+    def tenant_time_travel_remote_storage(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timestamp: datetime,
+        done_if_after: datetime,
+    ):
+        """
+        Issues a request to perform time travel operations on the remote storage
+        """
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/time_travel_remote_storage?travel_to={timestamp.isoformat()}Z&done_if_after={done_if_after.isoformat()}Z"
+        )
+        self.verbose_error(res)
+
     def timeline_list(
         self,
         tenant_id: Union[TenantId, TenantShardId],
@@ -549,17 +564,12 @@ class PageserverHttpClient(requests.Session):
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
         timestamp,
-        version: Optional[int] = None,
     ):
         log.info(
             f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}"
         )
-        if version is None:
-            version_str = ""
-        else:
-            version_str = f"&version={version}"
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp}{version_str}",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp}",
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -821,3 +831,16 @@ class PageserverHttpClient(requests.Session):
         self.put(
             f"http://localhost:{self.port}/v1/deletion_queue/flush?execute={'true' if execute else 'false'}"
         ).raise_for_status()
+
+    def timeline_wait_logical_size(self, tenant_id: TenantId, timeline_id: TimelineId) -> int:
+        detail = self.timeline_detail(
+            tenant_id,
+            timeline_id,
+            include_non_incremental_logical_size=True,
+            force_await_initial_logical_size=True,
+        )
+        current_logical_size = detail["current_logical_size"]
+        non_incremental = detail["current_logical_size_non_incremental"]
+        assert current_logical_size == non_incremental
+        assert isinstance(current_logical_size, int)
+        return current_logical_size

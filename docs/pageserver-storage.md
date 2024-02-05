@@ -64,7 +64,7 @@ Storage.
 
 The LayerMap tracks what layers exist in a timeline.
 
-Currently, the layer map is just a resizeable array (Vec). On a GetPage@LSN or
+Currently, the layer map is just a resizable array (Vec). On a GetPage@LSN or
 other read request, the layer map scans through the array to find the right layer
 that contains the data for the requested page. The read-code in LayeredTimeline
 is aware of the ancestor, and returns data from the ancestor timeline if it's
