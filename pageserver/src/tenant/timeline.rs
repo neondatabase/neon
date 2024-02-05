@@ -4659,9 +4659,13 @@ impl Timeline {
 }
 
 impl Timeline {
-    /// Returns non-remote layers for eviction.
-    pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
-        let guard = self.layers.read().await;
+    /// Returns non-remote layers for eviction if possible right now.
+    pub(crate) async fn get_local_layers_for_disk_usage_eviction(
+        &self,
+    ) -> Option<DiskUsageEvictionInfo> {
+        let Ok(guard) = self.layers.try_read() else {
+            return None;
+        };
         let layers = guard.layer_map();
 
         let mut max_layer_size: Option<u64> = None;
@@ -4698,10 +4702,10 @@ impl Timeline {
             });
         }
 
-        DiskUsageEvictionInfo {
+        Some(DiskUsageEvictionInfo {
             max_layer_size,
             resident_layers,
-        }
+        })
     }
 
     pub(crate) fn get_shard_index(&self) -> ShardIndex {
