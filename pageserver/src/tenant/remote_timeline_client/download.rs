@@ -531,7 +531,7 @@ where
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
-        &cancel,
+        cancel,
     )
     .await
     .ok_or_else(|| DownloadError::Cancelled)

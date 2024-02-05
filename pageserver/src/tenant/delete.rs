@@ -91,7 +91,7 @@ async fn create_remote_delete_mark(
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
-        &cancel,
+        cancel,
     )
     .await
     .ok_or_else(|| anyhow::anyhow!("Cancelled"))
@@ -189,7 +189,7 @@ async fn remove_tenant_remote_delete_mark(
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
-            &cancel,
+            cancel,
         )
         .await
         .ok_or_else(|| anyhow::anyhow!("Cancelled"))
