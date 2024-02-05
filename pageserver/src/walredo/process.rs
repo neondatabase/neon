@@ -11,7 +11,7 @@ use pageserver_api::{reltag::RelTag, shard::TenantShardId};
 use postgres_ffi::BLCKSZ;
 use std::os::fd::AsRawFd;
 #[cfg(feature = "testing")]
-use std::sync::AtomicUsize;
+use std::sync::atomic::AtomicUsize;
 use std::{
     collections::VecDeque,
     io::{Read, Write},
