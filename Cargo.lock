@@ -1329,7 +1329,6 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
- "diesel",
  "futures",
  "git-version",
  "hex",
