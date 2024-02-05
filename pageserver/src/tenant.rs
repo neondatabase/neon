@@ -205,7 +205,7 @@ impl AttachedTenantConf {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => Ok(Self {
                 tenant_conf: location_conf.tenant_conf,
-                location: attach_conf.clone(),
+                location: *attach_conf,
             }),
             LocationMode::Secondary(_) => {
                 anyhow::bail!("Attempted to construct AttachedTenantConf from a LocationConf in secondary mode")
@@ -625,6 +625,9 @@ impl Tenant {
             deletion_queue_client,
         } = resources;
 
+        let attach_mode = attached_conf.location.attach_mode;
+        let generation = attached_conf.location.generation;
+
         let tenant = Arc::new(Tenant::new(
             TenantState::Attaching,
             conf,
@@ -654,6 +657,12 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+
+                info!(
+                    ?attach_mode,
+                    "Attaching tenant"
+                );
+
                 let _gate_guard = attach_gate_guard;
 
                 // Is this tenant being spawned as part of process startup?
@@ -865,7 +874,7 @@ impl Tenant {
                 Ok(())
             }
             .instrument({
-                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
+                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation);
                 span.follows_from(Span::current());
                 span
             }),
@@ -2354,12 +2363,7 @@ impl Tenant {
     }
 
     pub(crate) fn get_attach_mode(&self) -> AttachmentMode {
-        self.tenant_conf
-            .read()
-            .unwrap()
-            .location
-            .attach_mode
-            .clone()
+        self.tenant_conf.read().unwrap().location.attach_mode
     }
 
     /// For API access: generate a LocationConfig equivalent to the one that would be used to
@@ -3225,8 +3229,6 @@ impl Tenant {
                 .context("branch initial metadata upload")?;
         }
 
-        info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
-
         Ok(new_timeline)
     }
 
@@ -3443,12 +3445,6 @@ impl Tenant {
 
         // All done!
         let timeline = raw_timeline.finish_creation()?;
-
-        info!(
-            "created root timeline {} timeline.lsn {}",
-            timeline_id,
-            timeline.get_last_record_lsn()
-        );
 
         Ok(timeline)
     }
