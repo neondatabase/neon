@@ -4074,7 +4074,7 @@ pub(crate) mod harness {
                 TenantState::Loading,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
-                    TenantConfOpt::from(self.tenant_conf),
+                    TenantConfOpt::from(self.tenant_conf.clone()),
                     self.generation,
                     &ShardParameters::default(),
                 ))
