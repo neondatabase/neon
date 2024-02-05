@@ -101,7 +101,7 @@ impl ControlPlaneClient {
             &self.cancel,
         )
         .await
-        .ok_or_else(|| RetryForeverError::ShuttingDown)?
+        .ok_or(RetryForeverError::ShuttingDown)?
         .expect("We retry forever, this should never be reached");
 
         Ok(res)
