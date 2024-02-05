@@ -5,7 +5,6 @@ use diesel::{
     query_builder::{AstPass, QueryFragment, QueryId},
     Connection, PgConnection, QueryResult, RunQueryDsl,
 };
-use diesel_migrations::{HarnessWithOutput, MigrationHarness};
 use hyper::Method;
 use pageserver_api::{
     models::{
@@ -17,7 +16,7 @@ use pageserver_api::{
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{env, str::FromStr};
+use std::str::FromStr;
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
@@ -273,37 +272,6 @@ impl AttachmentService {
         .expect("non-Unicode path")
     }
 
-    /// In order to access database migrations, we need to find the Neon source tree
-    async fn find_source_root(&self) -> anyhow::Result<Utf8PathBuf> {
-        // We assume that either prd or our binary is in the source tree. The former is usually
-        // true for automated test runners, the latter is usually true for developer workstations. Often
-        // both are true, which is fine.
-        let candidate_start_points = [
-            // Current working directory
-            Utf8PathBuf::from_path_buf(std::env::current_dir()?).unwrap(),
-            // Directory containing the binary we're running inside
-            Utf8PathBuf::from_path_buf(env::current_exe()?.parent().unwrap().to_owned()).unwrap(),
-        ];
-
-        // For each candidate start point, search through ancestors looking for a neon.git source tree root
-        for start_point in &candidate_start_points {
-            // Start from the build dir: assumes we are running out of a built neon source tree
-            for path in start_point.ancestors() {
-                // A crude approximation: the root of the source tree is whatever contains a "control_plane"
-                // subdirectory.
-                let control_plane = path.join("control_plane");
-                if tokio::fs::try_exists(&control_plane).await? {
-                    return Ok(path.to_owned());
-                }
-            }
-        }
-
-        // Fall-through
-        Err(anyhow::anyhow!(
-            "Could not find control_plane src dir, after searching ancestors of {candidate_start_points:?}"
-        ))
-    }
-
     /// Find the directory containing postgres binaries, such as `initdb` and `pg_ctl`
     ///
     /// This usually uses ATTACHMENT_SERVICE_POSTGRES_VERSION of postgres, but will fall back
@@ -390,22 +358,6 @@ impl AttachmentService {
             let mut conn = PgConnection::establish(&postgres_url)?;
             CreateDatabaseStatement::new(&database).execute(&mut conn)?;
         }
-        let mut conn = PgConnection::establish(&database_url)?;
-
-        let migrations_dir = self
-            .find_source_root()
-            .await?
-            .join("control_plane/attachment_service/migrations");
-
-        let migrations = diesel_migrations::FileBasedMigrations::from_path(migrations_dir)?;
-        println!("Running migrations in {}", migrations.path().display());
-        HarnessWithOutput::write_to_stdout(&mut conn)
-            .run_pending_migrations(migrations)
-            .map(|_| ())
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        println!("Migrations complete");
-
         Ok(database_url)
     }
 

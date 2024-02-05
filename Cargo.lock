@@ -1330,7 +1330,6 @@ dependencies = [
  "comfy-table",
  "compute_api",
  "diesel",
- "diesel_migrations",
  "futures",
  "git-version",
  "hex",
