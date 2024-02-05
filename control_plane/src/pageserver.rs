@@ -400,6 +400,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'lazy_slru_download' as bool")?,
+            timeline_get_rate_limit: settings
+                .remove("timeline_get_rate_limit")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("parse `timeline_get_rate_limit` from json")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -505,6 +510,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'lazy_slru_download' as bool")?,
+                timeline_get_rate_limit: settings
+                    .remove("timeline_get_rate_limit")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("parse `timeline_get_rate_limit` from json")?,
             }
         };
 

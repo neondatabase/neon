@@ -273,6 +273,7 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
+    pub timeline_get_rate_limit: Option<TimelineGetRateLimitConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +298,27 @@ pub struct EvictionPolicyLayerAccessThreshold {
     pub period: Duration,
     #[serde(with = "humantime_serde")]
     pub threshold: Duration,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TimelineGetRateLimitConfig {
+    pub task_kind: Vec<String>, // TaskKind
+    pub initial: usize,
+    pub interval_millis: NonZeroUsize,
+    pub max: usize,
+    pub fair: bool,
+}
+
+impl TimelineGetRateLimitConfig {
+    pub fn disabled() -> Self {
+        Self {
+            task_kind: vec![], // disables the rate limit
+            initial: 0,
+            interval_millis: NonZeroUsize::try_from(1).unwrap(),
+            max: 1,
+            fair: true,
+        }
+    }
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which

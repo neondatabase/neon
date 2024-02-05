@@ -168,6 +168,8 @@ pub(crate) mod timeline;
 
 pub mod size;
 
+mod throttle;
+
 pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
@@ -307,7 +309,7 @@ pub struct Tenant {
     // trying to use a Tenant which is shutting down.
     pub(crate) gate: Gate,
 
-    pub(crate) timeline_get_rate_limiter: Arc<leaky_bucket::RateLimiter>,
+    pub(crate) timeline_get_rate_limiter: Arc<crate::tenant::throttle::Throttle>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -1016,6 +1018,7 @@ impl Tenant {
                 TimelineResources {
                     remote_client: Some(remote_client),
                     deletion_queue_client: self.deletion_queue_client.clone(),
+                    timeline_get_rate_limiter: self.timeline_get_rate_limiter.clone(),
                 },
                 ctx,
             )
@@ -2555,6 +2558,7 @@ impl Tenant {
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().tenant_conf = new_tenant_conf;
+        self.tenant_conf_updated();
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -2566,6 +2570,7 @@ impl Tenant {
 
     pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
         *self.tenant_conf.write().unwrap() = new_conf;
+        self.tenant_conf_updated();
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -2573,6 +2578,14 @@ impl Tenant {
         for timeline in timelines {
             timeline.tenant_conf_updated();
         }
+    }
+
+    pub(crate) fn tenant_conf_updated(&self) {
+        let conf = {
+            let guard = self.tenant_conf.read().unwrap();
+            guard.tenant_conf.timeline_get_rate_limit.clone()
+        };
+        self.timeline_get_rate_limiter.reconfigure(conf)
     }
 
     /// Helper function to create a new Timeline struct.
@@ -2716,7 +2729,9 @@ impl Tenant {
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
-            timeline_get_rate_limiter: leaky_bucket::RateLimiter::builder().
+            timeline_get_rate_limiter: Arc::new(crate::tenant::throttle::Throttle::new(
+                attached_conf.tenant_conf.timeline_get_rate_limit,
+            )),
         }
     }
 
@@ -3470,6 +3485,7 @@ impl Tenant {
         TimelineResources {
             remote_client,
             deletion_queue_client: self.deletion_queue_client.clone(),
+            timeline_get_rate_limiter: self.timeline_get_rate_limiter.clone(),
         }
     }
 
@@ -3919,6 +3935,7 @@ pub(crate) mod harness {
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
+                timeline_get_rate_limit: Some(tenant_conf.timeline_get_rate_limit),
             }
         }
     }

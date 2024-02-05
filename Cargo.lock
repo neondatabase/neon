@@ -3441,6 +3441,7 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-compression",
  "async-stream",
  "async-trait",
@@ -6308,6 +6309,7 @@ dependencies = [
  "hex-literal",
  "hyper",
  "jsonwebtoken",
+ "leaky-bucket",
  "metrics",
  "nix 0.27.1",
  "once_cell",

@@ -157,6 +157,7 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
     pub deletion_queue_client: DeletionQueueClient,
+    pub timeline_get_rate_limiter: Arc<crate::tenant::throttle::Throttle>,
 }
 
 pub struct Timeline {
@@ -609,9 +610,11 @@ impl Timeline {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
 
-        if ctx.task_kind() == TaskKind::PageRequestHandler {
-            self.
-        }
+        let _rate_limit_permit = if ctx.task_kind() == TaskKind::PageRequestHandler {
+            Some(self.timeline_get_rate_limiter.acquire_one())
+        } else {
+            None
+        };
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
@@ -1547,6 +1550,8 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),
+
+                timeline_get_rate_limiter: resources.timeline_get_rate_limiter,
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
