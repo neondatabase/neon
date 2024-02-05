@@ -4,13 +4,14 @@
 /// This enables running & testing pageservers without a full-blown
 /// deployment of the Neon cloud platform.
 ///
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use attachment_service::http::make_router;
 use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
 use aws_config::{self, BehaviorVersion, Region};
 use camino::Utf8PathBuf;
 use clap::Parser;
+use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use std::sync::Arc;
 use tokio::signal::unix::SignalKind;
@@ -21,6 +22,9 @@ use utils::{project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
+
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -167,6 +171,19 @@ impl Secrets {
     }
 }
 
+async fn migration_run(database_url: &str) -> anyhow::Result<()> {
+    use diesel::PgConnection;
+    use diesel_migrations::{HarnessWithOutput, MigrationHarness};
+    let mut conn = PgConnection::establish(database_url)?;
+
+    HarnessWithOutput::write_to_stdout(&mut conn)
+        .run_pending_migrations(MIGRATIONS)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let launch_ts = Box::leak(Box::new(LaunchTimestamp::generate()));
@@ -194,6 +211,11 @@ async fn main() -> anyhow::Result<()> {
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
     };
+
+    // After loading secrets & config, but before starting anything else, apply database migrations
+    migration_run(&secrets.database_url)
+        .await
+        .context("Running database migrations")?;
 
     let json_path = args.path;
     let persistence = Arc::new(Persistence::new(secrets.database_url, json_path.clone()));
