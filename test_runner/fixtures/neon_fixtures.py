@@ -899,7 +899,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    S3Scrubber(self.test_output_dir, self).scan_metadata()
+                    S3Scrubber(self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -3649,9 +3649,9 @@ class SafekeeperHttpClient(requests.Session):
 
 
 class S3Scrubber:
-    def __init__(self, log_dir: Path, env: NeonEnvBuilder):
+    def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
         self.env = env
-        self.log_dir = log_dir
+        self.log_dir = log_dir or env.test_output_dir
 
     def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
@@ -3672,7 +3672,7 @@ class S3Scrubber:
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(
-            self.log_dir,
+            self.env.test_output_dir,
             args,
             echo_stderr=True,
             echo_stdout=True,
