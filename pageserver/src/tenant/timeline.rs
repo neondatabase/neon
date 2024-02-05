@@ -3869,13 +3869,23 @@ impl Timeline {
                         || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
-                        new_layers.push(
-                            writer
-                                .take()
-                                .unwrap()
-                                .finish(prev_key.unwrap().next(), self)
-                                .await?,
-                        );
+                        let layer = writer
+                            .take()
+                            .unwrap()
+                            .finish(prev_key.unwrap().next(), self)
+                            .await?;
+                        // 5GB limit for objects without multipart upload (which we don't want to use)
+                        // Make it a little bit below to account for differing GB units
+                        // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
+                        const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
+                        if layer.metadata().file_size() > S3_UPLOAD_LIMIT {
+                            return Err(CompactionError::Other(anyhow::anyhow!(
+                                "Created delta layer {} of size {} above limit {S3_UPLOAD_LIMIT}!",
+                                layer,
+                                layer.metadata().file_size(),
+                            )));
+                        }
+                        new_layers.push(layer);
                         writer = None;
 
                         if contains_hole {
