@@ -5701,7 +5701,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/more-ops#0626d98bbe57a1431990bde92ab63459040b62c4"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/more-ops#024f4be0cac13bc96c5d4207988923d2cb3b431f"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6226,7 +6226,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/more-ops#0626d98bbe57a1431990bde92ab63459040b62c4"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/more-ops#024f4be0cac13bc96c5d4207988923d2cb3b431f"
 dependencies = [
  "io-uring",
  "libc",
