@@ -65,95 +65,67 @@ jobs:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
     steps:
-      - name: check if ecr neon image
-        id: check-neon-ecr-image
-        uses: mnmandahalf/check-ecr-image-exists@v0.1.5
-        with:
-          region: eu-central-1
-          repository-name: "neon"
-          image-tag: "${{ github.event.inputs.build-tag }}"
-          access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-
-      - name: check if compute-tools image is build
-        if: ${{ steps.check-neon-ecr-image.outputs.image-exists == '0' }}
-        id: check-compute-tools-ecr-image
-        uses: mnmandahalf/check-ecr-image-exists@v0.1.5
-        with:
-          region: eu-central-1
-          repository-name: "compute-tools"
-          image-tag: "${{ github.event.inputs.build-tag }}"
-          access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-
-      - name: check if compute-node-v14 image is build
-        if: ${{ steps.check-compute-tools-ecr-image.outputs.image-exists == '0' }}
-        id: check-compute-node-v14-ecr-image
-        uses: mnmandahalf/check-ecr-image-exists@v0.1.5
-        with:
-          region: eu-central-1
-          repository-name: "compute-node-v14"
-          image-tag: "${{ github.event.inputs.build-tag }}"
-          access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-
-      - name: check if vm-compute-node-v14 image is build
-        if: ${{ steps.check-compute-node-v14-ecr-image.outputs.image-exists == '0' }}
-        id: check-vm-compute-node-v14-ecr-image
-        uses: mnmandahalf/check-ecr-image-exists@v0.1.5
-        with:
-          region: eu-central-1
-          repository-name: "vm-compute-node-v14"
-          image-tag: "${{ github.event.inputs.build-tag }}"
-          access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-
-      - name: check if compute-node-v15 image is build
-        if: ${{ steps.check-vm-compute-node-v14-ecr-image.outputs.image-exists == '0' }}
-        id: check-compute-node-v15-ecr-image
-        uses: mnmandahalf/check-ecr-image-exists@v0.1.5
-        with:
-          region: eu-central-1
-          repository-name: "compute-node-v15"
-          image-tag: "${{ github.event.inputs.build-tag }}"
-          access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-
-      - name: check if vm-compute-node-v15 image is build
-        if: ${{ steps.check-compute-node-v15-ecr-image.outputs.image-exists == '0' }}
-        id: check-vm-compute-node-v15-ecr-image
-        uses: mnmandahalf/check-ecr-image-exists@v0.1.5
-        with:
-          region: eu-central-1
-          repository-name: "vm-compute-node-v15"
-          image-tag: "${{ github.event.inputs.build-tag }}"
-          access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-
-      - name: check if compute-node-v16 image is build
-        if: ${{ steps.check-vm-compute-node-v15-ecr-image.outputs.image-exists == '0' }}
-        id: check-compute-node-v16-ecr-image
-        uses: mnmandahalf/check-ecr-image-exists@v0.1.5
-        with:
-          region: eu-central-1
-          repository-name: "compute-node-v16"
-          image-tag: "${{ github.event.inputs.build-tag }}"
-          access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-
-      - name: check if vm-compute-node-v16 image is build
-        if: ${{ steps.check-compute-node-v16-ecr-image.outputs.image-exists == '0' }}
-        id: check-vm-compute-node-v16-ecr-image
-        uses: mnmandahalf/check-ecr-image-exists@v0.1.5
-        with:
-          region: eu-central-1
-          repository-name: "vm-compute-node-v16"
-          image-tag: "${{ github.event.inputs.build-tag }}"
-          access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-          secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+      - name: check if ecr image are present
+        id: check-ecr-image-present
+        run: |
+          TAG=${{ github.event.inputs.build-tag }}
+          REPO=neon
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+          if [ "$OUTPUT" == "" ]; then
+            echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          REPO=compute-tools
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+          if [ "$OUTPUT" == "" ]; then
+            echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          REPO=compute-node-v14
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+          if [ "$OUTPUT" == "" ]; then
+            echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          REPO=vm-compute-node-v14
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+          if [ "$OUTPUT" == "" ]; then
+            echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          REPO=compute-node-v15
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+          if [ "$OUTPUT" == "" ]; then
+            echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          REPO=vm-compute-node-v15
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+          if [ "$OUTPUT" == "" ]; then
+            echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          REPO=compute-node-v16
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+          if [ "$OUTPUT" == "" ]; then
+            echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          REPO=vm-compute-node-v16
+          OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+          if [ "$OUTPUT" == "" ]; then
+            echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+            exit 1
+          fi
 
       - name: Set PR's status to pending and request a remote CI test
-        if: ${{ steps.check-vm-compute-node-v16-ecr-image.outputs.image-exists == '0' }}
         run: |
           # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
           # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
