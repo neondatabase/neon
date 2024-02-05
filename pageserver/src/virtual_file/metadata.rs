@@ -23,7 +23,7 @@ impl Metadata {
         match self {
             Metadata::StdFs(metadata) => metadata.len(),
             #[cfg(target_os = "linux")]
-            Metadata::TokioEpollUring(statx) => statx.stx_size as u64,
+            Metadata::TokioEpollUring(statx) => statx.stx_size,
         }
     }
 }
