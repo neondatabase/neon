@@ -5,7 +5,7 @@ use itertools::Itertools;
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
 
-use crate::task_mgr::TaskKind;
+use crate::{context::RequestContext, task_mgr::TaskKind};
 
 pub struct Throttle {
     inner: ArcSwap<Inner>,
@@ -13,7 +13,7 @@ pub struct Throttle {
 
 pub struct Inner {
     task_kinds: EnumSet<TaskKind>,
-    throttle: leaky_bucket::RateLimiter,
+    rate_limiter: Arc<leaky_bucket::RateLimiter>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -105,29 +105,30 @@ impl Throttle {
         } = config;
         Self {
             inner: ArcSwap::new(Arc::new(Inner {
-                task_kinds: config.task_kinds,
-                throttle: leaky_bucket::RateLimiter::builder()
-                    .initial(initial)
-                    .interval(Duration::from_millis(interval_millis.get()))
-                    .max(max)
-                    .fair(fair)
-                    .build(),
+                task_kinds,
+                rate_limiter: Arc::new(
+                    leaky_bucket::RateLimiter::builder()
+                        .initial(initial)
+                        .interval(Duration::from_millis(interval_millis.get()))
+                        .max(max)
+                        .fair(fair)
+                        .build(),
+                ),
             })),
         }
     }
     pub fn reconfigure(&self, config: Config) {
-        todo!()
-        // let new = Self::new(config);
-        // self.inner.store(new);
+        let new = Self::new(config);
+        self.inner.store(ArcSwap::into_inner(new.inner));
     }
 
-    pub fn acquire_one(&self) -> Permit<'_> {
-        todo!()
-        // let this = self.inner.load();
-        // this.acquire()
+    #[inline(always)]
+    pub async fn throttle(&self, ctx: &RequestContext) {
+        let inner = self.inner.load_full(); // clones the `Inner` Arc
+        if !inner.task_kinds.contains(ctx.task_kind()) {
+            return;
+        };
+        // weird api...
+        Arc::clone(&inner.rate_limiter).acquire_owned(1).await;
     }
-}
-
-pub(crate) struct Permit<'a> {
-    inner: leaky_bucket::Acquire<'a>,
 }

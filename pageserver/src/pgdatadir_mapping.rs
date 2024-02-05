@@ -171,9 +171,6 @@ impl Timeline {
         latest: bool,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
-
-        
-
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
                 RelationError::InvalidRelnode.into(),

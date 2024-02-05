@@ -610,11 +610,7 @@ impl Timeline {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
 
-        let _rate_limit_permit = if ctx.task_kind() == TaskKind::PageRequestHandler {
-            Some(self.timeline_get_rate_limiter.acquire_one())
-        } else {
-            None
-        };
+        let _rate_limiter_permit = self.timeline_get_rate_limiter.throttle(ctx);
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
