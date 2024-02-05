@@ -306,6 +306,8 @@ pub struct Tenant {
     // Users of the Tenant such as the page service must take this Gate to avoid
     // trying to use a Tenant which is shutting down.
     pub(crate) gate: Gate,
+
+    pub(crate) timeline_get_rate_limiter: Arc<leaky_bucket::RateLimiter>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -2714,6 +2716,7 @@ impl Tenant {
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
+            timeline_get_rate_limiter: leaky_bucket::RateLimiter::builder().
         }
     }
 

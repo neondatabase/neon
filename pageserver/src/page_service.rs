@@ -1103,6 +1103,7 @@ impl PageServerHandler {
         req: &PagestreamGetPageRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
+
         let timeline = match self.get_cached_timeline_for_page(req) {
             Ok(tl) => tl,
             Err(key) => {

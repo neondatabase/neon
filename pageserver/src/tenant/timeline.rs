@@ -346,6 +346,9 @@ pub struct Timeline {
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
+
+    /// Inherited from [`Tenant::timeline_get_rate_limiter`] on construction on construction on construction on construction
+    timeline_get_rate_limiter: Arc<leaky_bucket::RateLimiter>,
 }
 
 pub struct WalReceiverInfo {
@@ -604,6 +607,10 @@ impl Timeline {
     ) -> Result<Bytes, PageReconstructError> {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
+        }
+
+        if ctx.task_kind() == TaskKind::PageRequestHandler {
+            self.
         }
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
