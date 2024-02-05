@@ -126,7 +126,11 @@ impl ComputeUserInfoMaybeEndpoint {
             }),
         }
         .transpose()?;
-        ctx.set_endpoint_id(endpoint.clone());
+
+        if let Some(ep) = &endpoint {
+            ctx.set_endpoint_id(ep.clone());
+            tracing::Span::current().record("ep", &tracing::field::display(ep));
+        }
 
         info!(%user, project = endpoint.as_deref(), "credentials");
         if sni.is_some() {
@@ -150,7 +154,7 @@ impl ComputeUserInfoMaybeEndpoint {
 
         Ok(Self {
             user,
-            endpoint_id: endpoint.map(EndpointId::from),
+            endpoint_id: endpoint,
             options,
         })
     }

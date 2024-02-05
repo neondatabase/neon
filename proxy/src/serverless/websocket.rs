@@ -133,7 +133,7 @@ pub async fn serve_websocket(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
     websocket: HyperWebsocket,
-    cancel_map: &CancelMap,
+    cancel_map: Arc<CancelMap>,
     hostname: Option<String>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {

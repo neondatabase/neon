@@ -1,10 +1,7 @@
 use ::metrics::{
-    exponential_buckets, register_int_counter_pair_vec, register_int_counter_vec,
-    IntCounterPairVec, IntCounterVec,
-};
-use prometheus::{
-    register_histogram, register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec,
-    IntGaugeVec,
+    exponential_buckets, register_histogram, register_histogram_vec, register_hll_vec,
+    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge_vec, Histogram,
+    HistogramVec, HyperLogLogVec, IntCounterPairVec, IntCounterVec, IntGaugeVec,
 };
 
 use once_cell::sync::Lazy;
@@ -211,15 +208,6 @@ pub static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static NUM_BYTES_PROXIED_PER_CLIENT_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "proxy_io_bytes_per_client",
-        "Number of bytes sent/received between client and backend.",
-        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
-    )
-    .unwrap()
-});
-
 pub static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes",
@@ -236,3 +224,13 @@ pub const fn bool_to_str(x: bool) -> &'static str {
         "false"
     }
 }
+
+pub static CONNECTING_ENDPOINTS: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
+    register_hll_vec!(
+        32,
+        "proxy_connecting_endpoints",
+        "HLL approximate cardinality of endpoints that are connecting",
+        &["protocol"],
+    )
+    .unwrap()
+});

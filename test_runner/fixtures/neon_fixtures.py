@@ -482,6 +482,7 @@ class NeonEnvBuilder:
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
+        self.control_plane_compute_hook_api: Optional[str] = None
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
@@ -993,13 +994,23 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        attachment_service_port = self.port_distributor.get_port()
-        # Reserve the next port after attachment service for use by its postgres: this
-        # will assert out if the next port wasn't free.
-        attachment_service_pg_port = self.port_distributor.get_port()
-        assert attachment_service_pg_port == attachment_service_port + 1
+        # Find two adjacent ports for attachment service and its postgres DB.  This
+        # loop would eventually throw from get_port() if we run out of ports (extremely
+        # unlikely): usually we find two adjacent free ports on the first iteration.
+        while True:
+            self.attachment_service_port = self.port_distributor.get_port()
+            attachment_service_pg_port = self.port_distributor.get_port()
+            if attachment_service_pg_port == self.attachment_service_port + 1:
+                break
 
-        self.control_plane_api: str = f"http://127.0.0.1:{attachment_service_port}"
+        # The URL for the pageserver to use as its control_plane_api config
+        self.control_plane_api: str = f"http://127.0.0.1:{self.attachment_service_port}/upcall/v1"
+        # The base URL of the attachment service
+        self.attachment_service_api: str = f"http://127.0.0.1:{self.attachment_service_port}"
+
+        # For testing this with a fake HTTP server, enable passing through a URL from config
+        self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
+
         self.attachment_service: NeonAttachmentService = NeonAttachmentService(
             self, config.auth_enabled
         )
@@ -1018,6 +1029,9 @@ class NeonEnv:
 
         if self.control_plane_api is not None:
             cfg["control_plane_api"] = self.control_plane_api
+
+        if self.control_plane_compute_hook_api is not None:
+            cfg["control_plane_compute_hook_api"] = self.control_plane_compute_hook_api
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -1897,7 +1911,7 @@ class Pagectl(AbstractNeonCli):
 
 
 class NeonAttachmentService:
-    def __init__(self, env: NeonEnv, auth_enabled):
+    def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
         self.auth_enabled = auth_enabled
@@ -1913,6 +1927,14 @@ class NeonAttachmentService:
             self.env.neon_cli.attachment_service_stop(immediate)
             self.running = False
         return self
+
+    def pageserver_api(self) -> PageserverHttpClient:
+        """
+        The attachment service implements a subset of the pageserver REST API, for mapping
+        per-tenant actions into per-shard actions (e.g. timeline creation).  Tests should invoke those
+        functions via the HttpClient, as an implicit check that these APIs remain compatible.
+        """
+        return PageserverHttpClient(self.env.attachment_service_port, lambda: True)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
         kwargs["headers"] = self.headers()
@@ -1931,7 +1953,7 @@ class NeonAttachmentService:
     ) -> int:
         response = self.request(
             "POST",
-            f"{self.env.control_plane_api}/attach-hook",
+            f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
             headers=self.headers(),
         )
@@ -1943,7 +1965,7 @@ class NeonAttachmentService:
     def attach_hook_drop(self, tenant_shard_id: Union[TenantId, TenantShardId]):
         response = self.request(
             "POST",
-            f"{self.env.control_plane_api}/attach-hook",
+            f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": None},
             headers=self.headers(),
         )
@@ -1955,7 +1977,7 @@ class NeonAttachmentService:
         """
         response = self.request(
             "POST",
-            f"{self.env.control_plane_api}/inspect",
+            f"{self.env.attachment_service_api}/debug/v1/inspect",
             json={"tenant_shard_id": str(tenant_shard_id)},
             headers=self.headers(),
         )
@@ -1976,7 +1998,27 @@ class NeonAttachmentService:
         }
         log.info(f"node_register({body})")
         self.request(
-            "POST", f"{self.env.control_plane_api}/node", json=body, headers=self.headers()
+            "POST",
+            f"{self.env.attachment_service_api}/control/v1/node",
+            json=body,
+            headers=self.headers(),
+        ).raise_for_status()
+
+    def node_list(self):
+        response = self.request(
+            "GET", f"{self.env.attachment_service_api}/control/v1/node", headers=self.headers()
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def node_configure(self, node_id, body: dict[str, Any]):
+        log.info(f"node_configure({node_id}, {body})")
+        body["node_id"] = node_id
+        self.request(
+            "PUT",
+            f"{self.env.attachment_service_api}/control/v1/node/{node_id}/config",
+            json=body,
+            headers=self.headers(),
         ).raise_for_status()
 
     def tenant_create(
@@ -1986,6 +2028,9 @@ class NeonAttachmentService:
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[Dict[Any, Any]] = None,
     ):
+        """
+        Use this rather than pageserver_api() when you need to include shard parameters
+        """
         body: Dict[str, Any] = {"new_tenant_id": str(tenant_id)}
 
         if shard_count is not None:
@@ -1999,21 +2044,17 @@ class NeonAttachmentService:
             for k, v in tenant_config.items():
                 body[k] = v
 
-        response = self.request("POST", f"{self.env.control_plane_api}/tenant", json=body)
+        response = self.request("POST", f"{self.env.attachment_service_api}/v1/tenant", json=body)
         response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
 
-    def tenant_timeline_create(self, tenant_id: TenantId, timeline_id: TimelineId):
-        body: Dict[str, Any] = {"new_timeline_id": str(timeline_id)}
-
-        response = self.request(
-            "POST", f"{self.env.control_plane_api}/tenant/{tenant_id}/timeline", json=body
-        )
-        response.raise_for_status()
-        log.info(f"tenant_timeline_create success: {response.json()}")
-
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
-        response = self.request("GET", f"{self.env.control_plane_api}/tenant/{tenant_id}/locate")
+        """
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        """
+        response = self.request(
+            "GET", f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/locate"
+        )
         response.raise_for_status()
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
@@ -2022,7 +2063,7 @@ class NeonAttachmentService:
     def tenant_shard_split(self, tenant_id: TenantId, shard_count: int) -> list[TenantShardId]:
         response = self.request(
             "PUT",
-            f"{self.env.control_plane_api}/tenant/{tenant_id}/shard_split",
+            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/shard_split",
             json={"new_shard_count": shard_count},
         )
         response.raise_for_status()
@@ -2034,7 +2075,7 @@ class NeonAttachmentService:
     def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
         response = self.request(
             "PUT",
-            f"{self.env.control_plane_api}/tenant/{tenant_shard_id}/migrate",
+            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_shard_id}/migrate",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
         )
         response.raise_for_status()
@@ -3062,6 +3103,17 @@ class Endpoint(PgProtocol):
 
         return self
 
+    def edit_hba(self, hba: List[str]):
+        """Prepend hba lines into pg_hba.conf file."""
+        with open(os.path.join(self.pg_data_dir_path(), "pg_hba.conf"), "r+") as conf_file:
+            data = conf_file.read()
+            conf_file.seek(0)
+            conf_file.write("\n".join(hba) + "\n")
+            conf_file.write(data)
+
+        if self.running:
+            self.safe_psql("SELECT pg_reload_conf()")
+
     def reconfigure(self, pageserver_id: Optional[int] = None):
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
@@ -3077,6 +3129,20 @@ class Endpoint(PgProtocol):
         with open(config_path, "w") as file:
             log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
+
+    # Please note: if you didn't respec this endpoint to have the `migrations`
+    # feature, this function will probably fail because neon_migration.migration_id
+    # won't exist. This is temporary - soon we'll get rid of the feature flag and
+    # migrations will be enabled for everyone.
+    def wait_for_migrations(self):
+        with self.cursor() as cur:
+
+            def check_migrations_done():
+                cur.execute("SELECT id FROM neon_migration.migration_id")
+                migration_id = cur.fetchall()[0][0]
+                assert migration_id != 0
+
+            wait_until(20, 0.5, check_migrations_done)
 
     # Mock the extension part of spec passed from control plane for local testing
     # endpooint.rs adds content of this file as a part of the spec.json
@@ -3440,6 +3506,24 @@ class SafekeeperHttpClient(requests.Session):
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
         res.raise_for_status()
         res_json = json.loads(res.text)
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def patch_control_file(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        patch: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        res = self.patch(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/control_file",
+            json={
+                "updates": patch,
+                "apply_fields": list(patch.keys()),
+            },
+        )
+        res.raise_for_status()
+        res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
 
@@ -3917,7 +4001,16 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     # list files we're going to compare
     assert endpoint.pgdata_dir
     pgdata_files = list_files_to_compare(Path(endpoint.pgdata_dir))
+
     restored_files = list_files_to_compare(restored_dir_path)
+
+    if pgdata_files != restored_files:
+        # filter pg_xact and multixact files which are downloaded on demand
+        pgdata_files = [
+            f
+            for f in pgdata_files
+            if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
+        ]
 
     # check that file sets are equal
     assert pgdata_files == restored_files

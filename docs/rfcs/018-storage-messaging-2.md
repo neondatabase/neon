@@ -78,7 +78,7 @@ with grpc streams and tokio mpsc channels. The implementation description is at 
 
 It is just 500 lines of code and core functionality is complete. 1-1 pub sub
 gives about 120k received messages per second; having multiple subscribers in
-different connecitons quickly scales to 1 million received messages per second.
+different connections quickly scales to 1 million received messages per second.
 I had concerns about many concurrent streams in singe connection, but 2^20
 subscribers still work (though eat memory, with 10 publishers 20GB are consumed;
 in this implementation each publisher holds full copy of all subscribers). There
@@ -95,12 +95,12 @@ other members, with best-effort this is simple.
 ### Security implications
 
 Communication happens in a private network that is not exposed to users;
-additionaly we can add auth to the broker.
+additionally we can add auth to the broker.
 
 ## Alternative: get existing pub-sub
 
 We could take some existing pub sub solution, e.g. RabbitMQ, Redis. But in this
-case IMV simplicity of our own outweights external dependency costs (RabbitMQ is
+case IMV simplicity of our own outweighs external dependency costs (RabbitMQ is
 much more complicated and needs VM; Redis Rust client maintenance is not
 ideal...). Also note that projects like CockroachDB and TiDB are based on gRPC
 as well.

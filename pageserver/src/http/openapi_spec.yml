@@ -178,6 +178,64 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
+  /v1/tenant/{tenant_id}/time_travel_remote_storage:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: travel_to
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+      - name: done_if_after
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+    put:
+      description: Time travel the tenant's remote storage
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Error when no tenant id found in path or invalid timestamp
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/timeline:
     parameters:
@@ -419,12 +477,6 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
-        - name: version
-          in: query
-          required: false
-          schema:
-            type: integer
-          description: The version of the endpoint to use
       responses:
         "200":
           description: OK
@@ -674,6 +726,10 @@ paths:
       responses:
         "200":
           description: Tenant is now in requested state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantLocationConfigResponse"
         "503":
           description: Tenant's state cannot be changed right now.  Wait a few seconds and retry.
           content:
@@ -1426,6 +1482,28 @@ components:
           $ref: '#/components/schemas/SecondaryConfig'
         tenant_conf:
           $ref: '#/components/schemas/TenantConfig'
+    TenantLocationConfigResponse:
+      type: object
+      required:
+        - shards
+      properties:
+        shards:
+          description: Pageservers where this tenant's shards are attached.  Not populated for secondary locations.
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantShardLocation"
+    TenantShardLocation:
+      type: object
+      required:
+        - node_id
+        - shard_id
+      properties:
+        node_id:
+          description: Pageserver node ID where this shard is attached
+          type: integer
+        shard_id:
+          description: Tenant shard ID of the shard
+          type: string
     SecondaryConfig:
       type: object
       properties:

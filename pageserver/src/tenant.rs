@@ -20,6 +20,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::TimelineState;
+use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
@@ -362,6 +363,14 @@ impl WalRedoManager {
                 mgr.request_redo(key, lsn, base_img, records, pg_version)
                     .await
             }
+        }
+    }
+
+    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+        match self {
+            WalRedoManager::Prod(m) => m.status(),
+            #[cfg(test)]
+            WalRedoManager::Test(_) => None,
         }
     }
 }
@@ -1020,6 +1029,7 @@ impl Tenant {
                 Some(remote_timeline_client),
                 self.deletion_queue_client.clone(),
             )
+            .instrument(tracing::info_span!("timeline_delete", %timeline_id))
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
@@ -1956,6 +1966,10 @@ impl Tenant {
         self.generation
     }
 
+    pub(crate) fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
+        self.walredo_mgr.status()
+    }
+
     /// Changes tenant status to active, unless shutdown was already requested.
     ///
     /// `background_jobs_can_start` is an optional barrier set to a value during pageserver startup
@@ -2093,7 +2107,10 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             timelines.values().for_each(|timeline| {
                 let timeline = Arc::clone(timeline);
-                let span = Span::current();
+                let timeline_id = timeline.timeline_id;
+
+                let span =
+                    tracing::info_span!("timeline_shutdown", %timeline_id, ?freeze_and_flush);
                 js.spawn(async move {
                     if freeze_and_flush {
                         timeline.flush_and_shutdown().instrument(span).await
@@ -2693,7 +2710,7 @@ impl Tenant {
             activate_now_sem: tokio::sync::Semaphore::new(0),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
-            gate: Gate::new(format!("Tenant<{tenant_shard_id}>")),
+            gate: Gate::default(),
         }
     }
 
@@ -3778,6 +3795,11 @@ async fn run_initdb(
         .env_clear()
         .env("LD_LIBRARY_PATH", &initdb_lib_dir)
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
+        .stdin(std::process::Stdio::null())
+        // stdout invocation produces the same output every time, we don't need it
+        .stdout(std::process::Stdio::null())
+        // we would be interested in the stderr output, if there was any
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
 
     // Ideally we'd select here with the cancellation token, but the problem is that
@@ -3898,6 +3920,7 @@ pub(crate) mod harness {
                 ),
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
+                lazy_slru_download: Some(tenant_conf.lazy_slru_download),
             }
         }
     }
@@ -5220,7 +5243,7 @@ mod tests {
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
                 .shutdown()
-                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id))
+                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, timeline_id=%TIMELINE_ID))
                 .await;
             std::mem::forget(tline);
         }

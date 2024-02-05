@@ -72,10 +72,15 @@ pub struct LocalEnv {
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
 
-    // Control plane location: if None, we will not run attachment_service.  If set, this will
+    // Control plane upcall API for pageserver: if None, we will not run attachment_service.  If set, this will
     // be propagated into each pageserver's configuration.
     #[serde(default)]
     pub control_plane_api: Option<Url>,
+
+    // Control plane upcall API for attachment service.  If set, this will be propagated into the
+    // attachment service's configuration.
+    #[serde(default)]
+    pub control_plane_compute_hook_api: Option<Url>,
 
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     #[serde(default)]

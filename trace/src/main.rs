@@ -60,6 +60,7 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
         match msg {
             PagestreamFeMessage::Exists(_) => {}
             PagestreamFeMessage::Nblocks(_) => {}
+            PagestreamFeMessage::GetSlruSegment(_) => {}
             PagestreamFeMessage::GetPage(req) => {
                 total += 1;
 

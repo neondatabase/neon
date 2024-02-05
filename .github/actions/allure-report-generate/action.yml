@@ -179,23 +179,6 @@ runs:
           aws s3 rm "s3://${BUCKET}/${LOCK_FILE}"
         fi
 
-    - name: Store Allure test stat in the DB
-      if: ${{ !cancelled() && inputs.store-test-results-into-db == 'true' }}
-      shell: bash -euxo pipefail {0}
-      env:
-        COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        REPORT_JSON_URL: ${{ steps.generate-report.outputs.report-json-url }}
-      run: |
-        export DATABASE_URL=${REGRESS_TEST_RESULT_CONNSTR}
-
-        ./scripts/pysync
-
-        poetry run python3 scripts/ingest_regress_test_result.py \
-          --revision ${COMMIT_SHA} \
-          --reference ${GITHUB_REF} \
-          --build-type unified \
-          --ingest ${WORKDIR}/report/data/suites.json
-
     - name: Store Allure test stat in the DB (new)
       if: ${{ !cancelled() && inputs.store-test-results-into-db == 'true' }}
       shell: bash -euxo pipefail {0}

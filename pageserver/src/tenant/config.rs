@@ -345,6 +345,9 @@ pub struct TenantConf {
     /// may be disabled if a Tenant will not have secondary locations: only secondary
     /// locations will use the heatmap uploaded by attached locations.
     pub heatmap_period: Duration,
+
+    /// If true then SLRU segments are dowloaded on demand, if false SLRU segments are included in basebackup
+    pub lazy_slru_download: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -430,6 +433,10 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub heatmap_period: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub lazy_slru_download: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -475,6 +482,9 @@ impl TenantConfOpt {
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
             gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
             heatmap_period: self.heatmap_period.unwrap_or(global_conf.heatmap_period),
+            lazy_slru_download: self
+                .lazy_slru_download
+                .unwrap_or(global_conf.lazy_slru_download),
         }
     }
 }
@@ -513,6 +523,7 @@ impl Default for TenantConf {
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
             gc_feedback: false,
             heatmap_period: Duration::ZERO,
+            lazy_slru_download: false,
         }
     }
 }
@@ -584,6 +595,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
                 .map(humantime),
             gc_feedback: value.gc_feedback,
             heatmap_period: value.heatmap_period.map(humantime),
+            lazy_slru_download: value.lazy_slru_download,
         }
     }
 }

@@ -1,4 +1,4 @@
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod mock;
 pub mod neon;
 
@@ -199,7 +199,7 @@ pub mod errors {
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum AuthSecret {
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     /// Md5 hash of user's password.
     Md5([u8; 16]),
 
@@ -250,11 +250,11 @@ pub trait Api {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, errors::GetAuthInfoError>;
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
@@ -264,13 +264,16 @@ pub trait Api {
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 
-#[derive(Clone)]
+#[non_exhaustive]
 pub enum ConsoleBackend {
     /// Current Cloud API (V2).
     Console(neon::Api),
     /// Local mock of Cloud API (V2).
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     Postgres(mock::Api),
+    /// Internal testing
+    #[cfg(test)]
+    Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
 #[async_trait]
@@ -283,21 +286,25 @@ impl Api for ConsoleBackend {
         use ConsoleBackend::*;
         match self {
             Console(api) => api.get_role_secret(ctx, user_info).await,
-            #[cfg(feature = "testing")]
+            #[cfg(any(test, feature = "testing"))]
             Postgres(api) => api.get_role_secret(ctx, user_info).await,
+            #[cfg(test)]
+            Test(_) => unreachable!("this function should never be called in the test backend"),
         }
     }
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, errors::GetAuthInfoError> {
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
         use ConsoleBackend::*;
         match self {
-            Console(api) => api.get_allowed_ips(ctx, user_info).await,
-            #[cfg(feature = "testing")]
-            Postgres(api) => api.get_allowed_ips(ctx, user_info).await,
+            Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            #[cfg(test)]
+            Test(api) => api.get_allowed_ips_and_secret(),
         }
     }
 
@@ -310,8 +317,10 @@ impl Api for ConsoleBackend {
 
         match self {
             Console(api) => api.wake_compute(ctx, user_info).await,
-            #[cfg(feature = "testing")]
+            #[cfg(any(test, feature = "testing"))]
             Postgres(api) => api.wake_compute(ctx, user_info).await,
+            #[cfg(test)]
+            Test(api) => api.wake_compute(),
         }
     }
 }

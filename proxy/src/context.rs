@@ -89,8 +89,11 @@ impl RequestMonitoring {
         self.project = Some(x.project_id);
     }
 
-    pub fn set_endpoint_id(&mut self, endpoint_id: Option<EndpointId>) {
-        self.endpoint_id = endpoint_id.or_else(|| self.endpoint_id.clone());
+    pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+        crate::metrics::CONNECTING_ENDPOINTS
+            .with_label_values(&[self.protocol])
+            .measure(&endpoint_id);
+        self.endpoint_id = Some(endpoint_id);
     }
 
     pub fn set_application(&mut self, app: Option<SmolStr>) {

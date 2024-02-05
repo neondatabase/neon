@@ -51,7 +51,7 @@ project_git_version!(GIT_VERSION);
 
 const DEFAULT_PG_VERSION: &str = "15";
 
-const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/";
+const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
 fn default_conf(num_pageservers: u16) -> String {
     let mut template = format!(
@@ -795,7 +795,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                     &endpoint.timeline_id.to_string(),
                     branch_name,
                     lsn_str.as_str(),
-                    endpoint.status(),
+                    &format!("{}", endpoint.status()),
                 ]);
             }
 

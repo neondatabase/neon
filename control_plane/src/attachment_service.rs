@@ -17,6 +17,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{env, str::FromStr};
 use tokio::process::Command;
 use tracing::instrument;
+use url::Url;
 use utils::{
     auth::{Claims, Scope},
     id::{NodeId, TenantId},
@@ -59,6 +60,7 @@ pub struct InspectResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantCreateResponseShard {
+    pub shard_id: TenantShardId,
     pub node_id: NodeId,
     pub generation: u32,
 }
@@ -455,6 +457,12 @@ impl AttachmentService {
             args.push(format!("--public-key={public_key_path}"));
         }
 
+        if let Some(control_plane_compute_hook_api) = &self.env.control_plane_compute_hook_api {
+            args.push(format!(
+                "--compute-hook-url={control_plane_compute_hook_api}"
+            ));
+        }
+
         background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,
@@ -523,13 +531,15 @@ impl AttachmentService {
         RQ: Serialize + Sized,
         RS: DeserializeOwned + Sized,
     {
-        let url = self
-            .env
-            .control_plane_api
-            .clone()
-            .unwrap()
-            .join(&path)
-            .unwrap();
+        // The configured URL has the /upcall path prefix for pageservers to use: we will strip that out
+        // for general purpose API access.
+        let listen_url = self.env.control_plane_api.clone().unwrap();
+        let url = Url::from_str(&format!(
+            "http://{}:{}/{path}",
+            listen_url.host_str().unwrap(),
+            listen_url.port().unwrap()
+        ))
+        .unwrap();
 
         let mut builder = self.client.request(method, url);
         if let Some(body) = body {
@@ -566,7 +576,7 @@ impl AttachmentService {
         let response = self
             .dispatch::<_, AttachHookResponse>(
                 Method::POST,
-                "attach-hook".to_string(),
+                "debug/v1/attach-hook".to_string(),
                 Some(request),
             )
             .await?;
@@ -582,7 +592,11 @@ impl AttachmentService {
         let request = InspectRequest { tenant_shard_id };
 
         let response = self
-            .dispatch::<_, InspectResponse>(Method::POST, "inspect".to_string(), Some(request))
+            .dispatch::<_, InspectResponse>(
+                Method::POST,
+                "debug/v1/inspect".to_string(),
+                Some(request),
+            )
             .await?;
 
         Ok(response.attachment)
@@ -599,8 +613,12 @@ impl AttachmentService {
 
     #[instrument(skip(self))]
     pub async fn tenant_locate(&self, tenant_id: TenantId) -> anyhow::Result<TenantLocateResponse> {
-        self.dispatch::<(), _>(Method::GET, format!("tenant/{tenant_id}/locate"), None)
-            .await
+        self.dispatch::<(), _>(
+            Method::GET,
+            format!("control/v1/tenant/{tenant_id}/locate"),
+            None,
+        )
+        .await
     }
 
     #[instrument(skip(self))]
@@ -622,7 +640,7 @@ impl AttachmentService {
 
     #[instrument(skip_all, fields(node_id=%req.node_id))]
     pub async fn node_register(&self, req: NodeRegisterRequest) -> anyhow::Result<()> {
-        self.dispatch::<_, ()>(Method::POST, "node".to_string(), Some(req))
+        self.dispatch::<_, ()>(Method::POST, "control/v1/node".to_string(), Some(req))
             .await
     }
 
@@ -630,7 +648,7 @@ impl AttachmentService {
     pub async fn node_configure(&self, req: NodeConfigureRequest) -> anyhow::Result<()> {
         self.dispatch::<_, ()>(
             Method::PUT,
-            format!("node/{}/config", req.node_id),
+            format!("control/v1/node/{}/config", req.node_id),
             Some(req),
         )
         .await

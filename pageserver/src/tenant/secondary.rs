@@ -112,7 +112,7 @@ impl SecondaryTenant {
             // on shutdown we walk the tenants and fire their
             // individual cancellations?
             cancel: CancellationToken::new(),
-            gate: Gate::new(format!("SecondaryTenant {tenant_shard_id}")),
+            gate: Gate::default(),
 
             shard_identity,
             tenant_conf: std::sync::Mutex::new(tenant_conf),
