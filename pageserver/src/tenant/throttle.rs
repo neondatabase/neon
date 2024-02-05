@@ -1,9 +1,8 @@
-use std::{num::NonZeroU64, sync::Arc, time::Duration};
-
-use itertools::Itertools;
+use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
+use tracing::error;
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
@@ -16,83 +15,7 @@ pub struct Inner {
     rate_limiter: Arc<leaky_bucket::RateLimiter>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Config {
-    pub task_kinds: EnumSet<TaskKind>, // empty set disables the rate limit
-    pub initial: usize,
-    pub interval_millis: NonZeroU64,
-    pub max: usize,
-    pub fair: bool,
-}
-
-impl Config {
-    pub fn disabled() -> Config {
-        Config {
-            task_kinds: EnumSet::empty(),
-            initial: 0,
-            interval_millis: NonZeroU64::try_from(1).unwrap(),
-            max: 0,
-            fair: true,
-        }
-    }
-}
-
-impl TryFrom<pageserver_api::models::ThrottleConfig> for Config {
-    type Error = String;
-
-    fn try_from(value: pageserver_api::models::ThrottleConfig) -> Result<Self, Self::Error> {
-        let pageserver_api::models::ThrottleConfig {
-            task_kinds,
-            initial,
-            interval_millis,
-            max,
-            fair,
-        } = value;
-
-        let task_kinds: EnumSet<TaskKind> = task_kinds
-            .into_iter()
-            .map(|s| {
-                serde_json::from_str::<'_, TaskKind>(&s).map_err(|e| {
-                    format!(
-                        "canont parse task kind: {}",
-                        utils::error::report_compact_sources(&e)
-                    )
-                })
-            })
-            .try_collect()?;
-
-        Ok(Self {
-            task_kinds,
-            initial,
-            interval_millis,
-            max,
-            fair,
-        })
-    }
-}
-
-impl From<Config> for pageserver_api::models::ThrottleConfig {
-    fn from(value: Config) -> Self {
-        let Config {
-            task_kinds,
-            initial,
-            interval_millis,
-            max,
-            fair,
-        } = value;
-        pageserver_api::models::ThrottleConfig {
-            task_kinds: task_kinds
-                .iter()
-                .map(|k| serde_json::to_string(&k))
-                .try_collect()
-                .expect("TaskKind serialization cannot fail"),
-            initial,
-            interval_millis,
-            max,
-            fair,
-        }
-    }
-}
+pub type Config = pageserver_api::models::ThrottleConfig;
 
 impl Throttle {
     pub fn new(config: Config) -> Self {
@@ -103,6 +26,20 @@ impl Throttle {
             max,
             fair,
         } = config;
+        let task_kinds: EnumSet<TaskKind> = task_kinds
+            .into_iter()
+            .filter_map(|s| match serde_json::from_str::<'_, TaskKind>(&s) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    // TODO: avoid this failure mode
+                    error!(
+                        "canont parse task kind, ignoring for rate limiting {}",
+                        utils::error::report_compact_sources(&e)
+                    );
+                    None
+                }
+            })
+            .collect();
         Self {
             inner: ArcSwap::new(Arc::new(Inner {
                 task_kinds,

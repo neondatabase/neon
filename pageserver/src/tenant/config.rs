@@ -349,7 +349,7 @@ pub struct TenantConf {
     /// If true then SLRU segments are dowloaded on demand, if false SLRU segments are included in basebackup
     pub lazy_slru_download: bool,
 
-    pub timeline_get_rate_limit: crate::tenant::throttle::Config,
+    pub timeline_get_rate_limit: pageserver_api::models::ThrottleConfig,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -441,7 +441,7 @@ pub struct TenantConfOpt {
     pub lazy_slru_download: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeline_get_rate_limit: Option<crate::tenant::throttle::Config>,
+    pub timeline_get_rate_limit: Option<pageserver_api::models::ThrottleConfig>,
 }
 
 impl TenantConfOpt {
