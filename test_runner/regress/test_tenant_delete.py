@@ -9,6 +9,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
+    S3Scrubber,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -19,12 +20,13 @@ from fixtures.pageserver.utils import (
     assert_prefix_not_empty,
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
+    wait_for_upload,
     wait_tenant_status_404,
     wait_until_tenant_active,
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
-from fixtures.types import TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
 from requests.exceptions import ReadTimeout
 
@@ -669,3 +671,37 @@ def test_tenant_delete_races_timeline_creation(
 
     # Zero tenants remain (we deleted the default tenant)
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+
+
+def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
+    """
+    Validate that creating and then deleting the tenant both survives the scrubber,
+    and that one can run the scrubber without problems.
+    """
+
+    remote_storage_kind = RemoteStorageKind.MOCK_S3
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    scrubber = S3Scrubber(neon_env_builder)
+    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+
+    ps_http = env.pageserver.http_client()
+    # create a tenant separate from the main tenant so that we have one remaining
+    # after we deleted it, as the scrubber treats empty buckets as an error.
+    (tenant_id, timeline_id) = env.neon_cli.create_tenant()
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        run_pg_bench_small(pg_bin, endpoint.connstr())
+        last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    ps_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
+    env.stop()
+
+    scrubber.scan_metadata()
+
+    env.start()
+    ps_http = env.pageserver.http_client()
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
+    tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    env.stop()
+
+    scrubber.scan_metadata()
