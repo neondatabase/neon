@@ -6839,6 +6839,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "getrandom 0.2.11",
+ "hashbrown 0.13.2",
  "hashbrown 0.14.0",
  "hex",
  "hmac",
