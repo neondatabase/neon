@@ -424,7 +424,7 @@ async fn upload_tenant_heatmap(
         3,
         u32::MAX,
         "Uploading heatmap",
-        &cancel,
+        cancel,
     )
     .await
     .ok_or_else(|| anyhow::anyhow!("Shutting down"))
