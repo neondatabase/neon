@@ -34,9 +34,9 @@ struct Cli {
     #[arg(short, long)]
     listen: std::net::SocketAddr,
 
-    /// Path to public key for JWT authentication of clients
+    /// Public key for JWT authentication of clients
     #[arg(long)]
-    public_key: Option<camino::Utf8PathBuf>,
+    public_key: Option<String>,
 
     /// Token for authenticating this service with the pageservers it controls
     #[arg(long)]
@@ -159,7 +159,7 @@ impl Secrets {
     fn load_cli(database_url: &str, args: &Cli) -> anyhow::Result<Self> {
         let public_key = match &args.public_key {
             None => None,
-            Some(key_path) => Some(JwtAuth::from_key_path(key_path)?),
+            Some(key) => Some(JwtAuth::from_key(key.clone()).context("Loading public key")?),
         };
         Ok(Self {
             database_url: database_url.to_owned(),
