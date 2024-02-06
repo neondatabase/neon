@@ -473,7 +473,7 @@ mod tests {
         assert_eq!(*g, "now initialized");
     }
 
-    macro_rules! init_race_reproduction {
+    macro_rules! assertion_failure_reproduction {
         ($method:ident) => {{
             let cell = OnceCell::default();
 
@@ -512,25 +512,22 @@ mod tests {
                 _ = tokio::time::sleep(Duration::from_secs(3600 * 24 * 7 * 365)) => {}
             }
 
-            drop(permit);
-
             // now let "the other" proceed and initialize
+            drop(permit);
             drop(t2.await);
 
             let (s, permit) = { cell.get_mut().await.unwrap().take_and_deinit() };
             assert_eq!("t2", s);
 
-            // now t1 will see the original semaphore as closed, and assert that the option is set
-            // instead it should notice the Arc is not the same, and loop around
-
+            // now t1 will see the original semaphore as closed. it cannot yet get a permit from
+            // the new one.
             tokio::select! {
                 _ = &mut t1 => unreachable!("it cannot get permit"),
                 _ = tokio::time::sleep(Duration::from_secs(3600 * 24 * 7 * 365)) => {}
             }
 
-            drop(permit);
-
             // only now we get to initialize it
+            drop(permit);
             drop(t1.await);
 
             assert_eq!("t1", *cell.get().await.unwrap());
@@ -539,11 +536,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn reproduce_init_take_deinit_race() {
-        init_race_reproduction!(get_or_init);
+        assertion_failure_reproduction!(get_or_init);
     }
 
     #[tokio::test(start_paused = true)]
     async fn reproduce_init_take_deinit_race_mut() {
-        init_race_reproduction!(get_mut_or_init);
+        assertion_failure_reproduction!(get_mut_or_init);
     }
 }
