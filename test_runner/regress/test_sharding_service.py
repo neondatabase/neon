@@ -35,6 +35,11 @@ def test_sharding_service_smoke(
     neon_env_builder.num_pageservers = 3
     env = neon_env_builder.init_configs()
 
+    for pageserver in env.pageservers:
+        # This test detaches tenants during migration, which can race with deletion queue operations,
+        # during detach we only do an advisory flush, we don't wait for it.
+        pageserver.allowed_errors.extend([".*Dropped remote consistent LSN updates.*"])
+
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.try_start()
     env.attachment_service.start()

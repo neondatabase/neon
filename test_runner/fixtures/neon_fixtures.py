@@ -1162,7 +1162,8 @@ class NeonEnv:
         to the attachment service.
         """
         meta = self.attachment_service.inspect(tenant_id)
-        assert meta is not None, f"{tenant_id} attachment location not found"
+        if meta is None:
+            return None
         pageserver_id = meta[1]
         return self.get_pageserver(pageserver_id)
 
