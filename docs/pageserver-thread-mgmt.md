@@ -22,7 +22,7 @@ timeline to shutdown. It will also wait for them to finish.
 
 A task registered in the task registry can check if it has been
 requested to shut down, by calling `is_shutdown_requested()`. There's
-also a `shudown_watcher()` Future that can be used with `tokio::select!`
+also a `shutdown_watcher()` Future that can be used with `tokio::select!`
 or similar, to wake up on shutdown.
 
 

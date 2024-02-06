@@ -13,12 +13,14 @@ def test_migrations(neon_simple_env: NeonEnv):
     endpoint.respec(skip_pg_catalog_updates=False, features=["migrations"])
     endpoint.start()
 
-    time.sleep(1)  # Sleep to let migrations run
+    endpoint.wait_for_migrations()
+
+    num_migrations = 3
 
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
-        assert migration_id[0][0] == 3
+        assert migration_id[0][0] == num_migrations
 
     with open(log_path, "r") as log_file:
         logs = log_file.read()
@@ -26,11 +28,13 @@ def test_migrations(neon_simple_env: NeonEnv):
 
     endpoint.stop()
     endpoint.start()
-    time.sleep(1)  # Sleep to let migrations run
+    # We don't have a good way of knowing that the migrations code path finished executing
+    # in compute_ctl in the case that no migrations are being run
+    time.sleep(1)
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
-        assert migration_id[0][0] == 3
+        assert migration_id[0][0] == num_migrations
 
     with open(log_path, "r") as log_file:
         logs = log_file.read()
