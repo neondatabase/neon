@@ -4666,41 +4666,31 @@ impl Timeline {
         let Ok(guard) = self.layers.try_read() else {
             return None;
         };
-        let layers = guard.layer_map();
+
+        let layers = guard.resident_layers().await;
 
         let mut max_layer_size: Option<u64> = None;
-        let mut resident_layers = Vec::new();
+        let resident_layers = layers
+            .into_iter()
+            .map(|layer| {
+                let file_size = layer.layer_desc().file_size;
+                max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-        for l in layers.iter_historic_layers() {
-            let file_size = l.file_size();
-            max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
+                let last_activity_ts =
+                    layer.access_stats().latest_activity().unwrap_or_else(|| {
+                        // We only use this fallback if there's an implementation error.
+                        // `latest_activity` already does rate-limited warn!() log.
+                        debug!(%layer, "last_activity returns None, using SystemTime::now");
+                        SystemTime::now()
+                    });
 
-            let l = guard.get_from_desc(&l);
-
-            let l = match l.keep_resident().await {
-                Ok(Some(l)) => l,
-                Ok(None) => continue,
-                Err(e) => {
-                    // these should not happen, but we cannot make them statically impossible right
-                    // now.
-                    tracing::warn!(layer=%l, "failed to keep the layer resident: {e:#}");
-                    continue;
+                EvictionCandidate {
+                    layer: layer.into(),
+                    last_activity_ts,
+                    relative_last_activity: finite_f32::FiniteF32::ZERO,
                 }
-            };
-
-            let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
-                // We only use this fallback if there's an implementation error.
-                // `latest_activity` already does rate-limited warn!() log.
-                debug!(layer=%l, "last_activity returns None, using SystemTime::now");
-                SystemTime::now()
-            });
-
-            resident_layers.push(EvictionCandidate {
-                layer: l.drop_eviction_guard().into(),
-                last_activity_ts,
-                relative_last_activity: finite_f32::FiniteF32::ZERO,
-            });
-        }
+            })
+            .collect();
 
         Some(DiskUsageEvictionInfo {
             max_layer_size,
