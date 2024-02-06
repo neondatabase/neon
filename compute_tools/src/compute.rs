@@ -207,6 +207,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
 
 /// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
 /// that we give to customers
+#[instrument(skip_all)]
 fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let roles = spec
         .cluster
