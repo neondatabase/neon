@@ -1,4 +1,5 @@
 import os
+import time
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -47,7 +48,7 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
     cur.execute("select create_snapshots(10000)")
     # Wait logical replication to sync
     logical_replication_sync(vanilla_pg, endpoint)
-    cur.execute("vacuum")
+    time.sleep(10)
 
     # Check layer file sizes
     timeline_path = "{}/tenants/{}/timelines/{}/".format(
