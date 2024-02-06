@@ -695,8 +695,6 @@ jobs:
     if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' }}
     needs: [ check-permissions, promote-images, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
-    with:
-      build-tag: needs.tag.outputs.build-tag
     secrets: inherit
 
   neon-image:

@@ -5,10 +5,6 @@ on:
     types:
       - ready_for_review
   workflow_call:
-    inputs:
-      build-tag:
-        required: true
-        type: string
 
 defaults:
   run:
@@ -66,13 +62,12 @@ jobs:
     needs: [ tag ]
     runs-on: [ self-hosted, gen3, small ]
     env:
-      TAG: ${{ github.event_name == 'pull_request' && needs.tag.outputs.build-tag || github.event.inputs.build-tag }}
+      TAG: ${{ needs.tag.outputs.build-tag }}
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
     steps:
       - name: check if ecr image are present
-        id: check-ecr-image-present
         run: |
           for REPO in neon compute-tools compute-node-v14 vm-compute-node-v14 compute-node-v15 vm-compute-node-v15 compute-node-v16 vm-compute-node-v16; do
             OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
