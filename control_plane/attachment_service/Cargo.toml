@@ -25,6 +25,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 diesel = { version = "2.1.4", features = ["serde_json", "postgres"] }
+diesel_migrations = { version = "2.1.0" }
 
 utils = { path = "../../libs/utils/" }
 metrics = { path = "../../libs/metrics/" }
