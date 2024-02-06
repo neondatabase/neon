@@ -63,8 +63,7 @@ def test_lazy_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchm
           $$ LANGUAGE plpgsql
         """
         )
-        endpoint.safe_psql("SET statement_timeout=0")
-        endpoint.safe_psql("call updating()")
+        endpoint.safe_psql("SET statement_timeout=0; call updating()")
 
         endpoint.stop()
 
