@@ -105,7 +105,7 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
+use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
