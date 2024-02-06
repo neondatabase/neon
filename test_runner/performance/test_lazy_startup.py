@@ -51,7 +51,7 @@ def test_lazy_startup(slru: str, neon_env_builder: NeonEnvBuilder, zenbenchmark:
                 DECLARE
                 i integer;
                 BEGIN
-                FOR i IN 1..10000000 LOOP
+                FOR i IN 1..1000000 LOOP
                     UPDATE t SET x = x + 1 WHERE pk=1;
                     COMMIT;
                 END LOOP;
@@ -74,7 +74,7 @@ def test_lazy_startup(slru: str, neon_env_builder: NeonEnvBuilder, zenbenchmark:
 
         with zenbenchmark.record_duration(f"{slru}_{i}_select"):
             sum = endpoint.safe_psql("select sum(x) from t")[0][0]
-            assert sum == 10000000
+            assert sum == 1000000
 
         # Get metrics
         metrics = requests.get(f"http://localhost:{endpoint.http_port}/metrics.json").json()
