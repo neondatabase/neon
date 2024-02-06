@@ -1268,7 +1268,7 @@ impl Timeline {
         let mut historic_layers = Vec::new();
         for historic_layer in layer_map.iter_historic_layers() {
             let historic_layer = guard.get_from_desc(&historic_layer);
-            historic_layers.push(historic_layer.info(reset));
+            historic_layers.push(historic_layer.info(reset).await);
         }
 
         LayerMapInfo {
