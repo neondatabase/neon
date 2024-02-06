@@ -6,6 +6,7 @@ pub enum Metadata {
     TokioEpollUring(Box<tokio_epoll_uring::ops::statx::statx>),
 }
 
+#[cfg(target_os = "linux")]
 impl From<Box<tokio_epoll_uring::ops::statx::statx>> for Metadata {
     fn from(value: Box<tokio_epoll_uring::ops::statx::statx>) -> Self {
         Metadata::TokioEpollUring(value)

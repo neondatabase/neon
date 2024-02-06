@@ -67,6 +67,7 @@ use std::os::unix::prelude::FileExt;
 
 use super::{FileGuard, Metadata};
 
+#[cfg(target_os = "linux")]
 fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
     match e {
         tokio_epoll_uring::Error::Op(e) => e,
@@ -118,6 +119,7 @@ impl IoEngineKind {
                 let res = file_guard.with_std_file(|std_file| std_file.sync_all());
                 (file_guard, res)
             }
+            #[cfg(target_os = "linux")]
             IoEngineKind::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
                 let (resources, res) = system.fsync(file_guard).await;
@@ -134,6 +136,7 @@ impl IoEngineKind {
                 let res = file_guard.with_std_file(|std_file| std_file.sync_data());
                 (file_guard, res)
             }
+            #[cfg(target_os = "linux")]
             IoEngineKind::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
                 let (resources, res) = system.fdatasync(file_guard).await;
@@ -151,6 +154,7 @@ impl IoEngineKind {
                     file_guard.with_std_file(|std_file| std_file.metadata().map(Metadata::from));
                 (file_guard, res)
             }
+            #[cfg(target_os = "linux")]
             IoEngineKind::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
                 let (resources, res) = system.statx(file_guard).await;
