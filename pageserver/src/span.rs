@@ -1,7 +1,5 @@
-#[cfg(debug_assertions)]
 use utils::tracing_span_assert::check_fields_present;
 
-#[cfg(debug_assertions)]
 mod extractors {
     use utils::tracing_span_assert::ConstExtractor;
 
