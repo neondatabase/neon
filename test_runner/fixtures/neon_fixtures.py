@@ -3131,10 +3131,7 @@ class Endpoint(PgProtocol):
             log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
-    # Please note: if you didn't respec this endpoint to have the `migrations`
-    # feature, this function will probably fail because neon_migration.migration_id
-    # won't exist. This is temporary - soon we'll get rid of the feature flag and
-    # migrations will be enabled for everyone.
+    # Please note: Migrations only run if pg_skip_catalog_updates is false
     def wait_for_migrations(self):
         with self.cursor() as cur:
 
