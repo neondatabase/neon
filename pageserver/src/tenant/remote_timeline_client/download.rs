@@ -76,7 +76,6 @@ pub async fn download_layer_file<'a>(
     // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
     let temp_file_path = path_with_suffix_extension(&local_path, TEMP_DOWNLOAD_EXTENSION);
 
-    let cancel_inner = cancel.clone();
     let (mut destination_file, bytes_amount) = download_retry(
         || async {
             let destination_file = tokio::fs::File::create(&temp_file_path)
@@ -87,7 +86,7 @@ pub async fn download_layer_file<'a>(
             // Cancellation safety: it is safe to cancel this future, because it isn't writing to a local
             // file: the write to local file doesn't start until after the request header is returned
             // and we start draining the body stream below
-            let download = download_cancellable(&cancel_inner, storage.download(&remote_path))
+            let download = download_cancellable(cancel, storage.download(&remote_path))
                 .await
                 .with_context(|| {
                     format!(
@@ -107,7 +106,7 @@ pub async fn download_layer_file<'a>(
             // we will imminiently try and write to again.
             let bytes_amount: u64 = match timeout_cancellable(
                 DOWNLOAD_TIMEOUT,
-                &cancel_inner,
+                cancel,
                 tokio::io::copy_buf(&mut reader, &mut destination_file),
             )
             .await
@@ -386,9 +385,11 @@ pub(super) async fn download_index_part(
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "listing index_part files",
-        backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
+        &cancel,
     )
     .await
+    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .and_then(|x| x)
     .map_err(DownloadError::Other)?;
 
     // General case logic for which index to use: the latest index whose generation
@@ -510,7 +511,7 @@ pub(crate) async fn download_initdb_tar_zst(
 
 /// Helper function to handle retries for a download operation.
 ///
-/// Remote operations can fail due to rate limits (IAM, S3), spurious network
+/// Remote operations can fail due to rate limits (S3), spurious network
 /// problems, or other external reasons. Retry FAILED_DOWNLOAD_RETRIES times,
 /// with backoff.
 ///
@@ -530,9 +531,11 @@ where
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
-        backoff::Cancel::new(cancel.clone(), || DownloadError::Cancelled),
+        cancel,
     )
     .await
+    .ok_or_else(|| DownloadError::Cancelled)
+    .and_then(|x| x)
 }
 
 async fn download_retry_forever<T, O, F>(
@@ -550,7 +553,9 @@ where
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         u32::MAX,
         description,
-        backoff::Cancel::new(cancel, || DownloadError::Cancelled),
+        &cancel,
     )
     .await
+    .ok_or_else(|| DownloadError::Cancelled)
+    .and_then(|x| x)
 }

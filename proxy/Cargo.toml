@@ -31,6 +31,7 @@ hyper-tungstenite.workspace = true
 hyper.workspace = true
 ipnet.workspace = true
 itertools.workspace = true
+lasso = { workspace = true, features = ["multi-threaded"] }
 md5.workspace = true
 metrics.workspace = true
 once_cell.workspace = true
@@ -92,3 +93,4 @@ rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
 walkdir.workspace = true
+rand_distr = "0.4"
