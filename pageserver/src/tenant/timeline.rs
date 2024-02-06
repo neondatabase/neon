@@ -2283,45 +2283,41 @@ impl Timeline {
     /// should treat this as a cue to simply skip doing any heatmap uploading
     /// for this timeline.
     pub(crate) async fn generate_heatmap(&self) -> Option<HeatMapTimeline> {
-        let eviction_info = self.get_local_layers_for_disk_usage_eviction().await;
+        // no point in heatmaps without remote client
+        let _remote_client = self.remote_client.as_ref()?;
 
-        let remote_client = match &self.remote_client {
-            Some(c) => c,
-            None => return None,
+        if !self.is_active() {
+            return None;
+        }
+
+        let resident = {
+            let guard = self.layers.read().await;
+            guard.resident_layers().await
         };
 
-        let layer_file_names = eviction_info
-            .resident_layers
-            .iter()
-            .map(|l| l.layer.get_name())
-            .collect::<Vec<_>>();
+        // sadly we'll need to rewrite the vec to once more; it'd be more serde structures to
+        // just produce the HeatMapTimeline serialization output out of Vec<Layer>.
 
-        let decorated = match remote_client.get_layers_metadata(layer_file_names) {
-            Ok(d) => d,
-            Err(_) => {
-                // Getting metadata only fails on Timeline in bad state.
-                return None;
-            }
-        };
+        let layers = resident
+            .into_iter()
+            .map(|layer| {
+                let last_activity_ts =
+                    layer.access_stats().latest_activity().unwrap_or_else(|| {
+                        // We only use this fallback if there's an implementation error.
+                        // `latest_activity` already does rate-limited warn!() log.
+                        debug!(%layer, "last_activity returns None, using SystemTime::now");
+                        SystemTime::now()
+                    });
 
-        let heatmap_layers = std::iter::zip(
-            eviction_info.resident_layers.into_iter(),
-            decorated.into_iter(),
-        )
-        .filter_map(|(layer, remote_info)| {
-            remote_info.map(|remote_info| {
                 HeatMapLayer::new(
-                    layer.layer.get_name(),
-                    IndexLayerMetadata::from(remote_info),
-                    layer.last_activity_ts,
+                    layer.layer_desc().filename(),
+                    layer.metadata().into(),
+                    last_activity_ts,
                 )
             })
-        });
+            .collect();
 
-        Some(HeatMapTimeline::new(
-            self.timeline_id,
-            heatmap_layers.collect(),
-        ))
+        Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
 }
 
