@@ -34,7 +34,7 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
-      build-tag: ${{steps.build-tag.outputs.tag}}
+      build-tag: ${{ steps.build-tag.outputs.tag }}
 
     steps:
       - name: Checkout
@@ -62,7 +62,7 @@ jobs:
     needs: [ tag ]
     runs-on: [ self-hosted, gen3, small ]
     env:
-      TAG: ${{ github.event.inputs.build-tag }}
+      TAG: ${{ github.event.inputs.build-tag || needs.tag.outputs.build-tag }}
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -112,8 +112,8 @@ jobs:
                 \"ci_job_name\": \"neon-cloud-e2e\",
                 \"commit_hash\": \"$COMMIT_SHA\",
                 \"remote_repo\": \"${{ github.repository }}\",
-                \"storage_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
-                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
+                \"storage_image_tag\": \"${TAG}\",
+                \"compute_image_tag\": \"${TAG}\",
                 \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
               }
             }"
