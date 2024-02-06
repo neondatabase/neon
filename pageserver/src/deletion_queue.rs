@@ -700,8 +700,6 @@ impl DeletionQueue {
     }
 
     pub async fn shutdown(&mut self, timeout: Duration) {
-        self.cancel.cancel();
-
         match tokio::time::timeout(timeout, self.client.flush()).await {
             Ok(Ok(())) => {
                 tracing::info!("Deletion queue flushed successfully on shutdown")
@@ -715,6 +713,10 @@ impl DeletionQueue {
                 tracing::warn!("Timed out flushing deletion queue on shutdown")
             }
         }
+
+        // We only cancel _after_ flushing: otherwise we would be shutting down the
+        // components that do the flush.
+        self.cancel.cancel();
     }
 }
 

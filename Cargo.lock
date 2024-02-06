@@ -281,6 +281,7 @@ dependencies = [
  "clap",
  "control_plane",
  "diesel",
+ "diesel_migrations",
  "futures",
  "git-version",
  "hyper",
@@ -2721,6 +2722,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lasso"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4644821e1c3d7a560fe13d842d13f587c07348a1a05d3a797152d41c90c56df2"
+dependencies = [
+ "dashmap",
+ "hashbrown 0.13.2",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4077,6 +4088,7 @@ dependencies = [
  "hyper-tungstenite",
  "ipnet",
  "itertools",
+ "lasso",
  "md5",
  "metrics",
  "native-tls",
@@ -4093,6 +4105,7 @@ dependencies = [
  "pq_proto",
  "prometheus",
  "rand 0.8.5",
+ "rand_distr",
  "rcgen",
  "redis",
  "regex",

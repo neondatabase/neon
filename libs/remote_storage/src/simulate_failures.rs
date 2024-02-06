@@ -190,7 +190,7 @@ impl RemoteStorage for UnreliableWrapper {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))
             .map_err(|e| TimeTravelError::Other(anyhow::Error::new(e)))?;
