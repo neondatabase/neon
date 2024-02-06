@@ -1720,6 +1720,7 @@ pub(crate) async fn ignore_tenant(
     ignore_tenant0(conf, &TENANTS, tenant_id).await
 }
 
+#[instrument(skip_all, fields(shard_id))]
 async fn ignore_tenant0(
     conf: &'static PageServerConf,
     tenants: &std::sync::RwLock<TenantsMap>,
@@ -1727,6 +1728,10 @@ async fn ignore_tenant0(
 ) -> Result<(), TenantStateError> {
     // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    tracing::Span::current().record(
+        "shard_id",
+        tracing::field::display(tenant_shard_id.shard_slug()),
+    );
 
     remove_tenant_from_memory(tenants, tenant_shard_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
