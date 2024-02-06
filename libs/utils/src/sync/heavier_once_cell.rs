@@ -393,21 +393,21 @@ mod tests {
 
         jh.await.unwrap();
 
-        assert_eq!(*cell.get_mut().unwrap(), reinit);
+        assert_eq!(*cell.get_mut().await.unwrap(), reinit);
     }
 
-    #[test]
-    fn reinit_with_deinit_permit() {
+    #[tokio::test]
+    async fn reinit_with_deinit_permit() {
         let cell = Arc::new(OnceCell::new(42));
 
         let (mol, permit) = cell.get_mut().await.unwrap().take_and_deinit();
-        cell.set(5, permit);
-        assert_eq!(*cell.get_mut().unwrap(), 5);
+        cell.set(5, permit).await;
+        assert_eq!(*cell.get_mut().await.unwrap(), 5);
 
-        let (five, permit) = cell.get_mut().unwrap().take_and_deinit();
+        let (five, permit) = cell.get_mut().await.unwrap().take_and_deinit();
         assert_eq!(5, five);
-        cell.set(mol, permit);
-        assert_eq!(*cell.get_mut().unwrap(), 42);
+        cell.set(mol, permit).await;
+        assert_eq!(*cell.get_mut().await.unwrap(), 42);
     }
 
     #[tokio::test]

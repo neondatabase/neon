@@ -489,6 +489,12 @@ async fn timeline_create_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
+        if let Some(ancestor_id) = request_data.ancestor_timeline_id.as_ref() {
+            tracing::info!(%ancestor_id, "starting to branch");
+        } else {
+            tracing::info!("bootstrapping");
+        }
+
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -529,7 +535,7 @@ async fn timeline_create_handler(
     }
     .instrument(info_span!("timeline_create",
         tenant_id = %tenant_shard_id.tenant_id,
-        shard = %tenant_shard_id.shard_slug(),
+        shard_id = %tenant_shard_id.shard_slug(),
         timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await
 }
@@ -682,7 +688,7 @@ async fn get_lsn_by_timestamp_handler(
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
-    #[derive(serde::Serialize)]
+    #[derive(serde::Serialize, Debug)]
     struct Result {
         lsn: Lsn,
         kind: &'static str,
@@ -693,7 +699,14 @@ async fn get_lsn_by_timestamp_handler(
         LsnForTimestamp::Past(lsn) => (lsn, "past"),
         LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
     };
-    json_response(StatusCode::OK, Result { lsn, kind })
+    let result = Result { lsn, kind };
+    tracing::info!(
+        lsn=?result.lsn,
+        kind=%result.kind,
+        timestamp=%timestamp_raw,
+        "lsn_by_timestamp finished"
+    );
+    json_response(StatusCode::OK, result)
 }
 
 async fn get_timestamp_of_lsn_handler(
@@ -818,7 +831,7 @@ async fn timeline_delete_handler(
             }
         })?;
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-    tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
+    tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -843,7 +856,7 @@ async fn tenant_detach_handler(
         detach_ignored.unwrap_or(false),
         &state.deletion_queue_client,
     )
-    .instrument(info_span!("tenant_detach", %tenant_id))
+    .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
     .await?;
 
     json_response(StatusCode::OK, ())
@@ -994,7 +1007,7 @@ async fn tenant_delete_handler(
         .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
-            shard = %tenant_shard_id.shard_slug()
+            shard_id = %tenant_shard_id.shard_slug()
         ))
         .await?;
 
@@ -1350,7 +1363,7 @@ async fn put_tenant_location_config_handler(
             mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
                 .instrument(info_span!("tenant_detach",
                     tenant_id = %tenant_shard_id.tenant_id,
-                    shard = %tenant_shard_id.shard_slug()
+                    shard_id = %tenant_shard_id.shard_slug()
                 ))
                 .await
         {

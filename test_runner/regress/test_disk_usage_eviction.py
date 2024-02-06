@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
@@ -194,8 +194,10 @@ class EvictionEnv:
 
         # we now do initial logical size calculation on startup, which on debug builds can fight with disk usage based eviction
         for tenant_id, timeline_id in self.timelines:
-            pageserver_http = self.neon_env.get_tenant_pageserver(tenant_id).http_client()
-            pageserver_http.timeline_wait_logical_size(tenant_id, timeline_id)
+            tenant_ps = self.neon_env.get_tenant_pageserver(tenant_id)
+            # Pageserver may be none if we are currently not attached anywhere, e.g. during secondary eviction test
+            if tenant_ps is not None:
+                tenant_ps.http_client().timeline_wait_logical_size(tenant_id, timeline_id)
 
         def statvfs_called():
             assert pageserver.log_contains(".*running mocked statvfs.*")
@@ -864,18 +866,18 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
 
     # Set up a situation where one pageserver _only_ has secondary locations on it,
     # so that when we release space we are sure it is via secondary locations.
-
-    log.info("Setting up secondary location...")
-    ps_attached = env.neon_env.pageservers[0]
+    log.info("Setting up secondary locations...")
     ps_secondary = env.neon_env.pageservers[1]
     for tenant_id in tenant_ids:
-        # Migrate all attached tenants to the same pageserver, so that all the secondaries
-        # will run on the other pageserver.  This is necessary because when we create tenants,
-        # they are spread over pageservers by default.
-        env.neon_env.attachment_service.tenant_shard_migrate(
-            TenantShardId(tenant_id, 0, 0), ps_attached.id
-        )
+        # Find where it is attached
+        pageserver = env.neon_env.get_tenant_pageserver(tenant_id)
+        pageserver.http_client().tenant_heatmap_upload(tenant_id)
 
+        # Detach it
+        pageserver.tenant_detach(tenant_id)
+
+        # Create a secondary mode location for the tenant, all tenants on one pageserver that will only
+        # contain secondary locations: this is the one where we will exercise disk usage eviction
         ps_secondary.tenant_location_configure(
             tenant_id,
             {
@@ -887,8 +889,8 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
         readback_conf = ps_secondary.read_tenant_location_conf(tenant_id)
         log.info(f"Read back conf: {readback_conf}")
 
-        # Request secondary location to download all layers that the attached location has
-        ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+        # Request secondary location to download all layers that the attached location indicated
+        # in its heatmap
         ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
     # Configure the secondary pageserver to have a phony small disk size

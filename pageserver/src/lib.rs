@@ -17,6 +17,7 @@ pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod repository;
+pub mod span;
 pub(crate) mod statvfs;
 pub mod task_mgr;
 pub mod tenant;

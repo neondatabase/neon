@@ -638,7 +638,7 @@ impl RemoteStorage for S3Bucket {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         let kind = RequestKind::TimeTravel;
         let _guard = self.permit(kind).await;
@@ -678,9 +678,11 @@ impl RemoteStorage for S3Bucket {
                 warn_threshold,
                 max_retries,
                 "listing object versions for time_travel_recover",
-                backoff::Cancel::new(cancel.clone(), || TimeTravelError::Cancelled),
+                cancel,
             )
-            .await?;
+            .await
+            .ok_or_else(|| TimeTravelError::Cancelled)
+            .and_then(|x| x)?;
 
             tracing::trace!(
                 "  Got List response version_id_marker={:?}, key_marker={:?}",
@@ -805,9 +807,11 @@ impl RemoteStorage for S3Bucket {
                             warn_threshold,
                             max_retries,
                             "copying object version for time_travel_recover",
-                            backoff::Cancel::new(cancel.clone(), || TimeTravelError::Cancelled),
+                            cancel,
                         )
-                        .await?;
+                        .await
+                        .ok_or_else(|| TimeTravelError::Cancelled)
+                        .and_then(|x| x)?;
                         tracing::info!(%version_id, %key, "Copied old version in S3");
                     }
                     VerOrDelete {

@@ -67,7 +67,9 @@ use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT;
-use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
+use crate::metrics::{
+    remove_tenant_metrics, BROKEN_TENANTS_SET, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
+};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
@@ -98,6 +100,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::span;
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
@@ -148,7 +151,6 @@ pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
-mod span;
 
 pub mod metadata;
 mod par_fsync;
@@ -166,7 +168,7 @@ pub(crate) mod timeline;
 
 pub mod size;
 
-pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
+pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
 // re-export for use in remote_timeline_client.rs
@@ -205,7 +207,7 @@ impl AttachedTenantConf {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => Ok(Self {
                 tenant_conf: location_conf.tenant_conf,
-                location: attach_conf.clone(),
+                location: *attach_conf,
             }),
             LocationMode::Secondary(_) => {
                 anyhow::bail!("Attempted to construct AttachedTenantConf from a LocationConf in secondary mode")
@@ -625,6 +627,9 @@ impl Tenant {
             deletion_queue_client,
         } = resources;
 
+        let attach_mode = attached_conf.location.attach_mode;
+        let generation = attached_conf.location.generation;
+
         let tenant = Arc::new(Tenant::new(
             TenantState::Attaching,
             conf,
@@ -654,6 +659,12 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+
+                info!(
+                    ?attach_mode,
+                    "Attaching tenant"
+                );
+
                 let _gate_guard = attach_gate_guard;
 
                 // Is this tenant being spawned as part of process startup?
@@ -865,7 +876,7 @@ impl Tenant {
                 Ok(())
             }
             .instrument({
-                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
+                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation);
                 span.follows_from(Span::current());
                 span
             }),
@@ -2353,12 +2364,7 @@ impl Tenant {
     }
 
     pub(crate) fn get_attach_mode(&self) -> AttachmentMode {
-        self.tenant_conf
-            .read()
-            .unwrap()
-            .location
-            .attach_mode
-            .clone()
+        self.tenant_conf.read().unwrap().location.attach_mode
     }
 
     /// For API access: generate a LocationConfig equivalent to the one that would be used to
@@ -2632,9 +2638,16 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            // Strings for metric labels
+            // reflect tenant state in metrics:
+            // - global per tenant state: TENANT_STATE_METRIC
+            // - "set" of broken tenants: BROKEN_TENANTS_SET
+            //
+            // set of broken tenants should not have zero counts so that it remains accessible for
+            // alerting.
+
             let tid = tenant_shard_id.to_string();
-            let shard_id_str = format!("{}", tenant_shard_id.shard_slug());
+            let shard_id = tenant_shard_id.shard_slug().to_string();
+            let set_key = &[tid.as_str(), shard_id.as_str()][..];
 
             fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
                 ([state.into()], matches!(state, TenantState::Broken { .. }))
@@ -2643,21 +2656,13 @@ impl Tenant {
             let mut tuple = inspect_state(&rx.borrow_and_update());
 
             let is_broken = tuple.1;
-            let mut counted_broken = if !is_broken {
-                // the tenant might be ignored and reloaded, so first remove any previous set
-                // element. it most likely has already been scraped, as these are manual operations
-                // right now. most likely we will add it back very soon.
-                drop(
-                    crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid, &shard_id_str]),
-                );
-                false
-            } else {
+            let mut counted_broken = if is_broken {
                 // add the id to the set right away, there should not be any updates on the channel
-                // after
-                crate::metrics::BROKEN_TENANTS_SET
-                    .with_label_values(&[&tid, &shard_id_str])
-                    .set(1);
+                // after before tenant is removed, if ever
+                BROKEN_TENANTS_SET.with_label_values(set_key).set(1);
                 true
+            } else {
+                false
             };
 
             loop {
@@ -2666,10 +2671,9 @@ impl Tenant {
                 current.inc();
 
                 if rx.changed().await.is_err() {
-                    // tenant has been dropped; decrement the counter because a tenant with that
-                    // state is no longer in tenant map, but allow any broken set item to exist
-                    // still.
+                    // tenant has been dropped
                     current.dec();
+                    drop(BROKEN_TENANTS_SET.remove_label_values(set_key));
                     break;
                 }
 
@@ -2679,10 +2683,9 @@ impl Tenant {
                 let is_broken = tuple.1;
                 if is_broken && !counted_broken {
                     counted_broken = true;
-                    // insert the tenant_id (back) into the set
-                    crate::metrics::BROKEN_TENANTS_SET
-                        .with_label_values(&[&tid, &shard_id_str])
-                        .inc();
+                    // insert the tenant_id (back) into the set while avoiding needless counter
+                    // access
+                    BROKEN_TENANTS_SET.with_label_values(set_key).set(1);
                 }
             }
         });
@@ -3224,8 +3227,6 @@ impl Tenant {
                 .context("branch initial metadata upload")?;
         }
 
-        info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
-
         Ok(new_timeline)
     }
 
@@ -3292,11 +3293,11 @@ impl Tenant {
             3,
             u32::MAX,
             "persist_initdb_tar_zst",
-            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
+            &self.cancel,
         )
-        .await?;
-
-        Ok(())
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .and_then(|x| x)
     }
 
     /// - run initdb to init temporary instance and get bootstrap data
@@ -3442,12 +3443,6 @@ impl Tenant {
 
         // All done!
         let timeline = raw_timeline.finish_creation()?;
-
-        info!(
-            "created root timeline {} timeline.lsn {}",
-            timeline_id,
-            timeline.get_last_record_lsn()
-        );
 
         Ok(timeline)
     }
@@ -4000,6 +3995,10 @@ pub(crate) mod harness {
                 remote_fs_dir,
                 deletion_queue,
             })
+        }
+
+        pub fn span(&self) -> tracing::Span {
+            info_span!("TenantHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
         }
 
         pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
@@ -4606,7 +4605,7 @@ mod tests {
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
-                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+                .instrument(harness.span())
                 .await
                 .ok()
                 .unwrap();
@@ -4647,7 +4646,7 @@ mod tests {
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
-                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+                .instrument(harness.span())
                 .await
                 .ok()
                 .unwrap();
@@ -4709,7 +4708,7 @@ mod tests {
         // so that all uploads finish & we can call harness.try_load() below again
         tenant
             .shutdown(Default::default(), true)
-            .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+            .instrument(harness.span())
             .await
             .ok()
             .unwrap();
@@ -5242,7 +5241,7 @@ mod tests {
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
                 .shutdown()
-                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, timeline_id=%TIMELINE_ID))
+                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, shard_id=%raw_tline.tenant_shard_id.shard_slug(), timeline_id=%TIMELINE_ID))
                 .await;
             std::mem::forget(tline);
         }

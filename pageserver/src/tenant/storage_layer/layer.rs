@@ -15,6 +15,7 @@ use utils::sync::heavier_once_cell;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
@@ -836,6 +837,8 @@ impl LayerInner {
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
     ) -> Result<heavier_once_cell::InitPermit, DownloadError> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let task_name = format!("download layer {}", self);
 
         let (tx, rx) = tokio::sync::oneshot::channel();

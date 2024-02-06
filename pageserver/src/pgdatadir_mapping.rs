@@ -10,6 +10,7 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
@@ -699,7 +700,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
