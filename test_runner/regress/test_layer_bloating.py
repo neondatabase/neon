@@ -43,6 +43,7 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
                      end loop;
                    end; $$ language plpgsql"""
     )
+    cur.execute("set statement_timeout=0")
     cur.execute("select create_snapshots(10000)")
     # Wait logical replication to sync
     logical_replication_sync(vanilla_pg, endpoint)
