@@ -297,6 +297,7 @@ pub struct InitPermit(Arc<tokio::sync::Semaphore>);
 
 impl Drop for InitPermit {
     fn drop(&mut self) {
+        debug_assert_eq!(self.0.available_permits(), 0);
         self.0.add_permits(1);
     }
 }
