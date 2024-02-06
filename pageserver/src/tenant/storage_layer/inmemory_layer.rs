@@ -6,7 +6,7 @@
 //!
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
-use crate::repository::{Key, Value};
+use crate::repository::{Key, Value, MAX_VALUE_SIZE};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
@@ -283,6 +283,15 @@ impl InMemoryLayer {
         ctx: &RequestContext,
     ) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
+
+        if let Value::Image(buf) = val {
+            if buf.len() > MAX_VALUE_SIZE {
+                tracing::warn!(
+                    "Can't put value of size {} above limit {MAX_VALUE_SIZE} for key {key}",
+                    buf.len()
+                );
+            }
+        }
 
         let off = {
             // Avoid doing allocations for "small" values.

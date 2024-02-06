@@ -33,6 +33,9 @@ impl Value {
     }
 }
 
+/// The maximum size of a value supported by the pageserver
+pub const MAX_VALUE_SIZE: usize = 10_000_000;
+
 #[cfg(test)]
 mod test {
     use super::*;
