@@ -55,7 +55,7 @@ When PostgreSQL requests a file, `compute_ctl` downloads it.
 PostgreSQL requests files in the following cases:
 - When loading a preload library set in `local_preload_libraries`
 - When explicitly loading a library with `LOAD`
-- Wnen creating extension with `CREATE EXTENSION` (download sql scripts, (optional) extension data files and (optional) library files)))
+- When creating extension with `CREATE EXTENSION` (download sql scripts, (optional) extension data files and (optional) library files)))
 
 
 #### Summary

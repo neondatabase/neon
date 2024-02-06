@@ -356,10 +356,26 @@ def enable_remote_storage_versioning(
     """
     Enable S3 versioning for the remote storage
     """
-    # local_fs has no
+    # local_fs has no support for versioning
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
     assert remote.client is not None
 
+    # The SDK supports enabling versioning on normal S3 as well but we don't want to change
+    # these settings from a test in a live bucket (also, our access isn't enough nor should it be)
+    assert not remote.real, "Enabling storage versioning only supported on Mock S3"
+
+    # Workaround to enable self-copy until upstream bug is fixed: https://github.com/getmoto/moto/issues/7300
+    remote.client.put_bucket_encryption(
+        Bucket=remote.bucket_name,
+        ServerSideEncryptionConfiguration={
+            "Rules": [
+                {
+                    "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"},
+                    "BucketKeyEnabled": False,
+                },
+            ]
+        },
+    )
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
     response = remote.client.put_bucket_versioning(
         Bucket=remote.bucket_name,

@@ -188,16 +188,18 @@ pub(crate) async fn time_travel_recover_tenant(
         backoff::retry(
             || async {
                 storage
-                    .time_travel_recover(Some(prefix), timestamp, done_if_after, cancel.clone())
+                    .time_travel_recover(Some(prefix), timestamp, done_if_after, cancel)
                     .await
             },
             |e| !matches!(e, TimeTravelError::Other(_)),
             warn_after,
             max_attempts,
             "time travel recovery of tenant prefix",
-            backoff::Cancel::new(cancel.clone(), || TimeTravelError::Cancelled),
+            cancel,
         )
-        .await?;
+        .await
+        .ok_or_else(|| TimeTravelError::Cancelled)
+        .and_then(|x| x)?;
     }
     Ok(())
 }

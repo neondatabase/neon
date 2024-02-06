@@ -607,13 +607,6 @@ pub(crate) fn tenant_spawn(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
-    info!(
-        tenant_id = %tenant_shard_id.tenant_id,
-        shard_id = %tenant_shard_id.shard_slug(),
-        generation = ?location_conf.location.generation,
-        attach_mode = ?location_conf.location.attach_mode,
-        "Attaching tenant"
-    );
     let tenant = match Tenant::spawn(
         conf,
         tenant_shard_id,
