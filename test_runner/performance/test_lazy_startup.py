@@ -45,26 +45,27 @@ def test_lazy_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchm
     slru = "lazy"
     for tenant in tenants:
         endpoint = env.endpoints.create_start("main", tenant_id=tenant)
-        endpoint.safe_psql("CREATE TABLE t (pk integer PRIMARY KEY, x integer)")
-        endpoint.safe_psql("ALTER TABLE t SET (autovacuum_enabled = false)")
-        endpoint.safe_psql("INSERT INTO t VALUES (1, 0)")
-        endpoint.safe_psql(
-            """
-          CREATE PROCEDURE updating() as
-          $$
-            DECLARE
-              i integer;
-            BEGIN
-              FOR i IN 1..10000000 LOOP
-                UPDATE t SET x = x + 1 WHERE pk=1;
-                COMMIT;
-              END LOOP;
-            END
-          $$ LANGUAGE plpgsql
-        """
-        )
-        endpoint.safe_psql("SET statement_timeout=0")
-        endpoint.safe_psql("call updating()")
+        with endpoint.cursor() as cur:
+            cur.execute("CREATE TABLE t (pk integer PRIMARY KEY, x integer)")
+            cur.execute("ALTER TABLE t SET (autovacuum_enabled = false)")
+            cur.execute("INSERT INTO t VALUES (1, 0)")
+            cur.execute(
+                """
+                CREATE PROCEDURE updating() as
+                $$
+                    DECLARE
+                    i integer;
+                    BEGIN
+                    FOR i IN 1..10000000 LOOP
+                        UPDATE t SET x = x + 1 WHERE pk=1;
+                        COMMIT;
+                    END LOOP;
+                    END
+                $$ LANGUAGE plpgsql
+                """
+            )
+            cur.execute("SET statement_timeout=0")
+            cur.execute("call updating()")
 
         endpoint.stop()
 
