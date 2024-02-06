@@ -1,4 +1,5 @@
 use tracing;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::instrument;
@@ -71,7 +72,7 @@ impl NoLeakChild {
             // with the wait().
             error!(error = %e, "failed to SIGKILL; subsequent wait() might fail or wait for wrong process");
         }
-
+        debug!("sent SIGKILL, waiting for child to exit");
         match child.wait() {
             Ok(exit_status) => {
                 info!(exit_status = %exit_status, "wait successful");

@@ -742,8 +742,6 @@ def ensure_test_data(data_id: int, data: str, endpoint: Endpoint):
 def test_metrics_while_ignoring_broken_tenant_and_reloading(
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-
     env = neon_env_builder.init_start()
 
     client = env.pageserver.http_client()
@@ -761,56 +759,37 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
 
     client.tenant_break(env.initial_tenant)
 
-    found_broken = False
-    active, broken, broken_set = ([], [], [])
-    for _ in range(10):
+    def found_broken():
         m = client.get_metrics()
         active = m.query_all("pageserver_tenant_states_count", {"state": "Active"})
         broken = m.query_all("pageserver_tenant_states_count", {"state": "Broken"})
         broken_set = m.query_all(
             "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
         )
-        found_broken = only_int(active) == 0 and only_int(broken) == 1 and only_int(broken_set) == 1
+        assert only_int(active) == 0 and only_int(broken) == 1 and only_int(broken_set) == 1
 
-        if found_broken:
-            break
-        log.info(f"active: {active}, broken: {broken}, broken_set: {broken_set}")
-        time.sleep(0.5)
-    assert (
-        found_broken
-    ), f"tenant shows up as broken; active={active}, broken={broken}, broken_set={broken_set}"
+    wait_until(10, 0.5, found_broken)
 
     client.tenant_ignore(env.initial_tenant)
 
-    found_broken = False
-    broken, broken_set = ([], [])
-    for _ in range(10):
+    def found_cleaned_up():
         m = client.get_metrics()
         broken = m.query_all("pageserver_tenant_states_count", {"state": "Broken"})
         broken_set = m.query_all(
             "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
         )
-        found_broken = only_int(broken) == 0 and only_int(broken_set) == 1
+        assert only_int(broken) == 0 and len(broken_set) == 0
 
-        if found_broken:
-            break
-        time.sleep(0.5)
-    assert found_broken, f"broken should still be in set, but it is not in the tenant state count: broken={broken}, broken_set={broken_set}"
+    wait_until(10, 0.5, found_cleaned_up)
 
     env.pageserver.tenant_load(env.initial_tenant)
 
-    found_active = False
-    active, broken_set = ([], [])
-    for _ in range(10):
+    def found_active():
         m = client.get_metrics()
         active = m.query_all("pageserver_tenant_states_count", {"state": "Active"})
         broken_set = m.query_all(
             "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
         )
-        found_active = only_int(active) == 1 and len(broken_set) == 0
+        assert only_int(active) == 1 and len(broken_set) == 0
 
-        if found_active:
-            break
-        time.sleep(0.5)
-
-    assert found_active, f"reloaded tenant should be active, and broken tenant set item removed: active={active}, broken_set={broken_set}"
+    wait_until(10, 0.5, found_active)

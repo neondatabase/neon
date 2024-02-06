@@ -16,6 +16,7 @@ pub mod console;
 pub mod context;
 pub mod error;
 pub mod http;
+pub mod intern;
 pub mod jemalloc;
 pub mod logging;
 pub mod metrics;

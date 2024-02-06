@@ -77,9 +77,11 @@ impl Deleter {
             3,
             10,
             "executing deletion batch",
-            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Shutting down")),
+            &self.cancel,
         )
         .await
+        .ok_or_else(|| anyhow::anyhow!("Shutting down"))
+        .and_then(|x| x)
     }
 
     /// Block until everything in accumulator has been executed

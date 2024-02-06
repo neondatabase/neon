@@ -55,6 +55,7 @@ impl WalRedoProcess {
     //
     #[instrument(skip_all,fields(pg_version=pg_version))]
     pub(crate) fn launch(conf: &'static PageServerConf, pg_version: u32) -> anyhow::Result<Self> {
+        crate::span::debug_assert_current_span_has_tenant_id();
         let pg_bin_dir_path = conf.pg_bin_dir(pg_version).context("pg_bin_dir")?; // TODO these should be infallible.
         let pg_lib_dir_path = conf.pg_lib_dir(pg_version).context("pg_lib_dir")?;
 
