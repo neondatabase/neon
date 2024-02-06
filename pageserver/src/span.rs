@@ -1,20 +1,20 @@
 #[cfg(debug_assertions)]
-use utils::tracing_span_assert::{check_fields_present, MultiNameExtractor};
+use utils::tracing_span_assert::check_fields_present;
 
 #[cfg(debug_assertions)]
-static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<MultiNameExtractor<1>> =
-    once_cell::sync::Lazy::new(|| MultiNameExtractor::new("TenantId", ["tenant_id"]));
-#[cfg(debug_assertions)]
-static SHARD_ID_EXTRACTOR: once_cell::sync::Lazy<MultiNameExtractor<1>> =
-    once_cell::sync::Lazy::new(|| MultiNameExtractor::new("ShardId", ["shard_id"]));
-#[cfg(debug_assertions)]
-static TIMELINE_ID_EXTRACTOR: once_cell::sync::Lazy<MultiNameExtractor<1>> =
-    once_cell::sync::Lazy::new(|| MultiNameExtractor::new("TimelineId", ["timeline_id"]));
+mod extractors {
+    use utils::tracing_span_assert::ConstExtractor;
+
+    pub(super) const TENANT_ID: ConstExtractor = ConstExtractor::new("tenant_id");
+    pub(super) const SHARD_ID: ConstExtractor = ConstExtractor::new("shard_id");
+    pub(super) const TIMELINE_ID: ConstExtractor = ConstExtractor::new("timeline_id");
+}
 
 #[track_caller]
 pub(crate) fn debug_assert_current_span_has_tenant_id() {
     if cfg!(debug_assertions) {
-        if let Err(missing) = check_fields_present!([&*TENANT_ID_EXTRACTOR, &*SHARD_ID_EXTRACTOR]) {
+        if let Err(missing) = check_fields_present!([&extractors::TENANT_ID, &extractors::SHARD_ID])
+        {
             panic!("missing extractors: {missing:?}")
         }
     }
@@ -24,9 +24,9 @@ pub(crate) fn debug_assert_current_span_has_tenant_id() {
 pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
     if cfg!(debug_assertions) {
         if let Err(missing) = check_fields_present!([
-            &*TENANT_ID_EXTRACTOR,
-            &*SHARD_ID_EXTRACTOR,
-            &*TIMELINE_ID_EXTRACTOR,
+            &extractors::TENANT_ID,
+            &extractors::SHARD_ID,
+            &extractors::TIMELINE_ID,
         ]) {
             panic!("missing extractors: {missing:?}")
         }
@@ -37,7 +37,7 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
 pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id() {
     if cfg!(debug_assertions) {
         if let Err(missing) =
-            check_fields_present!([&*TENANT_ID_EXTRACTOR, &*TIMELINE_ID_EXTRACTOR,])
+            check_fields_present!([&extractors::TENANT_ID, &extractors::TIMELINE_ID,])
         {
             panic!("missing extractors: {missing:?}")
         }
