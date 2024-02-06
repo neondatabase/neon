@@ -803,7 +803,7 @@ jobs:
 
   compute-node-image:
     needs: [ check-permissions, build-buildtools-image, tag ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
       image: gcr.io/kaniko-project/executor:v1.9.2-debug
       # Workaround for "Resolving download.osgeo.org (download.osgeo.org)... failed: Temporary failure in name resolution.""
@@ -863,7 +863,7 @@ jobs:
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, gen3, large ]
     strategy:
       fail-fast: false
       matrix:
