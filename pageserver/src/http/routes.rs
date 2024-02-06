@@ -535,7 +535,7 @@ async fn timeline_create_handler(
     }
     .instrument(info_span!("timeline_create",
         tenant_id = %tenant_shard_id.tenant_id,
-        shard = %tenant_shard_id.shard_slug(),
+        shard_id = %tenant_shard_id.shard_slug(),
         timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await
 }
@@ -831,7 +831,7 @@ async fn timeline_delete_handler(
             }
         })?;
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-    tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
+    tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -856,7 +856,7 @@ async fn tenant_detach_handler(
         detach_ignored.unwrap_or(false),
         &state.deletion_queue_client,
     )
-    .instrument(info_span!("tenant_detach", %tenant_id))
+    .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
     .await?;
 
     json_response(StatusCode::OK, ())
@@ -1007,7 +1007,7 @@ async fn tenant_delete_handler(
         .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
-            shard = %tenant_shard_id.shard_slug()
+            shard_id = %tenant_shard_id.shard_slug()
         ))
         .await?;
 
@@ -1363,7 +1363,7 @@ async fn put_tenant_location_config_handler(
             mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
                 .instrument(info_span!("tenant_detach",
                     tenant_id = %tenant_shard_id.tenant_id,
-                    shard = %tenant_shard_id.shard_slug()
+                    shard_id = %tenant_shard_id.shard_slug()
                 ))
                 .await
         {

@@ -1952,6 +1952,7 @@ mod tests {
             tracing::info_span!(
                 "test",
                 tenant_id = %self.harness.tenant_shard_id.tenant_id,
+                shard_id = %self.harness.tenant_shard_id.shard_slug(),
                 timeline_id = %TIMELINE_ID
             )
         }

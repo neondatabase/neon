@@ -17,11 +17,11 @@ use utils::timeout::timeout_cancellable;
 use utils::{backoff, crashsafe};
 
 use crate::config::PageServerConf;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{
     download_cancellable, remote_layer_path, remote_timelines_path, DOWNLOAD_TIMEOUT,
 };
 use crate::tenant::storage_layer::LayerFileName;
-use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::Generation;
 use crate::virtual_file::on_fatal_io_error;
 use crate::TEMP_FILE_SUFFIX;
