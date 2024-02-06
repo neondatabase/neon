@@ -12,6 +12,7 @@ use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::stream::StreamExt;
 use itertools::Itertools;
 use pageserver_api::{
     keyspace::{key_range_size, KeySpaceAccum},
@@ -2290,32 +2291,24 @@ impl Timeline {
             return None;
         }
 
-        let resident = {
-            let guard = self.layers.read().await;
-            guard.resident_layers().await
-        };
+        let guard = self.layers.read().await;
 
-        // sadly we'll need to rewrite the vec to once more; it'd be more serde structures to
-        // just produce the HeatMapTimeline serialization output out of Vec<Layer>.
+        let resident = guard.resident_layers().map(|layer| {
+            let last_activity_ts = layer.access_stats().latest_activity().unwrap_or_else(|| {
+                // We only use this fallback if there's an implementation error.
+                // `latest_activity` already does rate-limited warn!() log.
+                debug!(%layer, "last_activity returns None, using SystemTime::now");
+                SystemTime::now()
+            });
 
-        let layers = resident
-            .into_iter()
-            .map(|layer| {
-                let last_activity_ts =
-                    layer.access_stats().latest_activity().unwrap_or_else(|| {
-                        // We only use this fallback if there's an implementation error.
-                        // `latest_activity` already does rate-limited warn!() log.
-                        debug!(%layer, "last_activity returns None, using SystemTime::now");
-                        SystemTime::now()
-                    });
+            HeatMapLayer::new(
+                layer.layer_desc().filename(),
+                layer.metadata().into(),
+                last_activity_ts,
+            )
+        });
 
-                HeatMapLayer::new(
-                    layer.layer_desc().filename(),
-                    layer.metadata().into(),
-                    last_activity_ts,
-                )
-            })
-            .collect();
+        let layers = resident.collect().await;
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
@@ -4663,11 +4656,10 @@ impl Timeline {
             return None;
         };
 
-        let layers = guard.resident_layers().await;
-
         let mut max_layer_size: Option<u64> = None;
-        let resident_layers = layers
-            .into_iter()
+
+        let resident_layers = guard
+            .resident_layers()
             .map(|layer| {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
@@ -4686,7 +4678,8 @@ impl Timeline {
                     relative_last_activity: finite_f32::FiniteF32::ZERO,
                 }
             })
-            .collect();
+            .collect()
+            .await;
 
         Some(DiskUsageEvictionInfo {
             max_layer_size,
