@@ -44,6 +44,7 @@ jobs:
 
       - name: Get build tag
         run: |
+          test=$(gh run list -b $GITHUB_REF_NAME -w 'Build and Test' -L 1)
           echo run:$GITHUB_RUN_ID
           echo ref:$GITHUB_REF_NAME
           echo rev:$(git rev-list --count HEAD)
