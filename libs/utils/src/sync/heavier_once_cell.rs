@@ -69,37 +69,44 @@ impl<T> OnceCell<T> {
         F: FnOnce(InitPermit) -> Fut,
         Fut: std::future::Future<Output = Result<(T, InitPermit), E>>,
     {
-        let sem = {
+        loop {
+            let sem = {
+                let guard = self.inner.write().await;
+                if guard.value.is_some() {
+                    return Ok(GuardMut(guard));
+                }
+                guard.init_semaphore.clone()
+            };
+
+            {
+                let permit = {
+                    // increment the count for the duration of queued
+                    let _guard = CountWaitingInitializers::start(self);
+                    sem.acquire().await
+                };
+
+                let Ok(permit) = permit else {
+                    let guard = self.inner.write().await;
+                    if !Arc::ptr_eq(&sem, &guard.init_semaphore) {
+                        // there was a take_and_deinit in between
+                        continue;
+                    }
+                    assert!(
+                        guard.value.is_some(),
+                        "semaphore got closed, must be initialized"
+                    );
+                    return Ok(GuardMut(guard));
+                };
+
+                permit.forget();
+            }
+
+            let permit = InitPermit(sem);
+            let (value, _permit) = factory(permit).await?;
+
             let guard = self.inner.write().await;
-            if guard.value.is_some() {
-                return Ok(GuardMut(guard));
-            }
-            guard.init_semaphore.clone()
-        };
 
-        let permit = {
-            // increment the count for the duration of queued
-            let _guard = CountWaitingInitializers::start(self);
-            sem.acquire_owned().await
-        };
-
-        match permit {
-            Ok(permit) => {
-                let permit = InitPermit(permit);
-                let (value, _permit) = factory(permit).await?;
-
-                let guard = self.inner.write().await;
-
-                Ok(Self::set0(value, guard))
-            }
-            Err(_closed) => {
-                let guard = self.inner.write().await;
-                assert!(
-                    guard.value.is_some(),
-                    "semaphore got closed, must be initialized"
-                );
-                return Ok(GuardMut(guard));
-            }
+            return Ok(Self::set0(value, guard));
         }
     }
 
@@ -112,37 +119,44 @@ impl<T> OnceCell<T> {
         F: FnOnce(InitPermit) -> Fut,
         Fut: std::future::Future<Output = Result<(T, InitPermit), E>>,
     {
-        let sem = {
-            let guard = self.inner.read().await;
-            if guard.value.is_some() {
-                return Ok(GuardRef(guard));
-            }
-            guard.init_semaphore.clone()
-        };
-
-        let permit = {
-            // increment the count for the duration of queued
-            let _guard = CountWaitingInitializers::start(self);
-            sem.acquire_owned().await
-        };
-
-        match permit {
-            Ok(permit) => {
-                let permit = InitPermit(permit);
-                let (value, _permit) = factory(permit).await?;
-
-                let guard = self.inner.write().await;
-
-                Ok(Self::set0(value, guard).downgrade())
-            }
-            Err(_closed) => {
+        loop {
+            let sem = {
                 let guard = self.inner.read().await;
-                assert!(
-                    guard.value.is_some(),
-                    "semaphore got closed, must be initialized"
-                );
-                return Ok(GuardRef(guard));
+                if guard.value.is_some() {
+                    return Ok(GuardRef(guard));
+                }
+                guard.init_semaphore.clone()
+            };
+
+            {
+                let permit = {
+                    // increment the count for the duration of queued
+                    let _guard = CountWaitingInitializers::start(self);
+                    sem.acquire().await
+                };
+
+                let Ok(permit) = permit else {
+                    let guard = self.inner.read().await;
+                    if !Arc::ptr_eq(&sem, &guard.init_semaphore) {
+                        // there was a take_and_deinit in between
+                        continue;
+                    }
+                    assert!(
+                        guard.value.is_some(),
+                        "semaphore got closed, must be initialized"
+                    );
+                    return Ok(GuardRef(guard));
+                };
+
+                permit.forget();
             }
+
+            let permit = InitPermit(sem);
+            let (value, _permit) = factory(permit).await?;
+
+            let guard = self.inner.write().await;
+
+            return Ok(Self::set0(value, guard).downgrade());
         }
     }
 
@@ -250,15 +264,12 @@ impl<'a, T> GuardMut<'a, T> {
     /// [`OnceCell::get_or_init`] will wait on it to complete.
     pub fn take_and_deinit(&mut self) -> (T, InitPermit) {
         let mut swapped = Inner::default();
-        let permit = swapped
-            .init_semaphore
-            .clone()
-            .try_acquire_owned()
-            .expect("we just created this");
+        let sem = swapped.init_semaphore.clone();
+        sem.try_acquire().expect("we just created this").forget();
         std::mem::swap(&mut *self.0, &mut swapped);
         swapped
             .value
-            .map(|v| (v, InitPermit(permit)))
+            .map(|v| (v, InitPermit(sem)))
             .expect("guard is not created unless value has been initialized")
     }
 
@@ -282,7 +293,13 @@ impl<T> std::ops::Deref for GuardRef<'_, T> {
 }
 
 /// Type held by OnceCell (de)initializing task.
-pub struct InitPermit(tokio::sync::OwnedSemaphorePermit);
+pub struct InitPermit(Arc<tokio::sync::Semaphore>);
+
+impl Drop for InitPermit {
+    fn drop(&mut self) {
+        self.0.add_permits(1);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -472,13 +489,13 @@ mod tests {
                 .unwrap();
 
             let t1 = async {
-                cell.$method(|init| async { Ok::<_, Infallible>(("foo", init)) })
+                cell.$method(|init| async { Ok::<_, Infallible>(("t1", init)) })
                     .await
             };
             let mut t1 = std::pin::pin!(t1);
 
             let t2 = async {
-                cell.$method(|init| async { Ok::<_, Infallible>(("bar", init)) })
+                cell.$method(|init| async { Ok::<_, Infallible>(("t2", init)) })
                     .await
             };
             let mut t2 = std::pin::pin!(t2);
@@ -500,9 +517,8 @@ mod tests {
             // now let "the other" proceed and initialize
             drop(t2.await);
 
-            assert_eq!("bar", *cell.get().await.unwrap());
-
-            let (_s, permit) = { cell.get_mut().await.unwrap().take_and_deinit() };
+            let (s, permit) = { cell.get_mut().await.unwrap().take_and_deinit() };
+            assert_eq!("t2", s);
 
             // now t1 will see the original semaphore as closed, and assert that the option is set
             // instead it should notice the Arc is not the same, and loop around
@@ -515,9 +531,9 @@ mod tests {
             drop(permit);
 
             // only now we get to initialize it
-            t1.await;
+            drop(t1.await);
 
-            assert_eq!("bar", *cell.get().await.unwrap());
+            assert_eq!("t1", *cell.get().await.unwrap());
         }};
     }
 
