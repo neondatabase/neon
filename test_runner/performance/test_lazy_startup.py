@@ -42,8 +42,7 @@ def test_lazy_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchm
         }
     )
     tenants = [lazy_tenant, eager_tenant]
-    slru = "lazy"
-    for tenant in tenants:
+    for tenant, slru in zip(tenants, ("lazy", "eager")):
         endpoint = env.endpoints.create_start("main", tenant_id=tenant)
         with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t (pk integer PRIMARY KEY, x integer)")
@@ -109,4 +108,3 @@ def test_lazy_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchm
 
             # Imitate optimizations that console would do for the second start
             endpoint.respec(skip_pg_catalog_updates=True)
-            slru = "eager"
