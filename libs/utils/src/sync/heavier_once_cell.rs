@@ -455,4 +455,79 @@ mod tests {
             .unwrap();
         assert_eq!(*g, "now initialized");
     }
+
+    macro_rules! init_race_reproduction {
+        ($method:ident) => {{
+            let cell = OnceCell::default();
+
+            // use this permit to force two instances to clone out the semaphore and move to force
+            // two tasks t1 and t2 to be awaiting for a permit.
+            let permit = cell
+                .inner
+                .read()
+                .await
+                .init_semaphore
+                .clone()
+                .try_acquire_owned()
+                .unwrap();
+
+            let t1 = async {
+                cell.$method(|init| async { Ok::<_, Infallible>(("foo", init)) })
+                    .await
+            };
+            let mut t1 = std::pin::pin!(t1);
+
+            let t2 = async {
+                cell.$method(|init| async { Ok::<_, Infallible>(("bar", init)) })
+                    .await
+            };
+            let mut t2 = std::pin::pin!(t2);
+
+            // drive t2 first to the queue
+            tokio::select! {
+                _ = &mut t2 => unreachable!("it cannot get permit"),
+                _ = tokio::time::sleep(Duration::from_secs(3600 * 24 * 7 * 365)) => {}
+            }
+
+            // followed by t1 in the queue
+            tokio::select! {
+                _ = &mut t1 => unreachable!("it cannot get permit"),
+                _ = tokio::time::sleep(Duration::from_secs(3600 * 24 * 7 * 365)) => {}
+            }
+
+            drop(permit);
+
+            // now let "the other" proceed and initialize
+            drop(t2.await);
+
+            assert_eq!("bar", *cell.get().await.unwrap());
+
+            let (_s, permit) = { cell.get_mut().await.unwrap().take_and_deinit() };
+
+            // now t1 will see the original semaphore as closed, and assert that the option is set
+            // instead it should notice the Arc is not the same, and loop around
+
+            tokio::select! {
+                _ = &mut t1 => unreachable!("it cannot get permit"),
+                _ = tokio::time::sleep(Duration::from_secs(3600 * 24 * 7 * 365)) => {}
+            }
+
+            drop(permit);
+
+            // only now we get to initialize it
+            t1.await;
+
+            assert_eq!("bar", *cell.get().await.unwrap());
+        }};
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reproduce_init_take_deinit_race() {
+        init_race_reproduction!(get_or_init);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reproduce_init_take_deinit_race_mut() {
+        init_race_reproduction!(get_mut_or_init);
+    }
 }
