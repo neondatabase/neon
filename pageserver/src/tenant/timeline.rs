@@ -1458,7 +1458,7 @@ impl Timeline {
                 generation,
                 shard_identity,
                 pg_version,
-                layers: Arc::new(tokio::sync::RwLock::new(LayerManager::create())),
+                layers: Default::default(),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,

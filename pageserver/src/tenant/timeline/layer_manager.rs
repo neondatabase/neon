@@ -20,19 +20,13 @@ use crate::{
 };
 
 /// Provides semantic APIs to manipulate the layer map.
+#[derive(Default)]
 pub(crate) struct LayerManager {
     layer_map: LayerMap,
     layer_fmgr: LayerFileManager<Layer>,
 }
 
 impl LayerManager {
-    pub(crate) fn create() -> Self {
-        Self {
-            layer_map: LayerMap::default(),
-            layer_fmgr: LayerFileManager::new(),
-        }
-    }
-
     pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
         self.layer_fmgr.get_from_desc(desc)
     }
@@ -253,6 +247,12 @@ impl LayerManager {
 
 pub(crate) struct LayerFileManager<T>(HashMap<PersistentLayerKey, T>);
 
+impl<T> Default for LayerFileManager<T> {
+    fn default() -> Self {
+        Self(HashMap::default())
+    }
+}
+
 impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
     fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
         // The assumption for the `expect()` is that all code maintains the following invariant:
@@ -273,10 +273,6 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
 
     pub(crate) fn contains(&self, layer: &T) -> bool {
         self.0.contains_key(&layer.layer_desc().key())
-    }
-
-    pub(crate) fn new() -> Self {
-        Self(HashMap::new())
     }
 
     pub(crate) fn remove(&mut self, layer: &T) {
