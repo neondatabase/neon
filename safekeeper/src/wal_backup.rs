@@ -558,16 +558,17 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     backoff::retry(
         || async {
             let files = storage.list_files(Some(&remote_path)).await?;
-            storage.delete_objects(&files).await?;
-            Ok(())
+            storage.delete_objects(&files).await
         },
         |_| false,
         3,
         10,
         "executing WAL segments deletion batch",
-        backoff::Cancel::new(token, || anyhow::anyhow!("canceled")),
+        &token,
     )
-    .await?;
+    .await
+    .ok_or_else(|| anyhow::anyhow!("canceled"))
+    .and_then(|x| x)?;
 
     Ok(())
 }

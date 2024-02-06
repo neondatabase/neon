@@ -426,9 +426,11 @@ async fn upload_tenant_heatmap(
         3,
         u32::MAX,
         "Uploading heatmap",
-        backoff::Cancel::new(tenant_cancel.clone(), || anyhow::anyhow!("Shutting down")),
+        &tenant_cancel,
     )
     .await
+    .ok_or_else(|| anyhow::anyhow!("Shutting down"))
+    .and_then(|x| x)
     {
         if tenant_cancel.is_cancelled() {
             return Err(UploadHeatmapError::Cancelled);

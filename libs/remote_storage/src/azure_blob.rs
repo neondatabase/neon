@@ -379,7 +379,7 @@ impl RemoteStorage for AzureBlobStorage {
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
-        _cancel: CancellationToken,
+        _cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         // TODO use Azure point in time recovery feature for this
         // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview
