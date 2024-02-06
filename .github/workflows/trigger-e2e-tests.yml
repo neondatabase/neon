@@ -72,7 +72,7 @@ jobs:
           for REPO in neon compute-tools compute-node-v14 vm-compute-node-v14 compute-node-v15 vm-compute-node-v15 compute-node-v16 vm-compute-node-v16; do
             OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
             if [ "$OUTPUT" == "" ]; then
-              echo "$Repo with image tag $TAG not found" >> $GITHUB_OUTPUT
+              echo "$REPO with image tag $TAG not found" >> $GITHUB_OUTPUT
               exit 1
             fi
           done
