@@ -63,6 +63,7 @@ use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::pgdatadir_mapping::Version;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
@@ -632,7 +633,7 @@ impl PageServerHandler {
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     // shard_id is filled in by the handler
-                    let span = tracing::info_span!("handle_get_page_at_lsn_request", shard_id=tracing::field::Empty, rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
+                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
                     (
                         self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
@@ -773,7 +774,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(%start_lsn, %end_lsn))]
+    #[instrument(skip_all, fields(shard_id, %start_lsn, %end_lsn))]
     async fn handle_import_wal<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -786,8 +787,6 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
-
         let timeline = self
             .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
@@ -894,6 +893,7 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_rel_exists_request(
         &mut self,
         tenant_id: TenantId,
@@ -920,6 +920,7 @@ impl PageServerHandler {
         }))
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_nblocks_request(
         &mut self,
         tenant_id: TenantId,
@@ -947,6 +948,7 @@ impl PageServerHandler {
         }))
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_db_size_request(
         &mut self,
         tenant_id: TenantId,
@@ -1097,6 +1099,7 @@ impl PageServerHandler {
         }
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_page_at_lsn_request(
         &mut self,
         tenant_id: TenantId,
@@ -1130,10 +1133,8 @@ impl PageServerHandler {
             }
         };
 
-        tracing::Span::current().record(
-            "shard_id",
-            format!("{}", timeline.tenant_shard_id.shard_slug()),
-        );
+        // load_timeline_for_page sets shard_id, but get_cached_timeline_for_page doesn't
+        set_tracing_field_shard_id(timeline);
 
         let _timer = timeline
             .query_metrics
@@ -1153,6 +1154,7 @@ impl PageServerHandler {
         }))
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_slru_segment_request(
         &mut self,
         tenant_id: TenantId,
@@ -1181,7 +1183,7 @@ impl PageServerHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(?lsn, ?prev_lsn, %full_backup))]
+    #[instrument(skip_all, fields(shard_id, ?lsn, ?prev_lsn, %full_backup))]
     async fn handle_basebackup_request<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -1196,8 +1198,6 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
-
         let started = std::time::Instant::now();
 
         // check that the timeline exists
@@ -1319,6 +1319,7 @@ impl PageServerHandler {
         .await
         .map_err(GetActiveTimelineError::Tenant)?;
         let timeline = tenant.get_timeline(timeline_id, true)?;
+        set_tracing_field_shard_id(&timeline);
         Ok(timeline)
     }
 }
@@ -1483,21 +1484,29 @@ where
                 .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
-            let timeline = self
-                .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
-                .await?;
+            async {
+                let timeline = self
+                    .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
+                    .await?;
 
-            let end_of_timeline = timeline.get_last_record_rlsn();
+                let end_of_timeline = timeline.get_last_record_rlsn();
 
-            pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                RowDescriptor::text_col(b"prev_lsn"),
-                RowDescriptor::text_col(b"last_lsn"),
-            ]))?
-            .write_message_noflush(&BeMessage::DataRow(&[
-                Some(end_of_timeline.prev.to_string().as_bytes()),
-                Some(end_of_timeline.last.to_string().as_bytes()),
-            ]))?
-            .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                    RowDescriptor::text_col(b"prev_lsn"),
+                    RowDescriptor::text_col(b"last_lsn"),
+                ]))?
+                .write_message_noflush(&BeMessage::DataRow(&[
+                    Some(end_of_timeline.prev.to_string().as_bytes()),
+                    Some(end_of_timeline.last.to_string().as_bytes()),
+                ]))?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                anyhow::Ok(())
+            }
+            .instrument(info_span!(
+                "handle_get_last_record_lsn",
+                shard_id = tracing::field::Empty
+            ))
+            .await?;
         }
         // same as basebackup, but result includes relational data as well
         else if query_string.starts_with("fullbackup ") {
@@ -1753,4 +1762,13 @@ impl From<GetActiveTimelineError> for QueryError {
             GetActiveTimelineError::Timeline(e) => QueryError::NotFound(format!("{e}").into()),
         }
     }
+}
+
+fn set_tracing_field_shard_id(timeline: &Timeline) {
+    debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+    tracing::Span::current().record(
+        "shard_id",
+        tracing::field::display(timeline.tenant_shard_id.shard_slug()),
+    );
+    debug_assert_current_span_has_tenant_and_timeline_id();
 }
