@@ -1949,6 +1949,15 @@ class NeonAttachmentService:
 
         return headers
 
+    def ready(self) -> bool:
+        resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
+        if resp.status_code == 503:
+            return False
+        elif resp.status_code == 200:
+            return True
+        else:
+            raise RuntimeError(f"Unexpected status {resp.status_code} from readiness endpoint")
+
     def attach_hook_issue(
         self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
     ) -> int:
