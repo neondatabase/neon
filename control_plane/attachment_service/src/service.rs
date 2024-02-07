@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
@@ -145,31 +145,36 @@ impl Service {
         // indeterminate, same as in [`ObservedStateLocation`])
         let mut observed = HashMap::new();
 
-        let nodes = {
-            let locked = self.inner.read().unwrap();
-            locked.nodes.clone()
-        };
+        let mut nodes_online = HashSet::new();
 
         // TODO: issue these requests concurrently
-        for node in nodes.values() {
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+        {
+            let nodes = {
+                let locked = self.inner.read().unwrap();
+                locked.nodes.clone()
+            };
+            for node in nodes.values() {
+                let client =
+                    mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
 
-            tracing::info!("Scanning shards on node {}...", node.id);
-            match client.list_location_config().await {
-                Err(e) => {
-                    tracing::warn!("Could not contact pageserver {} ({e})", node.id);
-                    // TODO: be more tolerant, apply a generous 5-10 second timeout with retries, in case
-                    // pageserver is being restarted at the same time as we are
-                }
-                Ok(listing) => {
-                    tracing::info!(
-                        "Received {} shard statuses from pageserver {}, setting it to Active",
-                        listing.tenant_shards.len(),
-                        node.id
-                    );
+                tracing::info!("Scanning shards on node {}...", node.id);
+                match client.list_location_config().await {
+                    Err(e) => {
+                        tracing::warn!("Could not contact pageserver {} ({e})", node.id);
+                        // TODO: be more tolerant, apply a generous 5-10 second timeout with retries, in case
+                        // pageserver is being restarted at the same time as we are
+                    }
+                    Ok(listing) => {
+                        tracing::info!(
+                            "Received {} shard statuses from pageserver {}, setting it to Active",
+                            listing.tenant_shards.len(),
+                            node.id
+                        );
+                        nodes_online.insert(node.id);
 
-                    for (tenant_shard_id, conf_opt) in listing.tenant_shards {
-                        observed.insert(tenant_shard_id, (node.id, conf_opt));
+                        for (tenant_shard_id, conf_opt) in listing.tenant_shards {
+                            observed.insert(tenant_shard_id, (node.id, conf_opt));
+                        }
                     }
                 }
             }
@@ -180,8 +185,19 @@ impl Service {
         let mut compute_notifications = Vec::new();
 
         // Populate intent and observed states for all tenants, based on reported state on pageservers
-        let shard_count = {
+        let (shard_count, nodes) = {
             let mut locked = self.inner.write().unwrap();
+
+            // Mark nodes online if they responded to us: nodes are offline by default after a restart.
+            let mut nodes = (*locked.nodes).clone();
+            for (node_id, node) in nodes.iter_mut() {
+                if nodes_online.contains(node_id) {
+                    node.availability = NodeAvailability::Active;
+                }
+            }
+            locked.nodes = Arc::new(nodes);
+            let nodes = locked.nodes.clone();
+
             for (tenant_shard_id, (node_id, observed_loc)) in observed {
                 let Some(tenant_state) = locked.tenants.get_mut(&tenant_shard_id) else {
                     cleanup.push((tenant_shard_id, node_id));
@@ -213,7 +229,7 @@ impl Service {
                 }
             }
 
-            locked.tenants.len()
+            (locked.tenants.len(), nodes)
         };
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
