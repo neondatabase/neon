@@ -31,6 +31,7 @@ pub use wrappers::{CountedReader, CountedWriter};
 mod hll;
 pub mod metric_vec_duration;
 pub use hll::{HyperLogLog, HyperLogLogVec};
+pub mod more_process_metrics;
 
 pub type UIntGauge = GenericGauge<AtomicU64>;
 pub type UIntGaugeVec = GenericGaugeVec<AtomicU64>;
