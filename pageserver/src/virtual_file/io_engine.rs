@@ -7,67 +7,100 @@
 //!
 //! Then use [`get`] and  [`super::OpenOptions`].
 
-#[derive(
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-    Debug,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum IoEngineKind {
+pub(crate) use super::api::IoEngineKind;
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum IoEngine {
+    NotSet,
     StdFs,
     #[cfg(target_os = "linux")]
     TokioEpollUring,
 }
 
-static IO_ENGINE: once_cell::sync::OnceCell<IoEngineKind> = once_cell::sync::OnceCell::new();
-
-#[cfg(not(test))]
-pub(super) fn init(engine: IoEngineKind) {
-    if IO_ENGINE.set(engine).is_err() {
-        panic!("called twice");
+impl From<IoEngineKind> for IoEngine {
+    fn from(value: IoEngineKind) -> Self {
+        match value {
+            IoEngineKind::StdFs => IoEngine::StdFs,
+            #[cfg(target_os = "linux")]
+            IoEngineKind::TokioEpollUring => IoEngine::TokioEpollUring,
+        }
     }
-    crate::metrics::virtual_file_io_engine::KIND
-        .with_label_values(&[&format!("{engine}")])
-        .set(1);
 }
 
-pub(super) fn get() -> &'static IoEngineKind {
-    #[cfg(test)]
-    {
-        let env_var_name = "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE";
-        IO_ENGINE.get_or_init(|| match std::env::var(env_var_name) {
-            Ok(v) => match v.parse::<IoEngineKind>() {
-                Ok(engine_kind) => engine_kind,
-                Err(e) => {
-                    panic!("invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}")
-                }
-            },
-            Err(std::env::VarError::NotPresent) => {
-                crate::config::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE
-                    .parse()
-                    .unwrap()
-            }
-            Err(std::env::VarError::NotUnicode(_)) => {
-                panic!("env var {env_var_name} is not unicode");
-            }
+impl TryFrom<u8> for IoEngine {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            v if v == (IoEngine::NotSet as u8) => IoEngine::NotSet,
+            v if v == (IoEngine::StdFs as u8) => IoEngine::StdFs,
+            #[cfg(target_os = "linux")]
+            v if v == (IoEngine::TokioEpollUring as u8) => IoEngine::TokioEpollUring,
+            x => return Err(x),
         })
     }
-    #[cfg(not(test))]
-    IO_ENGINE.get().unwrap()
 }
 
-use std::os::unix::prelude::FileExt;
+static IO_ENGINE: AtomicU8 = AtomicU8::new(IoEngine::NotSet as u8);
+
+pub(crate) fn set(engine_kind: IoEngineKind) {
+    let engine: IoEngine = engine_kind.into();
+    IO_ENGINE.store(engine as u8, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(test))]
+    {
+        let metric = &crate::metrics::virtual_file_io_engine::KIND;
+        metric.reset();
+        metric
+            .with_label_values(&[&format!("{engine_kind}")])
+            .set(1);
+    }
+}
+
+#[cfg(not(test))]
+pub(super) fn init(engine_kind: IoEngineKind) {
+    set(engine_kind);
+}
+
+pub(super) fn get() -> IoEngine {
+    let cur = IoEngine::try_from(IO_ENGINE.load(Ordering::Relaxed)).unwrap();
+    if cfg!(test) {
+        let env_var_name = "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE";
+        match cur {
+            IoEngine::NotSet => {
+                let kind = match std::env::var(env_var_name) {
+                    Ok(v) => match v.parse::<IoEngineKind>() {
+                        Ok(engine_kind) => engine_kind,
+                        Err(e) => {
+                            panic!("invalid VirtualFile io engine for env var {env_var_name}: {e:#}: {v:?}")
+                        }
+                    },
+                    Err(std::env::VarError::NotPresent) => {
+                        crate::config::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE
+                            .parse()
+                            .unwrap()
+                    }
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        panic!("env var {env_var_name} is not unicode");
+                    }
+                };
+                self::set(kind);
+                self::get()
+            }
+            x => x,
+        }
+    } else {
+        cur
+    }
+}
+
+use std::{
+    os::unix::prelude::FileExt,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 use super::FileGuard;
 
-impl IoEngineKind {
+impl IoEngine {
     pub(super) async fn read_at<B>(
         &self,
         file_guard: FileGuard,
@@ -78,7 +111,8 @@ impl IoEngineKind {
         B: tokio_epoll_uring::BoundedBufMut + Send,
     {
         match self {
-            IoEngineKind::StdFs => {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
                 // SAFETY: `dst` only lives at most as long as this match arm, during which buf remains valid memory.
                 let dst = unsafe {
                     std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf.bytes_total())
@@ -96,7 +130,7 @@ impl IoEngineKind {
                 ((file_guard, buf), res)
             }
             #[cfg(target_os = "linux")]
-            IoEngineKind::TokioEpollUring => {
+            IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
                 let (resources, res) = system.read(file_guard, offset, buf).await;
                 (
