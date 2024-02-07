@@ -11,6 +11,8 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
+use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
+
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
@@ -121,10 +123,17 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// Writes the given buffer directly to the underlying `VirtualFile`.
     /// You need to make sure that the internal buffer is empty, otherwise
     /// data will be written in wrong order.
-    async fn write_all_unbuffered(&mut self, src_buf: &[u8]) -> Result<(), Error> {
-        self.inner.write_all(src_buf).await?;
+    async fn write_all_unbuffered<T: IoBuf>(
+        &mut self,
+        src_buf: Slice<T>,
+    ) -> (Slice<T>, Result<(), Error>) {
+        // TODO: push down the Slice further
+        let res = self.inner.write_all(&src_buf).await;
+        if let Err(e) = res {
+            return (src_buf, Err(e));
+        }
         self.offset += src_buf.len() as u64;
-        Ok(())
+        (src_buf, Ok(()))
     }
 
     #[inline(always)]
@@ -146,62 +155,83 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     }
 
     /// Internal, possibly buffered, write function
-    async fn write_all(&mut self, mut src_buf: &[u8]) -> Result<(), Error> {
+    async fn write_all<T: IoBuf>(
+        &mut self,
+        mut src_buf: tokio_epoll_uring::Slice<T>,
+    ) -> (Slice<T>, Result<(), Error>) {
         if !BUFFERED {
             assert!(self.buf.is_empty());
-            self.write_all_unbuffered(src_buf).await?;
-            return Ok(());
+            return self.write_all_unbuffered(src_buf).await;
         }
         let remaining = Self::CAPACITY - self.buf.len();
         // First try to copy as much as we can into the buffer
         if remaining > 0 {
-            let copied = self.write_into_buffer(src_buf);
-            src_buf = &src_buf[copied..];
+            let copied = self.write_into_buffer(&src_buf);
+            src_buf = src_buf.slice(copied..);
         }
         // Then, if the buffer is full, flush it out
         if self.buf.len() == Self::CAPACITY {
-            self.flush_buffer().await?;
+            if let Err(e) = self.flush_buffer().await {
+                return (src_buf, Err(e));
+            }
         }
         // Finally, write the tail of src_buf:
         // If it wholly fits into the buffer without
         // completely filling it, then put it there.
         // If not, write it out directly.
-        if !src_buf.is_empty() {
+        let src_buf = if !src_buf.is_empty() {
             assert_eq!(self.buf.len(), 0);
             if src_buf.len() < Self::CAPACITY {
-                let copied = self.write_into_buffer(src_buf);
+                let copied = self.write_into_buffer(&src_buf);
                 // We just verified above that src_buf fits into our internal buffer.
                 assert_eq!(copied, src_buf.len());
+                src_buf
             } else {
-                self.write_all_unbuffered(src_buf).await?;
+                let (src_buf, res) = self.write_all_unbuffered(src_buf).await;
+                if let Err(e) = res {
+                    return (src_buf, Err(e));
+                }
+                src_buf
             }
-        }
-        Ok(())
+        } else {
+            src_buf
+        };
+        (src_buf, Ok(()))
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
-    pub async fn write_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+    pub async fn write_blob<T: IoBuf>(
+        &mut self,
+        srcbuf: tokio_epoll_uring::Slice<T>,
+    ) -> (tokio_epoll_uring::Slice<T>, Result<u64, Error>) {
         let offset = self.offset;
 
-        if srcbuf.len() < 128 {
+        let hdr_res = if srcbuf.len() < 128 {
             // Short blob. Write a 1-byte length header
             let len_buf = srcbuf.len() as u8;
-            self.write_all(&[len_buf]).await?;
+            let (_, res) = self.write_all(Slice::from([len_buf])).await;
+            res
         } else {
             // Write a 4-byte length header
             if srcbuf.len() > 0x7fff_ffff {
-                return Err(Error::new(
+                let error = Error::new(
                     ErrorKind::Other,
                     format!("blob too large ({} bytes)", srcbuf.len()),
-                ));
+                );
+                return (srcbuf, Err(error));
             }
             let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
             len_buf[0] |= 0x80;
-            self.write_all(&len_buf).await?;
+            let (_, res) = self.write_all(Slice::from(len_buf)).await;
+            res
+        };
+        match hdr_res {
+            Ok(_) => (),
+            Err(e) => return (srcbuf, Err(e)),
         }
-        self.write_all(srcbuf).await?;
-        Ok(offset)
+        let (srcbuf, res) = self.write_all(srcbuf).await;
+        (srcbuf, res.map(|_| offset))
     }
 }
 
