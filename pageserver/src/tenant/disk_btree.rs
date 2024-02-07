@@ -510,7 +510,7 @@ where
             .expect("should always have at least one item");
         let buf = last.pack();
         let downlink_key = last.first_key();
-        let downlink_ptr = self.writer.write_blk(buf)?;
+        let downlink_ptr = self.writer.write_blk(buf);
 
         // Append the downlink to the parent. If there is no parent, ie. this was the root page,
         // create a new root page, increasing the height of the tree.
@@ -538,7 +538,7 @@ where
             .first()
             .expect("by the check above we left one item there");
         let buf = root.pack();
-        let root_blknum = self.writer.write_blk(buf)?;
+        let root_blknum = self.writer.write_blk(buf);
 
         Ok((root_blknum, self.writer))
     }
