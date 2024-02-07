@@ -59,7 +59,7 @@ pub(crate) enum LayerCmd {
 
 async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
-    virtual_file::init(10, virtual_file::IoEngineKind::StdFs);
+    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
     page_cache::init(100);
     let file = FileBlockReader::new(VirtualFile::open(path).await?);
     let summary_blk = file.read_blk(0, ctx).await?;
@@ -187,7 +187,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             new_tenant_id,
             new_timeline_id,
         } => {
-            pageserver::virtual_file::init(10, virtual_file::IoEngineKind::StdFs);
+            pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
             pageserver::page_cache::init(100);
 
             let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);

@@ -28,9 +28,10 @@ use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 use utils::fs_ext;
 
-mod io_engine;
+pub use pageserver_api::models::virtual_file as api;
+pub(crate) mod io_engine;
 mod open_options;
-pub use io_engine::IoEngineKind;
+pub(crate) use io_engine::IoEngineKind;
 pub(crate) use open_options::*;
 
 ///

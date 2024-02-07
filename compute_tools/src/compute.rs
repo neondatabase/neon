@@ -773,12 +773,11 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
-        if self.has_feature(ComputeFeature::Migrations) {
-            thread::spawn(move || {
-                let mut client = Client::connect(connstr.as_str(), NoTls)?;
-                handle_migrations(&mut client)
-            });
-        }
+        // Run migrations separately to not hold up cold starts
+        thread::spawn(move || {
+            let mut client = Client::connect(connstr.as_str(), NoTls)?;
+            handle_migrations(&mut client)
+        });
         Ok(())
     }
 
