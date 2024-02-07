@@ -170,7 +170,7 @@ impl ComputeHook {
         reconfigure_request: &ComputeHookNotifyRequest,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let req = client.request(Method::POST, url);
+        let req = client.request(Method::PUT, url);
         let req = if let Some(value) = &self.authorization_header {
             req.header(reqwest::header::AUTHORIZATION, value)
         } else {
