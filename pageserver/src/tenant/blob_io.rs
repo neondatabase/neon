@@ -128,7 +128,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         src_buf: B,
     ) -> (B::Buf, Result<(), Error>) {
         let src_buf_len = src_buf.bytes_init();
-        let src_buf = Slice::from(src_buf.slice(0..src_buf_len));
+        let src_buf = src_buf.slice(0..src_buf_len);
         let res = self.inner.write_all(&src_buf).await;
         let src_buf = Slice::into_inner(src_buf);
         if let Ok(()) = &res {
