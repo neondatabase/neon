@@ -1041,8 +1041,6 @@ mod tests {
     use std::future::Future;
     use std::io::Write;
     use std::sync::Arc;
-    use tokio_epoll_uring::IoBuf;
-    use tokio_epoll_uring::Slice;
 
     enum MaybeVirtualFile {
         VirtualFile(VirtualFile),
@@ -1074,10 +1072,16 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all<B: IoBuf>(&mut self, buf: Slice<B>) -> Result<(), Error> {
+        async fn write_all<B: BoundedBuf>(&mut self, buf: B) -> Result<(), Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.write_all(buf).await,
-                MaybeVirtualFile::File(file) => file.write_all(&buf),
+                MaybeVirtualFile::VirtualFile(file) => {
+                    let (_buf, res) = file.write_all(buf).await;
+                    res.map(|_| ())
+                }
+                MaybeVirtualFile::File(file) => {
+                    let buf_len = buf.bytes_init();
+                    file.write_all(&buf.slice(0..buf_len))
+                }
             }
         }
 
@@ -1304,7 +1308,7 @@ mod tests {
         let path = testdir.join("myfile");
         let tmp_path = testdir.join("myfile.tmp");
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo")
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, *b"foo")
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
@@ -1313,7 +1317,7 @@ mod tests {
         assert!(!tmp_path.exists());
         drop(file);
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"bar")
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, *b"bar")
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
@@ -1335,7 +1339,7 @@ mod tests {
         std::fs::write(&tmp_path, "some preexisting junk that should be removed").unwrap();
         assert!(tmp_path.exists());
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo")
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, *b"foo")
             .await
             .unwrap();
 
