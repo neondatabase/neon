@@ -45,7 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
-          echo "runid=$(gh run list -b $GITHUB_REF_NAME -w 'Build and Test' -L 1 -q '.ID' --json number)" >> $GITHUB_OUTPUT
+          echo "runid=$(gh run list -b $GITHUB_REF_NAME -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')" >> $GITHUB_OUTPUT
 
   tag:
     needs: get-build-and-test-run-id
