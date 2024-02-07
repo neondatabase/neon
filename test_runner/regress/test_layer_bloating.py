@@ -1,15 +1,20 @@
 import os
 import time
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     logical_replication_sync,
 )
+from fixtures.pg_version import PgVersion
 
 
 def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
+
+    if env.pg_version != PgVersion.V16:
+        pytest.skip("pg_log_standby_snapshot() function is available only in PG16")
 
     timeline = env.neon_cli.create_branch("test_logical_replication", "empty")
     endpoint = env.endpoints.create_start(
