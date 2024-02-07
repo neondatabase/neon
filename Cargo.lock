@@ -5714,7 +5714,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/iobuf-and-slice-conveniences#dbf93e631697e95051c4f1258c22a7f1ab93f265"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/iobuf-and-slice-conveniences#61c258a40ba99e561bd8528fede922df5dacd0be"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6239,7 +6239,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/iobuf-and-slice-conveniences#dbf93e631697e95051c4f1258c22a7f1ab93f265"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/iobuf-and-slice-conveniences#61c258a40ba99e561bd8528fede922df5dacd0be"
 dependencies = [
  "bytes",
  "io-uring",

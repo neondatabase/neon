@@ -11,6 +11,7 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
+use bytes::{BufMut, BytesMut};
 use tokio_epoll_uring::{BoundedBuf, Slice};
 
 use crate::context::RequestContext;
@@ -102,6 +103,8 @@ pub struct BlobWriter<const BUFFERED: bool> {
     offset: u64,
     /// A buffer to save on write calls, only used if BUFFERED=true
     buf: Vec<u8>,
+    /// We do tiny writes for the length headers; they need to be in an owned buffer;
+    io_buf: Option<BytesMut>,
 }
 
 impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
@@ -110,6 +113,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             inner,
             offset: start_offset,
             buf: Vec::with_capacity(Self::CAPACITY),
+            io_buf: Some(BytesMut::new()),
         }
     }
 
@@ -206,22 +210,32 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
 
         let len = srcbuf.bytes_init();
 
-        let hdr_res = if len < 128 {
-            // Short blob. Write a 1-byte length header
-            let len_buf = len as u8;
-            let (_, res) = self.write_all([len_buf]).await;
-            res
-        } else {
-            // Write a 4-byte length header
-            if len > 0x7fff_ffff {
-                let error = Error::new(ErrorKind::Other, format!("blob too large ({} bytes)", len));
-                return (Slice::into_inner(srcbuf.slice(..)), Err(error));
+        let mut io_buf = self.io_buf.take().expect("we always put it back below");
+        io_buf.clear();
+        let (io_buf, hdr_res) = async {
+            if len < 128 {
+                // Short blob. Write a 1-byte length header
+                io_buf.put_u8(len as u8);
+                self.write_all(io_buf).await
+            } else {
+                // Write a 4-byte length header
+                if len > 0x7fff_ffff {
+                    return (
+                        io_buf,
+                        Err(Error::new(
+                            ErrorKind::Other,
+                            format!("blob too large ({} bytes)", len),
+                        )),
+                    );
+                }
+                let mut len_buf = (len as u32).to_be_bytes();
+                len_buf[0] |= 0x80;
+                io_buf.extend_from_slice(&len_buf[..]);
+                self.write_all(io_buf).await
             }
-            let mut len_buf = (len as u32).to_be_bytes();
-            len_buf[0] |= 0x80;
-            let (_, res) = self.write_all(len_buf).await;
-            res
-        };
+        }
+        .await;
+        self.io_buf = Some(io_buf);
         match hdr_res {
             Ok(_) => (),
             Err(e) => return (Slice::into_inner(srcbuf.slice(..)), Err(e)),
