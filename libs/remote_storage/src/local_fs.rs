@@ -431,7 +431,7 @@ impl RemoteStorage for LocalFs {
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
-        _cancel: CancellationToken,
+        _cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         Err(TimeTravelError::Unimplemented)
     }

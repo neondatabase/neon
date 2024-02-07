@@ -44,6 +44,10 @@ inputs:
     description: 'Postgres version to use for tests'
     required: false
     default: 'v14'
+  benchmark_durations:
+    description: 'benchmark durations JSON'
+    required: false
+    default: '{}'
 
 runs:
   using: "composite"
@@ -82,11 +86,10 @@ runs:
         fetch-depth: 1
 
     - name: Cache poetry deps
-      id: cache_poetry
       uses: actions/cache@v3
       with:
         path: ~/.cache/pypoetry/virtualenvs
-        key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+        key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
     - name: Install Python deps
       shell: bash -euxo pipefail {0}
@@ -160,7 +163,7 @@ runs:
         # We use pytest-split plugin to run benchmarks in parallel on different CI runners
         if [ "${TEST_SELECTION}" = "test_runner/performance" ] && [ "${{ inputs.build_type }}" != "remote" ]; then
           mkdir -p $TEST_OUTPUT
-          poetry run ./scripts/benchmark_durations.py "${TEST_RESULT_CONNSTR}" --days 10 --output "$TEST_OUTPUT/benchmark_durations.json"
+          echo '${{ inputs.benchmark_durations || '{}' }}' > $TEST_OUTPUT/benchmark_durations.json
 
           EXTRA_PARAMS="--durations-path $TEST_OUTPUT/benchmark_durations.json $EXTRA_PARAMS"
         fi

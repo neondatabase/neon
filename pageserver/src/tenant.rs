@@ -100,6 +100,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::span;
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
@@ -150,7 +151,6 @@ pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
-mod span;
 
 pub mod metadata;
 mod par_fsync;
@@ -168,7 +168,7 @@ pub(crate) mod timeline;
 
 pub mod size;
 
-pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
+pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
 // re-export for use in remote_timeline_client.rs
@@ -278,7 +278,7 @@ pub struct Tenant {
     // with timelines, which in turn may cause dropping replication connection, expiration of wait_for_lsn
     // timeout...
     gc_cs: tokio::sync::Mutex<()>,
-    walredo_mgr: Arc<WalRedoManager>,
+    walredo_mgr: Option<Arc<WalRedoManager>>,
 
     // provides access to timeline data sitting in the remote storage
     pub(crate) remote_storage: Option<GenericRemoteStorage>,
@@ -635,7 +635,7 @@ impl Tenant {
             conf,
             attached_conf,
             shard_identity,
-            wal_redo_manager,
+            Some(wal_redo_manager),
             tenant_shard_id,
             remote_storage.clone(),
             deletion_queue_client,
@@ -1195,10 +1195,6 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         reason: String,
     ) -> Arc<Tenant> {
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
-            conf,
-            tenant_shard_id,
-        )));
         Arc::new(Tenant::new(
             TenantState::Broken {
                 reason,
@@ -1209,7 +1205,7 @@ impl Tenant {
             // Shard identity isn't meaningful for a broken tenant: it's just a placeholder
             // to occupy the slot for this TenantShardId.
             ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
-            wal_redo_manager,
+            None,
             tenant_shard_id,
             None,
             DeletionQueueClient::broken(),
@@ -1978,7 +1974,7 @@ impl Tenant {
     }
 
     pub(crate) fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
-        self.walredo_mgr.status()
+        self.walredo_mgr.as_ref().and_then(|mgr| mgr.status())
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
@@ -2613,7 +2609,7 @@ impl Tenant {
             self.tenant_shard_id,
             self.generation,
             self.shard_identity,
-            Arc::clone(&self.walredo_mgr),
+            self.walredo_mgr.as_ref().map(Arc::clone),
             resources,
             pg_version,
             state,
@@ -2631,7 +2627,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         attached_conf: AttachedTenantConf,
         shard_identity: ShardIdentity,
-        walredo_mgr: Arc<WalRedoManager>,
+        walredo_mgr: Option<Arc<WalRedoManager>>,
         tenant_shard_id: TenantShardId,
         remote_storage: Option<GenericRemoteStorage>,
         deletion_queue_client: DeletionQueueClient,
@@ -3294,11 +3290,11 @@ impl Tenant {
             3,
             u32::MAX,
             "persist_initdb_tar_zst",
-            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
+            &self.cancel,
         )
-        .await?;
-
-        Ok(())
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .and_then(|x| x)
     }
 
     /// - run initdb to init temporary instance and get bootstrap data
@@ -3998,6 +3994,10 @@ pub(crate) mod harness {
             })
         }
 
+        pub fn span(&self) -> tracing::Span {
+            info_span!("TenantHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
+        }
+
         pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
@@ -4051,7 +4051,7 @@ pub(crate) mod harness {
                 .unwrap(),
                 // This is a legacy/test code path: sharding isn't supported here.
                 ShardIdentity::unsharded(),
-                walredo_mgr,
+                Some(walredo_mgr),
                 self.tenant_shard_id,
                 Some(self.remote_storage.clone()),
                 self.deletion_queue.new_client(),
@@ -4602,7 +4602,7 @@ mod tests {
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
-                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+                .instrument(harness.span())
                 .await
                 .ok()
                 .unwrap();
@@ -4643,7 +4643,7 @@ mod tests {
             // so that all uploads finish & we can call harness.load() below again
             tenant
                 .shutdown(Default::default(), true)
-                .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+                .instrument(harness.span())
                 .await
                 .ok()
                 .unwrap();
@@ -4705,7 +4705,7 @@ mod tests {
         // so that all uploads finish & we can call harness.try_load() below again
         tenant
             .shutdown(Default::default(), true)
-            .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_shard_id))
+            .instrument(harness.span())
             .await
             .ok()
             .unwrap();
@@ -5238,7 +5238,7 @@ mod tests {
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
                 .shutdown()
-                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, timeline_id=%TIMELINE_ID))
+                .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, shard_id=%raw_tline.tenant_shard_id.shard_slug(), timeline_id=%TIMELINE_ID))
                 .await;
             std::mem::forget(tline);
         }

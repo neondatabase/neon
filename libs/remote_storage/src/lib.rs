@@ -218,7 +218,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError>;
 }
 
@@ -442,7 +442,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         match self {
             Self::LocalFs(s) => {

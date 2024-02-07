@@ -537,11 +537,11 @@ impl<'a> TenantDownloader<'a> {
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "download heatmap",
-            backoff::Cancel::new(self.secondary_state.cancel.clone(), || {
-                UpdateError::Cancelled
-            }),
+            &self.secondary_state.cancel,
         )
-        .await?;
+        .await
+        .ok_or_else(|| UpdateError::Cancelled)
+        .and_then(|x| x)?;
 
         SECONDARY_MODE.download_heatmap.inc();
 

@@ -112,11 +112,10 @@ jobs:
           fetch-depth: 1
 
       - name: Cache poetry deps
-        id: cache_poetry
         uses: actions/cache@v3
         with:
           path: ~/.cache/pypoetry/virtualenvs
-          key: v1-codestyle-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
         run: ./scripts/pysync
@@ -132,7 +131,7 @@ jobs:
 
   check-codestyle-rust:
     needs: [ check-permissions, build-buildtools-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
@@ -479,8 +478,40 @@ jobs:
         if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
         uses: ./.github/actions/save-coverage-data
 
+  get-benchmarks-durations:
+    outputs:
+      json: ${{ steps.get-benchmark-durations.outputs.json }}
+    needs: [ check-permissions, build-buildtools-image ]
+    runs-on: [ self-hosted, gen3, small ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      options: --init
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Cache poetry deps
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: get benchmark durations
+        id: get-benchmark-durations
+        env:
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
+        run: |
+          poetry run ./scripts/benchmark_durations.py "${TEST_RESULT_CONNSTR}" \
+                                                      --days 10 \
+                                                      --output /tmp/benchmark_durations.json
+          echo "json=$(jq --compact-output '.' /tmp/benchmark_durations.json)" >> $GITHUB_OUTPUT
+
   benchmarks:
-    needs: [ check-permissions, build-neon, build-buildtools-image ]
+    needs: [ check-permissions, build-neon, build-buildtools-image, get-benchmarks-durations ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
@@ -491,7 +522,7 @@ jobs:
       fail-fast: false
       matrix:
         # the amount of groups (N) should be reflected in `extra_params: --splits N ...`
-        pytest_split_group: [ 1, 2, 3, 4 ]
+        pytest_split_group: [ 1, 2, 3, 4, 5 ]
         build_type: [ release ]
         pageserver_virtual_file_io_engine: [ std-fs, tokio-epoll-uring ]
     steps:
@@ -505,7 +536,8 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: ${{ github.ref_name == 'main' }}
-          extra_params: --splits 4 --group ${{ matrix.pytest_split_group }}
+          extra_params: --splits 5 --group ${{ matrix.pytest_split_group }}
+          benchmark_durations: ${{ needs.get-benchmarks-durations.outputs.json }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"

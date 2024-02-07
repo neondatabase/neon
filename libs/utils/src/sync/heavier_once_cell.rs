@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex, MutexGuard,
+    Arc,
 };
 use tokio::sync::Semaphore;
 
@@ -12,7 +12,7 @@ use tokio::sync::Semaphore;
 ///
 /// [`OwnedSemaphorePermit`]: tokio::sync::OwnedSemaphorePermit
 pub struct OnceCell<T> {
-    inner: Mutex<Inner<T>>,
+    inner: tokio::sync::RwLock<Inner<T>>,
     initializers: AtomicUsize,
 }
 
@@ -50,7 +50,7 @@ impl<T> OnceCell<T> {
         let sem = Semaphore::new(1);
         sem.close();
         Self {
-            inner: Mutex::new(Inner {
+            inner: tokio::sync::RwLock::new(Inner {
                 init_semaphore: Arc::new(sem),
                 value: Some(value),
             }),
@@ -61,18 +61,18 @@ impl<T> OnceCell<T> {
     /// Returns a guard to an existing initialized value, or uniquely initializes the value before
     /// returning the guard.
     ///
-    /// Initializing might wait on any existing [`Guard::take_and_deinit`] deinitialization.
+    /// Initializing might wait on any existing [`GuardMut::take_and_deinit`] deinitialization.
     ///
     /// Initialization is panic-safe and cancellation-safe.
-    pub async fn get_or_init<F, Fut, E>(&self, factory: F) -> Result<Guard<'_, T>, E>
+    pub async fn get_mut_or_init<F, Fut, E>(&self, factory: F) -> Result<GuardMut<'_, T>, E>
     where
         F: FnOnce(InitPermit) -> Fut,
         Fut: std::future::Future<Output = Result<(T, InitPermit), E>>,
     {
         let sem = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.inner.write().await;
             if guard.value.is_some() {
-                return Ok(Guard(guard));
+                return Ok(GuardMut(guard));
             }
             guard.init_semaphore.clone()
         };
@@ -88,29 +88,72 @@ impl<T> OnceCell<T> {
                 let permit = InitPermit(permit);
                 let (value, _permit) = factory(permit).await?;
 
-                let guard = self.inner.lock().unwrap();
+                let guard = self.inner.write().await;
 
                 Ok(Self::set0(value, guard))
             }
             Err(_closed) => {
-                let guard = self.inner.lock().unwrap();
+                let guard = self.inner.write().await;
                 assert!(
                     guard.value.is_some(),
                     "semaphore got closed, must be initialized"
                 );
-                return Ok(Guard(guard));
+                return Ok(GuardMut(guard));
             }
         }
     }
 
-    /// Assuming a permit is held after previous call to [`Guard::take_and_deinit`], it can be used
+    /// Returns a guard to an existing initialized value, or uniquely initializes the value before
+    /// returning the guard.
+    ///
+    /// Initialization is panic-safe and cancellation-safe.
+    pub async fn get_or_init<F, Fut, E>(&self, factory: F) -> Result<GuardRef<'_, T>, E>
+    where
+        F: FnOnce(InitPermit) -> Fut,
+        Fut: std::future::Future<Output = Result<(T, InitPermit), E>>,
+    {
+        let sem = {
+            let guard = self.inner.read().await;
+            if guard.value.is_some() {
+                return Ok(GuardRef(guard));
+            }
+            guard.init_semaphore.clone()
+        };
+
+        let permit = {
+            // increment the count for the duration of queued
+            let _guard = CountWaitingInitializers::start(self);
+            sem.acquire_owned().await
+        };
+
+        match permit {
+            Ok(permit) => {
+                let permit = InitPermit(permit);
+                let (value, _permit) = factory(permit).await?;
+
+                let guard = self.inner.write().await;
+
+                Ok(Self::set0(value, guard).downgrade())
+            }
+            Err(_closed) => {
+                let guard = self.inner.read().await;
+                assert!(
+                    guard.value.is_some(),
+                    "semaphore got closed, must be initialized"
+                );
+                return Ok(GuardRef(guard));
+            }
+        }
+    }
+
+    /// Assuming a permit is held after previous call to [`GuardMut::take_and_deinit`], it can be used
     /// to complete initializing the inner value.
     ///
     /// # Panics
     ///
     /// If the inner has already been initialized.
-    pub fn set(&self, value: T, _permit: InitPermit) -> Guard<'_, T> {
-        let guard = self.inner.lock().unwrap();
+    pub async fn set(&self, value: T, _permit: InitPermit) -> GuardMut<'_, T> {
+        let guard = self.inner.write().await;
 
         // cannot assert that this permit is for self.inner.semaphore, but we can assert it cannot
         // give more permits right now.
@@ -122,21 +165,31 @@ impl<T> OnceCell<T> {
         Self::set0(value, guard)
     }
 
-    fn set0(value: T, mut guard: std::sync::MutexGuard<'_, Inner<T>>) -> Guard<'_, T> {
+    fn set0(value: T, mut guard: tokio::sync::RwLockWriteGuard<'_, Inner<T>>) -> GuardMut<'_, T> {
         if guard.value.is_some() {
             drop(guard);
             unreachable!("we won permit, must not be initialized");
         }
         guard.value = Some(value);
         guard.init_semaphore.close();
-        Guard(guard)
+        GuardMut(guard)
     }
 
     /// Returns a guard to an existing initialized value, if any.
-    pub fn get(&self) -> Option<Guard<'_, T>> {
-        let guard = self.inner.lock().unwrap();
+    pub async fn get_mut(&self) -> Option<GuardMut<'_, T>> {
+        let guard = self.inner.write().await;
         if guard.value.is_some() {
-            Some(Guard(guard))
+            Some(GuardMut(guard))
+        } else {
+            None
+        }
+    }
+
+    /// Returns a guard to an existing initialized value, if any.
+    pub async fn get(&self) -> Option<GuardRef<'_, T>> {
+        let guard = self.inner.read().await;
+        if guard.value.is_some() {
+            Some(GuardRef(guard))
         } else {
             None
         }
@@ -168,9 +221,9 @@ impl<'a, T> Drop for CountWaitingInitializers<'a, T> {
 /// Uninteresting guard object to allow short-lived access to inspect or clone the held,
 /// initialized value.
 #[derive(Debug)]
-pub struct Guard<'a, T>(MutexGuard<'a, Inner<T>>);
+pub struct GuardMut<'a, T>(tokio::sync::RwLockWriteGuard<'a, Inner<T>>);
 
-impl<T> std::ops::Deref for Guard<'_, T> {
+impl<T> std::ops::Deref for GuardMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -181,7 +234,7 @@ impl<T> std::ops::Deref for Guard<'_, T> {
     }
 }
 
-impl<T> std::ops::DerefMut for Guard<'_, T> {
+impl<T> std::ops::DerefMut for GuardMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
             .value
@@ -190,7 +243,7 @@ impl<T> std::ops::DerefMut for Guard<'_, T> {
     }
 }
 
-impl<'a, T> Guard<'a, T> {
+impl<'a, T> GuardMut<'a, T> {
     /// Take the current value, and a new permit for it's deinitialization.
     ///
     /// The permit will be on a semaphore part of the new internal value, and any following
@@ -206,6 +259,24 @@ impl<'a, T> Guard<'a, T> {
         swapped
             .value
             .map(|v| (v, InitPermit(permit)))
+            .expect("guard is not created unless value has been initialized")
+    }
+
+    pub fn downgrade(self) -> GuardRef<'a, T> {
+        GuardRef(self.0.downgrade())
+    }
+}
+
+#[derive(Debug)]
+pub struct GuardRef<'a, T>(tokio::sync::RwLockReadGuard<'a, Inner<T>>);
+
+impl<T> std::ops::Deref for GuardRef<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .value
+            .as_ref()
             .expect("guard is not created unless value has been initialized")
     }
 }
@@ -248,7 +319,7 @@ mod tests {
                     barrier.wait().await;
                     let won = {
                         let g = cell
-                            .get_or_init(|permit| {
+                            .get_mut_or_init(|permit| {
                                 counters.factory_got_to_run.fetch_add(1, Ordering::Relaxed);
                                 async {
                                     counters.future_polled.fetch_add(1, Ordering::Relaxed);
@@ -295,7 +366,11 @@ mod tests {
             let cell = cell.clone();
             let deinitialization_started = deinitialization_started.clone();
             async move {
-                let (answer, _permit) = cell.get().expect("initialized to value").take_and_deinit();
+                let (answer, _permit) = cell
+                    .get_mut()
+                    .await
+                    .expect("initialized to value")
+                    .take_and_deinit();
                 assert_eq!(answer, initial);
 
                 deinitialization_started.wait().await;
@@ -306,7 +381,7 @@ mod tests {
         deinitialization_started.wait().await;
 
         let started_at = tokio::time::Instant::now();
-        cell.get_or_init(|permit| async { Ok::<_, Infallible>((reinit, permit)) })
+        cell.get_mut_or_init(|permit| async { Ok::<_, Infallible>((reinit, permit)) })
             .await
             .unwrap();
 
@@ -318,21 +393,21 @@ mod tests {
 
         jh.await.unwrap();
 
-        assert_eq!(*cell.get().unwrap(), reinit);
+        assert_eq!(*cell.get_mut().await.unwrap(), reinit);
     }
 
-    #[test]
-    fn reinit_with_deinit_permit() {
+    #[tokio::test]
+    async fn reinit_with_deinit_permit() {
         let cell = Arc::new(OnceCell::new(42));
 
-        let (mol, permit) = cell.get().unwrap().take_and_deinit();
-        cell.set(5, permit);
-        assert_eq!(*cell.get().unwrap(), 5);
+        let (mol, permit) = cell.get_mut().await.unwrap().take_and_deinit();
+        cell.set(5, permit).await;
+        assert_eq!(*cell.get_mut().await.unwrap(), 5);
 
-        let (five, permit) = cell.get().unwrap().take_and_deinit();
+        let (five, permit) = cell.get_mut().await.unwrap().take_and_deinit();
         assert_eq!(5, five);
-        cell.set(mol, permit);
-        assert_eq!(*cell.get().unwrap(), 42);
+        cell.set(mol, permit).await;
+        assert_eq!(*cell.get_mut().await.unwrap(), 42);
     }
 
     #[tokio::test]
@@ -340,13 +415,13 @@ mod tests {
         let cell = OnceCell::default();
 
         for _ in 0..10 {
-            cell.get_or_init(|_permit| async { Err("whatever error") })
+            cell.get_mut_or_init(|_permit| async { Err("whatever error") })
                 .await
                 .unwrap_err();
         }
 
         let g = cell
-            .get_or_init(|permit| async { Ok::<_, Infallible>(("finally success", permit)) })
+            .get_mut_or_init(|permit| async { Ok::<_, Infallible>(("finally success", permit)) })
             .await
             .unwrap();
         assert_eq!(*g, "finally success");
@@ -358,7 +433,7 @@ mod tests {
 
         let barrier = tokio::sync::Barrier::new(2);
 
-        let initializer = cell.get_or_init(|permit| async {
+        let initializer = cell.get_mut_or_init(|permit| async {
             barrier.wait().await;
             futures::future::pending::<()>().await;
 
@@ -372,10 +447,10 @@ mod tests {
 
         // now initializer is dropped
 
-        assert!(cell.get().is_none());
+        assert!(cell.get_mut().await.is_none());
 
         let g = cell
-            .get_or_init(|permit| async { Ok::<_, Infallible>(("now initialized", permit)) })
+            .get_mut_or_init(|permit| async { Ok::<_, Infallible>(("now initialized", permit)) })
             .await
             .unwrap();
         assert_eq!(*g, "now initialized");

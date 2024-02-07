@@ -4,13 +4,14 @@
 /// This enables running & testing pageservers without a full-blown
 /// deployment of the Neon cloud platform.
 ///
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use attachment_service::http::make_router;
 use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
 use aws_config::{self, BehaviorVersion, Region};
 use camino::Utf8PathBuf;
 use clap::Parser;
+use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use std::sync::Arc;
 use tokio::signal::unix::SignalKind;
@@ -22,6 +23,9 @@ use utils::{project_build_tag, project_git_version, tcp_listener};
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
@@ -30,9 +34,9 @@ struct Cli {
     #[arg(short, long)]
     listen: std::net::SocketAddr,
 
-    /// Path to public key for JWT authentication of clients
+    /// Public key for JWT authentication of clients
     #[arg(long)]
-    public_key: Option<camino::Utf8PathBuf>,
+    public_key: Option<String>,
 
     /// Token for authenticating this service with the pageservers it controls
     #[arg(long)]
@@ -53,7 +57,7 @@ struct Cli {
 
     /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
     #[arg(long)]
-    database_url: String,
+    database_url: Option<String>,
 }
 
 /// Secrets may either be provided on the command line (for testing), or loaded from AWS SecretManager: this
@@ -74,10 +78,9 @@ impl Secrets {
     const PUBLIC_KEY_SECRET: &'static str = "neon-storage-controller-public-key";
 
     async fn load(args: &Cli) -> anyhow::Result<Self> {
-        if args.database_url.is_empty() {
-            Self::load_aws_sm().await
-        } else {
-            Self::load_cli(args)
+        match &args.database_url {
+            Some(url) => Self::load_cli(url, args),
+            None => Self::load_aws_sm().await,
         }
     }
 
@@ -153,18 +156,31 @@ impl Secrets {
         })
     }
 
-    fn load_cli(args: &Cli) -> anyhow::Result<Self> {
+    fn load_cli(database_url: &str, args: &Cli) -> anyhow::Result<Self> {
         let public_key = match &args.public_key {
             None => None,
-            Some(key_path) => Some(JwtAuth::from_key_path(key_path)?),
+            Some(key) => Some(JwtAuth::from_key(key.clone()).context("Loading public key")?),
         };
         Ok(Self {
-            database_url: args.database_url.clone(),
+            database_url: database_url.to_owned(),
             public_key,
             jwt_token: args.jwt_token.clone(),
             control_plane_jwt_token: args.control_plane_jwt_token.clone(),
         })
     }
+}
+
+async fn migration_run(database_url: &str) -> anyhow::Result<()> {
+    use diesel::PgConnection;
+    use diesel_migrations::{HarnessWithOutput, MigrationHarness};
+    let mut conn = PgConnection::establish(database_url)?;
+
+    HarnessWithOutput::write_to_stdout(&mut conn)
+        .run_pending_migrations(MIGRATIONS)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -194,6 +210,11 @@ async fn main() -> anyhow::Result<()> {
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
     };
+
+    // After loading secrets & config, but before starting anything else, apply database migrations
+    migration_run(&secrets.database_url)
+        .await
+        .context("Running database migrations")?;
 
     let json_path = args.path;
     let persistence = Arc::new(Persistence::new(secrets.database_url, json_path.clone()));
