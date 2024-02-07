@@ -47,7 +47,7 @@ jobs:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
           CURRENT_BRANCH: ${{ github.head_ref }}
         run: |
-          BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')"
+          BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
           echo build and test runid:$BUILD_AND_TEST_RUN_ID
           echo ref:$GITHUB_REF_NAME
           echo rev:$(git rev-list --count HEAD)
