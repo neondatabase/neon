@@ -31,7 +31,6 @@ jobs:
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
   tag:
-    needs: get-build-and-test-run-id
     runs-on: [ ubuntu-latest ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
