@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::Context;
 use async_trait::async_trait;
 use tracing::info;
 
@@ -13,7 +12,7 @@ use crate::{
     proxy::connect_compute::ConnectMechanism,
 };
 
-use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool, APP_NAME};
+use super::conn_pool::{poll_client, Client, ConnInfo, ConnPoolError, GlobalConnPool, APP_NAME};
 
 pub struct PoolingBackend {
     pub pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
@@ -66,7 +65,7 @@ impl PoolingBackend {
         conn_info: ConnInfo,
         keys: ComputeCredentialKeys,
         force_new: bool,
-    ) -> anyhow::Result<Client<tokio_postgres::Client>> {
+    ) -> Result<Client<tokio_postgres::Client>, ConnPoolError> {
         let maybe_client = if !force_new {
             info!("pool: looking for an existing connection");
             self.pool.get(ctx, &conn_info).await?
@@ -90,7 +89,7 @@ impl PoolingBackend {
         let mut node_info = backend
             .wake_compute(ctx)
             .await?
-            .context("missing cache entry from wake_compute")?;
+            .ok_or(ConnPoolError::NoComputeInfo)?;
 
         match keys {
             #[cfg(any(test, feature = "testing"))]
@@ -124,7 +123,7 @@ struct TokioMechanism {
 impl ConnectMechanism for TokioMechanism {
     type Connection = Client<tokio_postgres::Client>;
     type ConnectError = tokio_postgres::Error;
-    type Error = anyhow::Error;
+    type Error = ConnPoolError;
 
     async fn connect_once(
         &self,
