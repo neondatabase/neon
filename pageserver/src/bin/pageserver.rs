@@ -274,7 +274,10 @@ fn start_pageserver(
     set_launch_timestamp_metric(launch_ts);
     #[cfg(target_os = "linux")]
     metrics::register_internal(Box::new(metrics::more_process_metrics::Collector::new())).unwrap();
-    metrics::register_internal(Box::new(pageserver::metrics::tokio_epoll_uring::Collector::new())).unwrap();
+    metrics::register_internal(Box::new(
+        pageserver::metrics::tokio_epoll_uring::Collector::new(),
+    ))
+    .unwrap();
     pageserver::preinitialize_metrics();
 
     // If any failpoints were set from FAILPOINTS environment variable,

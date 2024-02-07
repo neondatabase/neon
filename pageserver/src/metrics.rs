@@ -2431,6 +2431,7 @@ pub mod tokio_epoll_uring {
     }
 
     impl Collector {
+        #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             let mut descs = Vec::new();
 
