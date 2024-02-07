@@ -31,7 +31,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::sync::gate::Gate;
+use utils::{bin_ser::BeSer, sync::gate::Gate};
 
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
@@ -262,7 +262,7 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
-    write_lock: tokio::sync::Mutex<()>,
+    write_lock: tokio::sync::Mutex<Option<TimelineWriterState>>,
 
     /// Used to avoid multiple `flush_loop` tasks running
     pub(super) flush_loop_state: Mutex<FlushLoopState>,
@@ -1024,7 +1024,7 @@ impl Timeline {
     pub(crate) async fn writer(&self) -> TimelineWriter<'_> {
         TimelineWriter {
             tl: self,
-            _write_guard: self.write_lock.lock().await,
+            write_guard: self.write_lock.lock().await,
         }
     }
 
@@ -1061,7 +1061,7 @@ impl Timeline {
                 last_freeze_ts.elapsed()
             );
 
-            self.freeze_inmem_layer(true).await;
+            self.freeze_inmem_layer(false).await;
             self.last_freeze_at.store(last_lsn);
             *(self.last_freeze_ts.write().unwrap()) = Instant::now();
 
@@ -1500,7 +1500,7 @@ impl Timeline {
                 layer_flush_start_tx,
                 layer_flush_done_tx,
 
-                write_lock: tokio::sync::Mutex::new(()),
+                write_lock: tokio::sync::Mutex::new(None),
 
                 gc_info: std::sync::RwLock::new(GcInfo {
                     retain_lsns: Vec::new(),
@@ -2665,43 +2665,6 @@ impl Timeline {
         Ok(layer)
     }
 
-    async fn put_value(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        val: &Value,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        //info!("PUT: key {} at {}", key, lsn);
-        let layer = self.get_layer_for_write(lsn).await?;
-        layer.put_value(key, lsn, val, ctx).await?;
-        Ok(())
-    }
-
-    async fn put_values(
-        &self,
-        values: &HashMap<Key, Vec<(Lsn, Value)>>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Pick the first LSN in the batch to get the layer to write to.
-        for lsns in values.values() {
-            if let Some((lsn, _)) = lsns.first() {
-                let layer = self.get_layer_for_write(*lsn).await?;
-                layer.put_values(values, ctx).await?;
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    async fn put_tombstones(&self, tombstones: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
-        if let Some((_, lsn)) = tombstones.first() {
-            let layer = self.get_layer_for_write(*lsn).await?;
-            layer.put_tombstones(tombstones).await?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
@@ -2712,14 +2675,20 @@ impl Timeline {
     async fn freeze_inmem_layer(&self, write_lock_held: bool) {
         // Freeze the current open in-memory layer. It will be written to disk on next
         // iteration.
+
         let _write_guard = if write_lock_held {
             None
         } else {
             Some(self.write_lock.lock().await)
         };
+
+        self.freeze_inmem_layer_at(self.get_last_record_lsn()).await;
+    }
+
+    async fn freeze_inmem_layer_at(&self, at: Lsn) {
         let mut guard = self.layers.write().await;
         guard
-            .try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at)
+            .try_freeze_in_memory_layer(at, &self.last_freeze_at)
             .await;
     }
 
@@ -4742,13 +4711,33 @@ fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageRecon
     PageReconstructError::from(msg)
 }
 
+struct TimelineWriterState {
+    open_layer: Arc<InMemoryLayer>,
+    current_size: u64,
+    // Previous Lsn which passed through
+    prev_lsn: Option<Lsn>,
+    // Largest Lsn which passed through the current writer
+    max_lsn: Option<Lsn>,
+}
+
+impl TimelineWriterState {
+    fn new(open_layer: Arc<InMemoryLayer>, current_size: u64) -> Self {
+        Self {
+            open_layer,
+            current_size,
+            prev_lsn: None,
+            max_lsn: None,
+        }
+    }
+}
+
 /// Various functions to mutate the timeline.
 // TODO Currently, Deref is used to allow easy access to read methods from this trait.
 // This is probably considered a bad practice in Rust and should be fixed eventually,
 // but will cause large code changes.
 pub(crate) struct TimelineWriter<'a> {
     tl: &'a Timeline,
-    _write_guard: tokio::sync::MutexGuard<'a, ()>,
+    write_guard: tokio::sync::MutexGuard<'a, Option<TimelineWriterState>>,
 }
 
 impl Deref for TimelineWriter<'_> {
@@ -4759,31 +4748,174 @@ impl Deref for TimelineWriter<'_> {
     }
 }
 
+impl Drop for TimelineWriter<'_> {
+    fn drop(&mut self) {
+        let state = &mut *self.write_guard;
+        *state = None;
+    }
+}
+
+enum OpenLayerAction {
+    Roll,
+    Open,
+    None,
+}
+
 impl<'a> TimelineWriter<'a> {
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
     pub(crate) async fn put(
-        &self,
+        &mut self,
         key: Key,
         lsn: Lsn,
         value: &Value,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.tl.put_value(key, lsn, value, ctx).await
+        let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
+        buf.clear();
+        value.ser_into(&mut buf)?;
+        let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
+
+        let action = self.get_open_layer_action(lsn, buf_size);
+        let layer = self.handle_open_layer_action(lsn, action).await?;
+        let res = layer.put_value(key, lsn, &buf, ctx).await;
+
+        if res.is_ok() {
+            // Update the current size only when the entire write was ok.
+            // In case of failures, we may have had partial writes which
+            // render the size tracking out of sync. That's ok because
+            // the checkpoint distance should be significantly smaller
+            // than the S3 single shot upload limit of 5GiB.
+            let state = self.write_guard.as_mut().unwrap();
+
+            state.current_size += buf_size;
+            state.prev_lsn = Some(lsn);
+            state.max_lsn = std::cmp::max(state.max_lsn, Some(lsn));
+        }
+
+        res
+    }
+
+    async fn handle_open_layer_action(
+        &mut self,
+        at: Lsn,
+        action: OpenLayerAction,
+    ) -> anyhow::Result<&Arc<InMemoryLayer>> {
+        match action {
+            OpenLayerAction::Roll => {
+                let max_lsn = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
+                self.tl.freeze_inmem_layer_at(max_lsn).await;
+                *(self.last_freeze_ts.write().unwrap()) = Instant::now();
+                self.tl.flush_frozen_layers();
+
+                let current_size = self.write_guard.as_ref().unwrap().current_size;
+                if current_size > self.get_checkpoint_distance() {
+                    warn!("Flushed oversized open layer with size {}", current_size)
+                }
+
+                let state = &mut *self.write_guard;
+                assert!(state.is_some());
+
+                let layer = self.tl.get_layer_for_write(at).await?;
+                let initial_size = layer.size().await?;
+                *state = Some(TimelineWriterState::new(layer, initial_size));
+            }
+            OpenLayerAction::Open => {
+                let state = &mut *self.write_guard;
+                assert!(state.is_none());
+
+                let layer = self.tl.get_layer_for_write(at).await?;
+                let initial_size = layer.size().await?;
+                *state = Some(TimelineWriterState::new(layer, initial_size));
+            }
+            OpenLayerAction::None => {
+                let state = &*self.write_guard;
+                assert!(state.is_some());
+            }
+        }
+
+        Ok(&self.write_guard.as_ref().unwrap().open_layer)
+    }
+
+    fn get_open_layer_action(&self, lsn: Lsn, new_value_size: u64) -> OpenLayerAction {
+        let state = &*self.write_guard;
+        if state.is_none() {
+            return OpenLayerAction::Open;
+        }
+
+        let state = state.as_ref().unwrap();
+        if state.prev_lsn == Some(lsn) {
+            // Rolling mid LSN is not supported by downstream code.
+            // Hence, only roll at LSN boundaries.
+            return OpenLayerAction::None;
+        }
+
+        let last_freeze_at = self.last_freeze_at.load();
+        let distance = lsn.widening_sub(last_freeze_at);
+        let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
+
+        let proposed_open_layer_size = state.current_size + new_value_size;
+
+        // Rolling the open layer can be triggered by:
+        // 1. The distance from the last LSN we rolled at. This bounds the amount of WAL that
+        //    the safekeepers need to store.
+        // 2. The size of the currently open layer.
+        // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
+        //    up and suspend activity.
+        if distance >= self.get_checkpoint_distance().into() {
+            info!(
+                "Will roll layer at {} with layer size {} due to LSN distance ({})",
+                lsn, state.current_size, distance
+            );
+
+            OpenLayerAction::Roll
+        } else if state.current_size > 0
+            && proposed_open_layer_size >= self.get_checkpoint_distance()
+        {
+            info!(
+                "Will roll layer at {} with layer size {} due to layer size ({})",
+                lsn, state.current_size, proposed_open_layer_size
+            );
+
+            OpenLayerAction::Roll
+        } else if distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
+            info!(
+                "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
+                lsn,
+                state.current_size,
+                last_freeze_ts.elapsed()
+            );
+
+            OpenLayerAction::Roll
+        } else {
+            OpenLayerAction::None
+        }
     }
 
     pub(crate) async fn put_batch(
-        &self,
+        &mut self,
         batch: &HashMap<Key, Vec<(Lsn, Value)>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.tl.put_values(batch, ctx).await
+        for (key, vals) in batch {
+            for (lsn, val) in vals {
+                self.put(*key, *lsn, val, ctx).await?
+            }
+        }
+
+        Ok(())
     }
 
-    pub(crate) async fn delete_batch(&self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
-        self.tl.put_tombstones(batch).await
+    pub(crate) async fn delete_batch(&mut self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+        if let Some((_, lsn)) = batch.first() {
+            let action = self.get_open_layer_action(*lsn, 0);
+            let layer = self.handle_open_layer_action(*lsn, action).await?;
+            layer.put_tombstones(batch).await?;
+        }
+
+        Ok(())
     }
 
     /// Track the end of the latest digested WAL record.
