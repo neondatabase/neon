@@ -1,5 +1,5 @@
 Neon
-Copyright 2022 Neon Inc.
+Copyright 2022 - 2024 Neon Inc.
 
 The PostgreSQL submodules in vendor/ are licensed under the PostgreSQL license.
 See vendor/postgres-vX/COPYRIGHT for details.
