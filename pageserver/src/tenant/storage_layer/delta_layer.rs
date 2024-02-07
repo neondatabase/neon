@@ -434,7 +434,6 @@ impl DeltaLayerWriterInner {
         let val = tokio_epoll_uring::Slice::from(val);
 
         let (val, res) = self.blob_writer.write_blob(val).await;
-        let val = tokio_epoll_uring::Slice::into_inner(val);
         let off = match res {
             Ok(off) => off,
             Err(e) => return (val, Err(anyhow::anyhow!(e))),

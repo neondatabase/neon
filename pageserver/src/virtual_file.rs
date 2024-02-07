@@ -19,7 +19,7 @@ use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
+use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
@@ -409,10 +409,10 @@ impl VirtualFile {
     /// step, the tmp path is renamed to the final path. As renames are
     /// atomic, a crash during the write operation will never leave behind a
     /// partially written file.
-    pub async fn crashsafe_overwrite<B: IoBuf>(
+    pub async fn crashsafe_overwrite<B: BoundedBuf>(
         final_path: &Utf8Path,
         tmp_path: &Utf8Path,
-        content: Slice<B>,
+        content: B,
     ) -> std::io::Result<()> {
         let Some(final_path_parent) = final_path.parent() else {
             return Err(std::io::Error::from_raw_os_error(
@@ -601,8 +601,13 @@ impl VirtualFile {
         Ok(())
     }
 
-    pub async fn write_all<B: IoBuf>(&mut self, mut buf: B) -> (B, Result<(), Error>) {
-        let mut buf = buf.slice(..);
+    /// Writes `buf.slice(0..buf.bytes_init())`.
+    /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
+    /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
+    /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
+    pub async fn write_all<B: BoundedBuf>(&mut self, buf: B) -> (B::Buf, Result<usize, Error>) {
+        let nbytes = buf.bytes_init();
+        let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
             // TODO: push `Slice` further down
             match self.write(&buf).await {
@@ -622,7 +627,7 @@ impl VirtualFile {
                 Err(e) => return (Slice::into_inner(buf), Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(()))
+        (Slice::into_inner(buf), Ok(nbytes))
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
@@ -681,7 +686,6 @@ where
     F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
     Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
 {
-    use tokio_epoll_uring::BoundedBuf;
     let mut buf: tokio_epoll_uring::Slice<B> = buf.slice_full(); // includes all the uninitialized memory
     while buf.bytes_total() != 0 {
         let res;
