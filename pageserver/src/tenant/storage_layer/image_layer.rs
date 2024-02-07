@@ -342,18 +342,12 @@ impl ImageLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        if buf.spilled() {
-            // The code in ImageLayerWriterInner just warn!()s for this.
-            // It should probably error out as well.
-            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            )));
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(Slice::from(buf)).await?;
+        let (_buf, res) = file.write_all(Slice::from(buf)).await;
+        res?;
         Ok(())
     }
 }
@@ -556,7 +550,8 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            file.write_all(Slice::from(buf)).await?;
+            let (_buf, res) = file.write_all(Slice::from(buf)).await;
+            res?;
         }
 
         // Fill in the summary on blk 0
@@ -571,17 +566,12 @@ impl ImageLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
-        if buf.spilled() {
-            // This is bad as we only have one free block for the summary
-            warn!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            );
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(Slice::from(buf)).await;
+        res?;
 
         let metadata = file
             .metadata()

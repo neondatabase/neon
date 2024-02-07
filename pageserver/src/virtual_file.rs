@@ -19,7 +19,7 @@ use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::{IoBuf, IoBufMut, Slice};
+use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
@@ -429,7 +429,8 @@ impl VirtualFile {
                 .create_new(true),
         )
         .await?;
-        file.write_all(content).await?;
+        let (_content, res) = file.write_all(content).await;
+        res?;
         file.sync_all().await?;
         drop(file); // before the rename, that's important!
                     // renames are atomic
@@ -601,24 +602,27 @@ impl VirtualFile {
     }
 
     pub async fn write_all<B: IoBuf>(&mut self, mut buf: B) -> (B, Result<(), Error>) {
-        let slice = Slice::from(buf);
-        while !slice.is_empty() {
+        let mut buf = buf.slice(..);
+        while !buf.is_empty() {
             // TODO: push `Slice` further down
-            match self.write(&slice).await {
+            match self.write(&buf).await {
                 Ok(0) => {
-                    return Err(Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return (
+                        Slice::into_inner(buf),
+                        Err(Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        )),
+                    );
                 }
                 Ok(n) => {
-                    slice = slice.slice(n..);
+                    buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(slice), Err(e)),
+                Err(e) => return (Slice::into_inner(buf), Err(e)),
             }
         }
-        (Slice::into_inner(slice), Ok(()))
+        (Slice::into_inner(buf), Ok(()))
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {

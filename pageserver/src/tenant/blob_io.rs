@@ -123,9 +123,11 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// Writes the given buffer directly to the underlying `VirtualFile`.
     /// You need to make sure that the internal buffer is empty, otherwise
     /// data will be written in wrong order.
-    async fn write_all_unbuffered<B: IoBuf>(&mut self, src_buf: B) -> (B, Result<(), Error>) {
-        // TODO: push down the Slice further
-        let res = self.inner.write_all(src_buf).await;
+    async fn write_all_unbuffered<B: IoBuf>(
+        &mut self,
+        src_buf: Slice<B>,
+    ) -> (Slice<B>, Result<(), Error>) {
+        let (src_buf, res) = self.inner.write_all(src_buf).await;
         if let Err(e) = res {
             return (src_buf, Err(e));
         }
@@ -137,8 +139,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// Flushes the internal buffer to the underlying `VirtualFile`.
     pub async fn flush_buffer(&mut self) -> Result<(), Error> {
         let buf = std::mem::take(&mut self.buf);
-        let buf = self.inner.write_all(Slice::from(buf)).await?;
-        let buf = Slice::into_inner(buf);
+        let (buf, res) = self.inner.write_all(Slice::from(buf)).await;
+        res?;
+        let mut buf = Slice::into_inner(buf);
         buf.clear();
         self.buf = buf;
         Ok(())

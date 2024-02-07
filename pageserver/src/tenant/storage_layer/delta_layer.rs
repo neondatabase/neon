@@ -45,13 +45,13 @@ use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use tokio_epoll_uring::Slice;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use tokio_epoll_uring::Slice;
 use tracing::*;
 
 use utils::{
@@ -465,7 +465,8 @@ impl DeltaLayerWriterInner {
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            file.write_all(Slice::from(buf)).await?;
+            let (_buf, res) = file.write_all(Slice::from(buf)).await;
+            res?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -480,17 +481,12 @@ impl DeltaLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
-        if buf.spilled() {
-            // This is bad as we only have one free block for the summary
-            warn!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            );
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(Slice::from(buf)).await;
+        res?;
 
         let metadata = file
             .metadata()
@@ -683,18 +679,12 @@ impl DeltaLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here, but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        if buf.spilled() {
-            // The code in DeltaLayerWriterInner just warn!()s for this.
-            // It should probably error out as well.
-            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            )));
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(Slice::from(buf)).await?;
+        let (_buf, res) = file.write_all(Slice::from(buf)).await;
+        res?;
         Ok(())
     }
 }
