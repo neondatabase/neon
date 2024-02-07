@@ -4005,13 +4005,16 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
 
     restored_files = list_files_to_compare(restored_dir_path)
 
+    # Exclude pg_xact files from comparison, because postgres does not reliably write
+    # this out before we reach this point (in spite of our CHECKPOINT above)
+    # See https://github.com/neondatabase/neon/issues/559
+    pgdata_files = list(filter(lambda f: not f.startswith("pg_xact"), pgdata_files))
+    restored_files = list(filter(lambda f: not f.startswith("pg_xact"), restored_files))
+
     if pgdata_files != restored_files:
-        # filter pg_xact and multixact files which are downloaded on demand
-        pgdata_files = [
-            f
-            for f in pgdata_files
-            if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
-        ]
+        # filter out files which are downloaded on-demand.  This also includes pg_xact, but
+        # we removed those already.
+        pgdata_files = [f for f in pgdata_files if not f.startswith("pg_multixact")]
 
     # check that file sets are equal
     assert pgdata_files == restored_files
