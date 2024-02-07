@@ -19,7 +19,7 @@ use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::IoBufMut;
+use tokio_epoll_uring::{IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
@@ -409,10 +409,10 @@ impl VirtualFile {
     /// step, the tmp path is renamed to the final path. As renames are
     /// atomic, a crash during the write operation will never leave behind a
     /// partially written file.
-    pub async fn crashsafe_overwrite(
+    pub async fn crashsafe_overwrite<B: IoBuf>(
         final_path: &Utf8Path,
         tmp_path: &Utf8Path,
-        content: &[u8],
+        content: Slice<B>,
     ) -> std::io::Result<()> {
         let Some(final_path_parent) = final_path.parent() else {
             return Err(std::io::Error::from_raw_os_error(
@@ -600,9 +600,11 @@ impl VirtualFile {
         Ok(())
     }
 
-    pub async fn write_all(&mut self, mut buf: &[u8]) -> Result<(), Error> {
-        while !buf.is_empty() {
-            match self.write(buf).await {
+    pub async fn write_all<B: IoBuf>(&mut self, mut buf: B) -> (B, Result<(), Error>) {
+        let slice = Slice::from(buf);
+        while !slice.is_empty() {
+            // TODO: push `Slice` further down
+            match self.write(&slice).await {
                 Ok(0) => {
                     return Err(Error::new(
                         std::io::ErrorKind::WriteZero,
@@ -610,13 +612,13 @@ impl VirtualFile {
                     ));
                 }
                 Ok(n) => {
-                    buf = &buf[n..];
+                    slice = slice.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(e) => return (Slice::into_inner(slice), Err(e)),
             }
         }
-        Ok(())
+        (Slice::into_inner(slice), Ok(()))
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
@@ -1031,6 +1033,8 @@ mod tests {
     use std::future::Future;
     use std::io::Write;
     use std::sync::Arc;
+    use tokio_epoll_uring::IoBuf;
+    use tokio_epoll_uring::Slice;
 
     enum MaybeVirtualFile {
         VirtualFile(VirtualFile),
@@ -1062,10 +1066,10 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
+        async fn write_all<B: IoBuf>(&mut self, buf: Slice<B>) -> Result<(), Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => file.write_all(buf).await,
-                MaybeVirtualFile::File(file) => file.write_all(buf),
+                MaybeVirtualFile::File(file) => file.write_all(&buf),
             }
         }
 
@@ -1140,7 +1144,7 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_a.write_all(b"foobar").await?;
+        file_a.write_all(Slice::from(b"foobar".to_owned())).await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string().await.unwrap_err();
@@ -1149,7 +1153,10 @@ mod tests {
         let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar").await.unwrap_err();
+        let _ = file_a
+            .write_all(Slice::from(b"bar".to_owned()))
+            .await
+            .unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string().await?);

@@ -45,6 +45,7 @@ use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use tokio_epoll_uring::Slice;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
@@ -464,7 +465,7 @@ impl DeltaLayerWriterInner {
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref()).await?;
+            file.write_all(Slice::from(buf)).await?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -693,7 +694,7 @@ impl DeltaLayer {
             )));
         }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        file.write_all(Slice::from(buf)).await?;
         Ok(())
     }
 }

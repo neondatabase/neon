@@ -353,7 +353,7 @@ impl ImageLayer {
             )));
         }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        file.write_all(Slice::from(buf)).await?;
         Ok(())
     }
 }
@@ -556,7 +556,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref()).await?;
+            file.write_all(Slice::from(buf)).await?;
         }
 
         // Fill in the summary on blk 0
