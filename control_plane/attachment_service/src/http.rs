@@ -41,7 +41,7 @@ pub struct HttpState {
 
 impl HttpState {
     pub fn new(service: Arc<crate::service::Service>, auth: Option<Arc<SwappableJwtAuth>>) -> Self {
-        let allowlist_routes = ["/status", "/ready"]
+        let allowlist_routes = ["/status", "/ready", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
             .collect::<Vec<_>>();
