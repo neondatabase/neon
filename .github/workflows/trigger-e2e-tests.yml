@@ -29,10 +29,22 @@ jobs:
           gh workflow --repo neondatabase/cloud \
             run cancel-previous-in-concurrency-group.yml \
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
-          
-          gh run list -b $GITHUB_REF_NAME -w 'Build and Test' -L 1
+
+  get-build-and-test-run-id:
+    runs-on: ubuntu-latest
+    outputs:
+      run-id: ${{ steps.run-id.outputs.runid }}
+
+    steps:
+      - name: Fetch RunId of latest build and test workflow
+        id: run-id
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          echo "runid=$(gh run list -b $GITHUB_REF_NAME -w 'Build and Test' -L 1 -q '.ID' --json number)" >> $GITHUB_OUTPUT
 
   tag:
+    needs: get-build-and-test-run-id
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
@@ -47,8 +59,9 @@ jobs:
       - name: Get build tag
         env:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          BUILD_AND_TEST_RUN_ID: ${{ needs.get-build-and-test-run-id.outputs.run-id }}
         run: |
-          echo run:$GITHUB_RUN_ID
+          echo build and test runid:$BUILD_AND_TEST_RUN_ID
           echo ref:$GITHUB_REF_NAME
           echo rev:$(git rev-list --count HEAD)
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
@@ -57,7 +70,7 @@ jobs:
             echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
+            echo "tag=$BUILD_AND_TEST_RUN_ID" >> $GITHUB_OUTPUT
           fi
         shell: bash
         id: build-tag
