@@ -50,7 +50,6 @@ use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tokio_epoll_uring::Slice;
 use tracing::*;
 
 use utils::{
@@ -346,7 +345,7 @@ impl ImageLayer {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(Slice::from(buf)).await;
+        let (_buf, res) = file.write_all(buf).await;
         res?;
         Ok(())
     }
@@ -525,7 +524,7 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(Slice::from(img)).await;
+        let (_img, res) = self.blob_writer.write_blob(img).await;
         // TODO: re-use the buffer for `img` further upstack
         let off = res?;
 
@@ -550,7 +549,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(Slice::from(buf)).await;
+            let (_buf, res) = file.write_all(buf).await;
             res?;
         }
 
@@ -570,7 +569,7 @@ impl ImageLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(Slice::from(buf)).await;
+        let (_buf, res) = file.write_all(buf).await;
         res?;
 
         let metadata = file

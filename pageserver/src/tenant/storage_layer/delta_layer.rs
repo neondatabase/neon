@@ -51,7 +51,6 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tokio_epoll_uring::Slice;
 use tracing::*;
 
 use utils::{
@@ -431,8 +430,6 @@ impl DeltaLayerWriterInner {
         will_init: bool,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-        let val = tokio_epoll_uring::Slice::from(val);
-
         let (val, res) = self.blob_writer.write_blob(val).await;
         let off = match res {
             Ok(off) => off,
@@ -464,7 +461,7 @@ impl DeltaLayerWriterInner {
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(Slice::from(buf)).await;
+            let (_buf, res) = file.write_all(buf).await;
             res?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
@@ -484,7 +481,7 @@ impl DeltaLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(Slice::from(buf)).await;
+        let (_buf, res) = file.write_all(buf).await;
         res?;
 
         let metadata = file
@@ -682,7 +679,7 @@ impl DeltaLayer {
         // TODO: could use smallvec here, but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(Slice::from(buf)).await;
+        let (_buf, res) = file.write_all(buf).await;
         res?;
         Ok(())
     }

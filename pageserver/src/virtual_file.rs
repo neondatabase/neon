@@ -1152,7 +1152,7 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_a.write_all(Slice::from(b"foobar".to_owned())).await?;
+        file_a.write_all(b"foobar".to_owned()).await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string().await.unwrap_err();
@@ -1161,10 +1161,7 @@ mod tests {
         let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a
-            .write_all(Slice::from(b"bar".to_owned()))
-            .await
-            .unwrap_err();
+        let _ = file_a.write_all(b"bar".to_owned()).await.unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string().await?);
