@@ -52,8 +52,7 @@ use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use anyhow::Result;
 use pageserver_api::keyspace::KeySpaceAccum;
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
 use std::sync::Arc;
@@ -147,43 +146,22 @@ impl Drop for BatchedUpdates<'_> {
 }
 
 /// Return value of LayerMap::search
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Hash)]
 pub struct SearchResult {
     pub layer: Arc<PersistentLayerDesc>,
     pub lsn_floor: Lsn,
 }
 
-pub struct OrderedSearchResult(SearchResult);
-
-impl Ord for OrderedSearchResult {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.lsn_floor.cmp(&other.0.lsn_floor)
-    }
-}
-
-impl PartialOrd for OrderedSearchResult {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for OrderedSearchResult {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.lsn_floor == other.0.lsn_floor
-    }
-}
-
-impl Eq for OrderedSearchResult {}
-
+#[derive(Debug)]
 pub struct RangeSearchResult {
-    pub found: BTreeMap<OrderedSearchResult, KeySpaceAccum>,
+    pub found: HashMap<SearchResult, KeySpaceAccum>,
     pub not_found: KeySpaceAccum,
 }
 
 impl RangeSearchResult {
     fn new() -> Self {
         Self {
-            found: BTreeMap::new(),
+            found: HashMap::new(),
             not_found: KeySpaceAccum::new(),
         }
     }
@@ -314,7 +292,7 @@ where
             Some(search_result) => self
                 .result
                 .found
-                .entry(OrderedSearchResult(search_result))
+                .entry(search_result)
                 .or_default()
                 .add_range(covered_range),
             None => self.pad_range(covered_range),
@@ -869,6 +847,8 @@ impl LayerMap {
 
 #[cfg(test)]
 mod tests {
+    use pageserver_api::keyspace::KeySpace;
+
     use super::*;
 
     #[derive(Clone)]
@@ -895,15 +875,15 @@ mod tests {
 
     fn assert_range_search_result_eq(lhs: RangeSearchResult, rhs: RangeSearchResult) {
         assert_eq!(lhs.not_found.to_keyspace(), rhs.not_found.to_keyspace());
-        let lhs: Vec<_> = lhs
+        let lhs: HashMap<SearchResult, KeySpace> = lhs
             .found
             .into_iter()
-            .map(|(search_result, accum)| (search_result.0, accum.to_keyspace()))
+            .map(|(search_result, accum)| (search_result, accum.to_keyspace()))
             .collect();
-        let rhs: Vec<_> = rhs
+        let rhs: HashMap<SearchResult, KeySpace> = rhs
             .found
             .into_iter()
-            .map(|(search_result, accum)| (search_result.0, accum.to_keyspace()))
+            .map(|(search_result, accum)| (search_result, accum.to_keyspace()))
             .collect();
 
         assert_eq!(lhs, rhs);
@@ -923,7 +903,7 @@ mod tests {
                 Some(res) => {
                     range_search_result
                         .found
-                        .entry(OrderedSearchResult(res))
+                        .entry(res)
                         .or_default()
                         .add_key(key);
                 }
