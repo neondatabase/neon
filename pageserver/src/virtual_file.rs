@@ -607,6 +607,9 @@ impl VirtualFile {
     /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
     pub async fn write_all<B: BoundedBuf>(&mut self, buf: B) -> (B::Buf, Result<usize, Error>) {
         let nbytes = buf.bytes_init();
+        if nbytes == 0 {
+            return (Slice::into_inner(buf.slice_full()), Ok(0));
+        }
         let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
             // TODO: push `Slice` further down
@@ -1080,6 +1083,9 @@ mod tests {
                 }
                 MaybeVirtualFile::File(file) => {
                     let buf_len = buf.bytes_init();
+                    if buf_len == 0 {
+                        return Ok(());
+                    }
                     file.write_all(&buf.slice(0..buf_len))
                 }
             }
