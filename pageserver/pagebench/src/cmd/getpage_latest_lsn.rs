@@ -288,7 +288,11 @@ async fn main_impl(
                                 num_client: rng.gen_range(0..args.num_clients.get()),
                             },
                             PagestreamGetPageRequest {
-                                latest: rng.gen_bool(args.req_latest_probability),
+                                horizon: if rng.gen_bool(args.req_latest_probability) {
+                                    Lsn::MAX
+                                } else {
+                                    r.timeline_lsn
+                                },
                                 lsn: r.timeline_lsn,
                                 rel: rel_tag,
                                 blkno: block_no,
@@ -335,7 +339,11 @@ async fn main_impl(
                                     let (rel_tag, block_no) = key_to_rel_block(key)
                                         .expect("we filter non-rel-block keys out above");
                                     PagestreamGetPageRequest {
-                                        latest: rng.gen_bool(args.req_latest_probability),
+                                        horizon: if rng.gen_bool(args.req_latest_probability) {
+                                            Lsn::MAX
+                                        } else {
+                                            r.timeline_lsn
+                                        },
                                         lsn: r.timeline_lsn,
                                         rel: rel_tag,
                                         blkno: block_no,

@@ -1838,34 +1838,29 @@ static void
 CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
 {
 	hs->ts = 0;
-	hs->xmin.value = ~0;		/* largest unsigned value */
-	hs->catalog_xmin.value = ~0;	/* largest unsigned value */
+	hs->xmin = InvalidFullTransactionId;
+	hs->catalog_xmin = InvalidFullTransactionId;
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
-		if (wp->safekeeper[i].appendResponse.hs.ts != 0)
+ 		if (wp->safekeeper[i].appendResponse.hs.ts != 0)
 		{
 			HotStandbyFeedback *skhs = &wp->safekeeper[i].appendResponse.hs;
 
 			if (FullTransactionIdIsNormal(skhs->xmin)
-				&& FullTransactionIdPrecedes(skhs->xmin, hs->xmin))
+				&& (!FullTransactionIdIsValid(hs->xmin) || FullTransactionIdPrecedes(skhs->xmin, hs->xmin)))
 			{
 				hs->xmin = skhs->xmin;
 				hs->ts = skhs->ts;
 			}
 			if (FullTransactionIdIsNormal(skhs->catalog_xmin)
-				&& FullTransactionIdPrecedes(skhs->catalog_xmin, hs->xmin))
+				&& (!FullTransactionIdIsValid(hs->catalog_xmin) || FullTransactionIdPrecedes(skhs->catalog_xmin, hs->catalog_xmin)))
 			{
 				hs->catalog_xmin = skhs->catalog_xmin;
 				hs->ts = skhs->ts;
 			}
 		}
 	}
-
-	if (hs->xmin.value == ~0)
-		hs->xmin = InvalidFullTransactionId;
-	if (hs->catalog_xmin.value == ~0)
-		hs->catalog_xmin = InvalidFullTransactionId;
 }
 
 /*
@@ -1923,6 +1918,7 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
 	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &quorumFeedback.hs, sizeof hsFeedback) != 0)
 	{
 		quorumFeedback.hs = hsFeedback;
+		elog(DEBUG2, "ProcessStandbyHSFeedback(xmin=%d, catalog_xmin=%d", XidFromFullTransactionId(hsFeedback.xmin), XidFromFullTransactionId(hsFeedback.catalog_xmin));
 		ProcessStandbyHSFeedback(hsFeedback.ts,
 								 XidFromFullTransactionId(hsFeedback.xmin),
 								 EpochFromFullTransactionId(hsFeedback.xmin),
