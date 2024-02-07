@@ -533,7 +533,7 @@ impl<'a> TenantDownloader<'a> {
                     .map_err(UpdateError::from)?;
                 let mut heatmap_bytes = Vec::new();
                 let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-                let _size = tokio::io::copy(&mut body, &mut heatmap_bytes).await?;
+                let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
                 Ok(heatmap_bytes)
             },
             |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
