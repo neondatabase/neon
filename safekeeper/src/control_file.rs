@@ -3,8 +3,9 @@
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use camino::Utf8PathBuf;
-use tokio::fs::{self, File};
+use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use utils::crashsafe::durable_rename;
 
 use std::io::Read;
 use std::ops::Deref;
@@ -203,35 +204,8 @@ impl Storage for FileStorage {
             )
         })?;
 
-        // fsync the file
-        if !self.conf.no_sync {
-            control_partial.sync_all().await.with_context(|| {
-                format!(
-                    "failed to sync partial control file at {}",
-                    control_partial_path
-                )
-            })?;
-        }
-
         let control_path = self.timeline_dir.join(CONTROL_FILE_NAME);
-
-        // rename should be atomic
-        fs::rename(&control_partial_path, &control_path).await?;
-        // this sync is not required by any standard but postgres does this (see durable_rename)
-        if !self.conf.no_sync {
-            let new_f = File::open(&control_path).await?;
-            new_f
-                .sync_all()
-                .await
-                .with_context(|| format!("failed to sync control file at: {}", &control_path))?;
-
-            // fsync the directory (linux specific)
-            let tli_dir = File::open(&self.timeline_dir).await?;
-            tli_dir
-                .sync_all()
-                .await
-                .context("failed to sync control file directory")?;
-        }
+        durable_rename(&control_partial_path, &control_path, !self.conf.no_sync).await?;
 
         // update internal state
         self.state = s.clone();
@@ -249,6 +223,7 @@ mod test {
     use super::*;
     use crate::SafeKeeperConf;
     use anyhow::Result;
+    use tokio::fs;
     use utils::{id::TenantTimelineId, lsn::Lsn};
 
     fn stub_conf() -> SafeKeeperConf {

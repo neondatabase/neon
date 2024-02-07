@@ -71,6 +71,12 @@ pub(crate) struct TenantState {
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<String>>,
+
+    /// If we have a pending compute notification that for some reason we weren't able to send,
+    /// set this to true. If this is set, calls to [`Self::maybe_reconcile`] will run a task to retry
+    /// sending it.  This is the mechanism by which compute notifications are included in the scope
+    /// of state that we publish externally in an eventually consistent way.
+    pub(crate) pending_compute_notification: bool,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -164,6 +170,9 @@ pub(crate) struct ReconcileResult {
     pub(crate) tenant_shard_id: TenantShardId,
     pub(crate) generation: Generation,
     pub(crate) observed: ObservedState,
+
+    /// Set [`TenantState::pending_compute_notification`] from this flag
+    pub(crate) pending_compute_notification: bool,
 }
 
 impl IntentState {
@@ -226,6 +235,7 @@ impl TenantState {
             waiter: Arc::new(SeqWait::new(Sequence(0))),
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),
             last_error: Arc::default(),
+            pending_compute_notification: false,
         }
     }
 
@@ -333,6 +343,38 @@ impl TenantState {
         Ok(())
     }
 
+    /// Query whether the tenant's observed state for attached node matches its intent state, and if so,
+    /// yield the node ID.  This is appropriate for emitting compute hook notifications: we are checking that
+    /// the node in question is not only where we intend to attach, but that the tenant is indeed already attached there.
+    ///
+    /// Reconciliation may still be needed for other aspects of state such as secondaries (see [`Self::dirty`]): this
+    /// funciton should not be used to decide whether to reconcile.
+    pub(crate) fn stably_attached(&self) -> Option<NodeId> {
+        if let Some(attach_intent) = self.intent.attached {
+            match self.observed.locations.get(&attach_intent) {
+                Some(loc) => match &loc.conf {
+                    Some(conf) => match conf.mode {
+                        LocationConfigMode::AttachedMulti
+                        | LocationConfigMode::AttachedSingle
+                        | LocationConfigMode::AttachedStale => {
+                            // Our intent and observed state agree that this node is in an attached state.
+                            Some(attach_intent)
+                        }
+                        // Our observed config is not an attached state
+                        _ => None,
+                    },
+                    // Our observed state is None, i.e. in flux
+                    None => None,
+                },
+                // We have no observed state for this node
+                None => None,
+            }
+        } else {
+            // Our intent is not to attach
+            None
+        }
+    }
+
     fn dirty(&self) -> bool {
         if let Some(node_id) = self.intent.attached {
             let wanted_conf = attached_location_conf(self.generation, &self.shard, &self.config);
@@ -352,6 +394,12 @@ impl TenantState {
                     return true;
                 }
             }
+        }
+
+        // Even if there is no pageserver work to be done, if we have a pending notification to computes,
+        // wake up a reconciler to send it.
+        if self.pending_compute_notification {
+            return true;
         }
 
         false
@@ -415,11 +463,13 @@ impl TenantState {
             service_config: service_config.clone(),
             cancel: cancel.clone(),
             persistence: persistence.clone(),
+            compute_notify_failure: false,
         };
 
         let reconcile_seq = self.sequence;
 
         tracing::info!("Spawning Reconciler for sequence {}", self.sequence);
+        let must_notify = self.pending_compute_notification;
         let join_handle = tokio::task::spawn(async move {
             // Wait for any previous reconcile task to complete before we start
             if let Some(old_handle) = old_handle {
@@ -438,7 +488,16 @@ impl TenantState {
                 return;
             }
 
+            // Attempt to make observed state match intent state
             let result = reconciler.reconcile().await;
+
+            // If we know we had a pending compute notification from some previous action, send a notification irrespective
+            // of whether the above reconcile() did any work
+            if result.is_ok() && must_notify {
+                // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
+                reconciler.compute_notify().await.ok();
+            }
+
             result_tx
                 .send(ReconcileResult {
                     sequence: reconcile_seq,
@@ -446,6 +505,7 @@ impl TenantState {
                     tenant_shard_id: reconciler.tenant_shard_id,
                     generation: reconciler.generation,
                     observed: reconciler.observed,
+                    pending_compute_notification: reconciler.compute_notify_failure,
                 })
                 .ok();
         });

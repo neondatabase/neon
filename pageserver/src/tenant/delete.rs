@@ -91,9 +91,11 @@ async fn create_remote_delete_mark(
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
-        backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
+        cancel,
     )
     .await
+    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .and_then(|x| x)
     .context("mark_upload")?;
 
     Ok(())
@@ -136,7 +138,11 @@ async fn schedule_ordered_timeline_deletions(
     let mut already_running_deletions = vec![];
 
     for (timeline_id, _) in sorted.into_iter().rev() {
-        if let Err(e) = DeleteTimelineFlow::run(tenant, timeline_id, true).await {
+        let span = tracing::info_span!("timeline_delete", %timeline_id);
+        let res = DeleteTimelineFlow::run(tenant, timeline_id, true)
+            .instrument(span)
+            .await;
+        if let Err(e) = res {
             match e {
                 DeleteTimelineError::NotFound => {
                     // Timeline deletion finished after call to clone above but before call
@@ -183,9 +189,11 @@ async fn remove_tenant_remote_delete_mark(
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
-            backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
+            cancel,
         )
         .await
+        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .and_then(|x| x)
         .context("remove_tenant_remote_delete_mark")?;
     }
     Ok(())

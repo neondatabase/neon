@@ -26,7 +26,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 90
-    runs-on: macos-latest
+    runs-on: macos-14
 
     env:
       # Use release build only, to have less debug info around
@@ -60,21 +60,21 @@ jobs:
         uses: actions/cache@v3
         with:
           path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
         uses: actions/cache@v3
         with:
           path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
         uses: actions/cache@v3
         with:
           path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Set extra env for macOS
         run: |
@@ -89,7 +89,7 @@ jobs:
             !~/.cargo/registry/src
             ~/.cargo/git
             target
-          key: v1-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
@@ -110,7 +110,7 @@ jobs:
         run: make walproposer-lib -j$(sysctl -n hw.ncpu)
 
       - name: Run cargo build
-        run: cargo build --all --release
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release
 
       - name: Check that no warnings are produced
         run: ./run_clippy.sh
@@ -124,12 +124,12 @@ jobs:
       # Hence keeping target/ (and general cache size) smaller
       BUILD_TYPE: release
       CARGO_FEATURES: --features testing
-      CARGO_FLAGS: --locked --release
+      CARGO_FLAGS: --release
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
       options: --init
 
     steps:
@@ -210,18 +210,20 @@ jobs:
 
       - name: Run cargo build
         run: |
-          mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          mold -run cargo build --locked $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run cargo test
+        env:
+          NEXTEST_RETRIES: 3
         run: |
-          cargo test $CARGO_FLAGS $CARGO_FEATURES
+          cargo nextest run $CARGO_FEATURES
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
           export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
+          cargo nextest run --package remote_storage --test test_real_s3
 
           # Run separate tests for real Azure Blob Storage
           # XXX: replace region with `eu-central-1`-like region
@@ -231,7 +233,7 @@ jobs:
           export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
           export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo test $CARGO_FLAGS --package remote_storage --test test_real_azure
+          cargo nextest run --package remote_storage --test test_real_azure
 
   check-codestyle-rust-arm:
     timeout-minutes: 90

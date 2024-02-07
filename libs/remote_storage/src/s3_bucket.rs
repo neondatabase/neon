@@ -46,7 +46,7 @@ use utils::backoff;
 use super::StorageMetadata;
 use crate::{
     ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    S3Config, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    S3Config, TimeTravelError, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -638,8 +638,8 @@ impl RemoteStorage for S3Bucket {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
+        cancel: &CancellationToken,
+    ) -> Result<(), TimeTravelError> {
         let kind = RequestKind::TimeTravel;
         let _guard = self.permit(kind).await;
 
@@ -657,75 +657,114 @@ impl RemoteStorage for S3Bucket {
         let max_retries = 10;
         let is_permanent = |_e: &_| false;
 
-        let list = backoff::retry(
-            || async {
-                Ok(self
-                    .client
-                    .list_object_versions()
-                    .bucket(self.bucket_name.clone())
-                    .set_prefix(prefix.clone())
-                    .send()
-                    .await?)
-            },
-            is_permanent,
-            warn_threshold,
-            max_retries,
-            "listing object versions for time_travel_recover",
-            backoff::Cancel::new(cancel.clone(), || anyhow!("Cancelled")),
-        )
-        .await?;
+        let mut key_marker = None;
+        let mut version_id_marker = None;
+        let mut versions_and_deletes = Vec::new();
 
-        if list.is_truncated().unwrap_or_default() {
-            anyhow::bail!("Received truncated ListObjectVersions response for prefix={prefix:?}");
+        loop {
+            let response = backoff::retry(
+                || async {
+                    self.client
+                        .list_object_versions()
+                        .bucket(self.bucket_name.clone())
+                        .set_prefix(prefix.clone())
+                        .set_key_marker(key_marker.clone())
+                        .set_version_id_marker(version_id_marker.clone())
+                        .send()
+                        .await
+                        .map_err(|e| TimeTravelError::Other(e.into()))
+                },
+                is_permanent,
+                warn_threshold,
+                max_retries,
+                "listing object versions for time_travel_recover",
+                cancel,
+            )
+            .await
+            .ok_or_else(|| TimeTravelError::Cancelled)
+            .and_then(|x| x)?;
+
+            tracing::trace!(
+                "  Got List response version_id_marker={:?}, key_marker={:?}",
+                response.version_id_marker,
+                response.key_marker
+            );
+            let versions = response
+                .versions
+                .unwrap_or_default()
+                .into_iter()
+                .map(VerOrDelete::from_version);
+            let deletes = response
+                .delete_markers
+                .unwrap_or_default()
+                .into_iter()
+                .map(VerOrDelete::from_delete_marker);
+            itertools::process_results(versions.chain(deletes), |n_vds| {
+                versions_and_deletes.extend(n_vds)
+            })
+            .map_err(TimeTravelError::Other)?;
+            fn none_if_empty(v: Option<String>) -> Option<String> {
+                v.filter(|v| !v.is_empty())
+            }
+            version_id_marker = none_if_empty(response.next_version_id_marker);
+            key_marker = none_if_empty(response.next_key_marker);
+            if version_id_marker.is_none() {
+                // The final response is not supposed to be truncated
+                if response.is_truncated.unwrap_or_default() {
+                    return Err(TimeTravelError::Other(anyhow::anyhow!(
+                        "Received truncated ListObjectVersions response for prefix={prefix:?}"
+                    )));
+                }
+                break;
+            }
+            // Limit the number of versions deletions, mostly so that we don't
+            // keep requesting forever if the list is too long, as we'd put the
+            // list in RAM.
+            // Building a list of 100k entries that reaches the limit roughly takes
+            // 40 seconds, and roughly corresponds to tenants of 2 TiB physical size.
+            const COMPLEXITY_LIMIT: usize = 100_000;
+            if versions_and_deletes.len() >= COMPLEXITY_LIMIT {
+                return Err(TimeTravelError::TooManyVersions);
+            }
         }
 
-        let mut versions_deletes = list
-            .versions()
-            .iter()
-            .map(VerOrDelete::Version)
-            .chain(list.delete_markers().iter().map(VerOrDelete::DeleteMarker))
-            .collect::<Vec<_>>();
+        tracing::info!(
+            "Built list for time travel with {} versions and deletions",
+            versions_and_deletes.len()
+        );
 
-        versions_deletes.sort_by_key(|vd| (vd.key(), vd.last_modified()));
+        // Work on the list of references instead of the objects directly,
+        // otherwise we get lifetime errors in the sort_by_key call below.
+        let mut versions_and_deletes = versions_and_deletes.iter().collect::<Vec<_>>();
+
+        versions_and_deletes.sort_by_key(|vd| (&vd.key, &vd.last_modified));
 
         let mut vds_for_key = HashMap::<_, Vec<_>>::new();
 
-        for vd in versions_deletes {
-            let last_modified = vd.last_modified();
-            let version_id = vd.version_id();
-            let key = vd.key();
-            let (Some(last_modified), Some(version_id), Some(key)) =
-                (last_modified, version_id, key)
-            else {
-                anyhow::bail!(
-                    "One (or more) of last_modified, key, and id is None. \
-                    Is versioning enabled in the bucket? last_modified={:?} key={:?} version_id={:?}",
-                    last_modified, key, version_id,
-                );
-            };
+        for vd in &versions_and_deletes {
+            let VerOrDelete {
+                version_id, key, ..
+            } = &vd;
             if version_id == "null" {
-                anyhow::bail!("Received ListVersions response for key={key} with version_id='null', \
-                    indicating either disabled versioning, or legacy objects with null version id values");
+                return Err(TimeTravelError::Other(anyhow!("Received ListVersions response for key={key} with version_id='null', \
+                    indicating either disabled versioning, or legacy objects with null version id values")));
             }
             tracing::trace!(
-                "Parsing version key={key} version_id={version_id} is_delete={}",
-                matches!(vd, VerOrDelete::DeleteMarker(_))
+                "Parsing version key={key} version_id={version_id} kind={:?}",
+                vd.kind
             );
 
-            vds_for_key
-                .entry(key)
-                .or_default()
-                .push((vd, last_modified, version_id));
+            vds_for_key.entry(key).or_default().push(vd);
         }
         for (key, versions) in vds_for_key {
-            let (last_vd, last_last_modified, _version_id) = versions.last().unwrap();
-            if last_last_modified > &&done_if_after {
+            let last_vd = versions.last().unwrap();
+            if last_vd.last_modified > done_if_after {
                 tracing::trace!("Key {key} has version later than done_if_after, skipping");
                 continue;
             }
             // the version we want to restore to.
             let version_to_restore_to =
-                match versions.binary_search_by_key(&timestamp, |tpl| *tpl.1) {
+                match versions.binary_search_by_key(&timestamp, |tpl| tpl.last_modified) {
                     Ok(v) => v,
                     Err(e) => e,
                 };
@@ -743,7 +782,11 @@ impl RemoteStorage for S3Bucket {
                 do_delete = true;
             } else {
                 match &versions[version_to_restore_to - 1] {
-                    (VerOrDelete::Version(_), _last_modified, version_id) => {
+                    VerOrDelete {
+                        kind: VerOrDeleteKind::Version,
+                        version_id,
+                        ..
+                    } => {
                         tracing::trace!("Copying old version {version_id} for {key}...");
                         // Restore the state to the last version by copying
                         let source_id =
@@ -751,37 +794,48 @@ impl RemoteStorage for S3Bucket {
 
                         backoff::retry(
                             || async {
-                                Ok(self
-                                    .client
+                                self.client
                                     .copy_object()
                                     .bucket(self.bucket_name.clone())
                                     .key(key)
                                     .copy_source(&source_id)
                                     .send()
-                                    .await?)
+                                    .await
+                                    .map_err(|e| TimeTravelError::Other(e.into()))
                             },
                             is_permanent,
                             warn_threshold,
                             max_retries,
-                            "listing object versions for time_travel_recover",
-                            backoff::Cancel::new(cancel.clone(), || anyhow!("Cancelled")),
+                            "copying object version for time_travel_recover",
+                            cancel,
                         )
-                        .await?;
+                        .await
+                        .ok_or_else(|| TimeTravelError::Cancelled)
+                        .and_then(|x| x)?;
+                        tracing::info!(%version_id, %key, "Copied old version in S3");
                     }
-                    (VerOrDelete::DeleteMarker(_), _last_modified, _version_id) => {
+                    VerOrDelete {
+                        kind: VerOrDeleteKind::DeleteMarker,
+                        ..
+                    } => {
                         do_delete = true;
                     }
                 }
             };
             if do_delete {
-                if matches!(last_vd, VerOrDelete::DeleteMarker(_)) {
+                if matches!(last_vd.kind, VerOrDeleteKind::DeleteMarker) {
                     // Key has since been deleted (but there was some history), no need to do anything
                     tracing::trace!("Key {key} already deleted, skipping.");
                 } else {
                     tracing::trace!("Deleting {key}...");
 
-                    let oid = ObjectIdentifier::builder().key(key.to_owned()).build()?;
-                    self.delete_oids(kind, &[oid]).await?;
+                    let oid = ObjectIdentifier::builder()
+                        .key(key.to_owned())
+                        .build()
+                        .map_err(|e| TimeTravelError::Other(anyhow::Error::new(e)))?;
+                    self.delete_oids(kind, &[oid])
+                        .await
+                        .map_err(TimeTravelError::Other)?;
                 }
             }
         }
@@ -811,29 +865,59 @@ fn start_measuring_requests(
     })
 }
 
-enum VerOrDelete<'a> {
-    Version(&'a ObjectVersion),
-    DeleteMarker(&'a DeleteMarkerEntry),
+// Save RAM and only store the needed data instead of the entire ObjectVersion/DeleteMarkerEntry
+struct VerOrDelete {
+    kind: VerOrDeleteKind,
+    last_modified: DateTime,
+    version_id: String,
+    key: String,
 }
 
-impl<'a> VerOrDelete<'a> {
-    fn last_modified(&self) -> Option<&'a DateTime> {
-        match self {
-            VerOrDelete::Version(v) => v.last_modified(),
-            VerOrDelete::DeleteMarker(v) => v.last_modified(),
-        }
+#[derive(Debug)]
+enum VerOrDeleteKind {
+    Version,
+    DeleteMarker,
+}
+
+impl VerOrDelete {
+    fn with_kind(
+        kind: VerOrDeleteKind,
+        last_modified: Option<DateTime>,
+        version_id: Option<String>,
+        key: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let lvk = (last_modified, version_id, key);
+        let (Some(last_modified), Some(version_id), Some(key)) = lvk else {
+            anyhow::bail!(
+                "One (or more) of last_modified, key, and id is None. \
+            Is versioning enabled in the bucket? last_modified={:?}, version_id={:?}, key={:?}",
+                lvk.0,
+                lvk.1,
+                lvk.2,
+            );
+        };
+        Ok(Self {
+            kind,
+            last_modified,
+            version_id,
+            key,
+        })
     }
-    fn version_id(&self) -> Option<&'a str> {
-        match self {
-            VerOrDelete::Version(v) => v.version_id(),
-            VerOrDelete::DeleteMarker(v) => v.version_id(),
-        }
+    fn from_version(v: ObjectVersion) -> anyhow::Result<Self> {
+        Self::with_kind(
+            VerOrDeleteKind::Version,
+            v.last_modified,
+            v.version_id,
+            v.key,
+        )
     }
-    fn key(&self) -> Option<&'a str> {
-        match self {
-            VerOrDelete::Version(v) => v.key(),
-            VerOrDelete::DeleteMarker(v) => v.key(),
-        }
+    fn from_delete_marker(v: DeleteMarkerEntry) -> anyhow::Result<Self> {
+        Self::with_kind(
+            VerOrDeleteKind::DeleteMarker,
+            v.last_modified,
+            v.version_id,
+            v.key,
+        )
     }
 }
 

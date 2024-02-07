@@ -343,6 +343,23 @@ pub(super) async fn handle_walreceiver_connection(
                             modification.commit(&ctx).await?;
                             uncommitted_records = 0;
                             filtered_records = 0;
+
+                            //
+                            // We should check checkpoint distance after appending each ingest_batch_size bytes because otherwise
+                            // layer size can become much larger than `checkpoint_distance`.
+                            // It can append because wal-sender is sending WAL using 125kb chucks and some WAL records can cause writing large
+                            // amount of data to key-value storage. So performing this check only after processing
+                            // all WAL records in the chunk, can cause huge L0 layer files.
+                            //
+                            timeline
+                                .check_checkpoint_distance()
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to check checkpoint distance for timeline {}",
+                                        timeline.timeline_id
+                                    )
+                                })?;
                         }
                     }
 
@@ -426,13 +443,21 @@ pub(super) async fn handle_walreceiver_connection(
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let current_timeline_size = timeline
-                .get_current_logical_size(
-                    crate::tenant::timeline::GetLogicalSizePriority::User,
-                    &ctx,
-                )
-                // FIXME: https://github.com/neondatabase/neon/issues/5963
-                .size_dont_care_about_accuracy();
+            let current_timeline_size = if timeline.tenant_shard_id.is_zero() {
+                timeline
+                    .get_current_logical_size(
+                        crate::tenant::timeline::GetLogicalSizePriority::User,
+                        &ctx,
+                    )
+                    // FIXME: https://github.com/neondatabase/neon/issues/5963
+                    .size_dont_care_about_accuracy()
+            } else {
+                // Non-zero shards send zero for logical size.  The safekeeper will ignore
+                // this number.  This is because in a sharded tenant, only shard zero maintains
+                // accurate logical size.
+                0
+            };
+
             let status_update = PageserverFeedback {
                 current_timeline_size,
                 last_received_lsn,

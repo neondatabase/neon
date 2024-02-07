@@ -207,6 +207,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
 
 /// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
 /// that we give to customers
+#[instrument(skip_all)]
 fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let roles = spec
         .cluster
@@ -319,7 +320,7 @@ impl ComputeNode {
     // Get basebackup from the libpq connection to pageserver using `connstr` and
     // unarchive it to `pgdata` directory overriding all its previous content.
     #[instrument(skip_all, fields(%lsn))]
-    fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
+    fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Instant::now();
 
@@ -388,6 +389,34 @@ impl ComputeNode {
         state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
         state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
         Ok(())
+    }
+
+    // Gets the basebackup in a retry loop
+    #[instrument(skip_all, fields(%lsn))]
+    pub fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
+        let mut retry_period_ms = 500;
+        let mut attempts = 0;
+        let max_attempts = 5;
+        loop {
+            let result = self.try_get_basebackup(compute_state, lsn);
+            match result {
+                Ok(_) => {
+                    return result;
+                }
+                Err(ref e) if attempts < max_attempts => {
+                    warn!(
+                        "Failed to get basebackup: {} (attempt {}/{})",
+                        e, attempts, max_attempts
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(retry_period_ms));
+                    retry_period_ms *= 2;
+                }
+                Err(_) => {
+                    return result;
+                }
+            }
+            attempts += 1;
+        }
     }
 
     pub async fn check_safekeepers_synced_async(

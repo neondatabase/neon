@@ -64,18 +64,14 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # Check edge cases
         # Timestamp is in the future
         probe_timestamp = tbl[-1][1] + timedelta(hours=1)
-        result = client.timeline_get_lsn_by_timestamp(
-            tenant_id, timeline_id, f"{probe_timestamp.isoformat()}Z"
-        )
+        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
         assert result["kind"] == "future"
         # make sure that we return a well advanced lsn here
         assert Lsn(result["lsn"]) > start_lsn
 
         # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
-        result = client.timeline_get_lsn_by_timestamp(
-            tenant_id, timeline_id, f"{probe_timestamp.isoformat()}Z"
-        )
+        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
         assert result["kind"] == "past"
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) < start_lsn
@@ -83,9 +79,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # Probe a bunch of timestamps in the valid range
         for i in range(1, len(tbl), 100):
             probe_timestamp = tbl[i][1]
-            result = client.timeline_get_lsn_by_timestamp(
-                tenant_id, timeline_id, f"{probe_timestamp.isoformat()}Z"
-            )
+            result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
             assert result["kind"] not in ["past", "nodata"]
             lsn = result["lsn"]
             # Call get_lsn_by_timestamp to get the LSN
@@ -108,9 +102,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
         # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
-        result = client.timeline_get_lsn_by_timestamp(
-            tenant_id, timeline_id_child, f"{probe_timestamp.isoformat()}Z", 2
-        )
+        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id_child, probe_timestamp)
         assert result["kind"] == "past"
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) >= last_flush_lsn

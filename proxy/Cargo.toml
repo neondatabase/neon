@@ -31,6 +31,7 @@ hyper-tungstenite.workspace = true
 hyper.workspace = true
 ipnet.workspace = true
 itertools.workspace = true
+lasso = { workspace = true, features = ["multi-threaded"] }
 md5.workspace = true
 metrics.workspace = true
 once_cell.workspace = true
@@ -62,6 +63,8 @@ socket2.workspace = true
 sync_wrapper.workspace = true
 task-local-extensions.workspace = true
 thiserror.workspace = true
+tikv-jemallocator.workspace = true
+tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
 tls-listener.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
@@ -90,3 +93,4 @@ rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
 walkdir.workspace = true
+rand_distr = "0.4"

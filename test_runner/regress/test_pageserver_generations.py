@@ -499,7 +499,8 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # and serve clients.
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
     env.pageserver.start(
-        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",)
+        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
+        register=False,
     )
 
     # The pageserver should provide service to clients

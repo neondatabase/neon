@@ -51,7 +51,7 @@ project_git_version!(GIT_VERSION);
 
 const DEFAULT_PG_VERSION: &str = "15";
 
-const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/";
+const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
 fn default_conf(num_pageservers: u16) -> String {
     let mut template = format!(
@@ -135,7 +135,7 @@ fn main() -> Result<()> {
             "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
             "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
             "start" => rt.block_on(handle_start_all(sub_args, &env)),
-            "stop" => handle_stop_all(sub_args, &env),
+            "stop" => rt.block_on(handle_stop_all(sub_args, &env)),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
             "attachment_service" => rt.block_on(handle_attachment_service(sub_args, &env)),
             "safekeeper" => rt.block_on(handle_safekeeper(sub_args, &env)),
@@ -795,7 +795,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                     &endpoint.timeline_id.to_string(),
                     branch_name,
                     lsn_str.as_str(),
-                    endpoint.status(),
+                    &format!("{}", endpoint.status()),
                 ]);
             }
 
@@ -1056,8 +1056,9 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
+            let register = subcommand_args.get_one::<bool>("register").unwrap_or(&true);
             if let Err(e) = get_pageserver(env, subcommand_args)?
-                .start(&pageserver_config_overrides(subcommand_args))
+                .start(&pageserver_config_overrides(subcommand_args), *register)
                 .await
             {
                 eprintln!("pageserver start failed: {e}");
@@ -1086,24 +1087,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             }
 
             if let Err(e) = pageserver
-                .start(&pageserver_config_overrides(subcommand_args))
-                .await
-            {
-                eprintln!("pageserver start failed: {e}");
-                exit(1);
-            }
-        }
-
-        Some(("migrate", subcommand_args)) => {
-            let pageserver = get_pageserver(env, subcommand_args)?;
-            //TODO what shutdown strategy should we use here?
-            if let Err(e) = pageserver.stop(false) {
-                eprintln!("pageserver stop failed: {}", e);
-                exit(1);
-            }
-
-            if let Err(e) = pageserver
-                .start(&pageserver_config_overrides(subcommand_args))
+                .start(&pageserver_config_overrides(subcommand_args), false)
                 .await
             {
                 eprintln!("pageserver start failed: {e}");
@@ -1161,7 +1145,7 @@ async fn handle_attachment_service(
                 .map(|s| s.as_str())
                 == Some("immediate");
 
-            if let Err(e) = svc.stop(immediate) {
+            if let Err(e) = svc.stop(immediate).await {
                 eprintln!("stop failed: {}", e);
                 exit(1);
             }
@@ -1257,7 +1241,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
         let attachment_service = AttachmentService::from_env(env);
         if let Err(e) = attachment_service.start().await {
             eprintln!("attachment_service start failed: {:#}", e);
-            try_stop_all(env, true);
+            try_stop_all(env, true).await;
             exit(1);
         }
     }
@@ -1265,11 +1249,11 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
         if let Err(e) = pageserver
-            .start(&pageserver_config_overrides(sub_match))
+            .start(&pageserver_config_overrides(sub_match), true)
             .await
         {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
-            try_stop_all(env, true);
+            try_stop_all(env, true).await;
             exit(1);
         }
     }
@@ -1278,23 +1262,23 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
         let safekeeper = SafekeeperNode::from_env(env, node);
         if let Err(e) = safekeeper.start(vec![]).await {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
-            try_stop_all(env, false);
+            try_stop_all(env, false).await;
             exit(1);
         }
     }
     Ok(())
 }
 
-fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+async fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let immediate =
         sub_match.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
 
-    try_stop_all(env, immediate);
+    try_stop_all(env, immediate).await;
 
     Ok(())
 }
 
-fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
+async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     // Stop all endpoints
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
@@ -1329,7 +1313,7 @@ fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 
     if env.control_plane_api.is_some() {
         let attachment_service = AttachmentService::from_env(env);
-        if let Err(e) = attachment_service.stop(immediate) {
+        if let Err(e) = attachment_service.stop(immediate).await {
             eprintln!("attachment service stop failed: {e:#}");
         }
     }
@@ -1549,7 +1533,11 @@ fn cli() -> Command {
                 .subcommand(Command::new("status"))
                 .subcommand(Command::new("start")
                     .about("Start local pageserver")
-                    .arg(pageserver_config_args.clone())
+                    .arg(pageserver_config_args.clone()).arg(Arg::new("register")
+                    .long("register")
+                    .default_value("true").required(false)
+                    .value_parser(value_parser!(bool))
+                    .value_name("register"))
                 )
                 .subcommand(Command::new("stop")
                     .about("Stop local pageserver")

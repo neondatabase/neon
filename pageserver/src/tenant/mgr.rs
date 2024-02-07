@@ -607,13 +607,6 @@ pub(crate) fn tenant_spawn(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
-    info!(
-        tenant_id = %tenant_shard_id.tenant_id,
-        shard_id = %tenant_shard_id.shard_slug(),
-        generation = ?location_conf.location.generation,
-        attach_mode = ?location_conf.location.attach_mode,
-        "Attaching tenant"
-    );
     let tenant = match Tenant::spawn(
         conf,
         tenant_shard_id,
@@ -691,7 +684,7 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                                     // going to log too many lines
                                     debug!("tenant successfully stopped");
                                 }
-                                .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug())),
+                                .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
                             );
 
                             total_attached += 1;
@@ -896,6 +889,17 @@ impl TenantManager {
             Some(TenantSlot::Secondary(s)) => Some(s.clone()),
             _ => None,
         }
+    }
+
+    /// Whether the `TenantManager` is responsible for the tenant shard
+    pub(crate) fn manages_tenant_shard(&self, tenant_shard_id: TenantShardId) -> bool {
+        let locked = self.tenants.read().unwrap();
+
+        let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
+            .ok()
+            .flatten();
+
+        peek_slot.is_some()
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
@@ -1311,6 +1315,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         activation_timeout: Duration,
     ) -> Result<(), DeleteTenantError> {
+        super::span::debug_assert_current_span_has_tenant_id();
         // We acquire a SlotGuard during this function to protect against concurrent
         // changes while the ::prepare phase of DeleteTenantFlow executes, but then
         // have to return the Tenant to the map while the background deletion runs.
@@ -1715,6 +1720,7 @@ pub(crate) async fn ignore_tenant(
     ignore_tenant0(conf, &TENANTS, tenant_id).await
 }
 
+#[instrument(skip_all, fields(shard_id))]
 async fn ignore_tenant0(
     conf: &'static PageServerConf,
     tenants: &std::sync::RwLock<TenantsMap>,
@@ -1722,6 +1728,10 @@ async fn ignore_tenant0(
 ) -> Result<(), TenantStateError> {
     // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    tracing::Span::current().record(
+        "shard_id",
+        tracing::field::display(tenant_shard_id.shard_slug()),
+    );
 
     remove_tenant_from_memory(tenants, tenant_shard_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
@@ -2117,7 +2127,7 @@ fn tenant_map_acquire_slot_impl(
     METRICS.tenant_slot_writes.inc();
 
     let mut locked = tenants.write().unwrap();
-    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard = %tenant_shard_id.shard_slug());
+    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug());
     let _guard = span.enter();
 
     let m = match &mut *locked {
@@ -2353,7 +2363,7 @@ pub(crate) async fn immediate_gc(
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use tracing::{info_span, Instrument};
+    use tracing::Instrument;
 
     use crate::tenant::mgr::TenantSlot;
 
@@ -2364,17 +2374,16 @@ mod tests {
         // Test that if an InProgress tenant is in the map during shutdown, the shutdown will gracefully
         // wait for it to complete before proceeding.
 
-        let (t, _ctx) = TenantHarness::create("shutdown_awaits_in_progress_tenant")
-            .unwrap()
-            .load()
-            .await;
+        let h = TenantHarness::create("shutdown_awaits_in_progress_tenant").unwrap();
+        let (t, _ctx) = h.load().await;
 
         // harness loads it to active, which is forced and nothing is running on the tenant
 
         let id = t.tenant_shard_id();
 
         // tenant harness configures the logging and we cannot escape it
-        let _e = info_span!("testing", tenant_id = %id).entered();
+        let span = h.span();
+        let _e = span.enter();
 
         let tenants = BTreeMap::from([(id, TenantSlot::Attached(t.clone()))]);
         let tenants = Arc::new(std::sync::RwLock::new(TenantsMap::Open(tenants)));
@@ -2395,7 +2404,7 @@ mod tests {
                     };
                     super::remove_tenant_from_memory(&tenants, id, cleanup).await
                 }
-                .instrument(info_span!("foobar", tenant_id = %id))
+                .instrument(h.span())
             });
 
             // now the long cleanup should be in place, with the stopping state

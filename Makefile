@@ -51,6 +51,8 @@ CARGO_BUILD_FLAGS += $(filter -j1,$(MAKEFLAGS))
 CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
 # Force cargo not to print progress bar
 CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
+# Set PQ_LIB_DIR to make sure `attachment_service` get linked with bundled libpq (through diesel)
+CARGO_CMD_PREFIX += PQ_LIB_DIR=$(POSTGRES_INSTALL_DIR)/v16/lib
 
 #
 # Top level Makefile to build Neon and PostgreSQL
@@ -174,10 +176,10 @@ neon-pg-ext-clean-%:
 
 # Build walproposer as a static library. walproposer source code is located
 # in the pgxn/neon directory.
-# 
+#
 # We also need to include libpgport.a and libpgcommon.a, because walproposer
 # uses some functions from those libraries.
-# 
+#
 # Some object files are removed from libpgport.a and libpgcommon.a because
 # they depend on openssl and other libraries that are not included in our
 # Rust build.

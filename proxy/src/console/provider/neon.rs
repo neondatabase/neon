@@ -19,7 +19,6 @@ use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
-#[derive(Clone)]
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
@@ -194,17 +193,17 @@ impl super::Api for Api {
         Ok(Cached::new_uncached(auth_info.secret))
     }
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         let ep = &user_info.endpoint;
         if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(ep) {
             ALLOWED_IPS_BY_CACHE_OUTCOME
                 .with_label_values(&["hit"])
                 .inc();
-            return Ok(allowed_ips);
+            return Ok((allowed_ips, None));
         }
         ALLOWED_IPS_BY_CACHE_OUTCOME
             .with_label_values(&["miss"])
@@ -223,7 +222,10 @@ impl super::Api for Api {
                 .project_info
                 .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
         }
-        Ok(Cached::new_uncached(allowed_ips))
+        Ok((
+            Cached::new_uncached(allowed_ips),
+            Some(Cached::new_uncached(auth_info.secret)),
+        ))
     }
 
     #[tracing::instrument(skip_all)]

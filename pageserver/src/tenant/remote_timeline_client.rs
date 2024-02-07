@@ -1046,9 +1046,11 @@ impl RemoteTimelineClient {
             // when executed as part of tenant deletion this happens in the background
             2,
             "persist_index_part_with_deleted_flag",
-            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
+            &self.cancel,
         )
-        .await?;
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .and_then(|x| x)?;
 
         // all good, disarm the guard and mark as success
         ScopeGuard::into_inner(undo_deleted_at);
@@ -1083,9 +1085,11 @@ impl RemoteTimelineClient {
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "preserve_initdb_tar_zst",
-            backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled!")),
+            &cancel.clone(),
         )
         .await
+        .ok_or_else(|| anyhow::anyhow!("Cancellled"))
+        .and_then(|x| x)
         .context("backing up initdb archive")?;
         Ok(())
     }
@@ -1141,6 +1145,8 @@ impl RemoteTimelineClient {
         // taking the burden of listing all the layers that we already know we should delete.
         self.deletion_queue_client.flush_immediate().await?;
 
+        let cancel = shutdown_token();
+
         let remaining = backoff::retry(
             || async {
                 self.storage_impl
@@ -1151,9 +1157,11 @@ impl RemoteTimelineClient {
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "list_prefixes",
-            backoff::Cancel::new(shutdown_token(), || anyhow::anyhow!("Cancelled!")),
+            &cancel,
         )
         .await
+        .ok_or_else(|| anyhow::anyhow!("Cancelled!"))
+        .and_then(|x| x)
         .context("list prefixes")?;
 
         // We will delete the current index_part object last, since it acts as a deletion
@@ -1719,6 +1727,11 @@ pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
+fn remote_timelines_path_unsharded(tenant_id: &TenantId) -> RemotePath {
+    let path = format!("tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}");
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
 pub fn remote_timeline_path(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
@@ -1939,6 +1952,7 @@ mod tests {
             tracing::info_span!(
                 "test",
                 tenant_id = %self.harness.tenant_shard_id.tenant_id,
+                shard_id = %self.harness.tenant_shard_id.shard_slug(),
                 timeline_id = %TIMELINE_ID
             )
         }

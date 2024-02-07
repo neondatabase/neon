@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     fs::{self, File},
-    io::{self, Write},
+    io,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -112,45 +112,52 @@ pub async fn fsync_async(path: impl AsRef<Utf8Path>) -> Result<(), std::io::Erro
     tokio::fs::File::open(path.as_ref()).await?.sync_all().await
 }
 
-/// Writes a file to the specified `final_path` in a crash safe fasion
+pub async fn fsync_async_opt(
+    path: impl AsRef<Utf8Path>,
+    do_fsync: bool,
+) -> Result<(), std::io::Error> {
+    if do_fsync {
+        fsync_async(path.as_ref()).await?;
+    }
+    Ok(())
+}
+
+/// Like postgres' durable_rename, renames file issuing fsyncs do make it
+/// durable. After return, file and rename are guaranteed to be persisted.
 ///
-/// The file is first written to the specified tmp_path, and in a second
-/// step, the tmp path is renamed to the final path. As renames are
-/// atomic, a crash during the write operation will never leave behind a
-/// partially written file.
+/// Unlike postgres, it only does fsyncs to 1) file to be renamed to make
+/// contents durable; 2) its directory entry to make rename durable 3) again to
+/// already renamed file, which is not required by standards but postgres does
+/// it, let's stick to that. Postgres additionally fsyncs newpath *before*
+/// rename if it exists to ensure that at least one of the files survives, but
+/// current callers don't need that.
 ///
-/// NB: an async variant of this code exists in Pageserver's VirtualFile.
-pub fn overwrite(
-    final_path: &Utf8Path,
-    tmp_path: &Utf8Path,
-    content: &[u8],
-) -> std::io::Result<()> {
-    let Some(final_path_parent) = final_path.parent() else {
-        return Err(std::io::Error::from_raw_os_error(
-            nix::errno::Errno::EINVAL as i32,
-        ));
+/// virtual_file.rs has similar code, but it doesn't use vfs.
+///
+/// Useful links: <https://lwn.net/Articles/457667/>
+/// <https://www.postgresql.org/message-id/flat/56583BDD.9060302%402ndquadrant.com>
+/// <https://thunk.org/tytso/blog/2009/03/15/dont-fear-the-fsync/>
+pub async fn durable_rename(
+    old_path: impl AsRef<Utf8Path>,
+    new_path: impl AsRef<Utf8Path>,
+    do_fsync: bool,
+) -> io::Result<()> {
+    // first fsync the file
+    fsync_async_opt(old_path.as_ref(), do_fsync).await?;
+
+    // Time to do the real deal.
+    tokio::fs::rename(old_path.as_ref(), new_path.as_ref()).await?;
+
+    // Postgres'ish fsync of renamed file.
+    fsync_async_opt(new_path.as_ref(), do_fsync).await?;
+
+    // Now fsync the parent
+    let parent = match new_path.as_ref().parent() {
+        Some(p) => p,
+        None => Utf8Path::new("./"), // assume current dir if there is no parent
     };
-    std::fs::remove_file(tmp_path).or_else(crate::fs_ext::ignore_not_found)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        // Use `create_new` so that, if we race with ourselves or something else,
-        // we bail out instead of causing damage.
-        .create_new(true)
-        .open(tmp_path)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    drop(file); // before the rename, that's important!
-                // renames are atomic
-    std::fs::rename(tmp_path, final_path)?;
-    // Only open final path parent dirfd now, so that this operation only
-    // ever holds one VirtualFile fd at a time.  That's important because
-    // the current `find_victim_slot` impl might pick the same slot for both
-    // VirtualFile., and it eventually does a blocking write lock instead of
-    // try_lock.
-    let final_parent_dirfd = std::fs::OpenOptions::new()
-        .read(true)
-        .open(final_path_parent)?;
-    final_parent_dirfd.sync_all()?;
+    fsync_async_opt(parent, do_fsync).await?;
+
     Ok(())
 }
 

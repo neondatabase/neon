@@ -376,11 +376,6 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     # so we allow it to log at WARN, even if it is occasionally a false positive.
     env.pageserver.allowed_errors.append(".*failed to freeze and flush.*")
 
-    # When we shut down a tenant during a timeline creation, initdb is not cancelled, we wait
-    # for it to complete (since https://github.com/neondatabase/neon/pull/6451).  This means
-    # that shutdown can be delayed by >=1s on debug builds where initdb takes a long time to run.
-    env.pageserver.allowed_errors.append(".*still waiting, taking longer than expected... gate.*")
-
     def create_bg(delay_ms):
         time.sleep(delay_ms / 1000.0)
         try:

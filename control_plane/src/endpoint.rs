@@ -184,7 +184,7 @@ impl ComputeControlPlane {
                 v.tenant_id == tenant_id
                     && v.timeline_id == timeline_id
                     && v.mode == mode
-                    && v.status() != "stopped"
+                    && v.status() != EndpointStatus::Stopped
             });
 
             if let Some((key, _)) = duplicates.next() {
@@ -221,6 +221,26 @@ pub struct Endpoint {
 
     // Feature flags
     features: Vec<ComputeFeature>,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum EndpointStatus {
+    Running,
+    Stopped,
+    Crashed,
+    RunningNoPidfile,
+}
+
+impl std::fmt::Display for EndpointStatus {
+    fn fmt(&self, writer: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Crashed => "crashed",
+            Self::RunningNoPidfile => "running, no pidfile",
+        };
+        write!(writer, "{}", s)
+    }
 }
 
 impl Endpoint {
@@ -380,16 +400,16 @@ impl Endpoint {
         self.endpoint_path().join("pgdata")
     }
 
-    pub fn status(&self) -> &str {
+    pub fn status(&self) -> EndpointStatus {
         let timeout = Duration::from_millis(300);
         let has_pidfile = self.pgdata().join("postmaster.pid").exists();
         let can_connect = TcpStream::connect_timeout(&self.pg_address, timeout).is_ok();
 
         match (has_pidfile, can_connect) {
-            (true, true) => "running",
-            (false, false) => "stopped",
-            (true, false) => "crashed",
-            (false, true) => "running, no pidfile",
+            (true, true) => EndpointStatus::Running,
+            (false, false) => EndpointStatus::Stopped,
+            (true, false) => EndpointStatus::Crashed,
+            (false, true) => EndpointStatus::RunningNoPidfile,
         }
     }
 
@@ -438,7 +458,7 @@ impl Endpoint {
     }
 
     fn wait_for_compute_ctl_to_exit(&self, send_sigterm: bool) -> Result<()> {
-        // TODO use background_process::stop_process instead
+        // TODO use background_process::stop_process instead: https://github.com/neondatabase/neon/pull/6482
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
         let pid = nix::unistd::Pid::from_raw(pid as i32);
@@ -481,7 +501,7 @@ impl Endpoint {
         remote_ext_config: Option<&String>,
         shard_stripe_size: usize,
     ) -> Result<()> {
-        if self.status() == "running" {
+        if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
         }
 
@@ -583,9 +603,21 @@ impl Endpoint {
         }
 
         let child = cmd.spawn()?;
+        // set up a scopeguard to kill & wait for the child in case we panic or bail below
+        let child = scopeguard::guard(child, |mut child| {
+            println!("SIGKILL & wait the started process");
+            (|| {
+                // TODO: use another signal that can be caught by the child so it can clean up any children it spawned
+                child.kill().context("SIGKILL child")?;
+                child.wait().context("wait() for child process")?;
+                anyhow::Ok(())
+            })()
+            .with_context(|| format!("scopeguard kill&wait child {child:?}"))
+            .unwrap();
+        });
 
         // Write down the pid so we can wait for it when we want to stop
-        // TODO use background_process::start_process instead
+        // TODO use background_process::start_process instead: https://github.com/neondatabase/neon/pull/6482
         let pid = child.id();
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         std::fs::write(pidfile_path, pid.to_string())?;
@@ -633,6 +665,9 @@ impl Endpoint {
             }
             std::thread::sleep(ATTEMPT_INTERVAL);
         }
+
+        // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
+        drop(scopeguard::ScopeGuard::into_inner(child));
 
         Ok(())
     }

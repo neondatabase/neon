@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
+use crate::TimeTravelError;
 use crate::{
     AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath,
     RemoteStorage, StorageMetadata,
@@ -378,13 +379,11 @@ impl RemoteStorage for AzureBlobStorage {
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
-        _cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
+        _cancel: &CancellationToken,
+    ) -> Result<(), TimeTravelError> {
         // TODO use Azure point in time recovery feature for this
         // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview
-        Err(anyhow::anyhow!(
-            "time travel recovery for azure blob storage is not implemented"
-        ))
+        Err(TimeTravelError::Unimplemented)
     }
 }
 

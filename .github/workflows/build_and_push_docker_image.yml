@@ -69,7 +69,15 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.dockerfile-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-amd64
+        run: |
+          /kaniko/executor \
+            --reproducible \
+            --snapshotMode=redo \
+            --skip-unused-stages \
+            --dockerfile ${{ inputs.dockerfile-path }} \
+            --cache=true \
+            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
+            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-amd64
 
   kaniko-arm:
     if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
@@ -85,7 +93,15 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.dockerfile-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-arm64
+        run: |
+          /kaniko/executor \
+            --reproducible \
+            --snapshotMode=redo \
+            --skip-unused-stages \
+            --dockerfile ${{ inputs.dockerfile-path }} \
+            --cache=true \
+            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
+            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-arm64
 
   manifest:
     if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
@@ -99,7 +115,10 @@ jobs:
 
     steps:
       - name: Create manifest
-        run: docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }} --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-amd64 --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-arm64
+        run: |
+          docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }} \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-amd64 \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-arm64
 
       - name: Push manifest
         run: docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}

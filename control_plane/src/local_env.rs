@@ -72,10 +72,15 @@ pub struct LocalEnv {
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
 
-    // Control plane location: if None, we will not run attachment_service.  If set, this will
+    // Control plane upcall API for pageserver: if None, we will not run attachment_service.  If set, this will
     // be propagated into each pageserver's configuration.
     #[serde(default)]
     pub control_plane_api: Option<Url>,
+
+    // Control plane upcall API for attachment service.  If set, this will be propagated into the
+    // attachment service's configuration.
+    #[serde(default)]
+    pub control_plane_compute_hook_api: Option<Url>,
 
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     #[serde(default)]
@@ -223,7 +228,11 @@ impl LocalEnv {
     }
 
     pub fn attachment_service_bin(&self) -> PathBuf {
-        self.neon_distrib_dir.join("attachment_service")
+        // Irrespective of configuration, attachment service binary is always
+        // run from the same location as neon_local.  This means that for compatibility
+        // tests that run old pageserver/safekeeper, they still run latest attachment service.
+        let neon_local_bin_dir = env::current_exe().unwrap().parent().unwrap().to_owned();
+        neon_local_bin_dir.join("attachment_service")
     }
 
     pub fn safekeeper_bin(&self) -> PathBuf {

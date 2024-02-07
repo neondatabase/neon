@@ -199,7 +199,9 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             // Perhaps we did no work and the walredo process has been idle for some time:
             // give it a chance to shut down to avoid leaving walredo process running indefinitely.
-            tenant.walredo_mgr.maybe_quiesce(period * 10);
+            if let Some(walredo_mgr) = &tenant.walredo_mgr {
+                walredo_mgr.maybe_quiesce(period * 10);
+            }
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())

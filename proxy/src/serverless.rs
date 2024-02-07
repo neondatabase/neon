@@ -3,6 +3,7 @@
 //! Handles both SQL over HTTP and SQL over Websockets.
 
 mod conn_pool;
+mod json;
 mod sql_over_http;
 mod websocket;
 
@@ -40,6 +41,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
+
+pub const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -228,7 +231,7 @@ async fn request_handler(
                     config,
                     &mut ctx,
                     websocket,
-                    &cancel_map,
+                    cancel_map,
                     host,
                     endpoint_rate_limiter,
                 )

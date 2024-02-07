@@ -97,23 +97,86 @@ pub enum EvictionOrder {
 
     /// Order the layers to be evicted by how recently they have been accessed relatively within
     /// the set of resident layers of a tenant.
-    ///
-    /// This strategy will evict layers more fairly but is untested.
     RelativeAccessed {
-        #[serde(default)]
+        /// Determines if the tenant with most layers should lose first.
+        ///
+        /// Having this enabled is currently the only reasonable option, because the order in which
+        /// we read tenants is deterministic. If we find the need to use this as `false`, we need
+        /// to ensure nondeterminism by adding in a random number to break the
+        /// `relative_last_activity==0.0` ties.
+        #[serde(default = "default_highest_layer_count_loses_first")]
         highest_layer_count_loses_first: bool,
     },
 }
 
+fn default_highest_layer_count_loses_first() -> bool {
+    true
+}
+
 impl EvictionOrder {
-    /// Return true, if with [`Self::RelativeAccessed`] order the tenants with the highest layer
-    /// counts should be the first ones to have their layers evicted.
-    fn highest_layer_count_loses_first(&self) -> bool {
+    fn sort(&self, candidates: &mut [(MinResidentSizePartition, EvictionCandidate)]) {
+        use EvictionOrder::*;
+
         match self {
-            EvictionOrder::AbsoluteAccessed => false,
-            EvictionOrder::RelativeAccessed {
+            AbsoluteAccessed => {
+                candidates.sort_unstable_by_key(|(partition, candidate)| {
+                    (*partition, candidate.last_activity_ts)
+                });
+            }
+            RelativeAccessed { .. } => candidates.sort_unstable_by_key(|(partition, candidate)| {
+                (*partition, candidate.relative_last_activity)
+            }),
+        }
+    }
+
+    /// Called to fill in the [`EvictionCandidate::relative_last_activity`] while iterating tenants
+    /// layers in **most** recently used order.
+    fn relative_last_activity(&self, total: usize, index: usize) -> finite_f32::FiniteF32 {
+        use EvictionOrder::*;
+
+        match self {
+            AbsoluteAccessed => finite_f32::FiniteF32::ZERO,
+            RelativeAccessed {
                 highest_layer_count_loses_first,
-            } => *highest_layer_count_loses_first,
+            } => {
+                // keeping the -1 or not decides if every tenant should lose their least recently accessed
+                // layer OR if this should happen in the order of having highest layer count:
+                let fudge = if *highest_layer_count_loses_first {
+                    // relative_last_activity vs. tenant layer count:
+                    // - 0.1..=1.0 (10 layers)
+                    // - 0.01..=1.0 (100 layers)
+                    // - 0.001..=1.0 (1000 layers)
+                    //
+                    // leading to evicting less of the smallest tenants.
+                    0
+                } else {
+                    // use full 0.0..=1.0 range, which means even the smallest tenants could always lose a
+                    // layer. the actual ordering is unspecified: for 10k tenants on a pageserver it could
+                    // be that less than 10k layer evictions is enough, so we would not need to evict from
+                    // all tenants.
+                    //
+                    // as the tenant ordering is now deterministic this could hit the same tenants
+                    // disproportionetly on multiple invocations. alternative could be to remember how many
+                    // layers did we evict last time from this tenant, and inject that as an additional
+                    // fudge here.
+                    1
+                };
+
+                let total = total.checked_sub(fudge).filter(|&x| x > 1).unwrap_or(1);
+                let divider = total as f32;
+
+                // most recently used is always (total - 0) / divider == 1.0
+                // least recently used depends on the fudge:
+                // -       (total - 1) - (total - 1) / total => 0 / total
+                // -             total - (total - 1) / total => 1 / total
+                let distance = (total - index) as f32;
+
+                finite_f32::FiniteF32::try_from_normalized(distance / divider)
+                    .unwrap_or_else(|val| {
+                        tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={index}, total={total}: {val}");
+                        finite_f32::FiniteF32::ZERO
+                    })
+            }
         }
     }
 }
@@ -388,52 +451,6 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
 
     let selection = select_victims(&candidates, usage_pre);
-
-    let mut candidates = candidates;
-
-    let selection = if matches!(eviction_order, EvictionOrder::RelativeAccessed { .. }) {
-        // we currently have the layers ordered by AbsoluteAccessed so that we can get the summary
-        // for comparison here. this is a temporary measure to develop alternatives.
-        use std::fmt::Write;
-
-        let mut summary_buf = String::with_capacity(256);
-
-        {
-            let absolute_summary = candidates
-                .iter()
-                .take(selection.amount)
-                .map(|(_, candidate)| candidate)
-                .collect::<summary::EvictionSummary>();
-
-            write!(summary_buf, "{absolute_summary}").expect("string grows");
-
-            info!("absolute accessed selection summary: {summary_buf}");
-        }
-
-        candidates.sort_unstable_by_key(|(partition, candidate)| {
-            (*partition, candidate.relative_last_activity)
-        });
-
-        let selection = select_victims(&candidates, usage_pre);
-
-        {
-            summary_buf.clear();
-
-            let relative_summary = candidates
-                .iter()
-                .take(selection.amount)
-                .map(|(_, candidate)| candidate)
-                .collect::<summary::EvictionSummary>();
-
-            write!(summary_buf, "{relative_summary}").expect("string grows");
-
-            info!("relative accessed selection summary: {summary_buf}");
-        }
-
-        selection
-    } else {
-        selection
-    };
 
     let (evicted_amount, usage_planned) = selection.into_amount_and_planned();
 
@@ -835,54 +852,12 @@ async fn collect_eviction_candidates(
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
 
-        // keeping the -1 or not decides if every tenant should lose their least recently accessed
-        // layer OR if this should happen in the order of having highest layer count:
-        let fudge = if eviction_order.highest_layer_count_loses_first() {
-            // relative_age vs. tenant layer count:
-            // - 0.1..=1.0 (10 layers)
-            // - 0.01..=1.0 (100 layers)
-            // - 0.001..=1.0 (1000 layers)
-            //
-            // leading to evicting less of the smallest tenants.
-            0
-        } else {
-            // use full 0.0..=1.0 range, which means even the smallest tenants could always lose a
-            // layer. the actual ordering is unspecified: for 10k tenants on a pageserver it could
-            // be that less than 10k layer evictions is enough, so we would not need to evict from
-            // all tenants.
-            //
-            // as the tenant ordering is now deterministic this could hit the same tenants
-            // disproportionetly on multiple invocations. alternative could be to remember how many
-            // layers did we evict last time from this tenant, and inject that as an additional
-            // fudge here.
-            1
-        };
-
-        let total = tenant_candidates
-            .len()
-            .checked_sub(fudge)
-            .filter(|&x| x > 0)
-            // support 0 or 1 resident layer tenants as well
-            .unwrap_or(1);
-        let divider = total as f32;
+        let total = tenant_candidates.len();
 
         for (i, mut candidate) in tenant_candidates.into_iter().enumerate() {
             // as we iterate this reverse sorted list, the most recently accessed layer will always
             // be 1.0; this is for us to evict it last.
-            candidate.relative_last_activity = if matches!(
-                eviction_order,
-                EvictionOrder::RelativeAccessed { .. }
-            ) {
-                // another possibility: use buckets, like (256.0 * relative_last_activity) as u8 or
-                // similarly for u16. unsure how it would help.
-                finite_f32::FiniteF32::try_from_normalized((total - i) as f32 / divider)
-                    .unwrap_or_else(|val| {
-                        tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={i}, total={total}: {val}");
-                        finite_f32::FiniteF32::ZERO
-                    })
-            } else {
-                finite_f32::FiniteF32::ZERO
-            };
+            candidate.relative_last_activity = eviction_order.relative_last_activity(total, i);
 
             let partition = if cumsum > min_resident_size as i128 {
                 MinResidentSizePartition::Above
@@ -927,10 +902,7 @@ async fn collect_eviction_candidates(
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
         "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
 
-    // always behave as if AbsoluteAccessed was selected. if RelativeAccessed is in use, we
-    // will sort later by candidate.relative_last_activity to get compare evictions.
-    candidates
-        .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
+    eviction_order.sort(&mut candidates);
 
     Ok(EvictionCandidates::Finished(candidates))
 }
@@ -1070,6 +1042,12 @@ pub(crate) mod finite_f32 {
         }
     }
 
+    impl From<FiniteF32> for f32 {
+        fn from(value: FiniteF32) -> f32 {
+            value.0
+        }
+    }
+
     impl FiniteF32 {
         pub const ZERO: FiniteF32 = FiniteF32(0.0);
 
@@ -1082,136 +1060,9 @@ pub(crate) mod finite_f32 {
                 Err(value)
             }
         }
-    }
-}
 
-mod summary {
-    use super::finite_f32::FiniteF32;
-    use super::{EvictionCandidate, LayerCount};
-    use pageserver_api::shard::TenantShardId;
-    use std::collections::{BTreeMap, HashMap};
-    use std::time::SystemTime;
-
-    #[derive(Debug, Default)]
-    pub(super) struct EvictionSummary {
-        evicted_per_tenant: HashMap<TenantShardId, LayerCount>,
-        total: LayerCount,
-
-        last_absolute: Option<SystemTime>,
-        last_relative: Option<FiniteF32>,
-    }
-
-    impl<'a> FromIterator<&'a EvictionCandidate> for EvictionSummary {
-        fn from_iter<T: IntoIterator<Item = &'a EvictionCandidate>>(iter: T) -> Self {
-            let mut summary = EvictionSummary::default();
-            for item in iter {
-                let counts = summary
-                    .evicted_per_tenant
-                    .entry(*item.layer.get_tenant_shard_id())
-                    .or_default();
-
-                let sz = item.layer.get_file_size();
-
-                counts.file_sizes += sz;
-                counts.count += 1;
-
-                summary.total.file_sizes += sz;
-                summary.total.count += 1;
-
-                summary.last_absolute = Some(item.last_activity_ts);
-                summary.last_relative = Some(item.relative_last_activity);
-            }
-
-            summary
-        }
-    }
-
-    struct SiBytesAmount(u64);
-
-    impl std::fmt::Display for SiBytesAmount {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            if self.0 < 1024 {
-                return write!(f, "{}B", self.0);
-            }
-
-            let mut tmp = self.0;
-            let mut ch = 0;
-            let suffixes = b"KMGTPE";
-
-            while tmp > 1024 * 1024 && ch < suffixes.len() - 1 {
-                tmp /= 1024;
-                ch += 1;
-            }
-
-            let ch = suffixes[ch] as char;
-
-            write!(f, "{:.1}{ch}iB", tmp as f64 / 1024.0)
-        }
-    }
-
-    impl std::fmt::Display for EvictionSummary {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            // wasteful, but it's for testing
-
-            let mut sorted: BTreeMap<usize, Vec<(TenantShardId, u64)>> = BTreeMap::new();
-
-            for (tenant_shard_id, count) in &self.evicted_per_tenant {
-                sorted
-                    .entry(count.count)
-                    .or_default()
-                    .push((*tenant_shard_id, count.file_sizes));
-            }
-
-            let total_file_sizes = SiBytesAmount(self.total.file_sizes);
-
-            writeln!(
-                f,
-                "selected {} layers of {total_file_sizes} up to ({:?}, {:.2?}):",
-                self.total.count, self.last_absolute, self.last_relative,
-            )?;
-
-            for (count, per_tenant) in sorted.iter().rev().take(10) {
-                write!(f, "- {count} layers: ")?;
-
-                if per_tenant.len() < 3 {
-                    for (i, (tenant_shard_id, bytes)) in per_tenant.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        let bytes = SiBytesAmount(*bytes);
-                        write!(f, "{tenant_shard_id} ({bytes})")?;
-                    }
-                } else {
-                    let num_tenants = per_tenant.len();
-                    let total_bytes = per_tenant.iter().map(|(_id, bytes)| bytes).sum::<u64>();
-                    let total_bytes = SiBytesAmount(total_bytes);
-                    let layers = num_tenants * count;
-
-                    write!(
-                        f,
-                        "{num_tenants} tenants {total_bytes} in total {layers} layers",
-                    )?;
-                }
-
-                writeln!(f)?;
-            }
-
-            if sorted.len() > 10 {
-                let (rem_count, rem_bytes) = sorted
-                    .iter()
-                    .rev()
-                    .map(|(count, per_tenant)| {
-                        (
-                            count,
-                            per_tenant.iter().map(|(_id, bytes)| bytes).sum::<u64>(),
-                        )
-                    })
-                    .fold((0, 0), |acc, next| (acc.0 + next.0, acc.1 + next.1));
-                let rem_bytes = SiBytesAmount(rem_bytes);
-                writeln!(f, "- rest of tenants ({}) not shown ({rem_count} layers or {:.1}%, {rem_bytes} or {:.1}% bytes)", sorted.len() - 10, 100.0 * rem_count as f64 / self.total.count as f64, 100.0 * rem_bytes.0 as f64 / self.total.file_sizes as f64)?;
-            }
-
-            Ok(())
+        pub fn into_inner(self) -> f32 {
+            self.into()
         }
     }
 }
@@ -1334,5 +1185,42 @@ mod filesystem_level_usage {
 
         usage.add_available_bytes(16_000);
         assert!(!usage.has_pressure());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_equal_bounds() {
+        let order = EvictionOrder::RelativeAccessed {
+            highest_layer_count_loses_first: false,
+        };
+
+        let len = 10;
+        let v = (0..len)
+            .map(|i| order.relative_last_activity(len, i).into_inner())
+            .collect::<Vec<_>>();
+
+        assert_eq!(v.first(), Some(&1.0));
+        assert_eq!(v.last(), Some(&0.0));
+        assert!(v.windows(2).all(|slice| slice[0] > slice[1]));
+    }
+
+    #[test]
+    fn relative_spare_bounds() {
+        let order = EvictionOrder::RelativeAccessed {
+            highest_layer_count_loses_first: true,
+        };
+
+        let len = 10;
+        let v = (0..len)
+            .map(|i| order.relative_last_activity(len, i).into_inner())
+            .collect::<Vec<_>>();
+
+        assert_eq!(v.first(), Some(&1.0));
+        assert_eq!(v.last(), Some(&0.1));
+        assert!(v.windows(2).all(|slice| slice[0] > slice[1]));
     }
 }
