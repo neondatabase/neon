@@ -154,14 +154,21 @@ impl Service {
                 locked.nodes.clone()
             };
             for node in nodes.values() {
-                let client =
-                    mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+                let http_client = reqwest::ClientBuilder::new()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .expect("Failed to construct HTTP client");
+                let client = mgmt_api::Client::from_client(
+                    http_client,
+                    node.base_url(),
+                    self.config.jwt_token.as_deref(),
+                );
 
                 tracing::info!("Scanning shards on node {}...", node.id);
                 match client.list_location_config().await {
                     Err(e) => {
                         tracing::warn!("Could not contact pageserver {} ({e})", node.id);
-                        // TODO: be more tolerant, apply a generous 5-10 second timeout with retries, in case
+                        // TODO: be more tolerant, do some retries, in case
                         // pageserver is being restarted at the same time as we are
                     }
                     Ok(listing) => {
