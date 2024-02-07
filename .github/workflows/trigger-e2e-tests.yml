@@ -44,10 +44,8 @@ jobs:
         id: run-id
         env:
           GITHUB_CONTEXT: ${{ toJson(github) }}
-          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
-          echo "$GITHUB_CONTEXT"
-          echo "runid=$(gh run list -b ${{ github.event.pull_request.base.ref }} -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')" >> $GITHUB_OUTPUT
+          echo "runid=$(gh run list -b ${{ github.head_ref }} -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')" >> $GITHUB_OUTPUT
 
   tag:
     needs: get-build-and-test-run-id
