@@ -311,6 +311,17 @@ async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> 
     json_response(StatusCode::OK, ())
 }
 
+/// Readiness endpoint indicates when we're done doing startup I/O (e.g. reconciling
+/// with remote pageserver nodes)
+async fn handle_ready(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+    if state.service.startup_complete.is_ready() {
+        json_response(StatusCode::OK, ())
+    } else {
+        json_response(StatusCode::SERVICE_UNAVAILABLE, ())
+    }
+}
+
 impl From<ReconcileError> for ApiError {
     fn from(value: ReconcileError) -> Self {
         ApiError::Conflict(format!("Reconciliation error: {}", value))
@@ -366,6 +377,7 @@ pub fn make_router(
         .data(Arc::new(HttpState::new(service, auth)))
         // Non-prefixed generic endpoints (status, metrics)
         .get("/status", |r| request_span(r, handle_status))
+        .get("/ready", |r| request_span(r, handle_ready))
         // Upcalls for the pageserver: point the pageserver's `control_plane_api` config to this prefix
         .post("/upcall/v1/re-attach", |r| {
             request_span(r, handle_re_attach)
