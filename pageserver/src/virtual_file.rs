@@ -19,7 +19,7 @@ use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
+use tokio_epoll_uring::IoBufMut;
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
@@ -409,10 +409,10 @@ impl VirtualFile {
     /// step, the tmp path is renamed to the final path. As renames are
     /// atomic, a crash during the write operation will never leave behind a
     /// partially written file.
-    pub async fn crashsafe_overwrite<B: BoundedBuf>(
+    pub async fn crashsafe_overwrite(
         final_path: &Utf8Path,
         tmp_path: &Utf8Path,
-        content: B,
+        content: &[u8],
     ) -> std::io::Result<()> {
         let Some(final_path_parent) = final_path.parent() else {
             return Err(std::io::Error::from_raw_os_error(
@@ -429,8 +429,7 @@ impl VirtualFile {
                 .create_new(true),
         )
         .await?;
-        let (_content, res) = file.write_all(content).await;
-        res?;
+        file.write_all(content).await?;
         file.sync_all().await?;
         drop(file); // before the rename, that's important!
                     // renames are atomic
@@ -676,6 +675,7 @@ where
     F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
     Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
 {
+    use tokio_epoll_uring::BoundedBuf;
     let mut buf: tokio_epoll_uring::Slice<B> = buf.slice_full(); // includes all the uninitialized memory
     while buf.bytes_total() != 0 {
         let res;
@@ -1140,7 +1140,7 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_a.write_all(b"foobar".to_owned()).await?;
+        file_a.write_all(b"foobar").await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string().await.unwrap_err();
@@ -1292,7 +1292,7 @@ mod tests {
         let path = testdir.join("myfile");
         let tmp_path = testdir.join("myfile.tmp");
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, *b"foo")
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo")
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
@@ -1301,7 +1301,7 @@ mod tests {
         assert!(!tmp_path.exists());
         drop(file);
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, *b"bar")
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"bar")
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
@@ -1323,7 +1323,7 @@ mod tests {
         std::fs::write(&tmp_path, "some preexisting junk that should be removed").unwrap();
         assert!(tmp_path.exists());
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, *b"foo")
+        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo")
             .await
             .unwrap();
 

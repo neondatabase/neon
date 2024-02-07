@@ -341,12 +341,18 @@ impl ImageLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
+        if buf.spilled() {
+            // The code in ImageLayerWriterInner just warn!()s for this.
+            // It should probably error out as well.
+            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            )));
+        }
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
-        res?;
+        file.write_all(&buf).await?;
         Ok(())
     }
 }
@@ -549,8 +555,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf).await;
-            res?;
+            file.write_all(buf.as_ref()).await?;
         }
 
         // Fill in the summary on blk 0
@@ -565,12 +570,17 @@ impl ImageLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = Vec::with_capacity(PAGE_SZ);
-        // TODO: could use smallvec here but it's a pain with Slice<T>
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
         Summary::ser_into(&summary, &mut buf)?;
+        if buf.spilled() {
+            // This is bad as we only have one free block for the summary
+            warn!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            );
+        }
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
-        res?;
+        file.write_all(&buf).await?;
 
         let metadata = file
             .metadata()

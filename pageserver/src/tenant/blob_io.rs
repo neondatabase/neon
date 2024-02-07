@@ -127,13 +127,14 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         &mut self,
         src_buf: B,
     ) -> (B::Buf, Result<(), Error>) {
-        let (src_buf, res) = self.inner.write_all(src_buf).await;
-        let nbytes = match res {
-            Ok(nbytes) => nbytes,
-            Err(e) => return (src_buf, Err(e)),
-        };
-        self.offset += nbytes as u64;
-        (src_buf, Ok(()))
+        let src_buf_len = src_buf.bytes_init();
+        let src_buf = Slice::from(src_buf.slice(0..src_buf_len));
+        let res = self.inner.write_all(&src_buf).await;
+        let src_buf = Slice::into_inner(src_buf);
+        if let Ok(()) = &res {
+            self.offset += src_buf_len as u64;
+        }
+        (src_buf, res)
     }
 
     #[inline(always)]
