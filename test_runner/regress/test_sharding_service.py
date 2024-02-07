@@ -310,7 +310,7 @@ def test_sharding_service_compute_hook(
         notifications.append(request.json)
         return Response(status=200)
 
-    httpserver.expect_request("/notify", method="POST").respond_with_handler(handler)
+    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
     # Start running
     env = neon_env_builder.init_start()

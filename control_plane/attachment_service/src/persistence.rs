@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Duration;
 
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
@@ -44,7 +45,7 @@ use crate::PlacementPolicy;
 /// updated, and reads of nodes are always from memory, not the database.  We only require that
 /// we can UPDATE a node's scheduling mode reasonably quickly to mark a bad node offline.
 pub struct Persistence {
-    database_url: String,
+    connection_pool: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<PgConnection>>,
 
     // In test environments, we support loading+saving a JSON file.  This is temporary, for the benefit of
     // test_compatibility.py, so that we don't have to commit to making the database contents fully backward/forward
@@ -64,6 +65,8 @@ pub(crate) enum DatabaseError {
     Query(#[from] diesel::result::Error),
     #[error(transparent)]
     Connection(#[from] diesel::result::ConnectionError),
+    #[error(transparent)]
+    ConnectionPool(#[from] r2d2::Error),
     #[error("Logical error: {0}")]
     Logical(String),
 }
@@ -71,9 +74,31 @@ pub(crate) enum DatabaseError {
 pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 
 impl Persistence {
+    // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
+    // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
+    pub const MAX_CONNECTIONS: u32 = 99;
+
+    // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
+    const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+    const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
+
     pub fn new(database_url: String, json_path: Option<Utf8PathBuf>) -> Self {
+        let manager = diesel::r2d2::ConnectionManager::<PgConnection>::new(database_url);
+
+        // We will use a connection pool: this is primarily to _limit_ our connection count, rather than to optimize time
+        // to execute queries (database queries are not generally on latency-sensitive paths).
+        let connection_pool = diesel::r2d2::Pool::builder()
+            .max_size(Self::MAX_CONNECTIONS)
+            .max_lifetime(Some(Self::MAX_CONNECTION_LIFETIME))
+            .idle_timeout(Some(Self::IDLE_CONNECTION_TIMEOUT))
+            // Always keep at least one connection ready to go
+            .min_idle(Some(1))
+            .test_on_check_out(true)
+            .build(manager)
+            .expect("Could not build connection pool");
+
         Self {
-            database_url,
+            connection_pool,
             json_path,
         }
     }
@@ -84,14 +109,10 @@ impl Persistence {
         F: Fn(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        let database_url = self.database_url.clone();
-        tokio::task::spawn_blocking(move || -> DatabaseResult<R> {
-            // TODO: connection pooling, such as via diesel::r2d2
-            let mut conn = PgConnection::establish(&database_url)?;
-            func(&mut conn)
-        })
-        .await
-        .expect("Task panic")
+        let mut conn = self.connection_pool.get()?;
+        tokio::task::spawn_blocking(move || -> DatabaseResult<R> { func(&mut conn) })
+            .await
+            .expect("Task panic")
     }
 
     /// When a node is first registered, persist it before using it for anything
