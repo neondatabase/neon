@@ -416,7 +416,8 @@ impl DeltaLayerWriterInner {
     /// The values must be appended in key, lsn order.
     ///
     async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        let (_, res) = self.put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init())
+        let (_, res) = self
+            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init())
             .await;
         res
     }
@@ -435,15 +436,14 @@ impl DeltaLayerWriterInner {
         let val = tokio_epoll_uring::Slice::into_inner(val);
         let off = match res {
             Ok(off) => off,
-            x @ Err(_) => return (val, x),
+            Err(e) => return (val, Err(anyhow::anyhow!(e))),
         };
 
         let blob_ref = BlobRef::new(off, will_init);
 
         let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        self.tree.append(&delta_key.0, blob_ref.0)?;
-
-        (val, Ok(()))
+        let res = self.tree.append(&delta_key.0, blob_ref.0);
+        (val, res.map_err(|e| anyhow::anyhow!(e)))
     }
 
     fn size(&self) -> u64 {

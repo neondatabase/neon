@@ -50,6 +50,7 @@ use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use tokio_epoll_uring::Slice;
 use tracing::*;
 
 use utils::{
@@ -530,7 +531,9 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img).await?;
+        let (_img, res) = self.blob_writer.write_blob(Slice::from(img)).await;
+        // TODO: re-use the buffer for `img` further upstack
+        let off = res?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
