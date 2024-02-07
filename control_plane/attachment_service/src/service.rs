@@ -1028,6 +1028,10 @@ impl Service {
             }
         };
 
+        // TODO: if we timeout/fail on reconcile, we should still succeed this request,
+        // because otherwise a broken compute hook causes a feedback loop where
+        // location_config returns 500 and gets retried forever.
+
         if let Some(create_req) = maybe_create {
             let create_resp = self.tenant_create(create_req).await?;
             result.shards = create_resp
