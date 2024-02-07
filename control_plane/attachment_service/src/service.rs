@@ -977,10 +977,6 @@ impl Service {
             }
         };
 
-        // TODO: if we timeout/fail on reconcile, we should still succeed this request,
-        // because otherwise a broken compute hook causes a feedback loop where
-        // location_config returns 500 and gets retried forever.
-
         if let Some(create_req) = maybe_create {
             let create_resp = self.tenant_create(create_req).await?;
             result.shards = create_resp
@@ -993,7 +989,15 @@ impl Service {
                 .collect();
         } else {
             // This was an update, wait for reconciliation
-            self.await_waiters(waiters).await?;
+            if let Err(e) = self.await_waiters(waiters).await {
+                // Do not treat a reconcile error as fatal: we have already applied any requested
+                // Intent changes, and the reconcile can fail for external reasons like unavailable
+                // compute notification API.  In these cases, it is important that we do not
+                // cause the cloud control plane to retry forever on this API.
+                tracing::warn!(
+                    "Failed to reconcile after /location_config: {e}, returning success anyway"
+                );
+            }
         }
 
         Ok(result)
