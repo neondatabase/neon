@@ -30,6 +30,7 @@ use pageserver_api::{
 use pageserver_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
 use utils::{
+    backoff,
     completion::Barrier,
     generation::Generation,
     http::error::ApiError,
@@ -147,6 +148,9 @@ impl Service {
 
         let mut nodes_online = HashSet::new();
 
+        // TODO: give Service a cancellation token for clean shutdown
+        let cancel = CancellationToken::new();
+
         // TODO: issue these requests concurrently
         {
             let nodes = {
@@ -164,8 +168,33 @@ impl Service {
                     self.config.jwt_token.as_deref(),
                 );
 
+                fn is_retryable(e: &mgmt_api::Error) -> bool {
+                    use mgmt_api::Error::*;
+                    match e {
+                        ReceiveBody(_) | ReceiveErrorBody(_) => true,
+                        ApiError(StatusCode::SERVICE_UNAVAILABLE, _)
+                        | ApiError(StatusCode::GATEWAY_TIMEOUT, _)
+                        | ApiError(StatusCode::REQUEST_TIMEOUT, _) => true,
+                        ApiError(_, _) => false,
+                    }
+                }
+
+                let list_response = backoff::retry(
+                    || client.list_location_config(),
+                    |e| !is_retryable(e),
+                    1,
+                    5,
+                    "Location config listing",
+                    &cancel,
+                )
+                .await;
+                let Some(list_response) = list_response else {
+                    tracing::info!("Shutdown during startup_reconcile");
+                    return;
+                };
+
                 tracing::info!("Scanning shards on node {}...", node.id);
-                match client.list_location_config().await {
+                match list_response {
                     Err(e) => {
                         tracing::warn!("Could not contact pageserver {} ({e})", node.id);
                         // TODO: be more tolerant, do some retries, in case
@@ -297,9 +326,8 @@ impl Service {
         let stream = futures::stream::iter(compute_notifications.into_iter())
             .map(|(tenant_shard_id, node_id)| {
                 let compute_hook = compute_hook.clone();
+                let cancel = cancel.clone();
                 async move {
-                    // TODO: give Service a cancellation token for clean shutdown
-                    let cancel = CancellationToken::new();
                     if let Err(e) = compute_hook.notify(tenant_shard_id, node_id, &cancel).await {
                         tracing::error!(
                             tenant_shard_id=%tenant_shard_id,
@@ -405,7 +433,7 @@ impl Service {
             ))),
             config,
             persistence,
-            startup_complete,
+            startup_complete: startup_complete.clone(),
         });
 
         let result_task_this = this.clone();
