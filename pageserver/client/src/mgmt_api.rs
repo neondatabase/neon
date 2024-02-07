@@ -56,10 +56,18 @@ pub enum ForceAwaitLogicalSize {
 
 impl Client {
     pub fn new(mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
+        Self::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt)
+    }
+
+    pub fn from_client(
+        client: reqwest::Client,
+        mgmt_api_endpoint: String,
+        jwt: Option<&str>,
+    ) -> Self {
         Self {
             mgmt_api_endpoint,
             authorization_header: jwt.map(|jwt| format!("Bearer {jwt}")),
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
