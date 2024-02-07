@@ -272,6 +272,8 @@ fn start_pageserver(
     );
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
     set_launch_timestamp_metric(launch_ts);
+    #[cfg(target_os = "linux")]
+    metrics::register_internal(Box::new(metrics::more_process_metrics::Collector::new())).unwrap();
     pageserver::preinitialize_metrics();
 
     // If any failpoints were set from FAILPOINTS environment variable,
