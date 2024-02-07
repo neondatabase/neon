@@ -240,7 +240,7 @@ impl ComputeHook {
         let client = reqwest::Client::new();
         backoff::retry(
             || self.do_notify_iteration(&client, url, &reconfigure_request, cancel),
-            |e| matches!(e, NotifyError::Fatal(_)),
+            |e| matches!(e, NotifyError::Fatal(_) | NotifyError::Unexpected(_)),
             3,
             10,
             "Send compute notification",
