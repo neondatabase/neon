@@ -231,7 +231,7 @@ pub trait BlockWriter {
     /// 'buf' must be of size PAGE_SZ. Returns the block number the page was
     /// written to.
     ///
-    fn write_blk(&mut self, buf: Bytes) -> u32;
+    fn write_blk(&mut self, buf: Bytes) -> Result<u32, std::io::Error>;
 }
 
 ///
@@ -241,11 +241,11 @@ pub struct BlockBuf {
     pub blocks: Vec<Bytes>,
 }
 impl BlockWriter for BlockBuf {
-    fn write_blk(&mut self, buf: Bytes) -> u32 {
+    fn write_blk(&mut self, buf: Bytes) -> Result<u32, std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
         let blknum = self.blocks.len();
         self.blocks.push(buf);
-        blknum as u32
+        Ok(blknum as u32)
     }
 }
 
