@@ -194,10 +194,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let pause = ctx.latency_timer.pause();
     let do_handshake = handshake(stream, mode.handshake_tls(tls), &cancel_map);
-    let (mut stream, params) = match do_handshake.await? {
-        Some(x) => x,
-        None => return Ok(()), // it's a cancellation request
-    };
+    let (mut stream, params) =
+        match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
+            Some(x) => x,
+            None => return Ok(()), // it's a cancellation request
+        };
     drop(pause);
 
     let hostname = mode.hostname(stream.get_ref());
