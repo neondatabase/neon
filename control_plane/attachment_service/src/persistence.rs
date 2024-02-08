@@ -389,7 +389,10 @@ impl Persistence {
                     .filter(shard_count.eq(old_shard_count.0 as i32))
                     .set((splitting.eq(1),))
                     .execute(conn)?;
-                if u8::try_from(updated).map_err(|_| DatabaseError::Logical(format!("Overflow existing shard count {} while splitting", updated)))? != expect_parent_records {
+                if u8::try_from(updated)
+                    .map_err(|_| DatabaseError::Logical(
+                        format!("Overflow existing shard count {} while splitting", updated))
+                    )? != expect_parent_records {
                     // Perhaps a deletion or another split raced with this attempt to split, mutating
                     // the parent shards that we intend to split. In this case the split request should fail.
                     return Err(DatabaseError::Logical(
