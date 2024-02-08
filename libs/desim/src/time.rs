@@ -19,7 +19,8 @@ pub struct Timing {
     current_time: AtomicU64,
     /// Pending timers.
     queue: Mutex<BinaryHeap<Pending>>,
-    /// Global nonce.
+    /// Global nonce. Makes picking events from binary heap queue deterministic
+    /// by appending a number to events with the same timestamp.
     nonce: AtomicU32,
     /// Used to schedule fake events.
     fake_context: Arc<ThreadContext>,

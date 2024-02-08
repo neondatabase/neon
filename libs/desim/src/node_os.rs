@@ -44,6 +44,6 @@ impl NodeOs {
 
     /// Append a new event to the world event log.
     pub fn log_event(&self, data: String) {
-        self.world.add_event(self.id(), data)
+        self.internal.log_event(data)
     }
 }

@@ -25,6 +25,7 @@ use super::{chan::Chan, proto::AnyMessage};
 pub struct NetworkTask {
     options: Arc<NetworkOptions>,
     connections: Mutex<Vec<VirtualConnection>>,
+    /// min-heap of connections having something to deliver.
     events: Mutex<BinaryHeap<Event>>,
     task_context: Arc<ThreadContext>,
 }
@@ -76,6 +77,8 @@ impl NetworkTask {
 
 // private functions
 impl NetworkTask {
+    /// Schedule to wakeup network task (self) `after_ms` later to deliver
+    /// messages of connection `id`.
     fn schedule(&self, id: usize, after_ms: u64) {
         self.events.lock().push(Event {
             time: executor::now() + after_ms,
@@ -84,6 +87,7 @@ impl NetworkTask {
         self.task_context.schedule_wakeup(after_ms);
     }
 
+    /// Get locked connection `id`.
     fn get(&self, id: usize) -> MappedMutexGuard<'_, RawMutex, VirtualConnection> {
         MutexGuard::map(self.connections.lock(), |connections| {
             connections.get_mut(id).unwrap()
@@ -275,7 +279,8 @@ impl VirtualConnection {
         }
     }
 
-    /// Send a message to the buffer.
+    /// Try to send a message to the buffer, optionally dropping it and
+    /// determining delivery timestamp.
     fn send(&self, net: &NetworkTask, direction: MessageDirection, msg: AnyMessage) {
         let now = executor::now();
         let mut state = self.state.lock();

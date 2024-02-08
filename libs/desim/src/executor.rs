@@ -271,7 +271,7 @@ impl ThreadContext {
 impl ThreadContext {
     /// Set atomic flag to indicate that thread is ready to be woken up.
     fn inc_wake(&self) {
-        self.wakeup.store(1, Ordering::SeqCst);
+        self.wakeup.store(PENDING_WAKEUP, Ordering::SeqCst);
     }
 
     /// Internal function used for event queues.
