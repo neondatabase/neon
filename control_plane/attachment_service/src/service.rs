@@ -1107,6 +1107,7 @@ impl Service {
         self.ensure_attached_wait(tenant_id).await?;
 
         // TODO: refuse to do this if shard splitting is in progress
+        // (https://github.com/neondatabase/neon/issues/6676)
         let targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
@@ -1187,6 +1188,7 @@ impl Service {
         self.ensure_attached_wait(tenant_id).await?;
 
         // TODO: refuse to do this if shard splitting is in progress
+        // (https://github.com/neondatabase/neon/issues/6676)
         let targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
@@ -1488,6 +1490,7 @@ impl Service {
         // request could occur here, deleting or mutating the tenant.  begin_shard_split checks that the
         // parent shards exist as expected, but it would be neater to do the above pre-checks within the
         // same database transaction rather than pre-check in-memory and then maybe-fail the database write.
+        // (https://github.com/neondatabase/neon/issues/6676)
 
         // Before creating any new child shards in memory or on the pageservers, persist them: this
         // enables us to ensure that we will always be able to clean up if something goes wrong.  This also
@@ -1543,6 +1546,7 @@ impl Service {
         // FIXME: we have now committed the shard split state to the database, so any subsequent
         // failure needs to roll it back.  We will later wrap this function in logic to roll back
         // the split if it fails.
+        // (https://github.com/neondatabase/neon/issues/6676)
 
         // TODO: issue split calls concurrently (this only matters once we're splitting
         // N>1 shards into M shards -- initially we're usually splitting 1 shard into N).
