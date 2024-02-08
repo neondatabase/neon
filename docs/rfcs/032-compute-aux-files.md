@@ -30,13 +30,13 @@ There are several types of files:
 
 An important point is that these files could be modified on the replica in cases of chain replication or logical decoding at standby. Our approach with WAL logging comes at the expense of not being able to support chain replication and logical decoding at standby.
 
-### PGStat
+### PGStat: Postgres' cumulative statistics system
 
 * Stale file: Not acceptable, as Postgres discards it on a dirty stop.
-* Lost file: Postgres will work, but there may be a potential impact on query plans' quality.
+* Lost file: Postgres will work, but there may be a potential impact on query plans' quality and autovacuum performance.
 * PITR: Resetting pgstat is sensible if we can retrieve a relevant version of the file. Since dump/restore operations are only performed on stop/start, we might need to modify Postgres code to dump the file periodically and handle an outdated file on start, which seems more practical than trying to WAL-log changes to stats.
 
-Files are written only on shutdown and read only on startup. Their size depends on the number of relations and columns, typically ranging from 100KB to 1MB, but can exceed that. In my tests, the database had stats file around 1KB and it compressed 10x with gzip.
+Files are written only on shutdown and read only on startup.  Their size depends on the number of relations and columns, typically ranging from 100KB to 1MB, but can exceed that.  In my tests, the database had stats file around 1KB and it compressed 10x with gzip.
 
 Stored in `pg_stat/pgstat.stat`.
 ### Files written by extensions
