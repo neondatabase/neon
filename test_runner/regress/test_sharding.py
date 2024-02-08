@@ -208,3 +208,5 @@ def test_sharding_split_smoke(
 
         log.info(f"Migrating shard {migrate_shard} from {ps_id} to {destination}")
         env.neon_cli.tenant_migrate(migrate_shard, destination, timeout_secs=10)
+
+    workload.validate()
