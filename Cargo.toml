@@ -113,6 +113,7 @@ parquet = { version = "49.0.0", default-features = false, features = ["zstd"] }
 parquet_derive = "49.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
+procfs = "0.14"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
@@ -155,7 +156,7 @@ tikv-jemalloc-ctl = "0.5"
 tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
 tokio = { version = "1.17", features = ["macros"] }
 #tokio-epoll-uring = { path = "../tokio-epoll-uring/tokio-epoll-uring" }
-tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "problame/more-ops" }
+tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.10.0"
 tokio-rustls = "0.24"

@@ -649,6 +649,27 @@ pub struct WalRedoManagerStatus {
     pub pid: Option<u32>,
 }
 
+pub mod virtual_file {
+    #[derive(
+        Copy,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        strum_macros::EnumString,
+        strum_macros::Display,
+        serde_with::DeserializeFromStr,
+        serde_with::SerializeDisplay,
+        Debug,
+    )]
+    #[strum(serialize_all = "kebab-case")]
+    pub enum IoEngineKind {
+        StdFs,
+        #[cfg(target_os = "linux")]
+        TokioEpollUring,
+    }
+}
+
 // Wrapped in libpq CopyData
 #[derive(PartialEq, Eq, Debug)]
 pub enum PagestreamFeMessage {

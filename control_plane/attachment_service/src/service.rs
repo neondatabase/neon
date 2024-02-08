@@ -103,7 +103,9 @@ impl From<DatabaseError> for ApiError {
         match err {
             DatabaseError::Query(e) => ApiError::InternalServerError(e.into()),
             // FIXME: ApiError doesn't have an Unavailable variant, but ShuttingDown maps to 503.
-            DatabaseError::Connection(_e) => ApiError::ShuttingDown,
+            DatabaseError::Connection(_) | DatabaseError::ConnectionPool(_) => {
+                ApiError::ShuttingDown
+            }
             DatabaseError::Logical(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
@@ -987,7 +989,15 @@ impl Service {
                 .collect();
         } else {
             // This was an update, wait for reconciliation
-            self.await_waiters(waiters).await?;
+            if let Err(e) = self.await_waiters(waiters).await {
+                // Do not treat a reconcile error as fatal: we have already applied any requested
+                // Intent changes, and the reconcile can fail for external reasons like unavailable
+                // compute notification API.  In these cases, it is important that we do not
+                // cause the cloud control plane to retry forever on this API.
+                tracing::warn!(
+                    "Failed to reconcile after /location_config: {e}, returning success anyway"
+                );
+            }
         }
 
         Ok(result)
