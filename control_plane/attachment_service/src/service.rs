@@ -1367,6 +1367,9 @@ impl Service {
         let mut policy = None;
         let mut shard_ident = None;
 
+        // TODO: put a cancellation token on Service for clean shutdown
+        let cancel = CancellationToken::new();
+
         // A parent shard which will be split
         struct SplitTarget {
             parent_id: TenantShardId,
@@ -1643,12 +1646,26 @@ impl Service {
             }
         }
 
+        // Send compute notifications for all the new shards
+        let mut failed_notifications = Vec::new();
         for (child_id, child_ps) in child_locations {
-            if let Err(e) = compute_hook.notify(child_id, child_ps).await {
+            if let Err(e) = compute_hook.notify(child_id, child_ps, &cancel).await {
                 tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
                         child_id, child_ps);
+                failed_notifications.push(child_id);
             }
         }
+
+        // If we failed any compute notifications, make a note to retry later.
+        if !failed_notifications.is_empty() {
+            let mut locked = self.inner.write().unwrap();
+            for failed in failed_notifications {
+                if let Some(shard) = locked.tenants.get_mut(&failed) {
+                    shard.pending_compute_notification = true;
+                }
+            }
+        }
+
         Ok(response)
     }
 
