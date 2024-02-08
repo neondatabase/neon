@@ -1252,7 +1252,7 @@ impl TenantManager {
             None,
             self.tenants,
             SpawnMode::Normal,
-            &ctx,
+            ctx,
         )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
@@ -1414,7 +1414,7 @@ impl TenantManager {
             // have been left in a partially-shut-down state.
             tracing::warn!("Failed to prepare for split: {e}, reloading Tenant before returning");
             self.reset_tenant(tenant_shard_id, false, ctx).await?;
-            return Err(e.into());
+            return Err(e);
         }
 
         self.resources.deletion_queue_client.flush_advisory();
