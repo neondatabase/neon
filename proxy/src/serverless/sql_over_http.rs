@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::bail;
-use anyhow::Context;
 use futures::pin_mut;
 use futures::StreamExt;
 use hyper::body::HttpBody;
@@ -29,6 +28,7 @@ use utils::http::json::json_response;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
+use crate::auth::ComputeUserInfoParseError;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
@@ -42,7 +42,6 @@ use super::backend::PoolingBackend;
 use super::conn_pool::ConnInfo;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
-use super::SERVERLESS_DRIVER_SNI;
 
 #[derive(serde::Deserialize)]
 struct QueryData {
@@ -84,67 +83,70 @@ where
     Ok(json_to_pg_text(json))
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConnInfoError {
+    #[error("invalid header: {0}")]
+    InvalidHeader(&'static str),
+    #[error("invalid connection string: {0}")]
+    UrlParseError(#[from] url::ParseError),
+    #[error("incorrect scheme")]
+    IncorrectScheme,
+    #[error("missing database name")]
+    MissingDbName,
+    #[error("invalid database name")]
+    InvalidDbName,
+    #[error("missing username")]
+    MissingUsername,
+    #[error("missing password")]
+    MissingPassword,
+    #[error("missing hostname")]
+    MissingHostname,
+    #[error("invalid hostname: {0}")]
+    InvalidEndpoint(#[from] ComputeUserInfoParseError),
+    #[error("malformed endpoint")]
+    MalformedEndpoint,
+}
+
 fn get_conn_info(
     ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
-    sni_hostname: Option<String>,
     tls: &TlsConfig,
-) -> Result<ConnInfo, anyhow::Error> {
+) -> Result<ConnInfo, ConnInfoError> {
     let connection_string = headers
         .get("Neon-Connection-String")
-        .ok_or(anyhow::anyhow!("missing connection string"))?
-        .to_str()?;
+        .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
+        .to_str()
+        .map_err(|_| ConnInfoError::InvalidHeader("Neon-Connection-String"))?;
 
     let connection_url = Url::parse(connection_string)?;
 
     let protocol = connection_url.scheme();
     if protocol != "postgres" && protocol != "postgresql" {
-        return Err(anyhow::anyhow!(
-            "connection string must start with postgres: or postgresql:"
-        ));
+        return Err(ConnInfoError::IncorrectScheme);
     }
 
     let mut url_path = connection_url
         .path_segments()
-        .ok_or(anyhow::anyhow!("missing database name"))?;
+        .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname = url_path
-        .next()
-        .ok_or(anyhow::anyhow!("invalid database name"))?;
+    let dbname = url_path.next().ok_or(ConnInfoError::InvalidDbName)?;
 
     let username = RoleName::from(connection_url.username());
     if username.is_empty() {
-        return Err(anyhow::anyhow!("missing username"));
+        return Err(ConnInfoError::MissingUsername);
     }
     ctx.set_user(username.clone());
 
     let password = connection_url
         .password()
-        .ok_or(anyhow::anyhow!("no password"))?;
-
-    // TLS certificate selector now based on SNI hostname, so if we are running here
-    // we are sure that SNI hostname is set to one of the configured domain names.
-    let sni_hostname = sni_hostname.ok_or(anyhow::anyhow!("no SNI hostname set"))?;
+        .ok_or(ConnInfoError::MissingPassword)?;
 
     let hostname = connection_url
         .host_str()
-        .ok_or(anyhow::anyhow!("no host"))?;
+        .ok_or(ConnInfoError::MissingHostname)?;
 
-    let host_header = headers
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.split(':').next());
-
-    // sni_hostname has to be either the same as hostname or the one used in serverless driver.
-    if !check_matches(&sni_hostname, hostname)? {
-        return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
-    } else if let Some(h) = host_header {
-        if h != sni_hostname {
-            return Err(anyhow::anyhow!("mismatched host header and hostname"));
-        }
-    }
-
-    let endpoint = endpoint_sni(hostname, &tls.common_names)?.context("malformed endpoint")?;
+    let endpoint =
+        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?;
     ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
@@ -171,30 +173,16 @@ fn get_conn_info(
     })
 }
 
-fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Error> {
-    if sni_hostname == hostname {
-        return Ok(true);
-    }
-    let (sni_hostname_first, sni_hostname_rest) = sni_hostname
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected sni format."))?;
-    let (_, hostname_rest) = hostname
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected hostname format."))?;
-    Ok(sni_hostname_rest == hostname_rest && sni_hostname_first == SERVERLESS_DRIVER_SNI)
-}
-
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static ProxyConfig,
     mut ctx: RequestMonitoring,
     request: Request<Body>,
-    sni_hostname: Option<String>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.http_config.request_timeout,
-        handle_inner(config, &mut ctx, request, sni_hostname, backend),
+        handle_inner(config, &mut ctx, request, backend),
     )
     .await;
     let mut response = match result {
@@ -310,7 +298,6 @@ async fn handle_inner(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
-    sni_hostname: Option<String>,
     backend: Arc<PoolingBackend>,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
@@ -326,12 +313,7 @@ async fn handle_inner(
     //
     let headers = request.headers();
     // TLS config should be there.
-    let conn_info = get_conn_info(
-        ctx,
-        headers,
-        sni_hostname,
-        config.tls_config.as_ref().unwrap(),
-    )?;
+    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
     info!(
         user = conn_info.user_info.user.as_str(),
         project = conn_info.user_info.endpoint.as_str(),

@@ -109,10 +109,9 @@ pub async fn task_main(
 
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
-            let (io, tls) = stream.get_ref();
+            let (io, _) = stream.get_ref();
             let client_addr = io.client_addr();
             let remote_addr = io.inner.remote_addr();
-            let sni_name = tls.server_name().map(|s| s.to_string());
             let backend = backend.clone();
             let ws_connections = ws_connections.clone();
             let endpoint_rate_limiter = endpoint_rate_limiter.clone();
@@ -125,7 +124,6 @@ pub async fn task_main(
                 };
                 Ok(MetricService::new(hyper::service::service_fn(
                     move |req: Request<Body>| {
-                        let sni_name = sni_name.clone();
                         let backend = backend.clone();
                         let ws_connections = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
@@ -141,7 +139,6 @@ pub async fn task_main(
                                 ws_connections,
                                 cancel_map,
                                 session_id,
-                                sni_name,
                                 peer_addr.ip(),
                                 endpoint_rate_limiter,
                             )
@@ -210,7 +207,6 @@ async fn request_handler(
     ws_connections: TaskTracker,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
-    sni_hostname: Option<String>,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Body>, ApiError> {
@@ -253,7 +249,7 @@ async fn request_handler(
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
         let ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
 
-        sql_over_http::handle(config, ctx, request, sni_hostname, backend).await
+        sql_over_http::handle(config, ctx, request, backend).await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")
