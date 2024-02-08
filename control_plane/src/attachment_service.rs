@@ -651,7 +651,7 @@ impl AttachmentService {
     ) -> anyhow::Result<TenantShardMigrateResponse> {
         self.dispatch(
             Method::PUT,
-            format!("tenant/{tenant_shard_id}/migrate"),
+            format!("control/v1/tenant/{tenant_shard_id}/migrate"),
             Some(TenantShardMigrateRequest {
                 tenant_shard_id,
                 node_id,
