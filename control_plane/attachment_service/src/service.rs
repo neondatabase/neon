@@ -1434,7 +1434,7 @@ impl Service {
                 }
 
                 if tenant_shard_id.shard_count == ShardCount(split_req.new_shard_count) {
-                    tracing::warn!(
+                    tracing::info!(
                         "Tenant shard {} already has shard count {}",
                         tenant_shard_id,
                         split_req.new_shard_count
