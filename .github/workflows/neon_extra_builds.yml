@@ -117,6 +117,7 @@ jobs:
 
   check-linux-arm-build:
     timeout-minutes: 90
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: [ self-hosted, dev, arm64 ]
 
     env:
@@ -237,6 +238,7 @@ jobs:
 
   check-codestyle-rust-arm:
     timeout-minutes: 90
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: [ self-hosted, dev, arm64 ]
 
     container:
