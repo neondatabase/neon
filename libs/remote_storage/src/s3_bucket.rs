@@ -64,7 +64,6 @@ pub struct S3Bucket {
     concurrency_limiter: ConcurrencyLimiter,
 }
 
-#[derive(Default)]
 struct GetObjectRequest {
     bucket: String,
     key: String,
