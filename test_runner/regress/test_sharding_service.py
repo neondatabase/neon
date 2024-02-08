@@ -128,6 +128,38 @@ def test_sharding_service_smoke(
     assert counts[env.pageservers[2].id] == tenant_shard_count // 2
 
 
+def test_node_status_after_restart(
+    neon_env_builder: NeonEnvBuilder,
+):
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_start()
+
+    # Initially we have two online pageservers
+    nodes = env.attachment_service.node_list()
+    assert len(nodes) == 2
+
+    env.pageservers[1].stop()
+
+    env.attachment_service.stop()
+    env.attachment_service.start()
+
+    # Initially readiness check should fail because we're trying to connect to the offline node
+    assert env.attachment_service.ready() is False
+
+    def is_ready():
+        assert env.attachment_service.ready() is True
+
+    wait_until(30, 1, is_ready)
+
+    # We loaded nodes from database on restart
+    nodes = env.attachment_service.node_list()
+    assert len(nodes) == 2
+
+    # We should still be able to create a tenant, because the pageserver which is still online
+    # should have had its availabilty state set to Active.
+    env.attachment_service.tenant_create(TenantId.generate())
+
+
 def test_sharding_service_passthrough(
     neon_env_builder: NeonEnvBuilder,
 ):

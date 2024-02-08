@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
@@ -31,6 +31,7 @@ use pageserver_api::{
 use pageserver_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
 use utils::{
+    backoff,
     completion::Barrier,
     generation::Generation,
     http::error::ApiError,
@@ -150,31 +151,71 @@ impl Service {
         // indeterminate, same as in [`ObservedStateLocation`])
         let mut observed = HashMap::new();
 
-        let nodes = {
-            let locked = self.inner.read().unwrap();
-            locked.nodes.clone()
-        };
+        let mut nodes_online = HashSet::new();
+
+        // TODO: give Service a cancellation token for clean shutdown
+        let cancel = CancellationToken::new();
 
         // TODO: issue these requests concurrently
-        for node in nodes.values() {
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+        {
+            let nodes = {
+                let locked = self.inner.read().unwrap();
+                locked.nodes.clone()
+            };
+            for node in nodes.values() {
+                let http_client = reqwest::ClientBuilder::new()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .expect("Failed to construct HTTP client");
+                let client = mgmt_api::Client::from_client(
+                    http_client,
+                    node.base_url(),
+                    self.config.jwt_token.as_deref(),
+                );
 
-            tracing::info!("Scanning shards on node {}...", node.id);
-            match client.list_location_config().await {
-                Err(e) => {
-                    tracing::warn!("Could not contact pageserver {} ({e})", node.id);
-                    // TODO: be more tolerant, apply a generous 5-10 second timeout with retries, in case
-                    // pageserver is being restarted at the same time as we are
+                fn is_fatal(e: &mgmt_api::Error) -> bool {
+                    use mgmt_api::Error::*;
+                    match e {
+                        ReceiveBody(_) | ReceiveErrorBody(_) => false,
+                        ApiError(StatusCode::SERVICE_UNAVAILABLE, _)
+                        | ApiError(StatusCode::GATEWAY_TIMEOUT, _)
+                        | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
+                        ApiError(_, _) => true,
+                    }
                 }
-                Ok(listing) => {
-                    tracing::info!(
-                        "Received {} shard statuses from pageserver {}, setting it to Active",
-                        listing.tenant_shards.len(),
-                        node.id
-                    );
 
-                    for (tenant_shard_id, conf_opt) in listing.tenant_shards {
-                        observed.insert(tenant_shard_id, (node.id, conf_opt));
+                let list_response = backoff::retry(
+                    || client.list_location_config(),
+                    is_fatal,
+                    1,
+                    5,
+                    "Location config listing",
+                    &cancel,
+                )
+                .await;
+                let Some(list_response) = list_response else {
+                    tracing::info!("Shutdown during startup_reconcile");
+                    return;
+                };
+
+                tracing::info!("Scanning shards on node {}...", node.id);
+                match list_response {
+                    Err(e) => {
+                        tracing::warn!("Could not contact pageserver {} ({e})", node.id);
+                        // TODO: be more tolerant, do some retries, in case
+                        // pageserver is being restarted at the same time as we are
+                    }
+                    Ok(listing) => {
+                        tracing::info!(
+                            "Received {} shard statuses from pageserver {}, setting it to Active",
+                            listing.tenant_shards.len(),
+                            node.id
+                        );
+                        nodes_online.insert(node.id);
+
+                        for (tenant_shard_id, conf_opt) in listing.tenant_shards {
+                            observed.insert(tenant_shard_id, (node.id, conf_opt));
+                        }
                     }
                 }
             }
@@ -185,8 +226,19 @@ impl Service {
         let mut compute_notifications = Vec::new();
 
         // Populate intent and observed states for all tenants, based on reported state on pageservers
-        let shard_count = {
+        let (shard_count, nodes) = {
             let mut locked = self.inner.write().unwrap();
+
+            // Mark nodes online if they responded to us: nodes are offline by default after a restart.
+            let mut nodes = (*locked.nodes).clone();
+            for (node_id, node) in nodes.iter_mut() {
+                if nodes_online.contains(node_id) {
+                    node.availability = NodeAvailability::Active;
+                }
+            }
+            locked.nodes = Arc::new(nodes);
+            let nodes = locked.nodes.clone();
+
             for (tenant_shard_id, (node_id, observed_loc)) in observed {
                 let Some(tenant_state) = locked.tenants.get_mut(&tenant_shard_id) else {
                     cleanup.push((tenant_shard_id, node_id));
@@ -218,7 +270,7 @@ impl Service {
                 }
             }
 
-            locked.tenants.len()
+            (locked.tenants.len(), nodes)
         };
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
@@ -279,9 +331,8 @@ impl Service {
         let stream = futures::stream::iter(compute_notifications.into_iter())
             .map(|(tenant_shard_id, node_id)| {
                 let compute_hook = compute_hook.clone();
+                let cancel = cancel.clone();
                 async move {
-                    // TODO: give Service a cancellation token for clean shutdown
-                    let cancel = CancellationToken::new();
                     if let Err(e) = compute_hook.notify(tenant_shard_id, node_id, &cancel).await {
                         tracing::error!(
                             tenant_shard_id=%tenant_shard_id,
@@ -387,7 +438,7 @@ impl Service {
             ))),
             config,
             persistence,
-            startup_complete,
+            startup_complete: startup_complete.clone(),
         });
 
         let result_task_this = this.clone();
@@ -983,6 +1034,10 @@ impl Service {
                 None
             }
         };
+
+        // TODO: if we timeout/fail on reconcile, we should still succeed this request,
+        // because otherwise a broken compute hook causes a feedback loop where
+        // location_config returns 500 and gets retried forever.
 
         if let Some(create_req) = maybe_create {
             let create_resp = self.tenant_create(create_req).await?;
