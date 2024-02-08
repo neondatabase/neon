@@ -844,6 +844,7 @@ impl Timeline {
             use GetVectoredError::*;
             match (lhs, rhs) {
                 (Cancelled, Cancelled) => true,
+                (_, Cancelled) => true,
                 (Oversized(l), Oversized(r)) => l == r,
                 (InvalidLsn(l), InvalidLsn(r)) => l == r,
                 (MissingKey(l), MissingKey(r)) => l == r,
