@@ -97,7 +97,12 @@ Cons:
 * Mount time adds to start latency. Some slot files must be downloaded for Postgres to start, requiring careful batch access to prevent slow starts with thousands of small files. TODO: A detailed list of files that can block start needs to be compiled. TODO: check if snapshot files need to be read at startup.
 
 It not clear how to exactly mount S3 in our setup. We should restrict access to only a certain prefix, e.g. `/<branch_id>/<endpoint_id>`. Then we have to mount it somehow. AWS has `s3-csi`, but it is mounted on pod start and with our approach of pre-created computes we don't know endpoint/tenant during pod start. So we have to manage mount inside pod. That means setting `cap_admin` on pod. So not sure how to do that with pod. On the othe hand things are easier with NeonVM: in each pod we have VM and we have root access to it, so we can mount S3.
+*Alternative:*
 
+* create one filesystem for all tenants but encrypt its content with tenant-specific keys (using stackable encryption system like eCryptFS that can be mounted on top of CSI filesystem)
+* mount the filesystem on pod start
+* configure each tenant with the eCryptFS encryption key for its prefix
+* on compute start the tenant mounts the eCryptFS for its' prefix files 
 TODO: Determine how to share credentials with the VM and restrict access to a specific prefix.
 
 Note: S3FS is not suited for general-purpose file systems due to its limitations, such as no in-place updates and high latency. However, it is suitable for the files discussed here.
