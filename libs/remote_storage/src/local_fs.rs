@@ -18,9 +18,7 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
-use crate::{
-    Download, DownloadError, DownloadStream, Listing, ListingMode, RemotePath, TimeTravelError,
-};
+use crate::{Download, DownloadError, Listing, ListingMode, RemotePath, TimeTravelError};
 
 use super::{RemoteStorage, StorageMetadata};
 
@@ -365,27 +363,33 @@ impl RemoteStorage for LocalFs {
                     format!("Failed to open source file {target_path:?} to use in the download")
                 })
                 .map_err(DownloadError::Other)?;
+
+            let len = source
+                .metadata()
+                .await
+                .context("query file length")
+                .map_err(DownloadError::Other)?
+                .len();
+
             source
                 .seek(io::SeekFrom::Start(start_inclusive))
                 .await
                 .context("Failed to seek to the range start in a local storage file")
                 .map_err(DownloadError::Other)?;
+
             let metadata = self
                 .read_storage_metadata(&target_path)
                 .await
                 .map_err(DownloadError::Other)?;
 
-            let download_stream: DownloadStream = match end_exclusive {
-                Some(end_exclusive) => Box::pin(ReaderStream::new(
-                    source.take(end_exclusive - start_inclusive),
-                )),
-                None => Box::pin(ReaderStream::new(source)),
-            };
+            let source = source.take(end_exclusive.unwrap_or(len) - start_inclusive);
+            let source = ReaderStream::new(source);
+
             Ok(Download {
                 metadata,
                 last_modified: None,
                 etag: None,
-                download_stream,
+                download_stream: Box::pin(source),
             })
         } else {
             Err(DownloadError::NotFound)
@@ -657,6 +661,22 @@ mod fs_tests {
             second_part_local, second_part_remote,
             "Second part bytes should be returned when requested"
         );
+
+        let suffix_bytes = storage
+            .download_byte_range(&upload_target, 13, None)
+            .await?
+            .download_stream;
+        let suffix_bytes = aggregate(suffix_bytes).await?;
+        let suffix = std::str::from_utf8(&suffix_bytes)?;
+        assert_eq!(upload_name, suffix);
+
+        let all_bytes = storage
+            .download_byte_range(&upload_target, 0, None)
+            .await?
+            .download_stream;
+        let all_bytes = aggregate(all_bytes).await?;
+        let all_bytes = std::str::from_utf8(&all_bytes)?;
+        assert_eq!("contents for upload_1", all_bytes);
 
         Ok(())
     }
