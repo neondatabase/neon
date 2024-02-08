@@ -1379,7 +1379,7 @@ impl Service {
 
         // Validate input, and calculate which shards we will create
         let (old_shard_count, targets, compute_hook) = {
-            let mut locked = self.inner.write().unwrap();
+            let locked = self.inner.read().unwrap();
 
             let pageservers = locked.nodes.clone();
 
@@ -1389,9 +1389,8 @@ impl Service {
             let mut children_found = Vec::new();
             let mut old_shard_count = None;
 
-            for (tenant_shard_id, shard) in locked
-                .tenants
-                .range_mut(TenantShardId::tenant_range(tenant_id))
+            for (tenant_shard_id, shard) in
+                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
             {
                 match shard.shard.count.0.cmp(&split_req.new_shard_count) {
                     Ordering::Equal => {
