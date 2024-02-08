@@ -15,7 +15,7 @@ The mentioned files have different requirements regarding durability, exhibit di
 
 ### Replication Slots
 
-Replication slots persist data about the replication receiver on the replication source. In the case of chain replication, these files could be modified by a replica (because it may have another attached replica). The ability to modify this state on a replica is the main reason for this data to be kept in a separate file instead of in the usual relation (replicas can't modify data).
+Replication slots persist data about the replication receiver on the replication source. In the case of chain replication, these files could be modified by a replica (because it may have another attached replica). The ability to modify this state on a replica is the main reason for this data to be kept in a separate file instead of in the usual relation (ignoring hint bits, replicas can't modify relation data).
 
 * Stale file: Not allowed, as Postgres might have already pruned WAL or vacuumed old catalog entries (relevant in the case of logical replication).
 * Lost file: Postgres will start, but replication will not be able to proceed.
