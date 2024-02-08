@@ -373,6 +373,7 @@ impl Persistence {
     #[allow(dead_code)]
     pub(crate) async fn begin_shard_split(
         &self,
+        old_shard_count: ShardCount,
         split_tenant_id: TenantId,
         parent_to_children: Vec<(TenantShardId, Vec<TenantShardPersistence>)>,
     ) -> DatabaseResult<()> {
@@ -382,9 +383,16 @@ impl Persistence {
                 // Mark parent shards as splitting
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(old_shard_count.0 as i32))
                     .set((splitting.eq(1),))
                     .execute(conn)?;
-                debug_assert!(updated > 0);
+                if ShardCount(updated.try_into().map_err(|_| DatabaseError::Logical(format!("Overflow existing shard count {} while splitting", updated)))?) != old_shard_count {
+                    // Perhaps a deletion or another split raced with this attempt to split, mutating
+                    // the parent shards that we intend to split. In this case the split request should fail.
+                    return Err(DatabaseError::Logical(
+                        format!("Unexpected existing shard count {updated} when preparing tenant for split (expected {old_shard_count:?})")
+                    ));
+                }
 
                 // FIXME: spurious clone to sidestep closure move rules
                 let parent_to_children = parent_to_children.clone();

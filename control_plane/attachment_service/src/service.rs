@@ -1484,6 +1484,11 @@ impl Service {
         let shard_ident = shard_ident.unwrap();
         let policy = policy.unwrap();
 
+        // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
+        // request could occur here, deleting or mutating the tenant.  begin_shard_split checks that the
+        // parent shards exist as expected, but it would be neater to do the above pre-checks within the
+        // same database transaction rather than pre-check in-memory and then maybe-fail the database write.
+
         // Before creating any new child shards in memory or on the pageservers, persist them: this
         // enables us to ensure that we will always be able to clean up if something goes wrong.  This also
         // acts as the protection against two concurrent attempts to split: one of them will get a database
@@ -1518,7 +1523,7 @@ impl Service {
 
         if let Err(e) = self
             .persistence
-            .begin_shard_split(tenant_id, child_tsps)
+            .begin_shard_split(old_shard_count, tenant_id, child_tsps)
             .await
         {
             match e {
