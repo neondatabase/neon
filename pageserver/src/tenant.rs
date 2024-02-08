@@ -2399,6 +2399,9 @@ impl Tenant {
         self.generation
     }
 
+    /// This function partially shuts down the tenant (it shuts down the Timelines) and is fallible,
+    /// and can leave the tenant in a bad state if it fails.  The caller is responsible for
+    /// resetting this tenant to a valid state if we fail.
     pub(crate) async fn split_prepare(
         &self,
         child_shards: &Vec<TenantShardId>,

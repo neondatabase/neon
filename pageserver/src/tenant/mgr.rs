@@ -1199,7 +1199,7 @@ impl TenantManager {
         &self,
         tenant_shard_id: TenantShardId,
         drop_cache: bool,
-        ctx: RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
         let Some(old_slot) = slot_guard.get_old_value() else {
@@ -1409,7 +1409,13 @@ impl TenantManager {
         );
 
         // Phase 1: Write out child shards' remote index files, in the parent tenant's current generation
-        tenant.split_prepare(&child_shards).await?;
+        if let Err(e) = tenant.split_prepare(&child_shards).await {
+            // If [`Tenant::split_prepare`] fails, we must reload the tenant, because it might
+            // have been left in a partially-shut-down state.
+            tracing::warn!("Failed to prepare for split: {e}, reloading Tenant before returning");
+            self.reset_tenant(tenant_shard_id, false, ctx).await?;
+            return Err(e.into());
+        }
 
         self.resources.deletion_queue_client.flush_advisory();
 

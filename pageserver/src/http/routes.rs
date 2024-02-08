@@ -878,7 +878,7 @@ async fn tenant_reset_handler(
     let state = get_state(&request);
     state
         .tenant_manager
-        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), ctx)
+        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 
