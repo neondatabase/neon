@@ -1427,6 +1427,8 @@ impl TenantManager {
             Some(TenantSlot::Attached(t)) => t,
             Some(TenantSlot::Secondary(_)) => anyhow::bail!("Tenant location in secondary mode"),
             Some(TenantSlot::InProgress(_)) => {
+                // tenant_map_acquire_slot never returns InProgress, if a slot was InProgress
+                // it would return an error.
                 unreachable!()
             }
             None => {
