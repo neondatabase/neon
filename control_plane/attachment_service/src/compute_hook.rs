@@ -177,7 +177,7 @@ impl ComputeHook {
             req
         };
 
-        tracing::debug!(
+        tracing::info!(
             "Sending notify request to {} ({:?})",
             url,
             reconfigure_request
