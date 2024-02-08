@@ -13,10 +13,10 @@ use crate::{
     proxy::connect_compute::ConnectMechanism,
 };
 
-use super::conn_pool::{Client, ConnInfo, GlobalConnPool, APP_NAME};
+use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool, APP_NAME};
 
 pub struct PoolingBackend {
-    pub pool: Arc<GlobalConnPool>,
+    pub pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub config: &'static ProxyConfig,
 }
 
@@ -66,7 +66,7 @@ impl PoolingBackend {
         conn_info: ConnInfo,
         keys: ComputeCredentialKeys,
         force_new: bool,
-    ) -> anyhow::Result<Client> {
+    ) -> anyhow::Result<Client<tokio_postgres::Client>> {
         let maybe_client = if !force_new {
             info!("pool: looking for an existing connection");
             self.pool.get(ctx, &conn_info).await?
@@ -115,14 +115,14 @@ impl PoolingBackend {
 }
 
 struct TokioMechanism {
-    pool: Arc<GlobalConnPool>,
+    pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 }
 
 #[async_trait]
 impl ConnectMechanism for TokioMechanism {
-    type Connection = Client;
+    type Connection = Client<tokio_postgres::Client>;
     type ConnectError = tokio_postgres::Error;
     type Error = anyhow::Error;
 
@@ -142,8 +142,8 @@ impl ConnectMechanism for TokioMechanism {
         let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
 
         tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
-        let pool = self.pool.clone();
-        Ok(pool.poll_client(
+        Ok(poll_client(
+            self.pool.clone(),
             ctx,
             self.conn_info.clone(),
             client,

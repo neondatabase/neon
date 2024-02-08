@@ -19,6 +19,7 @@ chrono.workspace = true
 clap.workspace = true
 consumption_metrics.workspace = true
 dashmap.workspace = true
+env_logger.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hashbrown.workspace = true
