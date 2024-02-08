@@ -478,6 +478,9 @@ impl TestBackend for TestConnectMechanism {
     {
         unimplemented!("not used in tests")
     }
+    fn get_role_secret(&self) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError> {
+        unimplemented!("not used in tests")
+    }
 }
 
 fn helper_create_cached_node_info() -> CachedNodeInfo {

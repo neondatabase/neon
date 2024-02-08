@@ -4079,6 +4079,7 @@ dependencies = [
  "clap",
  "consumption_metrics",
  "dashmap",
+ "env_logger",
  "futures",
  "git-version",
  "hashbrown 0.13.2",

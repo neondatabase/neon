@@ -1,8 +1,10 @@
 use ::metrics::{
     exponential_buckets, register_histogram, register_histogram_vec, register_hll_vec,
-    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge_vec, Histogram,
-    HistogramVec, HyperLogLogVec, IntCounterPairVec, IntCounterVec, IntGaugeVec,
+    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge,
+    register_int_gauge_vec, Histogram, HistogramVec, HyperLogLogVec, IntCounterPairVec,
+    IntCounterVec, IntGauge, IntGaugeVec,
 };
+use metrics::{register_int_counter_pair, IntCounterPair};
 
 use once_cell::sync::Lazy;
 use tokio::time;
@@ -108,6 +110,44 @@ pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
         "proxy_allowed_ips_number",
         "Number of allowed ips",
         vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0],
+    )
+    .unwrap()
+});
+
+pub static HTTP_CONTENT_LENGTH: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_http_conn_content_length_bytes",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // largest bucket = 3^16 * 0.05ms = 2.15s
+        exponential_buckets(8.0, 2.0, 20).unwrap()
+    )
+    .unwrap()
+});
+
+pub static GC_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_http_pool_reclaimation_lag_seconds",
+        "Time it takes to reclaim unused connection pools",
+        // 1us -> 65ms
+        exponential_buckets(1e-6, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static ENDPOINT_POOLS: Lazy<IntCounterPair> = Lazy::new(|| {
+    register_int_counter_pair!(
+        "proxy_http_pool_endpoints_registered_total",
+        "Number of endpoints we have registered pools for",
+        "proxy_http_pool_endpoints_unregistered_total",
+        "Number of endpoints we have unregistered pools for",
+    )
+    .unwrap()
+});
+
+pub static NUM_OPEN_CLIENTS_IN_HTTP_POOL: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "proxy_http_pool_opened_connections",
+        "Number of opened connections to a database.",
     )
     .unwrap()
 });
