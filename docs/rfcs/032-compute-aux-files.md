@@ -39,7 +39,25 @@ An important point is that these files could be modified on the replica in cases
 Files are written only on shutdown and read only on startup. Their size depends on the number of relations and columns, typically ranging from 100KB to 1MB, but can exceed that. In my tests, the database had stats file around 1KB and it compressed 10x with gzip.
 
 Stored in `pg_stat/pgstat.stat`.
+### Files written by extensions
 
+Potentially any extension can write files upon shutdown that it may want to retrieve upon startup.
+PostgreSQL extensions, like pg_stat_statements, can manage persistent data across server restarts by writing to files during shutdown and reading from them during startup. This is achieved through PostgreSQL's support for extension hooks and background workers that can execute custom code at specific points in the server's lifecycle, including startup and shutdown.
+
+*Writing Data on Shutdown:* Extensions can use the shmem_exit hook to register a function that PostgreSQL will call during its shutdown sequence. In the case of pg_stat_statements, it registers a function that serializes the collected SQL statement statistics to a file (e.g., pg_stat/pg_stat_statements.stat). This serialization process involves writing the data to a disk in a format that the extension can later read.
+
+See 
+https://github.com/neondatabase/postgres/blob/f7ea954989a2e7901f858779cff55259f203479a/contrib/pg_stat_statements/pg_stat_statements.c#L556
+
+*Reading Data on Startup:* Upon server startup, after the extension is loaded, it can read the previously saved file to restore the statistics. This is typically done by registering a shmem_startup_hook in the _PG_init function of the extension, which is called when the extension is loaded into the PostgreSQL server process. The extension checks for the presence of its data file and loads it to initialize its in-memory data structures with the saved statistics.
+
+See
+https://github.com/neondatabase/postgres/blob/f7ea954989a2e7901f858779cff55259f203479a/contrib/pg_stat_statements/pg_stat_statements.c#L461
+
+
+*Ensuring Data Integrity:* To ensure data integrity across unexpected shutdowns, extensions like pg_stat_statements can also leverage PostgreSQL's WAL (Write-Ahead Logging) for critical data that must survive crashes. However, for performance statistics, a simple file-based persistence mechanism is often sufficient and involves less overhead.
+
+The following important extensions are supported by Neon and we could either provide an extension specific mechanism to survive their AUX files or write a generic mechanism that can support more extensions in their hooks.
 ### pg_stat_statements
 
 * Stale file: Not currently supported, but could be added if desired.
