@@ -90,6 +90,11 @@ pub enum ComputeFeature {
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
 
+    // Use latest version of remote extensions
+    // This is needed to allow us to test new versions of extensions before
+    // they are merged into the main branch.
+    RemoteExtensionsUseLatest,
+
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test
     /// `parse_unknown_features()` for more details.
@@ -152,8 +157,12 @@ impl RemoteExtSpec {
                 //
                 // Keep it in sync with path generation in
                 // https://github.com/neondatabase/build-custom-extensions/tree/main
+                //
+                // if ComputeFeature::RemoteExtensionsUseLatest is enabled
+                // use "latest" as the build_tag
                 let archive_path_str =
                     format!("{build_tag}/{pg_major_version}/extensions/{real_ext_name}.tar.zst");
+
                 Ok((
                     real_ext_name.to_string(),
                     RemotePath::from_string(&archive_path_str)?,

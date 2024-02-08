@@ -1235,10 +1235,19 @@ LIMIT 100",
 
         info!("Downloading to shared preload libraries: {:?}", &libs_vec);
 
+        let build_tag_str = if spec
+            .features
+            .contains(&ComputeFeature::RemoteExtensionsUseLatest)
+        {
+            "latest"
+        } else {
+            &self.build_tag
+        };
+
         let mut download_tasks = Vec::new();
         for library in &libs_vec {
             let (ext_name, ext_path) =
-                remote_extensions.get_ext(library, true, &self.build_tag, &self.pgversion)?;
+                remote_extensions.get_ext(library, true, build_tag_str, &self.pgversion)?;
             download_tasks.push(self.download_extension(ext_name, ext_path));
         }
         let results = join_all(download_tasks).await;

@@ -8,6 +8,7 @@ use std::thread;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
+use compute_api::spec::ComputeFeature;
 
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
@@ -171,12 +172,16 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     }
                 };
 
-                remote_extensions.get_ext(
-                    &filename,
-                    is_library,
-                    &compute.build_tag,
-                    &compute.pgversion,
-                )
+                let build_tag_str = if spec
+                    .features
+                    .contains(&ComputeFeature::RemoteExtensionsUseLatest)
+                {
+                    "latest"
+                } else {
+                    &compute.build_tag
+                };
+
+                remote_extensions.get_ext(&filename, is_library, build_tag_str, &compute.pgversion)
             };
 
             match ext {
