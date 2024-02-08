@@ -13,6 +13,7 @@ mod azure_blob;
 mod local_fs;
 mod s3_bucket;
 mod simulate_failures;
+mod support;
 
 use std::{
     collections::HashMap, fmt::Debug, num::NonZeroUsize, pin::Pin, sync::Arc, time::SystemTime,

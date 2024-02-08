@@ -45,8 +45,9 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
-    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    S3Config, TimeTravelError, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode,
+    RemotePath, RemoteStorage, S3Config, TimeTravelError, MAX_KEYS_PER_DELETE,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -352,33 +353,6 @@ impl Stream for ByteStreamAsStream {
 
     // cannot implement size_hint because inner.size_hint is remaining size in bytes, which makes
     // sense and Stream::size_hint does not really
-}
-
-pin_project_lite::pin_project! {
-    /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    struct PermitCarrying<S> {
-        permit: tokio::sync::OwnedSemaphorePermit,
-        #[pin]
-        inner: S,
-    }
-}
-
-impl<S> PermitCarrying<S> {
-    fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
-        Self { permit, inner }
-    }
-}
-
-impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for PermitCarrying<S> {
-    type Item = <S as Stream>::Item;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.project().inner.poll_next(cx)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
 }
 
 pin_project_lite::pin_project! {
