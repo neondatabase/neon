@@ -238,7 +238,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<(), TimeTravelError>;
 }
 
-pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
+pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync>>;
 pub struct Download {
     pub download_stream: DownloadStream,
     /// The last time the file was modified (`last-modified` HTTP header)
