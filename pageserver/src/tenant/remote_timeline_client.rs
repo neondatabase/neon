@@ -262,6 +262,11 @@ pub(crate) const INITDB_PRESERVED_PATH: &str = "initdb-preserved.tar.zst";
 /// Default buffer size when interfacing with [`tokio::fs::File`].
 pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 
+/// This timeout is intended to deal with hangs in lower layers, e.g. stuck TCP flows.  It is not
+/// intended to be snappy enough for prompt shutdown, as we have a CancellationToken for that.
+pub(crate) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
@@ -324,11 +329,6 @@ pub struct RemoteTimelineClient {
 
     cancel: CancellationToken,
 }
-
-/// This timeout is intended to deal with hangs in lower layers, e.g. stuck TCP flows.  It is not
-/// intended to be snappy enough for prompt shutdown, as we have a CancellationToken for that.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to anyhow.
 ///
