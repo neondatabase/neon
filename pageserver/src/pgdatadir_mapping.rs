@@ -14,6 +14,7 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_i
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
+use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
@@ -1442,7 +1443,16 @@ impl<'a> DatadirModification<'a> {
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            writer.put_batch(&self.pending_updates, ctx).await?;
+            let mut prev_pending_updates = HashMap::new();
+            std::mem::swap(&mut self.pending_updates, &mut prev_pending_updates);
+
+            let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = prev_pending_updates
+                .into_iter()
+                .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (key, lsn, val)))
+                .kmerge_by(|lhs, rhs| lhs.1 .0 < rhs.1 .0)
+                .collect();
+
+            writer.put_batch(lsn_ordered_batch, ctx).await?;
             self.pending_updates.clear();
         }
 

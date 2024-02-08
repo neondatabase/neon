@@ -4894,15 +4894,17 @@ impl<'a> TimelineWriter<'a> {
         }
     }
 
+    /// Put a batch keys at the specified Lsns.
+    ///
+    /// The batch should be sorted by Lsn such that it's safe
+    /// to roll the open layer mid batch.
     pub(crate) async fn put_batch(
         &mut self,
-        batch: &HashMap<Key, Vec<(Lsn, Value)>>,
+        batch: Vec<(Key, Lsn, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for (key, vals) in batch {
-            for (lsn, val) in vals {
-                self.put(*key, *lsn, val, ctx).await?
-            }
+        for (key, lsn, val) in batch {
+            self.put(key, lsn, &val, ctx).await?
         }
 
         Ok(())
