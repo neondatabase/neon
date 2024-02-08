@@ -2294,12 +2294,7 @@ impl Timeline {
         let guard = self.layers.read().await;
 
         let resident = guard.resident_layers().map(|layer| {
-            let last_activity_ts = layer.access_stats().latest_activity().unwrap_or_else(|| {
-                // We only use this fallback if there's an implementation error.
-                // `latest_activity` already does rate-limited warn!() log.
-                debug!(%layer, "last_activity returns None, using SystemTime::now");
-                SystemTime::now()
-            });
+            let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
             HeatMapLayer::new(
                 layer.layer_desc().filename(),
@@ -4664,13 +4659,7 @@ impl Timeline {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-                let last_activity_ts =
-                    layer.access_stats().latest_activity().unwrap_or_else(|| {
-                        // We only use this fallback if there's an implementation error.
-                        // `latest_activity` already does rate-limited warn!() log.
-                        debug!(%layer, "last_activity returns None, using SystemTime::now");
-                        SystemTime::now()
-                    });
+                let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
                 EvictionCandidate {
                     layer: layer.into(),

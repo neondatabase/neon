@@ -257,6 +257,12 @@ impl LayerAccessStats {
         ret
     }
 
+    /// Get the latest access timestamp, falling back to latest residence event, further falling
+    /// back to `SystemTime::now` for a usable timestamp for eviction.
+    pub(crate) fn latest_activity_or_now(&self) -> SystemTime {
+        self.latest_activity().unwrap_or_else(SystemTime::now)
+    }
+
     /// Get the latest access timestamp, falling back to latest residence event.
     ///
     /// This function can only return `None` if there has not yet been a call to the
@@ -271,7 +277,7 @@ impl LayerAccessStats {
     /// that that type can only be produced by inserting into the layer map.
     ///
     /// [`record_residence_event`]: Self::record_residence_event
-    pub(crate) fn latest_activity(&self) -> Option<SystemTime> {
+    fn latest_activity(&self) -> Option<SystemTime> {
         let locked = self.0.lock().unwrap();
         let inner = &locked.for_eviction_policy;
         match inner.last_accesses.recent() {
