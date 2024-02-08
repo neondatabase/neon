@@ -58,7 +58,7 @@ https://github.com/neondatabase/postgres/blob/f7ea954989a2e7901f858779cff55259f2
 *Ensuring Data Integrity:* To ensure data integrity across unexpected shutdowns, extensions like pg_stat_statements can also leverage PostgreSQL's WAL (Write-Ahead Logging) for critical data that must survive crashes. However, for performance statistics, a simple file-based persistence mechanism is often sufficient and involves less overhead.
 
 The following important extensions are supported by Neon and we could either provide an extension specific mechanism to survive their AUX files or write a generic mechanism that can support more extensions in their hooks.
-### pg_stat_statements
+#### pg_stat_statements
 
 * Stale file: Not currently supported, but could be added if desired.
 * Lost file: Results in lost stats, but everything else will work.
