@@ -1540,6 +1540,10 @@ impl Service {
             }
         }
 
+        // FIXME: we have now committed the shard split state to the database, so any subsequent
+        // failure needs to roll it back.  We will later wrap this function in logic to roll back
+        // the split if it fails.
+
         // TODO: issue split calls concurrently (this only matters once we're splitting
         // N>1 shards into M shards -- initially we're usually splitting 1 shard into N).
 
