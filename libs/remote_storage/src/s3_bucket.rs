@@ -259,7 +259,7 @@ impl S3Bucket {
         };
 
         let metadata = object_output.metadata().cloned().map(StorageMetadata);
-        let etag = object_output.e_tag.clone();
+        let etag = object_output.e_tag;
         let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
 
         let body = object_output.body;
