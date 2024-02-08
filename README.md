@@ -62,6 +62,11 @@ brew install protobuf openssl flex bison icu4c pkg-config
 echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc
 ```
 
+On macOS >= 14.2, to workaround `FATAL:  postmaster became multithreaded during startup` [issue](https://www.postgresql.org/message-id/flat/CYMBV0OT7216.JNRUO6R6GH86%40neon.tech):
+```
+brew install bayandin/tap/curl-without-ipv6
+```
+
 2. [Install Rust](https://www.rust-lang.org/tools/install)
 ```
 # recommended approach from https://www.rust-lang.org/tools/install

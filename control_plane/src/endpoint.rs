@@ -579,6 +579,33 @@ impl Endpoint {
         // Launch compute_ctl
         println!("Starting postgres node at '{}'", self.connstr());
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
+
+        // On macOS >= 14.2, Postgres fails to start with `FATAL:  postmaster became multithreaded during startup`,
+        // if `shared_preload_libraries` contains a library that linked to libcurl.
+        // A possible workaround is use libcurl built without IPv6 support and set proper `DYLD_LIBRARY_PATH`.
+        //
+        // Such curl can be installed via `brew install bayandin/tap/curl-without-ipv6`.
+        // If it is not installed, the code is basically a no-op.
+        //
+        // Ref: https://www.postgresql.org/message-id/flat/CYMBV0OT7216.JNRUO6R6GH86%40neon.tech
+        #[cfg(target_os = "macos")]
+        {
+            // Use HOMEBREW_PREFIX if it is set,
+            // otherwise fallback to /opt/homebrew for Apple Silicon and /usr/local for Intel processors.
+            // Ref: https://docs.brew.sh/Installation
+            let homebrew_prefix = std::env::var("HOMEBREW_PREFIX").unwrap_or_else(|_| {
+                if cfg!(target_arch = "aarch64") {
+                    "/opt/homebrew".to_string()
+                } else {
+                    "/usr/local".to_string()
+                }
+            });
+            cmd.env(
+                "DYLD_LIBRARY_PATH",
+                format!("{}/opt/curl-without-ipv6/lib", homebrew_prefix),
+            );
+        }
+
         cmd.args(["--http-port", &self.http_address.port().to_string()])
             .args(["--pgdata", self.pgdata().to_str().unwrap()])
             .args(["--connstr", &self.connstr()])
