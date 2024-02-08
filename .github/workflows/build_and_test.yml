@@ -22,7 +22,7 @@ env:
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
-  E2E_CONCURRENCY_GROUP: ${{ github.repository }}-${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
 
 jobs:
   check-permissions:
@@ -112,11 +112,10 @@ jobs:
           fetch-depth: 1
 
       - name: Cache poetry deps
-        id: cache_poetry
         uses: actions/cache@v3
         with:
           path: ~/.cache/pypoetry/virtualenvs
-          key: v1-codestyle-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
         run: ./scripts/pysync
@@ -132,7 +131,7 @@ jobs:
 
   check-codestyle-rust:
     needs: [ check-permissions, build-buildtools-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
@@ -478,8 +477,40 @@ jobs:
         if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
         uses: ./.github/actions/save-coverage-data
 
+  get-benchmarks-durations:
+    outputs:
+      json: ${{ steps.get-benchmark-durations.outputs.json }}
+    needs: [ check-permissions, build-buildtools-image ]
+    runs-on: [ self-hosted, gen3, small ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      options: --init
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Cache poetry deps
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Python deps
+        run: ./scripts/pysync
+
+      - name: get benchmark durations
+        id: get-benchmark-durations
+        env:
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
+        run: |
+          poetry run ./scripts/benchmark_durations.py "${TEST_RESULT_CONNSTR}" \
+                                                      --days 10 \
+                                                      --output /tmp/benchmark_durations.json
+          echo "json=$(jq --compact-output '.' /tmp/benchmark_durations.json)" >> $GITHUB_OUTPUT
+
   benchmarks:
-    needs: [ check-permissions, build-neon, build-buildtools-image ]
+    needs: [ check-permissions, build-neon, build-buildtools-image, get-benchmarks-durations ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
@@ -490,7 +521,7 @@ jobs:
       fail-fast: false
       matrix:
         # the amount of groups (N) should be reflected in `extra_params: --splits N ...`
-        pytest_split_group: [ 1, 2, 3, 4 ]
+        pytest_split_group: [ 1, 2, 3, 4, 5 ]
         build_type: [ release ]
     steps:
       - name: Checkout
@@ -503,7 +534,8 @@ jobs:
           test_selection: performance
           run_in_parallel: false
           save_perf_report: ${{ github.ref_name == 'main' }}
-          extra_params: --splits 4 --group ${{ matrix.pytest_split_group }}
+          extra_params: --splits 5 --group ${{ matrix.pytest_split_group }}
+          benchmark_durations: ${{ needs.get-benchmarks-durations.outputs.json }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -660,50 +692,10 @@ jobs:
             })
 
   trigger-e2e-tests:
+    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' }}
     needs: [ check-permissions, promote-images, tag ]
-    runs-on: [ self-hosted, gen3, small ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-      options: --init
-    steps:
-      - name: Set PR's status to pending and request a remote CI test
-        run: |
-          # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
-          # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
-          # to place a job run status update later.
-          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-          # For non-PR kinds of runs, the above will produce an empty variable, pick the original sha value for those
-          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
-
-          REMOTE_REPO="${{ github.repository_owner }}/cloud"
-
-          curl -f -X POST \
-          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
-          -H "Accept: application/vnd.github.v3+json" \
-          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-          --data \
-            "{
-              \"state\": \"pending\",
-              \"context\": \"neon-cloud-e2e\",
-              \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
-            }"
-
-          curl -f -X POST \
-          https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
-          -H "Accept: application/vnd.github.v3+json" \
-          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-          --data \
-            "{
-              \"ref\": \"main\",
-              \"inputs\": {
-                \"ci_job_name\": \"neon-cloud-e2e\",
-                \"commit_hash\": \"$COMMIT_SHA\",
-                \"remote_repo\": \"${{ github.repository }}\",
-                \"storage_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
-                \"compute_image_tag\": \"${{ needs.tag.outputs.build-tag }}\",
-                \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
-              }
-            }"
+    uses: ./.github/workflows/trigger-e2e-tests.yml
+    secrets: inherit
 
   neon-image:
     needs: [ check-permissions, build-buildtools-image, tag ]
@@ -872,7 +864,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.21.0
+      VM_BUILDER_VERSION: v0.23.2
 
     steps:
       - name: Checkout

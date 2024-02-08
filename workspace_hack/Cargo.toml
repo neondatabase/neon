@@ -15,7 +15,7 @@ publish = false
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 aws-config = { version = "1", default-features = false, features = ["rustls", "sso"] }
-aws-runtime = { version = "1", default-features = false, features = ["event-stream", "sigv4a"] }
+aws-runtime = { version = "1", default-features = false, features = ["event-stream", "http-02x", "sigv4a"] }
 aws-sigv4 = { version = "1", features = ["http0-compat", "sign-eventstream", "sigv4a"] }
 aws-smithy-async = { version = "1", default-features = false, features = ["rt-tokio"] }
 aws-smithy-http = { version = "0.60", default-features = false, features = ["event-stream"] }
@@ -29,7 +29,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "help", "std", "string", "suggestions", "usage"] }
 crossbeam-utils = { version = "0.8" }
-diesel = { version = "2", features = ["postgres", "serde_json"] }
+diesel = { version = "2", features = ["postgres", "r2d2", "serde_json"] }
 either = { version = "1" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 futures-channel = { version = "0.3", features = ["sink"] }
@@ -39,7 +39,8 @@ futures-io = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
-hashbrown = { version = "0.14", default-features = false, features = ["raw"] }
+hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", default-features = false, features = ["raw"] }
+hashbrown-594e8ee84c453af0 = { package = "hashbrown", version = "0.13", features = ["raw"] }
 hex = { version = "0.4", features = ["serde"] }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper = { version = "0.14", features = ["full"] }
@@ -89,9 +90,10 @@ anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
+diesel_derives = { version = "2", features = ["32-column-tables", "postgres", "r2d2", "with-deprecated"] }
 either = { version = "1" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
-hashbrown = { version = "0.14", default-features = false, features = ["raw"] }
+hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", default-features = false, features = ["raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
 itertools = { version = "0.10" }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }

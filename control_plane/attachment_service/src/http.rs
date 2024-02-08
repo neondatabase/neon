@@ -420,10 +420,6 @@ pub fn make_router(
         .put("/v1/tenant/:tenant_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
         })
-        // Tenant Shard operations (low level/maintenance)
-        .put("/tenant/:tenant_shard_id/migrate", |r| {
-            tenant_service_handler(r, handle_tenant_shard_migrate)
-        })
         // Timeline operations
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             tenant_service_handler(r, handle_tenant_timeline_delete)
@@ -432,7 +428,7 @@ pub fn make_router(
             tenant_service_handler(r, handle_tenant_timeline_create)
         })
         // Tenant detail GET passthrough to shard zero
-        .get("/v1/tenant/:tenant_id*", |r| {
+        .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(r, handle_tenant_timeline_passthrough)
         })
         // Timeline GET passthrough to shard zero.  Note that the `*` in the URL is a wildcard: any future
@@ -440,8 +436,4 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_id/timeline*", |r| {
             tenant_service_handler(r, handle_tenant_timeline_passthrough)
         })
-        // Path aliases for tests_forward_compatibility
-        // TODO: remove these in future PR
-        .post("/re-attach", |r| request_span(r, handle_re_attach))
-        .post("/validate", |r| request_span(r, handle_validate))
 }

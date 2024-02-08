@@ -31,7 +31,7 @@ pub struct AttachmentService {
     listen: String,
     path: Utf8PathBuf,
     jwt_token: Option<String>,
-    public_key_path: Option<Utf8PathBuf>,
+    public_key: Option<String>,
     postgres_port: u16,
     client: reqwest::Client,
 }
@@ -210,7 +210,7 @@ impl AttachmentService {
             .pageservers
             .first()
             .expect("Config is validated to contain at least one pageserver");
-        let (jwt_token, public_key_path) = match ps_conf.http_auth_type {
+        let (jwt_token, public_key) = match ps_conf.http_auth_type {
             AuthType::Trust => (None, None),
             AuthType::NeonJWT => {
                 let jwt_token = env
@@ -222,7 +222,26 @@ impl AttachmentService {
                 let public_key_path =
                     camino::Utf8PathBuf::try_from(env.base_data_dir.join("auth_public_key.pem"))
                         .unwrap();
-                (Some(jwt_token), Some(public_key_path))
+
+                // This service takes keys as a string rather than as a path to a file/dir: read the key into memory.
+                let public_key = if std::fs::metadata(&public_key_path)
+                    .expect("Can't stat public key")
+                    .is_dir()
+                {
+                    // Our config may specify a directory: this is for the pageserver's ability to handle multiple
+                    // keys.  We only use one key at a time, so, arbitrarily load the first one in the directory.
+                    let mut dir =
+                        std::fs::read_dir(&public_key_path).expect("Can't readdir public key path");
+                    let dent = dir
+                        .next()
+                        .expect("Empty key dir")
+                        .expect("Error reading key dir");
+
+                    std::fs::read_to_string(dent.path()).expect("Can't read public key")
+                } else {
+                    std::fs::read_to_string(&public_key_path).expect("Can't read public key")
+                };
+                (Some(jwt_token), Some(public_key))
             }
         };
 
@@ -231,7 +250,7 @@ impl AttachmentService {
             path,
             listen,
             jwt_token,
-            public_key_path,
+            public_key,
             postgres_port,
             client: reqwest::ClientBuilder::new()
                 .build()
@@ -456,8 +475,14 @@ impl AttachmentService {
             args.push(format!("--jwt-token={jwt_token}"));
         }
 
-        if let Some(public_key_path) = &self.public_key_path {
-            args.push(format!("--public-key={public_key_path}"));
+        if let Some(public_key) = &self.public_key {
+            args.push(format!("--public-key=\"{public_key}\""));
+        }
+
+        if let Some(control_plane_compute_hook_api) = &self.env.control_plane_compute_hook_api {
+            args.push(format!(
+                "--compute-hook-url={control_plane_compute_hook_api}"
+            ));
         }
 
         background_process::start_process(

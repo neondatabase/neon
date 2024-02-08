@@ -355,4 +355,16 @@ impl Client {
             .await
             .map_err(Error::ReceiveBody)
     }
+
+    pub async fn put_io_engine(
+        &self,
+        engine: &pageserver_api::models::virtual_file::IoEngineKind,
+    ) -> Result<()> {
+        let uri = format!("{}/v1/io_engine", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, engine)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
 }

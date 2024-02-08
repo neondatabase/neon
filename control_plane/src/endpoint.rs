@@ -184,7 +184,7 @@ impl ComputeControlPlane {
                 v.tenant_id == tenant_id
                     && v.timeline_id == timeline_id
                     && v.mode == mode
-                    && v.status() != "stopped"
+                    && v.status() != EndpointStatus::Stopped
             });
 
             if let Some((key, _)) = duplicates.next() {
@@ -221,6 +221,26 @@ pub struct Endpoint {
 
     // Feature flags
     features: Vec<ComputeFeature>,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum EndpointStatus {
+    Running,
+    Stopped,
+    Crashed,
+    RunningNoPidfile,
+}
+
+impl std::fmt::Display for EndpointStatus {
+    fn fmt(&self, writer: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Crashed => "crashed",
+            Self::RunningNoPidfile => "running, no pidfile",
+        };
+        write!(writer, "{}", s)
+    }
 }
 
 impl Endpoint {
@@ -380,16 +400,16 @@ impl Endpoint {
         self.endpoint_path().join("pgdata")
     }
 
-    pub fn status(&self) -> &str {
+    pub fn status(&self) -> EndpointStatus {
         let timeout = Duration::from_millis(300);
         let has_pidfile = self.pgdata().join("postmaster.pid").exists();
         let can_connect = TcpStream::connect_timeout(&self.pg_address, timeout).is_ok();
 
         match (has_pidfile, can_connect) {
-            (true, true) => "running",
-            (false, false) => "stopped",
-            (true, false) => "crashed",
-            (false, true) => "running, no pidfile",
+            (true, true) => EndpointStatus::Running,
+            (false, false) => EndpointStatus::Stopped,
+            (true, false) => EndpointStatus::Crashed,
+            (false, true) => EndpointStatus::RunningNoPidfile,
         }
     }
 
@@ -481,7 +501,7 @@ impl Endpoint {
         remote_ext_config: Option<&String>,
         shard_stripe_size: usize,
     ) -> Result<()> {
-        if self.status() == "running" {
+        if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
         }
 

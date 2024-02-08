@@ -5,9 +5,9 @@ mod mitm;
 use super::connect_compute::ConnectMechanism;
 use super::retry::ShouldRetry;
 use super::*;
-use crate::auth::backend::{ComputeUserInfo, TestBackend};
+use crate::auth::backend::{ComputeUserInfo, MaybeOwned, TestBackend};
 use crate::config::CertResolver;
-use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
+use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
@@ -371,6 +371,7 @@ enum ConnectAction {
     Fail,
 }
 
+#[derive(Clone)]
 struct TestConnectMechanism {
     counter: Arc<std::sync::Mutex<usize>>,
     sequence: Vec<ConnectAction>,
@@ -490,9 +491,16 @@ fn helper_create_cached_node_info() -> CachedNodeInfo {
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> (CachedNodeInfo, auth::BackendType<'_, ComputeUserInfo>) {
+) -> (CachedNodeInfo, auth::BackendType<'static, ComputeUserInfo>) {
     let cache = helper_create_cached_node_info();
-    let user_info = auth::BackendType::Test(mechanism);
+    let user_info = auth::BackendType::Console(
+        MaybeOwned::Owned(ConsoleBackend::Test(Box::new(mechanism.clone()))),
+        ComputeUserInfo {
+            endpoint: "endpoint".into(),
+            user: "user".into(),
+            options: NeonOptions::parse_options_raw(""),
+        },
+    );
     (cache, user_info)
 }
 

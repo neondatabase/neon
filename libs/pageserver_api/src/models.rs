@@ -464,6 +464,8 @@ pub struct TenantDetails {
     #[serde(flatten)]
     pub tenant_info: TenantInfo,
 
+    pub walredo: Option<WalRedoManagerStatus>,
+
     pub timelines: Vec<TimelineId>,
 }
 
@@ -649,6 +651,33 @@ pub enum DownloadRemoteLayersTaskState {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimelineGcRequest {
     pub gc_horizon: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalRedoManagerStatus {
+    pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub pid: Option<u32>,
+}
+
+pub mod virtual_file {
+    #[derive(
+        Copy,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        strum_macros::EnumString,
+        strum_macros::Display,
+        serde_with::DeserializeFromStr,
+        serde_with::SerializeDisplay,
+        Debug,
+    )]
+    #[strum(serialize_all = "kebab-case")]
+    pub enum IoEngineKind {
+        StdFs,
+        #[cfg(target_os = "linux")]
+        TokioEpollUring,
+    }
 }
 
 // Wrapped in libpq CopyData

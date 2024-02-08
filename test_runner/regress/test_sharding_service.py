@@ -1,14 +1,24 @@
 import time
 from collections import defaultdict
 
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-)
+from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import tenant_delete_wait_completed, timeline_delete_wait_completed
 from fixtures.pg_version import PgVersion
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
+from pytest_httpserver import HTTPServer
+from werkzeug.wrappers.request import Request
+from werkzeug.wrappers.response import Response
+
+
+def get_node_shard_counts(env: NeonEnv, tenant_ids):
+    counts: defaultdict[str, int] = defaultdict(int)
+    for tid in tenant_ids:
+        for shard in env.attachment_service.locate(tid):
+            counts[shard["node_id"]] += 1
+    return counts
 
 
 def test_sharding_service_smoke(
@@ -24,6 +34,11 @@ def test_sharding_service_smoke(
 
     neon_env_builder.num_pageservers = 3
     env = neon_env_builder.init_configs()
+
+    for pageserver in env.pageservers:
+        # This test detaches tenants during migration, which can race with deletion queue operations,
+        # during detach we only do an advisory flush, we don't wait for it.
+        pageserver.allowed_errors.extend([".*Dropped remote consistent LSN updates.*"])
 
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.try_start()
@@ -54,14 +69,7 @@ def test_sharding_service_smoke(
     for tid in tenant_ids:
         env.neon_cli.create_tenant(tid, shard_count=shards_per_tenant)
 
-    def get_node_shard_counts():
-        counts: defaultdict[str, int] = defaultdict(int)
-        for tid in tenant_ids:
-            for shard in env.attachment_service.locate(tid):
-                counts[shard["node_id"]] += 1
-        return counts
-
-    for node_id, count in get_node_shard_counts().items():
+    for node_id, count in get_node_shard_counts(env, tenant_ids).items():
         # we used a multiple of pagservers for the total shard count,
         # so expect equal number on all pageservers
         assert count == tenant_shard_count / len(
@@ -89,7 +97,7 @@ def test_sharding_service_smoke(
     env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
     def node_evacuated(node_id: int):
-        counts = get_node_shard_counts()
+        counts = get_node_shard_counts(env, tenant_ids)
         assert counts[node_id] == 0
 
     wait_until(10, 1, lambda: node_evacuated(env.pageservers[0].id))
@@ -98,7 +106,7 @@ def test_sharding_service_smoke(
     # immediately
     env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Active"})
     time.sleep(1)
-    assert get_node_shard_counts()[env.pageservers[0].id] == 0
+    assert get_node_shard_counts(env, tenant_ids)[env.pageservers[0].id] == 0
 
     # Delete all the tenants
     for tid in tenant_ids:
@@ -113,7 +121,7 @@ def test_sharding_service_smoke(
     for tid in tenant_ids:
         env.neon_cli.create_tenant(tid, shard_count=shards_per_tenant)
 
-    counts = get_node_shard_counts()
+    counts = get_node_shard_counts(env, tenant_ids)
     # Nothing should have been scheduled on the node in Draining
     assert counts[env.pageservers[1].id] == 0
     assert counts[env.pageservers[0].id] == tenant_shard_count // 2
@@ -136,6 +144,13 @@ def test_sharding_service_passthrough(
     client = PageserverHttpClient(env.attachment_service_port, lambda: True)
     timelines = client.timeline_list(tenant_id=env.initial_tenant)
     assert len(timelines) == 1
+
+    status = client.tenant_status(env.initial_tenant)
+    assert TenantId(status["id"]) == env.initial_tenant
+    assert set(TimelineId(t) for t in status["timelines"]) == {
+        env.initial_timeline,
+    }
+    assert status["state"]["slug"] == "Active"
 
 
 def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
@@ -270,3 +285,73 @@ def test_sharding_service_onboarding(
     # The onboarded tenant should surviev a restart of pageserver
     dest_ps.stop()
     dest_ps.start()
+
+
+def test_sharding_service_compute_hook(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address,
+):
+    """
+    Test that the sharding service calls out to the configured HTTP endpoint on attachment changes
+    """
+
+    # We will run two pageserver to migrate and check that the attachment service sends notifications
+    # when migrating.
+    neon_env_builder.num_pageservers = 2
+    (host, port) = httpserver_listen_address
+    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+
+    # Set up fake HTTP notify endpoint
+    notifications = []
+
+    def handler(request: Request):
+        log.info(f"Notify request: {request}")
+        notifications.append(request.json)
+        return Response(status=200)
+
+    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+
+    # Start running
+    env = neon_env_builder.init_start()
+
+    # We will to an unclean migration, which will result in deletion queue warnings
+    env.pageservers[0].allowed_errors.append(".*Dropped remote consistent LSN updates for tenant.*")
+
+    # Initial notification from tenant creation
+    assert len(notifications) == 1
+    expect = {
+        "tenant_id": str(env.initial_tenant),
+        "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
+    }
+
+    env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
+
+    def node_evacuated(node_id: int):
+        counts = get_node_shard_counts(env, [env.initial_tenant])
+        assert counts[node_id] == 0
+
+    wait_until(10, 1, lambda: node_evacuated(env.pageservers[0].id))
+
+    # Additional notification from migration
+    log.info(f"notifications: {notifications}")
+    expect = {
+        "tenant_id": str(env.initial_tenant),
+        "shards": [{"node_id": int(env.pageservers[1].id), "shard_number": 0}],
+    }
+
+    def received_migration_notification():
+        assert len(notifications) == 2
+        assert notifications[1] == expect
+
+    wait_until(20, 0.25, received_migration_notification)
+
+    # When we restart, we should re-emit notifications for all tenants
+    env.attachment_service.stop()
+    env.attachment_service.start()
+
+    def received_restart_notification():
+        assert len(notifications) == 3
+        assert notifications[1] == expect
+
+    wait_until(10, 1, received_restart_notification)

@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Download, DownloadError, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorage,
-    StorageMetadata,
+    StorageMetadata, TimeTravelError,
 };
 
 pub struct UnreliableWrapper {
@@ -190,9 +190,10 @@ impl RemoteStorage for UnreliableWrapper {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
-        self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))?;
+        cancel: &CancellationToken,
+    ) -> Result<(), TimeTravelError> {
+        self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))
+            .map_err(|e| TimeTravelError::Other(anyhow::Error::new(e)))?;
         self.inner
             .time_travel_recover(prefix, timestamp, done_if_after, cancel)
             .await
