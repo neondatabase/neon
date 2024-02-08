@@ -4,7 +4,7 @@ In the current Neon architecture, compute nodes can only persist data through WA
 
 * Replication slots
 * Postgres statistics files
-* `pg_stat_statements`` disk state
+* `pg_stat_statements` disk state
 * `pg_prewarm` disk state
 
 It may also be beneficial to store observability data, such as compute metrics and page access histograms, in the per-endpoint storage.
