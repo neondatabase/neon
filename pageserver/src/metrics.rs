@@ -2400,6 +2400,72 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
     }
 }
 
+pub mod tokio_epoll_uring {
+    use metrics::UIntGauge;
+
+    pub struct Collector {
+        descs: Vec<metrics::core::Desc>,
+        systems_created: UIntGauge,
+        systems_destroyed: UIntGauge,
+    }
+
+    const NMETRICS: usize = 2;
+
+    impl metrics::core::Collector for Collector {
+        fn desc(&self) -> Vec<&metrics::core::Desc> {
+            self.descs.iter().collect()
+        }
+
+        fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+            let mut mfs = Vec::with_capacity(NMETRICS);
+            let tokio_epoll_uring::metrics::Metrics {
+                systems_created,
+                systems_destroyed,
+            } = tokio_epoll_uring::metrics::global();
+            self.systems_created.set(systems_created);
+            mfs.extend(self.systems_created.collect());
+            self.systems_destroyed.set(systems_destroyed);
+            mfs.extend(self.systems_destroyed.collect());
+            mfs
+        }
+    }
+
+    impl Collector {
+        #[allow(clippy::new_without_default)]
+        pub fn new() -> Self {
+            let mut descs = Vec::new();
+
+            let systems_created = UIntGauge::new(
+                "pageserver_tokio_epoll_uring_systems_created",
+                "counter of tokio-epoll-uring systems that were created",
+            )
+            .unwrap();
+            descs.extend(
+                metrics::core::Collector::desc(&systems_created)
+                    .into_iter()
+                    .cloned(),
+            );
+
+            let systems_destroyed = UIntGauge::new(
+                "pageserver_tokio_epoll_uring_systems_destroyed",
+                "counter of tokio-epoll-uring systems that were destroyed",
+            )
+            .unwrap();
+            descs.extend(
+                metrics::core::Collector::desc(&systems_destroyed)
+                    .into_iter()
+                    .cloned(),
+            );
+
+            Self {
+                descs,
+                systems_created,
+                systems_destroyed,
+            }
+        }
+    }
+}
+
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //

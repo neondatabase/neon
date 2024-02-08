@@ -883,7 +883,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         # Deletion itself won't complete due to our failpoint: Tenant::shutdown can't complete while calculating
         # logical size is paused in a failpoint.  So instead we will use a log observation to check that
         # on-demand activation was triggered by the tenant deletion
-        log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000}}: Activating tenant \\(on-demand\\).*"
+        log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000 gen=[0-9a-f]+}}: Activating tenant \\(on-demand\\).*"
 
         def activated_on_demand():
             assert env.pageserver.log_contains(log_match) is not None

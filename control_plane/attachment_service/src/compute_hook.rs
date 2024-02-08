@@ -170,7 +170,7 @@ impl ComputeHook {
         reconfigure_request: &ComputeHookNotifyRequest,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let req = client.request(Method::POST, url);
+        let req = client.request(Method::PUT, url);
         let req = if let Some(value) = &self.authorization_header {
             req.header(reqwest::header::AUTHORIZATION, value)
         } else {
@@ -240,13 +240,15 @@ impl ComputeHook {
         let client = reqwest::Client::new();
         backoff::retry(
             || self.do_notify_iteration(&client, url, &reconfigure_request, cancel),
-            |e| matches!(e, NotifyError::Fatal(_)),
+            |e| matches!(e, NotifyError::Fatal(_) | NotifyError::Unexpected(_)),
             3,
             10,
             "Send compute notification",
-            backoff::Cancel::new(cancel.clone(), || NotifyError::ShuttingDown),
+            cancel,
         )
         .await
+        .ok_or_else(|| NotifyError::ShuttingDown)
+        .and_then(|x| x)
     }
 
     /// Call this to notify the compute (postgres) tier of new pageservers to use
