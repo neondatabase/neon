@@ -381,16 +381,19 @@ impl Persistence {
         self.with_conn(move |conn| -> DatabaseResult<()> {
             conn.transaction(|conn| -> DatabaseResult<()> {
                 // Mark parent shards as splitting
+
+                let expect_parent_records = std::cmp::max(1, old_shard_count.0);
+
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
                     .filter(shard_count.eq(old_shard_count.0 as i32))
                     .set((splitting.eq(1),))
                     .execute(conn)?;
-                if ShardCount(updated.try_into().map_err(|_| DatabaseError::Logical(format!("Overflow existing shard count {} while splitting", updated)))?) != old_shard_count {
+                if u8::try_from(updated).map_err(|_| DatabaseError::Logical(format!("Overflow existing shard count {} while splitting", updated)))? != expect_parent_records {
                     // Perhaps a deletion or another split raced with this attempt to split, mutating
                     // the parent shards that we intend to split. In this case the split request should fail.
                     return Err(DatabaseError::Logical(
-                        format!("Unexpected existing shard count {updated} when preparing tenant for split (expected {old_shard_count:?})")
+                        format!("Unexpected existing shard count {updated} when preparing tenant for split (expected {expect_parent_records})")
                     ));
                 }
 

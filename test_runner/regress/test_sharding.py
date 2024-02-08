@@ -4,7 +4,7 @@ from fixtures.neon_fixtures import (
     tenant_get_shards,
 )
 from fixtures.remote_storage import s3_storage
-from fixtures.types import TimelineId
+from fixtures.types import TenantShardId, TimelineId
 from fixtures.workload import Workload
 
 
@@ -82,6 +82,35 @@ def test_sharding_smoke(
             for tl in pageserver.http_client().timeline_list(shard["shard_id"])
         )
         assert timelines == {env.initial_timeline, timeline_b}
+
+
+def test_sharding_split_unsharded(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Test that shard splitting works on a tenant created as unsharded (i.e. with
+    ShardCount(0)).
+    """
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    workload = Workload(env, tenant_id, timeline_id, branch_name="main")
+    workload.init()
+    workload.write_rows(256)
+
+    # Check that we created with an unsharded TenantShardId: this is the default,
+    # but check it in case we change the default in future
+    assert env.attachment_service.inspect(TenantShardId(tenant_id, 0, 0)) is not None
+
+    # Split one shard into two
+    env.attachment_service.tenant_shard_split(tenant_id, shard_count=2)
+
+    # Check we got the shard IDs we expected
+    assert env.attachment_service.inspect(TenantShardId(tenant_id, 0, 2)) is not None
+    assert env.attachment_service.inspect(TenantShardId(tenant_id, 1, 2)) is not None
+
+    workload.validate()
 
 
 def test_sharding_split_smoke(
