@@ -399,8 +399,8 @@ def test_sql_over_http_batch_output_options(static_proxy: NeonProxy):
         data=json.dumps(
             {
                 "queries": [
-                    {"query": "select $1 as answer", "params": [42], "array_mode": True},
-                    {"query": "select $1 as answer", "params": [42], "array_mode": False},
+                    {"query": "select $1 as answer", "params": [42], "arrayMode": True},
+                    {"query": "select $1 as answer", "params": [42], "arrayMode": False},
                 ]
             }
         ),

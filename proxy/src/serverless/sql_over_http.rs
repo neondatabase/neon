@@ -44,6 +44,7 @@ use super::json::pg_text_row_to_json;
 use super::SERVERLESS_DRIVER_SNI;
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct QueryData {
     query: String,
     #[serde(deserialize_with = "bytes_to_pg_text")]
