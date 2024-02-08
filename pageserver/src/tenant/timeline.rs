@@ -828,7 +828,7 @@ impl Timeline {
         Ok(results)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     pub(super) async fn validate_get_vectored_impl(
         &self,
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
