@@ -268,6 +268,7 @@ pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 pub(crate) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const DELETION_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const COPY_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
@@ -1066,14 +1067,14 @@ impl RemoteTimelineClient {
                 upload::preserve_initdb_archive(&self.storage_impl, tenant_id, timeline_id, cancel)
                     .await
             },
-            |_e| false,
+            TimeoutOrCancel::caused_by_cancel,
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "preserve_initdb_tar_zst",
             &cancel.clone(),
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancellled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)
         .context("backing up initdb archive")?;
         Ok(())

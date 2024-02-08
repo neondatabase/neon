@@ -275,7 +275,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 
     /// Copy a remote object inside a bucket from one path to another.
-    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()>;
+    async fn copy(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()>;
 
     /// Resets the content of everything with the given prefix to the given state
     async fn time_travel_recover(
@@ -566,12 +572,19 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
-    pub async fn copy_object(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+    /// See [`RemoteStorage::copy`]
+    pub async fn copy_object(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.copy(from, to).await,
-            Self::AwsS3(s) => s.copy(from, to).await,
-            Self::AzureBlob(s) => s.copy(from, to).await,
-            Self::Unreliable(s) => s.copy(from, to).await,
+            Self::LocalFs(s) => s.copy(from, to, timeout, cancel).await,
+            Self::AwsS3(s) => s.copy(from, to, timeout, cancel).await,
+            Self::AzureBlob(s) => s.copy(from, to, timeout, cancel).await,
+            Self::Unreliable(s) => s.copy(from, to, timeout, cancel).await,
         }
     }
 

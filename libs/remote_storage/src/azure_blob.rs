@@ -23,13 +23,11 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use http_types::{StatusCode, Url};
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
 use crate::TimeTravelError;
-use crate::TimeoutOrCancel;
 use crate::{
     AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath,
     RemoteStorage, StorageMetadata, TimeoutOrCancel,
@@ -421,44 +419,64 @@ impl RemoteStorage for AzureBlobStorage {
         }
     }
 
-    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
-        let _permit = self.permit(RequestKind::Copy).await;
-        let blob_client = self.client.blob_client(self.relative_path_to_name(to));
+    async fn copy(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let _permit = tokio::select! {
+            permit = self.permit(RequestKind::Copy) => permit,
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
+
+        let timeout = tokio::time::sleep(timeout);
+
+        let mut copy_status = None;
 
         let op = async {
             let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
-        let result = builder.into_future().await?;
+            let source_url = format!(
+                "{}/{}",
+                self.client.url()?,
+                self.relative_path_to_name(from)
+            );
 
-        let mut copy_status = result.copy_status;
-        let start_time = Instant::now();
-        const MAX_WAIT_TIME: Duration = Duration::from_secs(60);
-        loop {
-            match copy_status {
-                CopyStatus::Aborted => {
-                    anyhow::bail!("Received abort for copy from {from} to {to}.");
+            let builder = blob_client.copy(Url::from_str(&source_url)?);
+            let copy = builder.into_future();
+
+            let result = copy.await?;
+
+            copy_status = Some(result.copy_status);
+            loop {
+                match copy_status.as_ref().expect("we always set it to Some") {
+                    CopyStatus::Aborted => {
+                        anyhow::bail!("Received abort for copy from {from} to {to}.");
+                    }
+                    CopyStatus::Failed => {
+                        anyhow::bail!("Received failure response for copy from {from} to {to}.");
+                    }
+                    CopyStatus::Success => return Ok(()),
+                    CopyStatus::Pending => (),
                 }
-                CopyStatus::Failed => {
-                    anyhow::bail!("Received failure response for copy from {from} to {to}.");
-                }
-                CopyStatus::Success => return Ok(()),
-                CopyStatus::Pending => (),
+                // The copy is taking longer. Waiting a second and then re-trying.
+                // TODO estimate time based on copy_progress and adjust time based on that
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                let properties = blob_client.get_properties().into_future().await?;
+                let Some(status) = properties.blob.properties.copy_status else {
+                    tracing::warn!("copy_status for copy is None!, from={from}, to={to}");
+                    return Ok(());
+                };
+                copy_status = Some(status);
             }
-            // The copy is taking longer. Waiting a second and then re-trying.
-            // TODO estimate time based on copy_progress and adjust time based on that
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-            let properties = blob_client.get_properties().into_future().await?;
-            let Some(status) = properties.blob.properties.copy_status else {
-                tracing::warn!("copy_status for copy is None!, from={from}, to={to}");
-                return Ok(());
-            };
-            if start_time.elapsed() > MAX_WAIT_TIME {
-                anyhow::bail!("Copy from from {from} to {to} took longer than limit MAX_WAIT_TIME={}s. copy_pogress={:?}.",
-                    MAX_WAIT_TIME.as_secs_f32(),
-                    properties.blob.properties.copy_progress,
-                );
-            }
-            copy_status = status;
+        };
+
+        tokio::select! {
+            res = op => res,
+            _ = cancel.cancelled() => Err(anyhow::Error::new(TimeoutOrCancel::Cancel)),
+            _ = timeout => Err(anyhow::Error::new(TimeoutOrCancel::Timeout).context(format!("Timeout, last state: {copy_status:?}"))),
         }
     }
 

@@ -11,7 +11,7 @@ use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
 
-use super::Generation;
+use super::{Generation, COPY_TIMEOUT};
 use crate::{
     config::PageServerConf,
     tenant::remote_timeline_client::{
@@ -165,7 +165,8 @@ pub(crate) async fn preserve_initdb_archive(
 ) -> anyhow::Result<()> {
     let source_path = remote_initdb_archive_path(tenant_id, timeline_id);
     let dest_path = remote_initdb_preserved_archive_path(tenant_id, timeline_id);
-    upload_cancellable(cancel, storage.copy_object(&source_path, &dest_path))
+    storage
+        .copy_object(&source_path, &dest_path, COPY_TIMEOUT, cancel)
         .await
         .with_context(|| format!("backing up initdb archive for '{tenant_id} / {timeline_id}'"))
 }

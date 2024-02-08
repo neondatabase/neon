@@ -54,7 +54,7 @@ use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
 use self::mgr::TenantsMap;
 use self::remote_timeline_client::upload::upload_index_part;
-use self::remote_timeline_client::RemoteTimelineClient;
+use self::remote_timeline_client::{RemoteTimelineClient, COPY_TIMEOUT};
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
@@ -3389,8 +3389,11 @@ impl Tenant {
                 );
                 let dest_path =
                     &remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &timeline_id);
+
+                // FIXME: backoff::retry
+                // FIXME: this seems out of place
                 storage
-                    .copy_object(source_path, dest_path)
+                    .copy_object(source_path, dest_path, COPY_TIMEOUT, &self.cancel)
                     .await
                     .context("copy initdb tar")?;
             }

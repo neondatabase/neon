@@ -625,9 +625,17 @@ impl RemoteStorage for S3Bucket {
         }
     }
 
-    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+    async fn copy(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         let kind = RequestKind::Copy;
         let _guard = self.permit(kind).await;
+
+        let timeout = tokio::time::sleep(timeout);
 
         let started_at = start_measuring_requests(kind);
 
@@ -638,14 +646,19 @@ impl RemoteStorage for S3Bucket {
             self.relative_path_to_s3_object(from)
         );
 
-        let res = self
+        let op = self
             .client
             .copy_object()
             .bucket(self.bucket_name.clone())
             .key(self.relative_path_to_s3_object(to))
             .copy_source(copy_source)
-            .send()
-            .await;
+            .send();
+
+        let res = tokio::select! {
+            res = op => res,
+            _ = timeout => return Err(TimeoutOrCancel::Timeout.into()),
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
 
         let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS

@@ -665,7 +665,7 @@ pub async fn copy_s3_segments(
         let from = RemotePath::new(&relative_src_path.join(&segment_name))?;
         let to = RemotePath::new(&relative_dst_path.join(&segment_name))?;
 
-        storage.copy_object(&from, &to).await?;
+        storage.copy_object(&from, &to, timeout, &cancel).await?;
     }
 
     info!(

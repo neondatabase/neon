@@ -527,7 +527,13 @@ impl RemoteStorage for LocalFs {
         Ok(())
     }
 
-    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+    async fn copy(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        _timeout: Duration,
+        _cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         let from_path = from.with_base(&self.storage_root);
         let to_path = to.with_base(&self.storage_root);
         create_target_directory(&to_path).await?;

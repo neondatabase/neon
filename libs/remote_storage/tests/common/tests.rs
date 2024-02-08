@@ -321,7 +321,9 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
         .await?;
 
     // Normal download request
-    ctx.client.copy_object(&path, &path_dest).await?;
+    ctx.client
+        .copy_object(&path, &path_dest, TIMEOUT, &cancel)
+        .await?;
 
     let dl = ctx.client.download(&path_dest, TIMEOUT, &cancel).await?;
     let buf = download_to_vec(dl).await?;
