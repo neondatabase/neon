@@ -312,7 +312,7 @@ async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> 
 }
 
 /// Readiness endpoint indicates when we're done doing startup I/O (e.g. reconciling
-/// with remote pageserver nodes)
+/// with remote pageserver nodes).  This is intended for use as a kubernetes readiness probe.
 async fn handle_ready(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let state = get_state(&req);
     if state.service.startup_complete.is_ready() {

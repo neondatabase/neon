@@ -168,20 +168,20 @@ impl Service {
                     self.config.jwt_token.as_deref(),
                 );
 
-                fn is_retryable(e: &mgmt_api::Error) -> bool {
+                fn is_fatal(e: &mgmt_api::Error) -> bool {
                     use mgmt_api::Error::*;
                     match e {
-                        ReceiveBody(_) | ReceiveErrorBody(_) => true,
+                        ReceiveBody(_) | ReceiveErrorBody(_) => false,
                         ApiError(StatusCode::SERVICE_UNAVAILABLE, _)
                         | ApiError(StatusCode::GATEWAY_TIMEOUT, _)
-                        | ApiError(StatusCode::REQUEST_TIMEOUT, _) => true,
-                        ApiError(_, _) => false,
+                        | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
+                        ApiError(_, _) => true,
                     }
                 }
 
                 let list_response = backoff::retry(
                     || client.list_location_config(),
-                    |e| !is_retryable(e),
+                    is_fatal,
                     1,
                     5,
                     "Location config listing",
