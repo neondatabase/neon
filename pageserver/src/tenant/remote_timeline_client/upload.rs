@@ -16,7 +16,7 @@ use crate::{
     config::PageServerConf,
     tenant::remote_timeline_client::{
         index::IndexPart, remote_index_path, remote_initdb_archive_path,
-        remote_initdb_preserved_archive_path, remote_path, upload_cancellable,
+        remote_initdb_preserved_archive_path, remote_path,
     },
 };
 use remote_storage::{GenericRemoteStorage, TimeTravelError};

@@ -196,7 +196,6 @@ pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
-use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -331,23 +330,6 @@ pub struct RemoteTimelineClient {
     deletion_queue_client: DeletionQueueClient,
 
     cancel: CancellationToken,
-}
-
-/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to anyhow.
-///
-/// This is a convenience for the various upload functions.  In future
-/// the anyhow::Error result should be replaced with a more structured type that
-/// enables callers to avoid handling shutdown as an error.
-async fn upload_cancellable<F>(cancel: &CancellationToken, future: F) -> anyhow::Result<()>
-where
-    F: std::future::Future<Output = anyhow::Result<()>>,
-{
-    match timeout_cancellable(UPLOAD_TIMEOUT, cancel, future).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(TimeoutCancellableError::Timeout) => Err(anyhow::anyhow!("Timeout")),
-        Err(TimeoutCancellableError::Cancelled) => Err(anyhow::anyhow!("Shutting down")),
-    }
 }
 
 impl RemoteTimelineClient {
