@@ -11,6 +11,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::TenantShardId;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use utils::{backoff, crashsafe};
@@ -242,29 +243,25 @@ async fn do_download_index_part(
     index_generation: Generation,
     cancel: &CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
-    use futures::stream::StreamExt;
-
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
     let index_part_bytes = download_retry_forever(
         || async {
-            // Cancellation: if is safe to cancel this future because we're just downloading into
-            // a memory buffer, not touching local disk.
-            let index_part_download = storage
+            let download = storage
                 .download(&remote_path, DOWNLOAD_TIMEOUT, cancel)
                 .await?;
 
-            let mut index_part_bytes = Vec::new();
-            let mut stream = std::pin::pin!(index_part_download.download_stream);
+            let mut bytes = Vec::new();
 
-            // FIXME: turn the error inside out in DownloadStream
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk
-                    .with_context(|| format!("download index part at {remote_path:?}"))
-                    .map_err(DownloadError::Other)?;
-                index_part_bytes.extend_from_slice(&chunk[..]);
-            }
-            Ok(index_part_bytes)
+            let stream = download.download_stream;
+            let mut stream = StreamReader::new(stream);
+
+            tokio::io::copy_buf(&mut stream, &mut bytes)
+                .await
+                .with_context(|| format!("download index part at {remote_path:?}"))
+                .map_err(DownloadError::Other)?;
+
+            Ok(bytes)
         },
         &format!("download {remote_path:?}"),
         cancel,
