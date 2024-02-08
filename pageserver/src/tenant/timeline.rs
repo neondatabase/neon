@@ -828,7 +828,7 @@ impl Timeline {
         Ok(results)
     }
 
-    #[allow(unused)]
+    #[cfg(debug_assertions)]
     pub(super) async fn validate_get_vectored_impl(
         &self,
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
@@ -2713,19 +2713,14 @@ impl Timeline {
 
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
-    /// Maintain a fringe (LayerFringe) which tracks all the layers that intersect
-    /// the current keyspace. At each iteration pop the top of the fringe (the layer
-    /// with the highest Lsn) and get all the required reconstruct data from the layer
-    /// in one go.
-    ///
-    /// More granulary, the algorithm is as follows:
-    // 1.   While some keys are still not done and there's a timeline to visit:
-    // 2.   Visit the timeline:
-    // 2.1: Build the fringe for the current keyspace
-    // 2.2  Visit the newest layer from the fringe to collect all values for the range it
-    //      intersects
-    // 2.3. Pop the timeline from the fringe
-    // 2.4. If the fringe is empty, go back to 1
+    /// The algorithm is as follows:
+    /// 1.   While some keys are still not done and there's a timeline to visit:
+    /// 2.   Visit the timeline (see [`Timeline::get_vectored_reconstruct_data_inner`]:
+    /// 2.1: Build the fringe for the current keyspace
+    /// 2.2  Visit the newest layer from the fringe to collect all values for the range it
+    ///      intersects
+    /// 2.3. Pop the timeline from the fringe
+    /// 2.4. If the fringe is empty, go back to 1
     async fn get_vectored_reconstruct_data(
         &self,
         mut keyspace: KeySpace,
@@ -2773,6 +2768,16 @@ impl Timeline {
         Ok(())
     }
 
+    /// Collect the reconstruct data for a ketspace from the specified timeline.
+    ///
+    /// Maintain a fringe [`LayerFringe`] which tracks all the layers that intersect
+    /// the current keyspace. The current keyspace of the search at any given timeline
+    /// is the original keyspace minus all the keys that have been completed minus
+    /// any keys for which we couldn't find an intersecting layer. It's not tracked explicitly,
+    /// but if you merge all the keyspaces in the fringe, you get the "current keyspace".
+    ///
+    /// At each iteration pop the top of the fringe (the layer with the highest Lsn)
+    /// and get all the required reconstruct data from the layer in one go.
     async fn get_vectored_reconstruct_data_inner(
         &self,
         timeline: &Timeline,

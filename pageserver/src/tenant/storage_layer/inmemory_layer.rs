@@ -27,7 +27,10 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use super::{DeltaLayerWriter, ResidentLayer, ValueReconstructState, ValuesReconstructState};
+use super::{
+    DeltaLayerWriter, ResidentLayer, ValueReconstructSituation, ValueReconstructState,
+    ValuesReconstructState,
+};
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -281,9 +284,9 @@ impl InMemoryLayer {
                 continue;
             }
 
-            let key_done =
+            let key_situation =
                 reconstruct_state.update_key(&block_read.key, block_read.lsn, value.unwrap());
-            if key_done {
+            if key_situation == ValueReconstructSituation::Complete {
                 completed_keys.insert(block_read.key);
             }
         }

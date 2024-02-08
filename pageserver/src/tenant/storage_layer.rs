@@ -91,9 +91,13 @@ pub(crate) struct VectoredValueReconstructState {
     pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
     pub(crate) img: Option<(Lsn, Bytes)>,
 
-    // TODO: can probably get rid of cached_lsn and use img.0
-    cached_lsn: Option<Lsn>,
     situation: ValueReconstructSituation,
+}
+
+impl VectoredValueReconstructState {
+    fn get_cached_lsn(&self) -> Option<Lsn> {
+        self.img.as_ref().map(|img| img.0)
+    }
 }
 
 impl From<VectoredValueReconstructState> for ValueReconstructState {
@@ -111,7 +115,6 @@ impl From<VectoredValueReconstructState> for ValueReconstructState {
 /// Bag of data accumulated during a vectored get
 pub(crate) struct ValuesReconstructState {
     pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
-    pub(crate) total_keys_done: usize,
 
     keys_done: KeySpaceRandomAccum,
 }
@@ -120,7 +123,6 @@ impl ValuesReconstructState {
     pub(crate) fn new() -> Self {
         Self {
             keys: HashMap::new(),
-            total_keys_done: 0,
             keys_done: KeySpaceRandomAccum::new(),
         }
     }
@@ -130,7 +132,6 @@ impl ValuesReconstructState {
         let previous = self.keys.insert(key, Err(err));
         if let Some(Ok(state)) = previous {
             if state.situation == ValueReconstructSituation::Continue {
-                self.total_keys_done += 1;
                 self.keys_done.add_key(key);
             }
         }
@@ -140,7 +141,12 @@ impl ValuesReconstructState {
     /// Returns true if this was the last value needed for the key and false otherwise.
     ///
     /// If the key is done after the update, mark it as such.
-    pub(crate) fn update_key(&mut self, key: &Key, lsn: Lsn, value: Value) -> bool {
+    pub(crate) fn update_key(
+        &mut self,
+        key: &Key,
+        lsn: Lsn,
+        value: Value,
+    ) -> ValueReconstructSituation {
         let state = self
             .keys
             .entry(*key)
@@ -148,14 +154,15 @@ impl ValuesReconstructState {
 
         if let Ok(state) = state {
             let key_done = match state.situation {
-                ValueReconstructSituation::Complete => true,
+                ValueReconstructSituation::Complete => unreachable!(),
                 ValueReconstructSituation::Continue => match value {
                     Value::Image(img) => {
                         state.img = Some((lsn, img));
                         true
                     }
                     Value::WalRecord(rec) => {
-                        let reached_cache = state.cached_lsn.map(|clsn| clsn + 1) == Some(lsn);
+                        let reached_cache =
+                            state.get_cached_lsn().map(|clsn| clsn + 1) == Some(lsn);
                         let will_init = rec.will_init();
                         state.records.push((lsn, rec));
                         will_init || reached_cache
@@ -165,13 +172,12 @@ impl ValuesReconstructState {
 
             if key_done && state.situation == ValueReconstructSituation::Continue {
                 state.situation = ValueReconstructSituation::Complete;
-                self.total_keys_done += 1;
                 self.keys_done.add_key(*key);
             }
 
-            key_done
+            state.situation
         } else {
-            true
+            ValueReconstructSituation::Complete
         }
     }
 
@@ -181,7 +187,7 @@ impl ValuesReconstructState {
         self.keys
             .get(key)
             .and_then(|k| k.as_ref().ok())
-            .and_then(|state| state.cached_lsn)
+            .and_then(|state| state.get_cached_lsn())
     }
 
     /// Returns the key space describing the keys that have

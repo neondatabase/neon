@@ -63,7 +63,8 @@ use utils::{
 };
 
 use super::{
-    AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+    AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer, ValueReconstructSituation,
+    ValuesReconstructState,
 };
 
 ///
@@ -946,7 +947,10 @@ impl DeltaLayerInner {
                     break;
                 }
 
-                reconstruct_state.update_key(&key, lsn, value.unwrap());
+                let key_situation = reconstruct_state.update_key(&key, lsn, value.unwrap());
+                if key_situation == ValueReconstructSituation::Complete {
+                    break;
+                }
             }
         }
 
