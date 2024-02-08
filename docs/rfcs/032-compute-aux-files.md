@@ -3,7 +3,7 @@
 In the current Neon architecture, compute nodes can only persist data through WAL replication to storage nodes. This method covers most of the data that Postgres persists, but not all. Exceptions include:
 
 * Replication slots
-* Postgres statistics files
+* Postgres statistics files (`pg_stat/pgstat.stat`)
 * `pg_stat_statements` disk state
 * `pg_prewarm` disk state
 
