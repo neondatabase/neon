@@ -26,7 +26,7 @@ env:
 
 jobs:
   check-permissions:
-    if: ${{ ! contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: ubuntu-latest
     steps:
     - name: Disallow PRs from forks
