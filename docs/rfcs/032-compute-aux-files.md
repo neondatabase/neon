@@ -65,7 +65,7 @@ The following important extensions are supported by Neon and we could either pro
 
 The file is only saved on a clean shutdown and read on startup. The maximum size depends on the `pgss_max` setting (the maximum amount of tracked queries), with the default value being 5000. Using `sqlsmith` to generate random SQL queries and fill the statement cache to 4967 entries, the pg_stat/pg_stat_statements.stat file was 12MB and compressed to 2.1MB with gzip.
 
-### pg_prewarm
+#### pg_prewarm
 
 No stale file support currently, but it could be added if needed.
 
