@@ -286,7 +286,7 @@ async fn do_download_index_part(
     .await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
-        .with_context(|| format!("download index part file at {remote_path:?}"))
+        .with_context(|| format!("deserialize index part file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
     Ok(index_part)
