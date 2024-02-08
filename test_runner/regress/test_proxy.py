@@ -390,6 +390,39 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
     assert result[0]["rows"] == [{"answer": 42}]
 
 
+def test_sql_over_http_batch_output_options(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+    response = requests.post(
+        f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+        data=json.dumps(
+            {
+                "queries": [
+                    {"query": "select $1 as answer", "params": [42], "array_mode": True},
+                    {"query": "select $1 as answer", "params": [42], "array_mode": False},
+                ]
+            }
+        ),
+        headers={
+            "Content-Type": "application/sql",
+            "Neon-Connection-String": connstr,
+            "Neon-Batch-Isolation-Level": "Serializable",
+            "Neon-Batch-Read-Only": "false",
+            "Neon-Batch-Deferrable": "false",
+        },
+        verify=str(static_proxy.test_output_dir / "proxy.crt"),
+    )
+    assert response.status_code == 200
+    results = response.json()["results"]
+
+    assert results[0]["rowAsArray"]
+    assert results[0]["rows"] == [["42"]]
+
+    assert not results[1]["rowAsArray"]
+    assert results[1]["rows"] == [{"answer": "42"}]
+
+
 def test_sql_over_http_pool(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth with password 'http' superuser")
 
