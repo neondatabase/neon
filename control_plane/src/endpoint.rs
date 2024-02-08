@@ -584,7 +584,7 @@ impl Endpoint {
         // if `shared_preload_libraries` contains a library that linked to libcurl.
         // A possible workaround is use libcurl built without IPv6 support and set proper `DYLD_LIBRARY_PATH`.
         //
-        // Such curl can be installed via `brew install bayandin/tap/curl-without-ipv6`.
+        // Such curl can be installed via `brew install neondatabase/tap/curl-without-ipv6`.
         // If it is not installed, the code is basically a no-op.
         //
         // Ref: https://www.postgresql.org/message-id/flat/CYMBV0OT7216.JNRUO6R6GH86%40neon.tech
