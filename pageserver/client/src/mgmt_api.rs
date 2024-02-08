@@ -310,6 +310,22 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    pub async fn tenant_shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        req: TenantShardSplitRequest,
+    ) -> Result<TenantShardSplitResponse> {
+        let uri = format!(
+            "{}/v1/tenant/{}/shard_split",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
+        self.request(Method::PUT, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_list(
         &self,
         tenant_shard_id: &TenantShardId,

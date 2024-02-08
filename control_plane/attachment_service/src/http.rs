@@ -3,7 +3,8 @@ use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
-    TenantCreateRequest, TenantLocationConfigRequest, TimelineCreateRequest,
+    TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
+    TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -292,6 +293,19 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, state.service.node_configure(config_req)?)
 }
 
+async fn handle_tenant_shard_split(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let split_req = json_request::<TenantShardSplitRequest>(&mut req).await?;
+
+    json_response(
+        StatusCode::OK,
+        service.tenant_shard_split(tenant_id, split_req).await?,
+    )
+}
+
 async fn handle_tenant_shard_migrate(
     service: Arc<Service>,
     mut req: Request<Body>,
@@ -390,6 +404,9 @@ pub fn make_router(
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(r, handle_tenant_shard_migrate)
+        })
+        .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
+            tenant_service_handler(r, handle_tenant_shard_split)
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into

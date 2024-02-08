@@ -8,7 +8,10 @@ use diesel::{
 use diesel_migrations::{HarnessWithOutput, MigrationHarness};
 use hyper::Method;
 use pageserver_api::{
-    models::{ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo},
+    models::{
+        ShardParameters, TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
+        TimelineCreateRequest, TimelineInfo,
+    },
     shard::TenantShardId,
 };
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
@@ -648,11 +651,25 @@ impl AttachmentService {
     ) -> anyhow::Result<TenantShardMigrateResponse> {
         self.dispatch(
             Method::PUT,
-            format!("tenant/{tenant_shard_id}/migrate"),
+            format!("control/v1/tenant/{tenant_shard_id}/migrate"),
             Some(TenantShardMigrateRequest {
                 tenant_shard_id,
                 node_id,
             }),
+        )
+        .await
+    }
+
+    #[instrument(skip(self), fields(%tenant_id, %new_shard_count))]
+    pub async fn tenant_split(
+        &self,
+        tenant_id: TenantId,
+        new_shard_count: u8,
+    ) -> anyhow::Result<TenantShardSplitResponse> {
+        self.dispatch(
+            Method::PUT,
+            format!("control/v1/tenant/{tenant_id}/shard_split"),
+            Some(TenantShardSplitRequest { new_shard_count }),
         )
         .await
     }
