@@ -24,6 +24,9 @@ impl ReportableError for CancelError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             CancelError::IO(_) => crate::error::ErrorKind::Compute,
+            CancelError::Postgres(e) if e.as_db_error().is_some() => {
+                crate::error::ErrorKind::Postgres
+            }
             CancelError::Postgres(_) => crate::error::ErrorKind::Compute,
         }
     }

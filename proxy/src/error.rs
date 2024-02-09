@@ -46,6 +46,9 @@ pub enum ErrorKind {
     /// Error communicating with control plane
     ControlPlane,
 
+    /// Postgres error
+    Postgres,
+
     /// Error communicating with compute
     Compute,
 }
@@ -58,7 +61,10 @@ impl ErrorKind {
             ErrorKind::RateLimit => "request cancelled due to rate limit",
             ErrorKind::Service => "internal service error",
             ErrorKind::ControlPlane => "non-retryable control plane error",
-            ErrorKind::Compute => "non-retryable compute error (or exhausted retry capacity)",
+            ErrorKind::Postgres => "postgres error",
+            ErrorKind::Compute => {
+                "non-retryable compute connection error (or exhausted retry capacity)"
+            }
         }
     }
 
@@ -69,6 +75,7 @@ impl ErrorKind {
             ErrorKind::RateLimit => "ratelimit",
             ErrorKind::Service => "service",
             ErrorKind::ControlPlane => "controlplane",
+            ErrorKind::Postgres => "postgres",
             ErrorKind::Compute => "compute",
         }
     }
