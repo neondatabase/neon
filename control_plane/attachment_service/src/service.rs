@@ -30,6 +30,7 @@ use pageserver_api::{
 };
 use pageserver_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument;
 use utils::{
     backoff,
     completion::Barrier,
@@ -151,8 +152,9 @@ impl Service {
         &self.config
     }
 
-    /// TODO: don't allow other API calls until this is done, don't start doing any background housekeeping
-    /// until this is done.
+    /// Called once on startup, this function attempts to contact all pageservers to build an up-to-date
+    /// view of the world, and determine which pageservers are responsive.
+    #[instrument(skip_all)]
     async fn startup_reconcile(&self) {
         // For all tenant shards, a vector of observed states on nodes (where None means
         // indeterminate, same as in [`ObservedStateLocation`])
@@ -372,8 +374,79 @@ impl Service {
         tracing::info!("Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)");
     }
 
+    #[instrument(skip_all)]
+    async fn process_results(
+        &self,
+        mut result_rx: tokio::sync::mpsc::UnboundedReceiver<ReconcileResult>,
+    ) {
+        loop {
+            // Wait for the next result, or for cancellation
+            let result = tokio::select! {
+                r = result_rx.recv() => {
+                    match r {
+                        Some(result) => {result},
+                        None => {break;}
+                    }
+                }
+                _ = self.cancel.cancelled() => {
+                    break;
+                }
+            };
+
+            tracing::info!(
+                "Reconcile result for sequence {}, ok={}",
+                result.sequence,
+                result.result.is_ok()
+            );
+            let mut locked = self.inner.write().unwrap();
+            let Some(tenant) = locked.tenants.get_mut(&result.tenant_shard_id) else {
+                // A reconciliation result might race with removing a tenant: drop results for
+                // tenants that aren't in our map.
+                continue;
+            };
+
+            // Usually generation should only be updated via this path, so the max() isn't
+            // needed, but it is used to handle out-of-band updates via. e.g. test hook.
+            tenant.generation = std::cmp::max(tenant.generation, result.generation);
+
+            // If the reconciler signals that it failed to notify compute, set this state on
+            // the shard so that a future [`TenantState::maybe_reconcile`] will try again.
+            tenant.pending_compute_notification = result.pending_compute_notification;
+
+            match result.result {
+                Ok(()) => {
+                    for (node_id, loc) in &result.observed.locations {
+                        if let Some(conf) = &loc.conf {
+                            tracing::info!("Updating observed location {}: {:?}", node_id, conf);
+                        } else {
+                            tracing::info!("Setting observed location {} to None", node_id,)
+                        }
+                    }
+                    tenant.observed = result.observed;
+                    tenant.waiter.advance(result.sequence);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Reconcile error on tenant {}: {}",
+                        tenant.tenant_shard_id,
+                        e
+                    );
+
+                    // Ordering: populate last_error before advancing error_seq,
+                    // so that waiters will see the correct error after waiting.
+                    *(tenant.last_error.lock().unwrap()) = format!("{e}");
+                    tenant.error_waiter.advance(result.sequence);
+
+                    for (node_id, o) in result.observed.locations {
+                        tenant.observed.locations.insert(node_id, o);
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn spawn(config: Config, persistence: Arc<Persistence>) -> anyhow::Result<Arc<Self>> {
-        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
 
         tracing::info!("Loading nodes from database...");
         let nodes = persistence.list_nodes().await?;
@@ -449,60 +522,9 @@ impl Service {
 
         let result_task_this = this.clone();
         tokio::task::spawn(async move {
-            while let Some(result) = result_rx.recv().await {
-                tracing::info!(
-                    "Reconcile result for sequence {}, ok={}",
-                    result.sequence,
-                    result.result.is_ok()
-                );
-                let mut locked = result_task_this.inner.write().unwrap();
-                let Some(tenant) = locked.tenants.get_mut(&result.tenant_shard_id) else {
-                    // A reconciliation result might race with removing a tenant: drop results for
-                    // tenants that aren't in our map.
-                    continue;
-                };
-
-                // Usually generation should only be updated via this path, so the max() isn't
-                // needed, but it is used to handle out-of-band updates via. e.g. test hook.
-                tenant.generation = std::cmp::max(tenant.generation, result.generation);
-
-                // If the reconciler signals that it failed to notify compute, set this state on
-                // the shard so that a future [`TenantState::maybe_reconcile`] will try again.
-                tenant.pending_compute_notification = result.pending_compute_notification;
-
-                match result.result {
-                    Ok(()) => {
-                        for (node_id, loc) in &result.observed.locations {
-                            if let Some(conf) = &loc.conf {
-                                tracing::info!(
-                                    "Updating observed location {}: {:?}",
-                                    node_id,
-                                    conf
-                                );
-                            } else {
-                                tracing::info!("Setting observed location {} to None", node_id,)
-                            }
-                        }
-                        tenant.observed = result.observed;
-                        tenant.waiter.advance(result.sequence);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Reconcile error on tenant {}: {}",
-                            tenant.tenant_shard_id,
-                            e
-                        );
-
-                        // Ordering: populate last_error before advancing error_seq,
-                        // so that waiters will see the correct error after waiting.
-                        *(tenant.last_error.lock().unwrap()) = format!("{e}");
-                        tenant.error_waiter.advance(result.sequence);
-
-                        for (node_id, o) in result.observed.locations {
-                            tenant.observed.locations.insert(node_id, o);
-                        }
-                    }
-                }
+            // Block shutdown until we're done (we must respect self.cancel)
+            if let Ok(_gate) = result_task_this.gate.enter() {
+                result_task_this.process_results(result_rx).await
             }
         });
 
@@ -511,7 +533,10 @@ impl Service {
             // Block the [`Service::startup_complete`] barrier until we're done
             let _completion = startup_completion;
 
-            startup_reconcile_this.startup_reconcile().await
+            // Block shutdown until we're done (we must respect self.cancel)
+            if let Ok(_gate) = startup_reconcile_this.gate.enter() {
+                startup_reconcile_this.startup_reconcile().await
+            }
         });
 
         Ok(this)
