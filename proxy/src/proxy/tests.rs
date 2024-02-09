@@ -12,6 +12,7 @@ use crate::cache::Cached;
 use crate::config::CertResolver;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
+use crate::error::ErrorKind;
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
@@ -372,6 +373,8 @@ enum ConnectAction {
     Connect,
     Retry,
     Fail,
+    RetryPg,
+    FailPg,
 }
 
 #[derive(Clone)]
@@ -406,6 +409,13 @@ struct TestConnection;
 #[derive(Debug)]
 struct TestConnectError {
     retryable: bool,
+    kind: crate::error::ErrorKind,
+}
+
+impl ReportableError for TestConnectError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        self.kind
+    }
 }
 
 impl std::fmt::Display for TestConnectError {
@@ -439,8 +449,22 @@ impl ConnectMechanism for TestConnectMechanism {
         *counter += 1;
         match action {
             ConnectAction::Connect => Ok(TestConnection),
-            ConnectAction::Retry => Err(TestConnectError { retryable: true }),
-            ConnectAction::Fail => Err(TestConnectError { retryable: false }),
+            ConnectAction::Retry => Err(TestConnectError {
+                retryable: true,
+                kind: ErrorKind::Compute,
+            }),
+            ConnectAction::Fail => Err(TestConnectError {
+                retryable: false,
+                kind: ErrorKind::Compute,
+            }),
+            ConnectAction::FailPg => Err(TestConnectError {
+                retryable: false,
+                kind: ErrorKind::Postgres,
+            }),
+            ConnectAction::RetryPg => Err(TestConnectError {
+                retryable: true,
+                kind: ErrorKind::Postgres,
+            }),
             x => panic!("expecting action {:?}, connect is called instead", x),
         }
     }
@@ -535,6 +559,32 @@ async fn connect_to_compute_retry() {
     connect_to_compute(&mut ctx, &mechanism, &user_info, false)
         .await
         .unwrap();
+    mechanism.verify();
+}
+
+#[tokio::test]
+async fn connect_to_compute_retry_pg() {
+    let _ = env_logger::try_init();
+    use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
+    let mechanism = TestConnectMechanism::new(vec![Wake, RetryPg, Connect]);
+    let user_info = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+        .await
+        .unwrap();
+    mechanism.verify();
+}
+
+#[tokio::test]
+async fn connect_to_compute_fail_pg() {
+    let _ = env_logger::try_init();
+    use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
+    let mechanism = TestConnectMechanism::new(vec![Wake, FailPg]);
+    let user_info = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+        .await
+        .unwrap_err();
     mechanism.verify();
 }
 

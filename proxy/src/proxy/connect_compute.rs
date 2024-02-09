@@ -3,6 +3,7 @@ use crate::{
     compute::{self, PostgresConnection},
     console::{self, errors::WakeComputeError, CachedNodeInfo, NodeInfo},
     context::RequestMonitoring,
+    error::ReportableError,
     metrics::NUM_CONNECTION_FAILURES,
     proxy::{
         retry::{retry_after, ShouldRetry},
@@ -37,7 +38,7 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
 #[async_trait]
 pub trait ConnectMechanism {
     type Connection;
-    type ConnectError;
+    type ConnectError: ReportableError;
     type Error: From<Self::ConnectError>;
     async fn connect_once(
         &self,
@@ -121,8 +122,13 @@ where
 
     error!(error = ?err, "could not connect to compute node");
 
-    // TODO(anna): do not retry if the connection was established.
-    let node_info = if true {
+    let node_info = if err.get_error_kind() == crate::error::ErrorKind::Postgres {
+        // If the error is Postgres, that means that we managed to connect to the compute node, but there was an error.
+        if !err.should_retry(num_retries) {
+            return Err(err.into());
+        }
+        node_info
+    } else {
         // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
         info!("compute node's state has likely changed; requesting a wake-up");
         ctx.latency_timer.cache_miss();
@@ -131,8 +137,6 @@ where
         node_info.reuse_settings(old_node_info);
 
         mechanism.update_connect_config(&mut node_info.config);
-        node_info
-    } else {
         node_info
     };
 
