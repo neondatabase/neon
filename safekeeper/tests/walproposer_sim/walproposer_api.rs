@@ -121,8 +121,12 @@ impl EventSet {
         let index = self
             .sk_ptrs
             .iter()
-            .position(|&ptr| ptr == sk.raw_ptr)
-            .expect("safekeeper should exist in event set");
+            .position(|&ptr| ptr == sk.raw_ptr);
+        if index.is_none() {
+            debug!("remove_safekeeper: sk={:?} not found", sk.raw_ptr);
+            return;
+        }
+        let index = index.unwrap();
 
         self.chans.remove(index);
         self.sk_ptrs.remove(index);
