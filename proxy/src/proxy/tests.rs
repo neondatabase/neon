@@ -530,7 +530,7 @@ async fn connect_to_compute_retry() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
-    let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Connect]);
+    let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
     connect_to_compute(&mut ctx, &mechanism, &user_info, false)
         .await
@@ -544,7 +544,7 @@ async fn connect_to_compute_non_retry_1() {
     let _ = env_logger::try_init();
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
-    let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Fail]);
+    let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Fail]);
     let user_info = helper_create_connect_info(&mechanism);
     connect_to_compute(&mut ctx, &mechanism, &user_info, false)
         .await
@@ -574,8 +574,8 @@ async fn connect_to_compute_non_retry_3() {
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![
-        Wake, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry,
-        Retry, Retry, Retry, Retry, /* the 17th time */ Retry,
+        Wake, Retry, Wake, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry,
+        Retry, Retry, Retry, Retry, Retry, /* the 17th time */ Retry,
     ]);
     let user_info = helper_create_connect_info(&mechanism);
     connect_to_compute(&mut ctx, &mechanism, &user_info, false)
