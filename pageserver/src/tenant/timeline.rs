@@ -4707,8 +4707,7 @@ impl Deref for TimelineWriter<'_> {
 
 impl Drop for TimelineWriter<'_> {
     fn drop(&mut self) {
-        let state = &mut *self.write_guard;
-        *state = None;
+        self.write_guard.take();
     }
 }
 
@@ -4777,7 +4776,7 @@ impl<'a> TimelineWriter<'a> {
 
                 let layer = self.tl.get_layer_for_write(at).await?;
                 let initial_size = layer.size().await?;
-                *state = Some(TimelineWriterState::new(layer, initial_size));
+                state.replace(TimelineWriterState::new(layer, initial_size));
             }
             OpenLayerAction::Open => {
                 let state = &mut *self.write_guard;
@@ -4785,7 +4784,7 @@ impl<'a> TimelineWriter<'a> {
 
                 let layer = self.tl.get_layer_for_write(at).await?;
                 let initial_size = layer.size().await?;
-                *state = Some(TimelineWriterState::new(layer, initial_size));
+                state.replace(TimelineWriterState::new(layer, initial_size));
             }
             OpenLayerAction::None => {
                 let state = &*self.write_guard;
