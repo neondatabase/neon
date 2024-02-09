@@ -177,6 +177,7 @@ def test_node_status_after_restart(
     assert len(nodes) == 2
 
     env.pageservers[1].stop()
+    env.storage_controller.allowed_errors.extend([".*Could not scan node"])
 
     env.storage_controller.stop()
     env.storage_controller.start()
@@ -681,6 +682,9 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
     tenant_id = TenantId.generate()
     body: Dict[str, Any] = {"new_tenant_id": str(tenant_id)}
 
+    env.storage_controller.allowed_errors.append(".*Unauthorized.*")
+    env.storage_controller.allowed_errors.append(".*Forbidden.*")
+
     # No token
     with pytest.raises(
         StorageControllerApiException,
@@ -842,6 +846,12 @@ def test_sharding_service_heartbeats(
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
+
+    # Default log allow list permitr connection errors, but this test will use error responses on
+    # the utilization endpoint.
+    env.storage_controller.allowed_errors.append(
+        ".*Call to node.*management API.*failed.*failpoint.*"
+    )
 
     # Initially we have two online pageservers
     nodes = env.storage_controller.node_list()
