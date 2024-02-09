@@ -6,7 +6,7 @@ use futures::stream::Stream;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::{collections::hash_map::Entry, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -140,9 +140,13 @@ impl RemoteStorage for UnreliableWrapper {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::Upload(to.clone()))?;
-        self.inner.upload(data, data_size_bytes, to, metadata).await
+        self.inner
+            .upload(data, data_size_bytes, to, metadata, timeout, cancel)
+            .await
     }
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {

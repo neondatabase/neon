@@ -10,9 +10,11 @@ use futures::stream::Stream;
 use once_cell::sync::OnceCell;
 use remote_storage::{Download, GenericRemoteStorage, RemotePath};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 static LOGGING_DONE: OnceCell<()> = OnceCell::new();
+pub(crate) const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) fn upload_stream(
     content: std::borrow::Cow<'static, [u8]>,
@@ -58,8 +60,12 @@ pub(crate) async fn upload_simple_remote_data(
 ) -> ControlFlow<HashSet<RemotePath>, HashSet<RemotePath>> {
     info!("Creating {upload_tasks_count} remote files");
     let mut upload_tasks = JoinSet::new();
+    let cancel = CancellationToken::new();
+
     for i in 1..upload_tasks_count + 1 {
         let task_client = Arc::clone(client);
+        let cancel = cancel.clone();
+
         upload_tasks.spawn(async move {
             let blob_path = PathBuf::from(format!("folder{}/blob_{}.txt", i / 7, i));
             let blob_path = RemotePath::new(
@@ -69,7 +75,9 @@ pub(crate) async fn upload_simple_remote_data(
             debug!("Creating remote item {i} at path {blob_path:?}");
 
             let (data, len) = upload_stream(format!("remote blob data {i}").into_bytes().into());
-            task_client.upload(data, len, &blob_path, None).await?;
+            task_client
+                .upload(data, len, &blob_path, None, TIMEOUT, &cancel)
+                .await?;
 
             Ok::<_, anyhow::Error>(blob_path)
         });
@@ -141,8 +149,12 @@ pub(crate) async fn upload_remote_data(
 ) -> ControlFlow<Uploads, Uploads> {
     info!("Creating {upload_tasks_count} remote files");
     let mut upload_tasks = JoinSet::new();
+    let cancel = CancellationToken::new();
+
     for i in 1..upload_tasks_count + 1 {
         let task_client = Arc::clone(client);
+        let cancel = cancel.clone();
+
         upload_tasks.spawn(async move {
             let prefix = format!("{base_prefix_str}/sub_prefix_{i}/");
             let blob_prefix = RemotePath::new(Utf8Path::new(&prefix))
@@ -152,7 +164,9 @@ pub(crate) async fn upload_remote_data(
 
             let (data, data_len) =
                 upload_stream(format!("remote blob data {i}").into_bytes().into());
-            task_client.upload(data, data_len, &blob_path, None).await?;
+            task_client
+                .upload(data, data_len, &blob_path, None, TIMEOUT, &cancel)
+                .await?;
 
             Ok::<_, anyhow::Error>((blob_prefix, blob_path))
         });

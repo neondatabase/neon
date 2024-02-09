@@ -29,6 +29,7 @@ use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
 use crate::TimeTravelError;
+use crate::TimeoutOrCancel;
 use crate::{
     AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath,
     RemoteStorage, StorageMetadata,
@@ -260,26 +261,42 @@ impl RemoteStorage for AzureBlobStorage {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let _permit = self.permit(RequestKind::Put).await;
-        let blob_client = self.client.blob_client(self.relative_path_to_name(to));
+        let op = async {
+            // acquiring the permit is not timed, but it is subject to cancellation
+            let _permit = self.permit(RequestKind::Put).await;
 
-        let from: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>> =
-            Box::pin(from);
+            let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
-        let from = NonSeekableStream::new(from, data_size_bytes);
+            let from: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>> =
+                Box::pin(from);
 
-        let body = azure_core::Body::SeekableStream(Box::new(from));
+            let from = NonSeekableStream::new(from, data_size_bytes);
 
-        let mut builder = blob_client.put_block_blob(body);
+            let body = azure_core::Body::SeekableStream(Box::new(from));
 
-        if let Some(metadata) = metadata {
-            builder = builder.metadata(to_azure_metadata(metadata));
+            let mut builder = blob_client.put_block_blob(body);
+
+            if let Some(metadata) = metadata {
+                builder = builder.metadata(to_azure_metadata(metadata));
+            }
+
+            let fut = builder.into_future();
+            let fut = tokio::time::timeout(timeout, fut);
+
+            match fut.await {
+                Ok(Ok(_response)) => Ok(()),
+                Ok(Err(azure)) => Err(azure.into()),
+                Err(_timeout) => Err(TimeoutOrCancel::Cancel.into()),
+            }
+        };
+
+        tokio::select! {
+            res = op => res,
+            _ = cancel.cancelled() => Err(TimeoutOrCancel::Cancel.into()),
         }
-
-        let _response = builder.into_future().await?;
-
-        Ok(())
     }
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {

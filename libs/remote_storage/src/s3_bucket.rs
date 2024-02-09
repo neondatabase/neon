@@ -11,7 +11,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{anyhow, Context as _};
@@ -47,7 +47,7 @@ use utils::backoff;
 use super::StorageMetadata;
 use crate::{
     support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode,
-    RemotePath, RemoteStorage, S3Config, TimeTravelError, MAX_KEYS_PER_DELETE,
+    RemotePath, RemoteStorage, S3Config, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
     REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
@@ -511,34 +511,52 @@ impl RemoteStorage for S3Bucket {
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let kind = RequestKind::Put;
-        let _guard = self.permit(kind).await;
+        let op = async {
+            // acquiring permit is not subject to cancellation
+            let kind = RequestKind::Put;
+            let _guard = self.permit(kind).await;
 
-        let started_at = start_measuring_requests(kind);
+            let started_at = start_measuring_requests(kind);
 
-        let body = Body::wrap_stream(from);
-        let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
+            let body = Body::wrap_stream(from);
+            let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
 
-        let res = self
-            .client
-            .put_object()
-            .bucket(self.bucket_name.clone())
-            .key(self.relative_path_to_s3_object(to))
-            .set_metadata(metadata.map(|m| m.0))
-            .content_length(from_size_bytes.try_into()?)
-            .body(bytes_stream)
-            .send()
-            .await;
+            let upload = self
+                .client
+                .put_object()
+                .bucket(self.bucket_name.clone())
+                .key(self.relative_path_to_s3_object(to))
+                .set_metadata(metadata.map(|m| m.0))
+                .content_length(from_size_bytes.try_into()?)
+                .body(bytes_stream)
+                .send();
 
-        let started_at = ScopeGuard::into_inner(started_at);
-        metrics::BUCKET_METRICS
-            .req_seconds
-            .observe_elapsed(kind, &res, started_at);
+            let upload = tokio::time::timeout(timeout, upload);
 
-        res?;
+            let res = upload.await;
 
-        Ok(())
+            if let Ok(inner) = &res {
+                // do not incl. timeouts as errors in metrics but cancellations
+                let started_at = ScopeGuard::into_inner(started_at);
+                metrics::BUCKET_METRICS
+                    .req_seconds
+                    .observe_elapsed(kind, inner, started_at);
+            }
+
+            match res {
+                Ok(Ok(_put)) => Ok(()),
+                Ok(Err(sdk)) => Err(sdk.into()),
+                Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
+            }
+        };
+
+        tokio::select! {
+            res = op => res,
+            _ = cancel.cancelled() => Err(TimeoutOrCancel::Cancel.into()),
+        }
     }
 
     async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {

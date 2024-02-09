@@ -23,11 +23,12 @@ mod common;
 #[path = "common/tests.rs"]
 mod tests_s3;
 
-use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data};
+use common::{
+    cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, TIMEOUT,
+};
 use utils::backoff;
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
-
 const BASE_PREFIX: &str = "test";
 
 #[test_context(MaybeEnabledStorage)]
@@ -90,7 +91,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream("remote blob data1".as_bytes().into());
-        ctx.client.upload(data, len, &path1, None)
+        ctx.client.upload(data, len, &path1, None, TIMEOUT, &cancel)
     })
     .await?;
 
@@ -102,7 +103,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream(old_data.as_bytes().into());
-        ctx.client.upload(data, len, &path2, None)
+        ctx.client.upload(data, len, &path2, None, TIMEOUT, &cancel)
     })
     .await?;
 
@@ -125,7 +126,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream("remote blob data3".as_bytes().into());
-        ctx.client.upload(data, len, &path3, None)
+        ctx.client.upload(data, len, &path3, None, TIMEOUT, &cancel)
     })
     .await?;
 
@@ -133,7 +134,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream(new_data.as_bytes().into());
-        ctx.client.upload(data, len, &path2, None)
+        ctx.client.upload(data, len, &path2, None, TIMEOUT, &cancel)
     })
     .await?;
 

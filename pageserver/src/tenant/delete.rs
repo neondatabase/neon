@@ -76,6 +76,8 @@ async fn create_remote_delete_mark(
     tenant_shard_id: &TenantShardId,
     cancel: &CancellationToken,
 ) -> Result<(), DeleteTenantError> {
+    use crate::tenant::remote_timeline_client::UPLOAD_TIMEOUT;
+
     let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
 
     let data: &[u8] = &[];
@@ -84,7 +86,7 @@ async fn create_remote_delete_mark(
             let data = bytes::Bytes::from_static(data);
             let stream = futures::stream::once(futures::future::ready(Ok(data)));
             remote_storage
-                .upload(stream, 0, &remote_mark_path, None)
+                .upload(stream, 0, &remote_mark_path, None, UPLOAD_TIMEOUT, cancel)
                 .await
         },
         |_e| false,

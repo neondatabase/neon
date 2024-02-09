@@ -203,7 +203,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use std::ops::DerefMut;
 use tracing::{debug, error, info, instrument, warn};
 use tracing::{info_span, Instrument};
@@ -1444,6 +1444,10 @@ impl RemoteTimelineClient {
             match upload_result {
                 Ok(()) => {
                     break;
+                }
+                Err(e) if TimeoutOrCancel::caused_by_cancel(&e) => {
+                    // loop around to do the proper stopping
+                    continue;
                 }
                 Err(e) => {
                     let retries = task.retries.fetch_add(1, Ordering::SeqCst);

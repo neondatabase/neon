@@ -10,7 +10,7 @@ use crate::{
     tenant::{
         config::AttachmentMode,
         mgr::TenantManager,
-        remote_timeline_client::remote_heatmap_path,
+        remote_timeline_client::{remote_heatmap_path, UPLOAD_TIMEOUT},
         span::debug_assert_current_span_has_tenant_id,
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
         Tenant,
@@ -21,17 +21,16 @@ use futures::Future;
 use md5;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};
 
 use super::{
+    heatmap::HeatMapTenant,
     scheduler::{self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs},
-    CommandRequest,
+    CommandRequest, UploadCommand,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
 use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
-
-use super::{heatmap::HeatMapTenant, UploadCommand};
 
 pub(super) async fn heatmap_uploader_task(
     tenant_manager: Arc<TenantManager>,
@@ -417,10 +416,10 @@ async fn upload_tenant_heatmap(
         || async {
             let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
             remote_storage
-                .upload_storage_object(bytes, size, &path)
+                .upload_storage_object(bytes, size, &path, UPLOAD_TIMEOUT, cancel)
                 .await
         },
-        |_| false,
+        TimeoutOrCancel::caused_by_cancel,
         3,
         u32::MAX,
         "Uploading heatmap",

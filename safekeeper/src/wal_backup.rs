@@ -511,7 +511,13 @@ async fn backup_object(
 
     let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
 
-    storage.upload_storage_object(file, size, target_file).await
+    let cancel = CancellationToken::new();
+    let timeout = std::time::Duration::from_secs(120);
+
+    // TODO: is there upper retry?
+    storage
+        .upload_storage_object(file, size, target_file, timeout, &cancel)
+        .await
 }
 
 pub async fn read_object(

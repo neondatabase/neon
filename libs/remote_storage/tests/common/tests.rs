@@ -2,8 +2,9 @@ use anyhow::Context;
 use camino::Utf8Path;
 use remote_storage::RemotePath;
 use std::sync::Arc;
-use std::{collections::HashSet, num::NonZeroU32};
+use std::{collections::HashSet, num::NonZeroU32, time::Duration};
 use test_context::test_context;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::common::{download_to_vec, upload_stream, wrap_stream};
@@ -11,6 +12,8 @@ use crate::common::{download_to_vec, upload_stream, wrap_stream};
 use super::{
     MaybeEnabledStorage, MaybeEnabledStorageWithSimpleTestBlobs, MaybeEnabledStorageWithTestBlobs,
 };
+
+const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Tests that S3 client can list all prefixes, even if the response come paginated and requires multiple S3 queries.
 /// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified.
@@ -168,6 +171,8 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
         MaybeEnabledStorage::Disabled => return Ok(()),
     };
 
+    let cancel = CancellationToken::new();
+
     let path1 = RemotePath::new(Utf8Path::new(format!("{}/path1", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
@@ -178,13 +183,19 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
         .with_context(|| "RemotePath conversion")?;
 
     let (data, len) = upload_stream("remote blob data1".as_bytes().into());
-    ctx.client.upload(data, len, &path1, None).await?;
+    ctx.client
+        .upload(data, len, &path1, None, TIMEOUT, &cancel)
+        .await?;
 
     let (data, len) = upload_stream("remote blob data2".as_bytes().into());
-    ctx.client.upload(data, len, &path2, None).await?;
+    ctx.client
+        .upload(data, len, &path2, None, TIMEOUT, &cancel)
+        .await?;
 
     let (data, len) = upload_stream("remote blob data3".as_bytes().into());
-    ctx.client.upload(data, len, &path3, None).await?;
+    ctx.client
+        .upload(data, len, &path3, None, TIMEOUT, &cancel)
+        .await?;
 
     ctx.client.delete_objects(&[path1, path2]).await?;
 
@@ -204,6 +215,8 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
         return Ok(());
     };
 
+    let cancel = CancellationToken::new();
+
     let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
@@ -211,7 +224,9 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
 
     let (data, len) = wrap_stream(orig.clone());
 
-    ctx.client.upload(data, len, &path, None).await?;
+    ctx.client
+        .upload(data, len, &path, None, TIMEOUT, &cancel)
+        .await?;
 
     // Normal download request
     let dl = ctx.client.download(&path).await?;
@@ -265,6 +280,8 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
         return Ok(());
     };
 
+    let cancel = CancellationToken::new();
+
     let path = RemotePath::new(Utf8Path::new(
         format!("{}/file_to_copy", ctx.base_prefix).as_str(),
     ))
@@ -278,7 +295,9 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
 
     let (data, len) = wrap_stream(orig.clone());
 
-    ctx.client.upload(data, len, &path, None).await?;
+    ctx.client
+        .upload(data, len, &path, None, TIMEOUT, &cancel)
+        .await?;
 
     // Normal download request
     ctx.client.copy_object(&path, &path_dest).await?;

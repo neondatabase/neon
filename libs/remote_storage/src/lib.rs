@@ -21,7 +21,7 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{bail, Context};
@@ -200,6 +200,9 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<Listing, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
+    ///
+    /// If the operation fails because of timeout or cancellation, the root cause of the error will be
+    /// set to `TimeoutOrCancel`.
     async fn upload(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
@@ -208,6 +211,8 @@ pub trait RemoteStorage: Send + Sync + 'static {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()>;
 
     /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
@@ -268,6 +273,11 @@ pub enum DownloadError {
     /// A cancellation token aborted the download, typically during
     /// tenant detach or process shutdown.
     Cancelled,
+    /// A timeout happened while executing the request. Possible reasons:
+    /// - stuck tcp connection
+    ///
+    /// Concurrency control is not timed within timeout.
+    Timeout,
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
@@ -278,8 +288,9 @@ impl std::fmt::Display for DownloadError {
             DownloadError::BadInput(e) => {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
-            DownloadError::Cancelled => write!(f, "Cancelled, shutting down"),
             DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
+            DownloadError::Cancelled => write!(f, "Cancelled, shutting down"),
+            DownloadError::Timeout => write!(f, "timeout"),
             DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
         }
     }
@@ -295,6 +306,7 @@ impl DownloadError {
             BadInput(_) => true,
             NotFound => true,
             Cancelled => true,
+            Timeout => false,
             Other(_) => false,
         }
     }
@@ -398,18 +410,33 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
+    /// See [`RemoteStorage::upload`]
     pub async fn upload(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::AzureBlob(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::LocalFs(s) => {
+                s.upload(from, data_size_bytes, to, metadata, timeout, cancel)
+                    .await
+            }
+            Self::AwsS3(s) => {
+                s.upload(from, data_size_bytes, to, metadata, timeout, cancel)
+                    .await
+            }
+            Self::AzureBlob(s) => {
+                s.upload(from, data_size_bytes, to, metadata, timeout, cancel)
+                    .await
+            }
+            Self::Unreliable(s) => {
+                s.upload(from, data_size_bytes, to, metadata, timeout, cancel)
+                    .await
+            }
         }
     }
 
@@ -532,18 +559,16 @@ impl GenericRemoteStorage {
         Self::Unreliable(Arc::new(UnreliableWrapper::new(s, fail_first)))
     }
 
-    /// Takes storage object contents and its size and uploads to remote storage,
-    /// mapping `from_path` to the corresponding remote object id in the storage.
-    ///
-    /// The storage object does not have to be present on the `from_path`,
-    /// this path is used for the remote object id conversion only.
+    /// See [`RemoteStorage::upload`], which this method calls with `None` as metadata.
     pub async fn upload_storage_object(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        self.upload(from, from_size_bytes, to, None)
+        self.upload(from, from_size_bytes, to, None, timeout, cancel)
             .await
             .with_context(|| {
                 format!("Failed to upload data of length {from_size_bytes} to storage path {to:?}")

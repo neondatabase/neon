@@ -5,7 +5,12 @@
 //! volume is mounted to the local FS.
 
 use std::{
-    borrow::Cow, future::Future, io::ErrorKind, num::NonZeroU32, pin::Pin, time::SystemTime,
+    borrow::Cow,
+    future::Future,
+    io::ErrorKind,
+    num::NonZeroU32,
+    pin::Pin,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{bail, ensure, Context};
@@ -20,7 +25,9 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
-use crate::{Download, DownloadError, Listing, ListingMode, RemotePath, TimeTravelError};
+use crate::{
+    Download, DownloadError, Listing, ListingMode, RemotePath, TimeTravelError, TimeoutOrCancel,
+};
 
 use super::{RemoteStorage, StorageMetadata};
 
@@ -157,6 +164,118 @@ impl LocalFs {
 
         Ok(files)
     }
+
+    async fn upload0(
+        &self,
+        data: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let target_file_path = to.with_base(&self.storage_root);
+        create_target_directory(&target_file_path).await?;
+        // We need this dance with sort of durable rename (without fsyncs)
+        // to prevent partial uploads. This was really hit when pageserver shutdown
+        // cancelled the upload and partial file was left on the fs
+        // NOTE: Because temp file suffix always the same this operation is racy.
+        // Two concurrent operations can lead to the following sequence:
+        // T1: write(temp)
+        // T2: write(temp) -> overwrites the content
+        // T1: rename(temp, dst) -> succeeds
+        // T2: rename(temp, dst) -> fails, temp no longet exists
+        // This can be solved by supplying unique temp suffix every time, but this situation
+        // is not normal in the first place, the error can help (and helped at least once)
+        // to discover bugs in upper level synchronization.
+        let temp_file_path =
+            path_with_suffix_extension(&target_file_path, LOCAL_FS_TEMP_FILE_SUFFIX);
+        let mut destination = io::BufWriter::new(
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&temp_file_path)
+                .await
+                .with_context(|| {
+                    format!("Failed to open target fs destination at '{target_file_path}'")
+                })?,
+        );
+
+        let from_size_bytes = data_size_bytes as u64;
+        let data = tokio_util::io::StreamReader::new(data);
+        let data = std::pin::pin!(data);
+        let mut buffer_to_read = data.take(from_size_bytes);
+
+        // alternatively we could just write the bytes to a file, but local_fs is a testing utility
+        let copy = io::copy_buf(&mut buffer_to_read, &mut destination);
+
+        let bytes_read = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let file = destination.into_inner();
+                // wait for the inflight operation(s) to complete so that there could be a next
+                // attempt right away and our writes are not directed to their file.
+                file.into_std().await;
+
+                // TODO: leave the temp or not? leaving is probably less racy. enabled truncate at
+                // least.
+                fs::remove_file(temp_file_path).await.context("remove temp_file_path after cancellation or timeout")?;
+                return Err(TimeoutOrCancel::Cancel.into());
+            }
+            read = copy => read,
+        };
+
+        let bytes_read =
+            bytes_read.with_context(|| {
+                format!(
+                    "Failed to upload file (write temp) to the local storage at '{temp_file_path}'",
+                )
+            })?;
+
+        if bytes_read < from_size_bytes {
+            bail!("Provided stream was shorter than expected: {bytes_read} vs {from_size_bytes} bytes");
+        }
+        // Check if there is any extra data after the given size.
+        let mut from = buffer_to_read.into_inner();
+        let extra_read = from.read(&mut [1]).await?;
+        ensure!(
+            extra_read == 0,
+            "Provided stream was larger than expected: expected {from_size_bytes} bytes",
+        );
+
+        destination.flush().await.with_context(|| {
+            format!(
+                "Failed to upload (flush temp) file to the local storage at '{temp_file_path}'",
+            )
+        })?;
+
+        fs::rename(temp_file_path, &target_file_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to upload (rename) file to the local storage at '{target_file_path}'",
+                )
+            })?;
+
+        if let Some(storage_metadata) = metadata {
+            // FIXME: we must not be using metadata much, since this would forget the old metadata
+            // for new writes? or perhaps metadata is sticky; could consider removing if it's never
+            // used.
+            let storage_metadata_path = storage_metadata_path(&target_file_path);
+            fs::write(
+                &storage_metadata_path,
+                serde_json::to_string(&storage_metadata.0)
+                    .context("Failed to serialize storage metadata as json")?,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to write metadata to the local storage at '{storage_metadata_path}'",
+                )
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 impl RemoteStorage for LocalFs {
@@ -231,89 +350,31 @@ impl RemoteStorage for LocalFs {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let target_file_path = to.with_base(&self.storage_root);
-        create_target_directory(&target_file_path).await?;
-        // We need this dance with sort of durable rename (without fsyncs)
-        // to prevent partial uploads. This was really hit when pageserver shutdown
-        // cancelled the upload and partial file was left on the fs
-        // NOTE: Because temp file suffix always the same this operation is racy.
-        // Two concurrent operations can lead to the following sequence:
-        // T1: write(temp)
-        // T2: write(temp) -> overwrites the content
-        // T1: rename(temp, dst) -> succeeds
-        // T2: rename(temp, dst) -> fails, temp no longet exists
-        // This can be solved by supplying unique temp suffix every time, but this situation
-        // is not normal in the first place, the error can help (and helped at least once)
-        // to discover bugs in upper level synchronization.
-        let temp_file_path =
-            path_with_suffix_extension(&target_file_path, LOCAL_FS_TEMP_FILE_SUFFIX);
-        let mut destination = io::BufWriter::new(
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .open(&temp_file_path)
-                .await
-                .with_context(|| {
-                    format!("Failed to open target fs destination at '{target_file_path}'")
-                })?,
-        );
+        let cancel = cancel.child_token();
 
-        let from_size_bytes = data_size_bytes as u64;
-        let data = tokio_util::io::StreamReader::new(data);
-        let data = std::pin::pin!(data);
-        let mut buffer_to_read = data.take(from_size_bytes);
+        let op = self.upload0(data, data_size_bytes, to, metadata, &cancel);
+        let mut op = std::pin::pin!(op);
 
-        // alternatively we could just write the bytes to a file, but local_fs is a testing utility
-        let bytes_read = io::copy_buf(&mut buffer_to_read, &mut destination)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to upload file (write temp) to the local storage at '{temp_file_path}'",
-                )
-            })?;
+        // race the upload0 to the timeout; if it goes over, do a graceful shutdown
+        let (res, timeout) = tokio::select! {
+            res = &mut op => (res, false),
+            _ = tokio::time::sleep(timeout) => {
+                cancel.cancel();
+                (op.await, true)
+            }
+        };
 
-        if bytes_read < from_size_bytes {
-            bail!("Provided stream was shorter than expected: {bytes_read} vs {from_size_bytes} bytes");
+        match res {
+            Err(e) if timeout && TimeoutOrCancel::caused_by_cancel(&e) => {
+                // we caused this cancel (or they happened simultaneously) -- swap it out to
+                // Timeout
+                Err(TimeoutOrCancel::Timeout.into())
+            }
+            res => res,
         }
-        // Check if there is any extra data after the given size.
-        let mut from = buffer_to_read.into_inner();
-        let extra_read = from.read(&mut [1]).await?;
-        ensure!(
-            extra_read == 0,
-            "Provided stream was larger than expected: expected {from_size_bytes} bytes",
-        );
-
-        destination.flush().await.with_context(|| {
-            format!(
-                "Failed to upload (flush temp) file to the local storage at '{temp_file_path}'",
-            )
-        })?;
-
-        fs::rename(temp_file_path, &target_file_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to upload (rename) file to the local storage at '{target_file_path}'",
-                )
-            })?;
-
-        if let Some(storage_metadata) = metadata {
-            let storage_metadata_path = storage_metadata_path(&target_file_path);
-            fs::write(
-                &storage_metadata_path,
-                serde_json::to_string(&storage_metadata.0)
-                    .context("Failed to serialize storage metadata as json")?,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to write metadata to the local storage at '{storage_metadata_path}'",
-                )
-            })?;
-        }
-
-        Ok(())
     }
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
@@ -524,6 +585,8 @@ mod fs_tests {
     use futures_util::Stream;
     use std::{collections::HashMap, io::Write};
 
+    const TIMEOUT: Duration = Duration::from_secs(120);
+
     async fn read_and_check_metadata(
         storage: &LocalFs,
         remote_storage_path: &RemotePath,
@@ -545,16 +608,16 @@ mod fs_tests {
 
     #[tokio::test]
     async fn upload_file() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
 
-        let target_path_1 = upload_dummy_file(&storage, "upload_1", None).await?;
+        let target_path_1 = upload_dummy_file(&storage, "upload_1", None, TIMEOUT, &cancel).await?;
         assert_eq!(
             storage.list_all().await?,
             vec![target_path_1.clone()],
             "Should list a single file after first upload"
         );
 
-        let target_path_2 = upload_dummy_file(&storage, "upload_2", None).await?;
+        let target_path_2 = upload_dummy_file(&storage, "upload_2", None, TIMEOUT, &cancel).await?;
         assert_eq!(
             list_files_sorted(&storage).await?,
             vec![target_path_1.clone(), target_path_2.clone()],
@@ -566,7 +629,7 @@ mod fs_tests {
 
     #[tokio::test]
     async fn upload_file_negatives() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
 
         let id = RemotePath::new(Utf8Path::new("dummy"))?;
         let content = Bytes::from_static(b"12345");
@@ -575,34 +638,37 @@ mod fs_tests {
         // Check that you get an error if the size parameter doesn't match the actual
         // size of the stream.
         storage
-            .upload(content(), 0, &id, None)
+            .upload(content(), 0, &id, None, TIMEOUT, &cancel)
             .await
             .expect_err("upload with zero size succeeded");
         storage
-            .upload(content(), 4, &id, None)
+            .upload(content(), 4, &id, None, TIMEOUT, &cancel)
             .await
             .expect_err("upload with too short size succeeded");
         storage
-            .upload(content(), 6, &id, None)
+            .upload(content(), 6, &id, None, TIMEOUT, &cancel)
             .await
             .expect_err("upload with too large size succeeded");
 
         // Correct size is 5, this should succeed.
-        storage.upload(content(), 5, &id, None).await?;
+        storage
+            .upload(content(), 5, &id, None, TIMEOUT, &cancel)
+            .await?;
 
         Ok(())
     }
 
-    fn create_storage() -> anyhow::Result<LocalFs> {
+    fn create_storage() -> anyhow::Result<(LocalFs, CancellationToken)> {
         let storage_root = tempdir()?.path().to_path_buf();
-        LocalFs::new(storage_root)
+        LocalFs::new(storage_root).map(|s| (s, CancellationToken::new()))
     }
 
     #[tokio::test]
     async fn download_file() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
+        let upload_target =
+            upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
 
         let contents = read_and_check_metadata(&storage, &upload_target, None).await?;
         assert_eq!(
@@ -621,9 +687,10 @@ mod fs_tests {
 
     #[tokio::test]
     async fn download_file_range_positive() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
+        let upload_target =
+            upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
 
         let full_range_download_contents =
             read_and_check_metadata(&storage, &upload_target, None).await?;
@@ -689,9 +756,10 @@ mod fs_tests {
 
     #[tokio::test]
     async fn download_file_range_negative() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
+        let upload_target =
+            upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
 
         let start = 1_000_000_000;
         let end = start + 1;
@@ -733,9 +801,10 @@ mod fs_tests {
 
     #[tokio::test]
     async fn delete_file() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
+        let upload_target =
+            upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
 
         storage.delete(&upload_target).await?;
         assert!(storage.list_all().await?.is_empty());
@@ -750,14 +819,20 @@ mod fs_tests {
 
     #[tokio::test]
     async fn file_with_metadata() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
         let metadata = StorageMetadata(HashMap::from([
             ("one".to_string(), "1".to_string()),
             ("two".to_string(), "2".to_string()),
         ]));
-        let upload_target =
-            upload_dummy_file(&storage, upload_name, Some(metadata.clone())).await?;
+        let upload_target = upload_dummy_file(
+            &storage,
+            upload_name,
+            Some(metadata.clone()),
+            TIMEOUT,
+            &cancel,
+        )
+        .await?;
 
         let full_range_download_contents =
             read_and_check_metadata(&storage, &upload_target, Some(&metadata)).await?;
@@ -792,9 +867,11 @@ mod fs_tests {
     #[tokio::test]
     async fn list() -> anyhow::Result<()> {
         // No delimiter: should recursively list everything
-        let storage = create_storage()?;
-        let child = upload_dummy_file(&storage, "grandparent/parent/child", None).await?;
-        let uncle = upload_dummy_file(&storage, "grandparent/uncle", None).await?;
+        let (storage, cancel) = create_storage()?;
+        let child =
+            upload_dummy_file(&storage, "grandparent/parent/child", None, TIMEOUT, &cancel).await?;
+        let uncle =
+            upload_dummy_file(&storage, "grandparent/uncle", None, TIMEOUT, &cancel).await?;
 
         let listing = storage.list(None, ListingMode::NoDelimiter, None).await?;
         assert!(listing.prefixes.is_empty());
@@ -827,10 +904,82 @@ mod fs_tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn overwrite_shorter_file() -> anyhow::Result<()> {
+        let (storage, cancel) = create_storage()?;
+
+        let path = RemotePath::new("does/not/matter/file".into())?;
+
+        let body = Bytes::from_static(b"long file contents is long");
+        {
+            let len = body.len();
+            let body =
+                futures::stream::once(futures::future::ready(std::io::Result::Ok(body.clone())));
+            storage
+                .upload(body, len, &path, None, TIMEOUT, &cancel)
+                .await?;
+        }
+
+        let read = aggregate(storage.download(&path).await?.download_stream).await?;
+        assert_eq!(body, read);
+
+        let shorter = Bytes::from_static(b"shorter body");
+        {
+            let len = shorter.len();
+            let body =
+                futures::stream::once(futures::future::ready(std::io::Result::Ok(shorter.clone())));
+            storage
+                .upload(body, len, &path, None, TIMEOUT, &cancel)
+                .await?;
+        }
+
+        let read = aggregate(storage.download(&path).await?.download_stream).await?;
+        assert_eq!(shorter, read);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_upload_can_later_be_retried() -> anyhow::Result<()> {
+        let (storage, cancel) = create_storage()?;
+
+        let path = RemotePath::new("does/not/matter/file".into())?;
+
+        let body = Bytes::from_static(b"long file contents is long");
+        {
+            let len = body.len();
+            let body =
+                futures::stream::once(futures::future::ready(std::io::Result::Ok(body.clone())));
+            let cancel = cancel.child_token();
+            cancel.cancel();
+            let e = storage
+                .upload(body, len, &path, None, TIMEOUT, &cancel)
+                .await
+                .unwrap_err();
+
+            assert!(TimeoutOrCancel::caused_by_cancel(&e));
+        }
+
+        {
+            let len = body.len();
+            let body =
+                futures::stream::once(futures::future::ready(std::io::Result::Ok(body.clone())));
+            storage
+                .upload(body, len, &path, None, TIMEOUT, &cancel)
+                .await?;
+        }
+
+        let read = aggregate(storage.download(&path).await?.download_stream).await?;
+        assert_eq!(body, read);
+
+        Ok(())
+    }
+
     async fn upload_dummy_file(
         storage: &LocalFs,
         name: &str,
         metadata: Option<StorageMetadata>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<RemotePath> {
         let from_path = storage
             .storage_root
@@ -852,7 +1001,9 @@ mod fs_tests {
 
         let file = tokio_util::io::ReaderStream::new(file);
 
-        storage.upload(file, size, &relative_path, metadata).await?;
+        storage
+            .upload(file, size, &relative_path, metadata, timeout, cancel)
+            .await?;
         Ok(relative_path)
     }
 
