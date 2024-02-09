@@ -1347,6 +1347,7 @@ impl RemoteTimelineClient {
     /// queue.
     ///
     async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
+        let cancel = shutdown_token();
         // Loop to retry until it completes.
         loop {
             // If we're requested to shut down, close up shop and exit.
@@ -1358,7 +1359,7 @@ impl RemoteTimelineClient {
             // the Future, but we're not 100% sure if the remote storage library
             // is cancellation safe, so we don't dare to do that. Hopefully, the
             // upload finishes or times out soon enough.
-            if task_mgr::is_shutdown_requested() {
+            if cancel.is_cancelled() {
                 info!("upload task cancelled by shutdown request");
                 match self.stop() {
                     Ok(()) => {}
@@ -1469,7 +1470,7 @@ impl RemoteTimelineClient {
                         retries,
                         DEFAULT_BASE_BACKOFF_SECONDS,
                         DEFAULT_MAX_BACKOFF_SECONDS,
-                        &shutdown_token(),
+                        &cancel,
                     )
                     .await;
                 }
