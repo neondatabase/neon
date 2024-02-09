@@ -527,7 +527,7 @@ where
 {
     backoff::retry(
         op,
-        |e| matches!(e, DownloadError::BadInput(_) | DownloadError::NotFound),
+        DownloadError::is_permanent,
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
@@ -549,7 +549,7 @@ where
 {
     backoff::retry(
         op,
-        |e| matches!(e, DownloadError::BadInput(_) | DownloadError::NotFound),
+        DownloadError::is_permanent,
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         u32::MAX,
         description,

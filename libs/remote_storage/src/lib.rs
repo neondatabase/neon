@@ -270,6 +270,19 @@ impl std::fmt::Display for DownloadError {
 
 impl std::error::Error for DownloadError {}
 
+impl DownloadError {
+    /// Returns true if the error should not be retried with backoff
+    pub fn is_permanent(&self) -> bool {
+        use DownloadError::*;
+        match self {
+            BadInput(_) => true,
+            NotFound => true,
+            Cancelled => true,
+            Other(_) => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TimeTravelError {
     /// Validation or other error happened due to user input.
