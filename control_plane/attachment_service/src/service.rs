@@ -374,6 +374,28 @@ impl Service {
         tracing::info!("Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)");
     }
 
+    /// Long running background task that periodically wakes up and looks for shards that need
+    /// reconciliation.  Reconciliation is fallible, so any reconciliation tasks that fail during
+    /// e.g. a tenant create/attach/migrate must eventually be retried: this task is responsible
+    /// for those retries.
+    #[instrument(skip_all)]
+    async fn background_reconcile(&self) {
+        self.startup_complete.clone().wait().await;
+
+        const BACKGROUND_RECONCILE_INTERVAL: Duration = Duration::from_secs(18);
+
+        while !self.cancel.is_cancelled() {
+            if tokio::time::timeout(BACKGROUND_RECONCILE_INTERVAL, self.cancel.cancelled())
+                .await
+                .is_ok()
+            {
+                break;
+            }
+
+            self.reconcile_all();
+        }
+    }
+
     #[instrument(skip_all)]
     async fn process_results(
         &self,
@@ -536,6 +558,14 @@ impl Service {
             // Block shutdown until we're done (we must respect self.cancel)
             if let Ok(_gate) = startup_reconcile_this.gate.enter() {
                 startup_reconcile_this.startup_reconcile().await
+            }
+        });
+
+        let background_reconcile_this = this.clone();
+        tokio::task::spawn(async move {
+            // Block shutdown until we're done (we must respect self.cancel)
+            if let Ok(_gate) = background_reconcile_this.gate.enter() {
+                background_reconcile_this.background_reconcile().await
             }
         });
 
