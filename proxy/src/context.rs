@@ -49,6 +49,7 @@ pub struct RequestMonitoring {
 
 #[derive(Clone, Debug)]
 pub enum AuthMethod {
+    // aka link aka passwordless
     Web,
     ScramSha256,
     ScramSha256Plus,

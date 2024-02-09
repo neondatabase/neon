@@ -116,6 +116,9 @@ fn get_conn_info(
     headers: &HeaderMap,
     tls: &TlsConfig,
 ) -> Result<ConnInfo, ConnInfoError> {
+    // HTTP only uses cleartext (for now and likely always)
+    ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
+
     let connection_string = headers
         .get("Neon-Connection-String")
         .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
