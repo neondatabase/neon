@@ -216,16 +216,15 @@ pub async fn list_remote_timelines(
         anyhow::bail!("storage-sync-list-remote-timelines");
     });
 
-    let cancel_inner = cancel.clone();
     let listing = download_retry_forever(
         || {
             download_cancellable(
-                &cancel_inner,
+                &cancel,
                 storage.list(Some(&remote_path), ListingMode::WithDelimiter),
             )
         },
         &format!("list timelines for {tenant_shard_id}"),
-        cancel,
+        &cancel,
     )
     .await?;
 
@@ -258,19 +257,18 @@ async fn do_download_index_part(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     index_generation: Generation,
-    cancel: CancellationToken,
+    cancel: &CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
     use futures::stream::StreamExt;
 
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
-    let cancel_inner = cancel.clone();
     let index_part_bytes = download_retry_forever(
         || async {
             // Cancellation: if is safe to cancel this future because we're just downloading into
             // a memory buffer, not touching local disk.
             let index_part_download =
-                download_cancellable(&cancel_inner, storage.download(&remote_path)).await?;
+                download_cancellable(cancel, storage.download(&remote_path)).await?;
 
             let mut index_part_bytes = Vec::new();
             let mut stream = std::pin::pin!(index_part_download.download_stream);
@@ -305,7 +303,7 @@ pub(super) async fn download_index_part(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     my_generation: Generation,
-    cancel: CancellationToken,
+    cancel: &CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -325,14 +323,8 @@ pub(super) async fn download_index_part(
     // index in our generation.
     //
     // This is an optimization to avoid doing the listing for the general case below.
-    let res = do_download_index_part(
-        storage,
-        tenant_shard_id,
-        timeline_id,
-        my_generation,
-        cancel.clone(),
-    )
-    .await;
+    let res =
+        do_download_index_part(storage, tenant_shard_id, timeline_id, my_generation, cancel).await;
     match res {
         Ok(index_part) => {
             tracing::debug!(
@@ -357,7 +349,7 @@ pub(super) async fn download_index_part(
         tenant_shard_id,
         timeline_id,
         my_generation.previous(),
-        cancel.clone(),
+        cancel,
     )
     .await;
     match res {
@@ -383,7 +375,7 @@ pub(super) async fn download_index_part(
     let indices = download_retry(
         || async { storage.list_files(Some(&index_prefix)).await },
         "list index_part files",
-        &cancel,
+        cancel,
     )
     .await?;
 
@@ -442,8 +434,6 @@ pub(crate) async fn download_initdb_tar_zst(
         "{INITDB_PATH}.download-{timeline_id}.{TEMP_FILE_SUFFIX}"
     ));
 
-    let cancel_inner = cancel.clone();
-
     let file = download_retry(
         || async {
             let file = OpenOptions::new()
@@ -456,13 +446,11 @@ pub(crate) async fn download_initdb_tar_zst(
                 .with_context(|| format!("tempfile creation {temp_path}"))
                 .map_err(DownloadError::Other)?;
 
-            let download = match download_cancellable(&cancel_inner, storage.download(&remote_path))
-                .await
+            let download = match download_cancellable(cancel, storage.download(&remote_path)).await
             {
                 Ok(dl) => dl,
                 Err(DownloadError::NotFound) => {
-                    download_cancellable(&cancel_inner, storage.download(&remote_preserved_path))
-                        .await?
+                    download_cancellable(cancel, storage.download(&remote_preserved_path)).await?
                 }
                 Err(other) => Err(other)?,
             };
@@ -536,7 +524,7 @@ where
 async fn download_retry_forever<T, O, F>(
     op: O,
     description: &str,
-    cancel: CancellationToken,
+    cancel: &CancellationToken,
 ) -> Result<T, DownloadError>
 where
     O: FnMut() -> F,
@@ -548,7 +536,7 @@ where
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         u32::MAX,
         description,
-        &cancel,
+        cancel,
     )
     .await
     .ok_or_else(|| DownloadError::Cancelled)

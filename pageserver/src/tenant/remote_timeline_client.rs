@@ -507,7 +507,7 @@ impl RemoteTimelineClient {
     /// Download index file
     pub async fn download_index_file(
         &self,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<MaybeDeletedIndexPart, DownloadError> {
         let _unfinished_gauge_guard = self.metrics.call_begin(
             &RemoteOpFileKind::Index,
@@ -1986,7 +1986,7 @@ mod tests {
 
         // Download back the index.json, and check that the list of files is correct
         let initial_index_part = match client
-            .download_index_file(CancellationToken::new())
+            .download_index_file(&CancellationToken::new())
             .await
             .unwrap()
         {
@@ -2080,7 +2080,7 @@ mod tests {
 
         // Download back the index.json, and check that the list of files is correct
         let index_part = match client
-            .download_index_file(CancellationToken::new())
+            .download_index_file(&CancellationToken::new())
             .await
             .unwrap()
         {
@@ -2282,7 +2282,7 @@ mod tests {
         let client = test_state.build_client(get_generation);
 
         let download_r = client
-            .download_index_file(CancellationToken::new())
+            .download_index_file(&CancellationToken::new())
             .await
             .expect("download should always succeed");
         assert!(matches!(download_r, MaybeDeletedIndexPart::IndexPart(_)));
