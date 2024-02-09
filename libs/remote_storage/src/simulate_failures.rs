@@ -60,7 +60,7 @@ impl UnreliableWrapper {
     /// On the first attempts of this operation, return an error. After 'attempts_to_fail'
     /// attempts, let the operation go ahead, and clear the counter.
     ///
-    fn attempt(&self, op: RemoteOp) -> Result<u64, DownloadError> {
+    fn attempt(&self, op: RemoteOp) -> anyhow::Result<u64> {
         let mut attempts = self.attempts.lock().unwrap();
 
         match attempts.entry(op) {
@@ -78,13 +78,13 @@ impl UnreliableWrapper {
                 } else {
                     let error =
                         anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());
-                    Err(DownloadError::Other(error))
+                    Err(error)
                 }
             }
             Entry::Vacant(e) => {
                 let error = anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());
                 e.insert(1);
-                Err(DownloadError::Other(error))
+                Err(error)
             }
         }
     }
@@ -105,12 +105,17 @@ impl RemoteStorage for UnreliableWrapper {
         &self,
         prefix: Option<&RemotePath>,
     ) -> Result<Vec<RemotePath>, DownloadError> {
-        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))?;
+        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
+            .map_err(DownloadError::Other)?;
         self.inner.list_prefixes(prefix).await
     }
 
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        self.attempt(RemoteOp::ListPrefixes(folder.cloned()))?;
+    async fn list_files(
+        &self,
+        folder: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
+        self.attempt(RemoteOp::ListPrefixes(folder.cloned()))
+            .map_err(DownloadError::Other)?;
         self.inner.list_files(folder).await
     }
 
@@ -119,7 +124,8 @@ impl RemoteStorage for UnreliableWrapper {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
     ) -> Result<Listing, DownloadError> {
-        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))?;
+        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
+            .map_err(DownloadError::Other)?;
         self.inner.list(prefix, mode).await
     }
 
@@ -137,7 +143,8 @@ impl RemoteStorage for UnreliableWrapper {
     }
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
-        self.attempt(RemoteOp::Download(from.clone()))?;
+        self.attempt(RemoteOp::Download(from.clone()))
+            .map_err(DownloadError::Other)?;
         self.inner.download(from).await
     }
 
@@ -150,7 +157,8 @@ impl RemoteStorage for UnreliableWrapper {
         // Note: We treat any download_byte_range as an "attempt" of the same
         // operation. We don't pay attention to the ranges. That's good enough
         // for now.
-        self.attempt(RemoteOp::Download(from.clone()))?;
+        self.attempt(RemoteOp::Download(from.clone()))
+            .map_err(DownloadError::Other)?;
         self.inner
             .download_byte_range(from, start_inclusive, end_exclusive)
             .await
@@ -193,7 +201,7 @@ impl RemoteStorage for UnreliableWrapper {
         cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))
-            .map_err(|e| TimeTravelError::Other(anyhow::Error::new(e)))?;
+            .map_err(TimeTravelError::Other)?;
         self.inner
             .time_travel_recover(prefix, timestamp, done_if_after, cancel)
             .await

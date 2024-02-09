@@ -53,6 +53,7 @@ use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
 use self::mgr::TenantsMap;
+use self::remote_timeline_client::upload::upload_index_part;
 use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::TimelineUninitMark;
@@ -1376,7 +1377,7 @@ impl Tenant {
                 async move {
                     debug!("starting index part download");
 
-                    let index_part = client.download_index_file(cancel_clone).await;
+                    let index_part = client.download_index_file(&cancel_clone).await;
 
                     debug!("finished index part download");
 
@@ -2396,6 +2397,67 @@ impl Tenant {
 
     pub(crate) fn get_generation(&self) -> Generation {
         self.generation
+    }
+
+    /// This function partially shuts down the tenant (it shuts down the Timelines) and is fallible,
+    /// and can leave the tenant in a bad state if it fails.  The caller is responsible for
+    /// resetting this tenant to a valid state if we fail.
+    pub(crate) async fn split_prepare(
+        &self,
+        child_shards: &Vec<TenantShardId>,
+    ) -> anyhow::Result<()> {
+        let timelines = self.timelines.lock().unwrap().clone();
+        for timeline in timelines.values() {
+            let Some(tl_client) = &timeline.remote_client else {
+                anyhow::bail!("Remote storage is mandatory");
+            };
+
+            let Some(remote_storage) = &self.remote_storage else {
+                anyhow::bail!("Remote storage is mandatory");
+            };
+
+            // We do not block timeline creation/deletion during splits inside the pageserver: it is up to higher levels
+            // to ensure that they do not start a split if currently in the process of doing these.
+
+            // Upload an index from the parent: this is partly to provide freshness for the
+            // child tenants that will copy it, and partly for general ease-of-debugging: there will
+            // always be a parent shard index in the same generation as we wrote the child shard index.
+            tl_client.schedule_index_upload_for_file_changes()?;
+            tl_client.wait_completion().await?;
+
+            // Shut down the timeline's remote client: this means that the indices we write
+            // for child shards will not be invalidated by the parent shard deleting layers.
+            tl_client.shutdown().await?;
+
+            // Download methods can still be used after shutdown, as they don't flow through the remote client's
+            // queue.  In principal the RemoteTimelineClient could provide this without downloading it, but this
+            // operation is rare, so it's simpler to just download it (and robustly guarantees that the index
+            // we use here really is the remotely persistent one).
+            let result = tl_client
+                .download_index_file(&self.cancel)
+                .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))
+                .await?;
+            let index_part = match result {
+                MaybeDeletedIndexPart::Deleted(_) => {
+                    anyhow::bail!("Timeline deletion happened concurrently with split")
+                }
+                MaybeDeletedIndexPart::IndexPart(p) => p,
+            };
+
+            for child_shard in child_shards {
+                upload_index_part(
+                    remote_storage,
+                    child_shard,
+                    &timeline.timeline_id,
+                    self.generation,
+                    &index_part,
+                    &self.cancel,
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -3731,6 +3793,10 @@ impl Tenant {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
+        self.tenant_conf.read().unwrap().tenant_conf
     }
 }
 

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::bail;
-use anyhow::Context;
 use futures::pin_mut;
 use futures::StreamExt;
 use hyper::body::HttpBody;
@@ -29,9 +28,11 @@ use utils::http::json::json_response;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
+use crate::auth::ComputeUserInfoParseError;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
@@ -41,13 +42,15 @@ use super::backend::PoolingBackend;
 use super::conn_pool::ConnInfo;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
-use super::SERVERLESS_DRIVER_SNI;
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct QueryData {
     query: String,
     #[serde(deserialize_with = "bytes_to_pg_text")]
     params: Vec<Option<String>>,
+    #[serde(default)]
+    array_mode: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -83,67 +86,70 @@ where
     Ok(json_to_pg_text(json))
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConnInfoError {
+    #[error("invalid header: {0}")]
+    InvalidHeader(&'static str),
+    #[error("invalid connection string: {0}")]
+    UrlParseError(#[from] url::ParseError),
+    #[error("incorrect scheme")]
+    IncorrectScheme,
+    #[error("missing database name")]
+    MissingDbName,
+    #[error("invalid database name")]
+    InvalidDbName,
+    #[error("missing username")]
+    MissingUsername,
+    #[error("missing password")]
+    MissingPassword,
+    #[error("missing hostname")]
+    MissingHostname,
+    #[error("invalid hostname: {0}")]
+    InvalidEndpoint(#[from] ComputeUserInfoParseError),
+    #[error("malformed endpoint")]
+    MalformedEndpoint,
+}
+
 fn get_conn_info(
     ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
-    sni_hostname: Option<String>,
     tls: &TlsConfig,
-) -> Result<ConnInfo, anyhow::Error> {
+) -> Result<ConnInfo, ConnInfoError> {
     let connection_string = headers
         .get("Neon-Connection-String")
-        .ok_or(anyhow::anyhow!("missing connection string"))?
-        .to_str()?;
+        .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
+        .to_str()
+        .map_err(|_| ConnInfoError::InvalidHeader("Neon-Connection-String"))?;
 
     let connection_url = Url::parse(connection_string)?;
 
     let protocol = connection_url.scheme();
     if protocol != "postgres" && protocol != "postgresql" {
-        return Err(anyhow::anyhow!(
-            "connection string must start with postgres: or postgresql:"
-        ));
+        return Err(ConnInfoError::IncorrectScheme);
     }
 
     let mut url_path = connection_url
         .path_segments()
-        .ok_or(anyhow::anyhow!("missing database name"))?;
+        .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname = url_path
-        .next()
-        .ok_or(anyhow::anyhow!("invalid database name"))?;
+    let dbname = url_path.next().ok_or(ConnInfoError::InvalidDbName)?;
 
     let username = RoleName::from(connection_url.username());
     if username.is_empty() {
-        return Err(anyhow::anyhow!("missing username"));
+        return Err(ConnInfoError::MissingUsername);
     }
     ctx.set_user(username.clone());
 
     let password = connection_url
         .password()
-        .ok_or(anyhow::anyhow!("no password"))?;
-
-    // TLS certificate selector now based on SNI hostname, so if we are running here
-    // we are sure that SNI hostname is set to one of the configured domain names.
-    let sni_hostname = sni_hostname.ok_or(anyhow::anyhow!("no SNI hostname set"))?;
+        .ok_or(ConnInfoError::MissingPassword)?;
 
     let hostname = connection_url
         .host_str()
-        .ok_or(anyhow::anyhow!("no host"))?;
+        .ok_or(ConnInfoError::MissingHostname)?;
 
-    let host_header = headers
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.split(':').next());
-
-    // sni_hostname has to be either the same as hostname or the one used in serverless driver.
-    if !check_matches(&sni_hostname, hostname)? {
-        return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
-    } else if let Some(h) = host_header {
-        if h != sni_hostname {
-            return Err(anyhow::anyhow!("mismatched host header and hostname"));
-        }
-    }
-
-    let endpoint = endpoint_sni(hostname, &tls.common_names)?.context("malformed endpoint")?;
+    let endpoint =
+        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?;
     ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
@@ -170,36 +176,27 @@ fn get_conn_info(
     })
 }
 
-fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Error> {
-    if sni_hostname == hostname {
-        return Ok(true);
-    }
-    let (sni_hostname_first, sni_hostname_rest) = sni_hostname
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected sni format."))?;
-    let (_, hostname_rest) = hostname
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected hostname format."))?;
-    Ok(sni_hostname_rest == hostname_rest && sni_hostname_first == SERVERLESS_DRIVER_SNI)
-}
-
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    mut ctx: RequestMonitoring,
     request: Request<Body>,
-    sni_hostname: Option<String>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.http_config.request_timeout,
-        handle_inner(config, ctx, request, sni_hostname, backend),
+        handle_inner(config, &mut ctx, request, backend),
     )
     .await;
     let mut response = match result {
         Ok(r) => match r {
-            Ok(r) => r,
+            Ok(r) => {
+                ctx.set_success();
+                r
+            }
             Err(e) => {
+                // TODO: ctx.set_error_kind(e.get_error_type());
+
                 let mut message = format!("{:?}", e);
                 let db_error = e
                     .downcast_ref::<tokio_postgres::Error>()
@@ -275,7 +272,9 @@ pub async fn handle(
                 )?
             }
         },
-        Err(_) => {
+        Err(e) => {
+            ctx.set_error_kind(e.get_error_kind());
+
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
                 config.http_config.request_timeout.as_secs()
@@ -287,6 +286,7 @@ pub async fn handle(
             )?
         }
     };
+
     response.headers_mut().insert(
         "Access-Control-Allow-Origin",
         hyper::http::HeaderValue::from_static("*"),
@@ -299,7 +299,6 @@ async fn handle_inner(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
-    sni_hostname: Option<String>,
     backend: Arc<PoolingBackend>,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
@@ -315,12 +314,7 @@ async fn handle_inner(
     //
     let headers = request.headers();
     // TLS config should be there.
-    let conn_info = get_conn_info(
-        ctx,
-        headers,
-        sni_hostname,
-        config.tls_config.as_ref().unwrap(),
-    )?;
+    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
     info!(
         user = conn_info.user_info.user.as_str(),
         project = conn_info.user_info.endpoint.as_str(),
@@ -330,7 +324,7 @@ async fn handle_inner(
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
     let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
-    let array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
+    let default_array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
@@ -402,86 +396,88 @@ async fn handle_inner(
     // Now execute the query and return the result
     //
     let mut size = 0;
-    let result =
-        match payload {
-            Payload::Single(stmt) => {
-                let (status, results) =
-                    query_to_json(&*client, stmt, &mut 0, raw_output, array_mode)
-                        .await
-                        .map_err(|e| {
-                            client.discard();
-                            e
-                        })?;
-                client.check_idle(status);
-                results
+    let result = match payload {
+        Payload::Single(stmt) => {
+            let (status, results) =
+                query_to_json(&*client, stmt, &mut 0, raw_output, default_array_mode)
+                    .await
+                    .map_err(|e| {
+                        client.discard();
+                        e
+                    })?;
+            client.check_idle(status);
+            results
+        }
+        Payload::Batch(statements) => {
+            let (inner, mut discard) = client.inner();
+            let mut builder = inner.build_transaction();
+            if let Some(isolation_level) = txn_isolation_level {
+                builder = builder.isolation_level(isolation_level);
             }
-            Payload::Batch(statements) => {
-                let (inner, mut discard) = client.inner();
-                let mut builder = inner.build_transaction();
-                if let Some(isolation_level) = txn_isolation_level {
-                    builder = builder.isolation_level(isolation_level);
-                }
-                if txn_read_only {
-                    builder = builder.read_only(true);
-                }
-                if txn_deferrable {
-                    builder = builder.deferrable(true);
-                }
-
-                let transaction = builder.start().await.map_err(|e| {
-                    // if we cannot start a transaction, we should return immediately
-                    // and not return to the pool. connection is clearly broken
-                    discard.discard();
-                    e
-                })?;
-
-                let results =
-                    match query_batch(&transaction, statements, &mut size, raw_output, array_mode)
-                        .await
-                    {
-                        Ok(results) => {
-                            let status = transaction.commit().await.map_err(|e| {
-                                // if we cannot commit - for now don't return connection to pool
-                                // TODO: get a query status from the error
-                                discard.discard();
-                                e
-                            })?;
-                            discard.check_idle(status);
-                            results
-                        }
-                        Err(err) => {
-                            let status = transaction.rollback().await.map_err(|e| {
-                                // if we cannot rollback - for now don't return connection to pool
-                                // TODO: get a query status from the error
-                                discard.discard();
-                                e
-                            })?;
-                            discard.check_idle(status);
-                            return Err(err);
-                        }
-                    };
-
-                if txn_read_only {
-                    response = response.header(
-                        TXN_READ_ONLY.clone(),
-                        HeaderValue::try_from(txn_read_only.to_string())?,
-                    );
-                }
-                if txn_deferrable {
-                    response = response.header(
-                        TXN_DEFERRABLE.clone(),
-                        HeaderValue::try_from(txn_deferrable.to_string())?,
-                    );
-                }
-                if let Some(txn_isolation_level) = txn_isolation_level_raw {
-                    response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
-                }
-                json!({ "results": results })
+            if txn_read_only {
+                builder = builder.read_only(true);
             }
-        };
+            if txn_deferrable {
+                builder = builder.deferrable(true);
+            }
 
-    ctx.set_success();
-    ctx.log();
+            let transaction = builder.start().await.map_err(|e| {
+                // if we cannot start a transaction, we should return immediately
+                // and not return to the pool. connection is clearly broken
+                discard.discard();
+                e
+            })?;
+
+            let results = match query_batch(
+                &transaction,
+                statements,
+                &mut size,
+                raw_output,
+                default_array_mode,
+            )
+            .await
+            {
+                Ok(results) => {
+                    let status = transaction.commit().await.map_err(|e| {
+                        // if we cannot commit - for now don't return connection to pool
+                        // TODO: get a query status from the error
+                        discard.discard();
+                        e
+                    })?;
+                    discard.check_idle(status);
+                    results
+                }
+                Err(err) => {
+                    let status = transaction.rollback().await.map_err(|e| {
+                        // if we cannot rollback - for now don't return connection to pool
+                        // TODO: get a query status from the error
+                        discard.discard();
+                        e
+                    })?;
+                    discard.check_idle(status);
+                    return Err(err);
+                }
+            };
+
+            if txn_read_only {
+                response = response.header(
+                    TXN_READ_ONLY.clone(),
+                    HeaderValue::try_from(txn_read_only.to_string())?,
+                );
+            }
+            if txn_deferrable {
+                response = response.header(
+                    TXN_DEFERRABLE.clone(),
+                    HeaderValue::try_from(txn_deferrable.to_string())?,
+                );
+            }
+            if let Some(txn_isolation_level) = txn_isolation_level_raw {
+                response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
+            }
+            json!({ "results": results })
+        }
+    };
+
     let metrics = client.metrics();
 
     // how could this possibly fail
@@ -524,7 +520,7 @@ async fn query_to_json<T: GenericClient>(
     data: QueryData,
     current_size: &mut usize,
     raw_output: bool,
-    array_mode: bool,
+    default_array_mode: bool,
 ) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
     let query_params = data.params;
     let row_stream = client.query_raw_txt(&data.query, query_params).await?;
@@ -577,6 +573,8 @@ async fn query_to_json<T: GenericClient>(
         }));
         columns.push(client.get_type(c.type_oid()).await?);
     }
+
+    let array_mode = data.array_mode.unwrap_or(default_array_mode);
 
     // convert rows to JSON
     let rows = rows

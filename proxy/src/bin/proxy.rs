@@ -88,6 +88,9 @@ struct ProxyCliArgs {
     /// path to directory with TLS certificates for client postgres connections
     #[clap(long)]
     certs_dir: Option<String>,
+    /// timeout for the TLS handshake
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    handshake_timeout: tokio::time::Duration,
     /// http endpoint to receive periodic metric updates
     #[clap(long)]
     metric_collection_endpoint: Option<String>,
@@ -411,6 +414,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
+        handshake_timeout: args.handshake_timeout,
         // TODO: add this argument
         region: args.region.clone(),
     }));

@@ -17,7 +17,7 @@ pub fn log_error<E: fmt::Display>(e: E) -> E {
 /// NOTE: This trait should not be implemented for [`anyhow::Error`], since it
 /// is way too convenient and tends to proliferate all across the codebase,
 /// ultimately leading to accidental leaks of sensitive data.
-pub trait UserFacingError: fmt::Display {
+pub trait UserFacingError: ReportableError {
     /// Format the error for client, stripping all sensitive info.
     ///
     /// Although this might be a no-op for many types, it's highly
@@ -29,13 +29,13 @@ pub trait UserFacingError: fmt::Display {
     }
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum ErrorKind {
     /// Wrong password, unknown endpoint, protocol violation, etc...
     User,
 
     /// Network error between user and proxy. Not necessarily user error
-    Disconnect,
+    ClientDisconnect,
 
     /// Proxy self-imposed rate limits
     RateLimit,
@@ -46,6 +46,9 @@ pub enum ErrorKind {
     /// Error communicating with control plane
     ControlPlane,
 
+    /// Postgres error
+    Postgres,
+
     /// Error communicating with compute
     Compute,
 }
@@ -54,11 +57,36 @@ impl ErrorKind {
     pub fn to_str(&self) -> &'static str {
         match self {
             ErrorKind::User => "request failed due to user error",
-            ErrorKind::Disconnect => "client disconnected",
+            ErrorKind::ClientDisconnect => "client disconnected",
             ErrorKind::RateLimit => "request cancelled due to rate limit",
             ErrorKind::Service => "internal service error",
             ErrorKind::ControlPlane => "non-retryable control plane error",
-            ErrorKind::Compute => "non-retryable compute error (or exhausted retry capacity)",
+            ErrorKind::Postgres => "postgres error",
+            ErrorKind::Compute => {
+                "non-retryable compute connection error (or exhausted retry capacity)"
+            }
         }
+    }
+
+    pub fn to_metric_label(&self) -> &'static str {
+        match self {
+            ErrorKind::User => "user",
+            ErrorKind::ClientDisconnect => "clientdisconnect",
+            ErrorKind::RateLimit => "ratelimit",
+            ErrorKind::Service => "service",
+            ErrorKind::ControlPlane => "controlplane",
+            ErrorKind::Postgres => "postgres",
+            ErrorKind::Compute => "compute",
+        }
+    }
+}
+
+pub trait ReportableError: fmt::Display + Send + 'static {
+    fn get_error_kind(&self) -> ErrorKind;
+}
+
+impl ReportableError for tokio::time::error::Elapsed {
+    fn get_error_kind(&self) -> ErrorKind {
+        ErrorKind::RateLimit
     }
 }

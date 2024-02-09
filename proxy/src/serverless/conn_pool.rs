@@ -28,6 +28,8 @@ use crate::{
 use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
+use super::backend::HttpConnError;
+
 pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
 
 #[derive(Debug, Clone)]
@@ -358,7 +360,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         self: &Arc<Self>,
         ctx: &mut RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> anyhow::Result<Option<Client<C>>> {
+    ) -> Result<Option<Client<C>>, HttpConnError> {
         let mut client: Option<ClientInner<C>> = None;
 
         let endpoint_pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());

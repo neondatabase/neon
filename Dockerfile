@@ -100,6 +100,11 @@ RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
        -c "listen_pg_addr='0.0.0.0:6400'" \
        -c "listen_http_addr='0.0.0.0:9898'"
 
+# When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
+# that want a particular postgres version will select it explicitly: this is just a default.
+ENV LD_LIBRARY_PATH /usr/local/v16/lib
+
+
 VOLUME ["/data"]
 USER neon
 EXPOSE 6400
