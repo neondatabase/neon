@@ -95,13 +95,14 @@ def test_sharding_split_unsharded(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    workload = Workload(env, tenant_id, timeline_id, branch_name="main")
-    workload.init()
-    workload.write_rows(256)
-
     # Check that we created with an unsharded TenantShardId: this is the default,
     # but check it in case we change the default in future
     assert env.attachment_service.inspect(TenantShardId(tenant_id, 0, 0)) is not None
+
+    workload = Workload(env, tenant_id, timeline_id, branch_name="main")
+    workload.init()
+    workload.write_rows(256)
+    workload.validate()
 
     # Split one shard into two
     env.attachment_service.tenant_shard_split(tenant_id, shard_count=2)
