@@ -368,7 +368,10 @@ impl Test {
             }
         }
 
-        debug!("finished schedule");
+        debug!(
+            "finished schedule, total steps: {}",
+            self.world.get_thread_step_count()
+        );
         debug!("skipped_tx: {}", skipped_tx);
         debug!("started_tx: {}", started_tx);
 

@@ -63,6 +63,10 @@ impl World {
         self.runtime.lock().step()
     }
 
+    pub fn get_thread_step_count(&self) -> u64 {
+        self.runtime.lock().step_counter
+    }
+
     /// Create a new random number generator.
     pub fn new_rng(&self) -> StdRng {
         let mut rng = self.rng.lock();

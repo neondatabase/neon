@@ -20,6 +20,10 @@ pub struct Runtime {
     clock: Arc<Timing>,
     // thread counter
     thread_counter: AtomicU32,
+    // Thread step counter -- how many times all threads has been actually
+    // stepped (note that all world/time/executor/thread have slightly different
+    // meaning of steps). For observability.
+    pub step_counter: u64,
 }
 
 impl Runtime {
@@ -29,6 +33,7 @@ impl Runtime {
             threads: Vec::new(),
             clock,
             thread_counter: AtomicU32::new(0),
+            step_counter: 0,
         }
     }
 
@@ -111,6 +116,7 @@ impl Runtime {
 
             trace!("entering thread-{}", thread.ctx.tid());
             let status = thread.step();
+            self.step_counter += 1;
             trace!(
                 "out of thread-{} with status {:?}",
                 thread.ctx.tid(),
