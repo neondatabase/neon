@@ -91,6 +91,9 @@ struct ProxyCliArgs {
     /// timeout for the TLS handshake
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     handshake_timeout: tokio::time::Duration,
+    /// timeout for the control plane requests
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    cplane_timeout: tokio::time::Duration,
     /// http endpoint to receive periodic metric updates
     #[clap(long)]
     metric_collection_endpoint: Option<String>,
@@ -368,7 +371,10 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             tokio::spawn(locks.garbage_collect_worker(epoch));
 
             let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
+            let endpoint = http::Endpoint::new(
+                url,
+                http::new_client(rate_limiter_config, args.cplane_timeout),
+            );
 
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             let api = console::provider::ConsoleBackend::Console(api);

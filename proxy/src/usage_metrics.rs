@@ -237,6 +237,7 @@ mod tests {
     use std::{
         net::TcpListener,
         sync::{Arc, Mutex},
+        time::Duration,
     };
 
     use anyhow::Error;
@@ -279,7 +280,7 @@ mod tests {
         tokio::spawn(server);
 
         let metrics = Metrics::default();
-        let client = http::new_client(RateLimiterConfig::default());
+        let client = http::new_client(RateLimiterConfig::default(), Duration::from_secs(15));
         let endpoint = Url::parse(&format!("http://{addr}")).unwrap();
         let now = Utc::now();
 

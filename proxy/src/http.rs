@@ -19,10 +19,14 @@ use reqwest_middleware::RequestBuilder;
 /// This is the preferred way to create new http clients,
 /// because it takes care of observability (OpenTelemetry).
 /// We deliberately don't want to replace this with a public static.
-pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> ClientWithMiddleware {
+pub fn new_client(
+    rate_limiter_config: rate_limiter::RateLimiterConfig,
+    timeout: Duration,
+) -> ClientWithMiddleware {
     let client = reqwest::ClientBuilder::new()
         .dns_resolver(Arc::new(GaiResolver::default()))
         .connection_verbose(true)
+        .timeout(timeout)
         .build()
         .expect("Failed to create http client");
 
