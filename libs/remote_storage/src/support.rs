@@ -9,6 +9,8 @@ use bytes::Bytes;
 use futures_util::Stream;
 use tokio_util::sync::CancellationToken;
 
+use crate::DownloadError;
+
 pin_project_lite::pin_project! {
     /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
     pub(crate) struct PermitCarrying<S> {
@@ -127,14 +129,19 @@ impl TimeoutOrCancel {
 // `std::io::Error`.
 impl From<TimeoutOrCancel> for std::io::Error {
     fn from(value: TimeoutOrCancel) -> Self {
+        let e = DownloadError::from(value);
+        std::io::Error::other(e)
+    }
+}
+
+impl From<TimeoutOrCancel> for DownloadError {
+    fn from(value: TimeoutOrCancel) -> Self {
         use TimeoutOrCancel::*;
 
-        let e = match value {
-            Timeout => crate::DownloadError::Timeout,
-            Cancel => crate::DownloadError::Cancelled,
-        };
-
-        std::io::Error::other(e)
+        match value {
+            Timeout => DownloadError::Timeout,
+            Cancel => DownloadError::Cancelled,
+        }
     }
 }
 
