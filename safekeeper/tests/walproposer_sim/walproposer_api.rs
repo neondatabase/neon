@@ -118,10 +118,7 @@ impl EventSet {
     }
 
     fn remove_safekeeper(&mut self, sk: &SafekeeperConn) {
-        let index = self
-            .sk_ptrs
-            .iter()
-            .position(|&ptr| ptr == sk.raw_ptr);
+        let index = self.sk_ptrs.iter().position(|&ptr| ptr == sk.raw_ptr);
         if index.is_none() {
             debug!("remove_safekeeper: sk={:?} not found", sk.raw_ptr);
             return;
@@ -531,6 +528,10 @@ impl ApiImpl for SimulationApi {
             }
             if msg.contains("failed to download WAL for logical replicaiton") {
                 // Recovery connection broken and recovery was failed
+                executor::exit(1, msg.to_owned());
+            }
+            if msg.contains("missing majority of votes, collected") {
+                // Voting bug when safekeeper disconnects after voting
                 executor::exit(1, msg.to_owned());
             }
             panic!("unknown FATAL error from walproposer: {}", msg);
