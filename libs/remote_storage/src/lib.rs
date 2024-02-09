@@ -41,6 +41,8 @@ pub use self::{
 };
 use s3_bucket::RequestKind;
 
+pub use support::TimeoutOrCancel;
+
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
 /// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>

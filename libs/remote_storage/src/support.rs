@@ -56,8 +56,7 @@ impl<F, S> DownloadStream<F, S> {
     }
 }
 
-/// TODO: This is currently returning `std::io::Error` which is not really required, the From bound is
-/// going to the opposite direction.
+/// See documentation on [`crate::DownloadStream`] on rationale why `std::io::Error` is used.
 impl<E, F, S> Stream for DownloadStream<F, S>
 where
     std::io::Error: From<E>,
@@ -72,7 +71,6 @@ where
         if !*this.hit {
             if let Poll::Ready(e) = this.cancellation.poll(cx) {
                 *this.hit = true;
-                // FIXME: does this make any sense? quite ackward type
                 let e = Err(std::io::Error::from(e));
                 return Poll::Ready(Some(e));
             }
@@ -86,9 +84,58 @@ where
     }
 }
 
-pub(crate) enum TimeoutOrCancel {
+/// This type is used at as the root cause for timeouts and cancellations with anyhow returning
+/// RemoteStorage methods.
+#[derive(Debug)]
+pub enum TimeoutOrCancel {
     Timeout,
     Cancel,
+}
+
+impl std::fmt::Display for TimeoutOrCancel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use TimeoutOrCancel::*;
+        match self {
+            Timeout => write!(f, "timeout"),
+            Cancel => write!(f, "cancel"),
+        }
+    }
+}
+
+impl std::error::Error for TimeoutOrCancel {}
+
+impl TimeoutOrCancel {
+    pub fn caused(error: &anyhow::Error) -> Option<&Self> {
+        error.root_cause().downcast_ref()
+    }
+
+    /// Returns true if the error was caused by [`TimeoutOrCancel::Cancel`].
+    pub fn caused_by_cancel(error: &anyhow::Error) -> bool {
+        Self::caused(error).is_some_and(Self::is_cancel)
+    }
+
+    pub fn is_cancel(&self) -> bool {
+        matches!(self, TimeoutOrCancel::Cancel)
+    }
+
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, TimeoutOrCancel::Timeout)
+    }
+}
+
+// Sadly the only way `tokio::io::copy_buf` helpers work is that if the error type is
+// `std::io::Error`.
+impl From<TimeoutOrCancel> for std::io::Error {
+    fn from(value: TimeoutOrCancel) -> Self {
+        use TimeoutOrCancel::*;
+
+        let e = match value {
+            Timeout => crate::DownloadError::Timeout,
+            Cancel => crate::DownloadError::Cancelled,
+        };
+
+        std::io::Error::other(e)
+    }
 }
 
 /// Fires only on the first cancel or timeout, not on both.
