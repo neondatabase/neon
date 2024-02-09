@@ -768,7 +768,7 @@ impl RemoteStorage for S3Bucket {
 
         let warn_threshold = 3;
         let max_retries = 10;
-        let is_permanent = |_e: &_| false;
+        let is_permanent = |e: &_| matches!(e, TimeTravelError::Cancelled);
 
         let mut key_marker = None;
         let mut version_id_marker = None;
@@ -777,15 +777,19 @@ impl RemoteStorage for S3Bucket {
         loop {
             let response = backoff::retry(
                 || async {
-                    self.client
+                    let op = self
+                        .client
                         .list_object_versions()
                         .bucket(self.bucket_name.clone())
                         .set_prefix(prefix.clone())
                         .set_key_marker(key_marker.clone())
                         .set_version_id_marker(version_id_marker.clone())
-                        .send()
-                        .await
-                        .map_err(|e| TimeTravelError::Other(e.into()))
+                        .send();
+
+                    tokio::select! {
+                        res = op => res.map_err(|e| TimeTravelError::Other(e.into())),
+                        _ = cancel.cancelled() => Err(TimeTravelError::Cancelled),
+                    }
                 },
                 is_permanent,
                 warn_threshold,
@@ -907,14 +911,18 @@ impl RemoteStorage for S3Bucket {
 
                         backoff::retry(
                             || async {
-                                self.client
+                                let op = self
+                                    .client
                                     .copy_object()
                                     .bucket(self.bucket_name.clone())
                                     .key(key)
                                     .copy_source(&source_id)
-                                    .send()
-                                    .await
-                                    .map_err(|e| TimeTravelError::Other(e.into()))
+                                    .send();
+
+                                tokio::select! {
+                                    res = op => res.map_err(|e| TimeTravelError::Other(e.into())),
+                                    _ = cancel.cancelled() => Err(TimeTravelError::Cancelled),
+                                }
                             },
                             is_permanent,
                             warn_threshold,
