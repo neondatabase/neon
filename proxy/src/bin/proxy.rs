@@ -380,7 +380,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
         AuthBackend::Link => {
             let url = args.uri.parse()?;
-            auth::BackendType::Link(MaybeOwned::Owned(url))
+            auth::BackendType::Link(MaybeOwned::Owned(url), ())
         }
     };
     let http_config = HttpConfig {

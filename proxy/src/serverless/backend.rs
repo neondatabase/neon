@@ -1,11 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::Context;
 use async_trait::async_trait;
 use tracing::info;
 
 use crate::{
-    auth::{backend::ComputeCredentialKeys, check_peer_addr_is_in_list, AuthError},
+    auth::{backend::ComputeCredentials, check_peer_addr_is_in_list, AuthError},
     compute,
     config::ProxyConfig,
     console::CachedNodeInfo,
@@ -25,7 +24,7 @@ impl PoolingBackend {
         &self,
         ctx: &mut RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> Result<ComputeCredentialKeys, AuthError> {
+    ) -> Result<ComputeCredentials, AuthError> {
         let user_info = conn_info.user_info.clone();
         let backend = self.config.auth_backend.as_ref().map(|_| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
@@ -47,13 +46,17 @@ impl PoolingBackend {
         };
         let auth_outcome =
             crate::auth::validate_password_and_exchange(conn_info.password.as_bytes(), secret)?;
-        match auth_outcome {
+        let res = match auth_outcome {
             crate::sasl::Outcome::Success(key) => Ok(key),
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
                 Err(AuthError::auth_failed(&*conn_info.user_info.user))
             }
-        }
+        };
+        res.map(|key| ComputeCredentials {
+            info: user_info,
+            keys: key,
+        })
     }
 
     // Wake up the destination if needed. Code here is a bit involved because
@@ -64,7 +67,7 @@ impl PoolingBackend {
         &self,
         ctx: &mut RequestMonitoring,
         conn_info: ConnInfo,
-        keys: ComputeCredentialKeys,
+        keys: ComputeCredentials,
         force_new: bool,
     ) -> anyhow::Result<Client<tokio_postgres::Client>> {
         let maybe_client = if !force_new {
@@ -81,25 +84,7 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
         ctx.set_application(Some(APP_NAME));
-        let backend = self
-            .config
-            .auth_backend
-            .as_ref()
-            .map(|_| conn_info.user_info.clone());
-
-        let mut node_info = backend
-            .wake_compute(ctx)
-            .await?
-            .context("missing cache entry from wake_compute")?;
-
-        match keys {
-            #[cfg(any(test, feature = "testing"))]
-            ComputeCredentialKeys::Password(password) => node_info.config.password(password),
-            ComputeCredentialKeys::AuthKeys(auth_keys) => node_info.config.auth_keys(auth_keys),
-        };
-
-        ctx.set_project(node_info.aux.clone());
-
+        let backend = self.config.auth_backend.as_ref().map(|_| keys);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
@@ -107,8 +92,8 @@ impl PoolingBackend {
                 conn_info,
                 pool: self.pool.clone(),
             },
-            node_info,
             &backend,
+            false, // do not allow self signed compute for http flow
         )
         .await
     }

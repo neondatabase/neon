@@ -20,7 +20,7 @@ pub async fn authenticate_cleartext(
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
     secret: AuthSecret,
-) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
+) -> auth::Result<ComputeCredentials> {
     warn!("cleartext auth flow override is enabled, proceeding");
 
     // pause the timer while we communicate with the client
@@ -50,7 +50,7 @@ pub async fn password_hack_no_authentication(
     info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<ComputeCredentials<Vec<u8>>> {
+) -> auth::Result<ComputeCredentials> {
     warn!("project not specified, resorting to the password hack auth flow");
 
     // pause the timer while we communicate with the client
@@ -71,6 +71,6 @@ pub async fn password_hack_no_authentication(
             options: info.options,
             endpoint: payload.endpoint,
         },
-        keys: payload.password,
+        keys: ComputeCredentialKeys::Password(payload.password),
     })
 }

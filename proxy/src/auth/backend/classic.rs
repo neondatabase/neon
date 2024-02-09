@@ -17,7 +17,7 @@ pub(super) async fn authenticate(
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
     secret: AuthSecret,
-) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
+) -> auth::Result<ComputeCredentials> {
     let flow = AuthFlow::new(client);
     let scram_keys = match secret {
         #[cfg(any(test, feature = "testing"))]

@@ -139,14 +139,14 @@ pub enum ClientMode {
 
 /// Abstracts the logic of handling TCP vs WS clients
 impl ClientMode {
-    fn allow_cleartext(&self) -> bool {
+    pub fn allow_cleartext(&self) -> bool {
         match self {
             ClientMode::Tcp => false,
             ClientMode::Websockets { .. } => true,
         }
     }
 
-    fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
+    pub fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
         match self {
             ClientMode::Tcp => config.allow_self_signed_compute,
             ClientMode::Websockets { .. } => false,
@@ -226,7 +226,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     }
 
     let user = user_info.get_user().to_owned();
-    let (mut node_info, user_info) = match user_info
+    let user_info = match user_info
         .authenticate(
             ctx,
             &mut stream,
@@ -245,14 +245,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
-    node_info.allow_self_signed_compute = mode.allow_self_signed_compute(config);
-
-    let aux = node_info.aux.clone();
     let mut node = connect_to_compute(
         ctx,
         &TcpMechanism { params: &params },
-        node_info,
         &user_info,
+        mode.allow_self_signed_compute(config),
     )
     .or_else(|e| stream.throw_error(e))
     .await?;
@@ -267,7 +264,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let (stream, read_buf) = stream.into_inner();
     node.stream.write_all(&read_buf).await?;
 
-    proxy_pass(ctx, stream, node.stream, aux).await
+    proxy_pass(ctx, stream, node.stream, node.aux).await
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.

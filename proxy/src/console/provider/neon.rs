@@ -259,10 +259,10 @@ impl super::Api for Api {
         }
 
         let node = self.do_wake_compute(ctx, user_info).await?;
-        let (_, cached) = self.caches.node_info.insert(key.clone(), node);
+        self.caches.node_info.insert(key.clone(), node.clone());
         info!(key = &*key, "created a cache entry for compute node info");
 
-        Ok(cached)
+        Ok(Cached::new_uncached(node))
     }
 }
 
