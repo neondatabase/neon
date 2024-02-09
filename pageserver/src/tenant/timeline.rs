@@ -758,10 +758,8 @@ impl Timeline {
             GetVectoredImpl::Vectored => {
                 let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
 
-                if cfg!(debug_assertions) {
-                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                        .await;
-                }
+                self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                    .await;
 
                 vectored_res
             }
@@ -828,7 +826,6 @@ impl Timeline {
         Ok(results)
     }
 
-    #[allow(unused)]
     pub(super) async fn validate_get_vectored_impl(
         &self,
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
