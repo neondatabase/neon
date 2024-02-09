@@ -141,10 +141,81 @@ impl From<TimeoutOrCancel> for std::io::Error {
 /// Fires only on the first cancel or timeout, not on both.
 pub(crate) async fn cancel_or_timeout(
     timeout: Duration,
-    cancel: &CancellationToken,
+    cancel: CancellationToken,
 ) -> TimeoutOrCancel {
     tokio::select! {
         _ = tokio::time::sleep(timeout) => TimeoutOrCancel::Timeout,
         _ = cancel.cancelled() => TimeoutOrCancel::Cancel,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DownloadError;
+    use futures::stream::StreamExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_download_stream() {
+        let inner = futures::stream::pending();
+        let timeout = Duration::from_secs(120);
+        let cancel = CancellationToken::new();
+
+        let stream = DownloadStream::new(cancel_or_timeout(timeout, cancel.clone()), inner);
+        let mut stream = std::pin::pin!(stream);
+
+        let mut first = stream.next();
+
+        tokio::select! {
+            _ = &mut first => unreachable!("we haven't yet cancelled nor is timeout passed"),
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+        }
+
+        cancel.cancel();
+
+        let e = first.await.expect("there must be some").unwrap_err();
+        assert!(matches!(e.kind(), std::io::ErrorKind::Other), "{e:?}");
+        let inner = e.get_ref().expect("inner should be set");
+        assert!(
+            inner
+                .downcast_ref::<DownloadError>()
+                .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
+            "{inner:?}"
+        );
+
+        tokio::select! {
+            _ = stream.next() => unreachable!("no timeout ever happens as we were already cancelled"),
+            _ = tokio::time::sleep(Duration::from_secs(121)) => {},
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeouted_download_stream() {
+        let inner = futures::stream::pending();
+        let timeout = Duration::from_secs(120);
+        let cancel = CancellationToken::new();
+
+        let stream = DownloadStream::new(cancel_or_timeout(timeout, cancel.clone()), inner);
+        let mut stream = std::pin::pin!(stream);
+
+        // because the stream uses 120s timeout we are paused, we advance to 120s right away.
+        let first = stream.next();
+
+        let e = first.await.expect("there must be some").unwrap_err();
+        assert!(matches!(e.kind(), std::io::ErrorKind::Other), "{e:?}");
+        let inner = e.get_ref().expect("inner should be set");
+        assert!(
+            inner
+                .downcast_ref::<DownloadError>()
+                .is_some_and(|e| matches!(e, DownloadError::Timeout)),
+            "{inner:?}"
+        );
+
+        cancel.cancel();
+
+        tokio::select! {
+            _ = stream.next() => unreachable!("no cancellation ever happens because we already timed out"),
+            _ = tokio::time::sleep(Duration::from_secs(121)) => {},
+        }
     }
 }

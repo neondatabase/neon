@@ -221,17 +221,34 @@ pub trait RemoteStorage: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> anyhow::Result<()>;
 
-    /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Streams the remote storage entry contents into the buffered writer given.
+    ///
+    /// The returned download stream will obey initial timeout and cancellation signal by erroring
+    /// on whichever happens first. Only one of the reasons will fail the stream, which is usually
+    /// enough for `tokio::io::copy_buf` usage. If needed the error can be filtered out.
+    ///
     /// Returns the metadata, if any was stored with the file previously.
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError>;
+    async fn download(
+        &self,
+        from: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError>;
 
-    /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Streams a given byte range of the remote storage entry contents.
+    ///
+    /// The returned download stream will obey initial timeout and cancellation signal by erroring
+    /// on whichever happens first. Only one of the reasons will fail the stream, which is usually
+    /// enough for `tokio::io::copy_buf` usage. If needed the error can be filtered out.
+    ///
     /// Returns the metadata, if any was stored with the file previously.
     async fn download_byte_range(
         &self,
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
@@ -251,7 +268,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<(), TimeTravelError>;
 }
 
-pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync>>;
+/// DownloadStream is sensitive to the timeout and cancellation used with the original
+/// [`RemoteStorage::download`] request. The type yields `std::io::Result<Bytes>` to be compatible
+/// with `tokio::io::copy_buf`.
+// This has 'static because safekeepers do not use cancellation tokens (yet)
+pub type DownloadStream =
+    Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>>;
+
 pub struct Download {
     pub download_stream: DownloadStream,
     /// The last time the file was modified (`last-modified` HTTP header)
@@ -452,12 +475,17 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
-    pub async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    pub async fn download(
+        &self,
+        from: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.download(from).await,
-            Self::AwsS3(s) => s.download(from).await,
-            Self::AzureBlob(s) => s.download(from).await,
-            Self::Unreliable(s) => s.download(from).await,
+            Self::LocalFs(s) => s.download(from, timeout, cancel).await,
+            Self::AwsS3(s) => s.download(from, timeout, cancel).await,
+            Self::AzureBlob(s) => s.download(from, timeout, cancel).await,
+            Self::Unreliable(s) => s.download(from, timeout, cancel).await,
         }
     }
 
@@ -466,22 +494,24 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match self {
             Self::LocalFs(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, timeout, cancel)
                     .await
             }
             Self::AwsS3(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, timeout, cancel)
                     .await
             }
             Self::AzureBlob(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, timeout, cancel)
                     .await
             }
             Self::Unreliable(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, timeout, cancel)
                     .await
             }
         }
@@ -593,10 +623,15 @@ impl GenericRemoteStorage {
         &self,
         byte_range: Option<(u64, Option<u64>)>,
         from: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match byte_range {
-            Some((start, end)) => self.download_byte_range(from, start, end).await,
-            None => self.download(from).await,
+            Some((start, end)) => {
+                self.download_byte_range(from, start, end, timeout, cancel)
+                    .await
+            }
+            None => self.download(from, timeout, cancel).await,
         }
     }
 }

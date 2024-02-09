@@ -34,7 +34,9 @@ use super::{
 
 use crate::tenant::{
     mgr::TenantManager,
-    remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
+    remote_timeline_client::{
+        download::download_layer_file, remote_heatmap_path, DOWNLOAD_TIMEOUT,
+    },
 };
 
 use chrono::format::{DelayedFormat, StrftimeItems};
@@ -523,12 +525,13 @@ impl<'a> TenantDownloader<'a> {
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
+        let cancel = &self.secondary_state.cancel;
 
         let heatmap_bytes = backoff::retry(
             || async {
                 let download = self
                     .remote_storage
-                    .download(&heatmap_path)
+                    .download(&heatmap_path, DOWNLOAD_TIMEOUT, cancel)
                     .await
                     .map_err(UpdateError::from)?;
                 let mut heatmap_bytes = Vec::new();
@@ -540,7 +543,7 @@ impl<'a> TenantDownloader<'a> {
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "download heatmap",
-            &self.secondary_state.cancel,
+            cancel,
         )
         .await
         .ok_or_else(|| UpdateError::Cancelled)

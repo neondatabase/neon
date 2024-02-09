@@ -159,10 +159,15 @@ impl RemoteStorage for UnreliableWrapper {
             .await
     }
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    async fn download(
+        &self,
+        from: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         self.attempt(RemoteOp::Download(from.clone()))
             .map_err(DownloadError::Other)?;
-        self.inner.download(from).await
+        self.inner.download(from, timeout, cancel).await
     }
 
     async fn download_byte_range(
@@ -170,6 +175,8 @@ impl RemoteStorage for UnreliableWrapper {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // Note: We treat any download_byte_range as an "attempt" of the same
         // operation. We don't pay attention to the ranges. That's good enough
@@ -177,7 +184,7 @@ impl RemoteStorage for UnreliableWrapper {
         self.attempt(RemoteOp::Download(from.clone()))
             .map_err(DownloadError::Other)?;
         self.inner
-            .download_byte_range(from, start_inclusive, end_exclusive)
+            .download_byte_range(from, start_inclusive, end_exclusive, timeout, cancel)
             .await
     }
 

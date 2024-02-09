@@ -398,7 +398,12 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    async fn download(
+        &self,
+        from: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         let target_path = from.with_base(&self.storage_root);
         if file_exists(&target_path).map_err(DownloadError::BadInput)? {
             let source = ReaderStream::new(
@@ -416,6 +421,10 @@ impl RemoteStorage for LocalFs {
                 .read_storage_metadata(&target_path)
                 .await
                 .map_err(DownloadError::Other)?;
+
+            let cancel_or_timeout = crate::support::cancel_or_timeout(timeout, cancel.clone());
+            let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
+
             Ok(Download {
                 metadata,
                 last_modified: None,
@@ -432,6 +441,8 @@ impl RemoteStorage for LocalFs {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         if let Some(end_exclusive) = end_exclusive {
             if end_exclusive <= start_inclusive {
@@ -472,6 +483,9 @@ impl RemoteStorage for LocalFs {
 
             let source = source.take(end_exclusive.unwrap_or(len) - start_inclusive);
             let source = ReaderStream::new(source);
+
+            let cancel_or_timeout = crate::support::cancel_or_timeout(timeout, cancel.clone());
+            let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
 
             Ok(Download {
                 metadata,
@@ -613,8 +627,9 @@ mod fs_tests {
         remote_storage_path: &RemotePath,
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
+        let cancel = CancellationToken::new();
         let download = storage
-            .download(remote_storage_path)
+            .download(remote_storage_path, TIMEOUT, &cancel)
             .await
             .map_err(|e| anyhow::anyhow!("Download failed: {e}"))?;
         ensure!(
@@ -699,7 +714,7 @@ mod fs_tests {
         );
 
         let non_existing_path = "somewhere/else";
-        match storage.download(&RemotePath::new(Utf8Path::new(non_existing_path))?).await {
+        match storage.download(&RemotePath::new(Utf8Path::new(non_existing_path))?, TIMEOUT, &cancel).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -725,7 +740,13 @@ mod fs_tests {
         let (first_part_local, second_part_local) = uploaded_bytes.split_at(3);
 
         let first_part_download = storage
-            .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
+            .download_byte_range(
+                &upload_target,
+                0,
+                Some(first_part_local.len() as u64),
+                TIMEOUT,
+                &cancel,
+            )
             .await?;
         assert!(
             first_part_download.metadata.is_none(),
@@ -743,6 +764,8 @@ mod fs_tests {
                 &upload_target,
                 first_part_local.len() as u64,
                 Some((first_part_local.len() + second_part_local.len()) as u64),
+                TIMEOUT,
+                &cancel,
             )
             .await?;
         assert!(
@@ -757,7 +780,7 @@ mod fs_tests {
         );
 
         let suffix_bytes = storage
-            .download_byte_range(&upload_target, 13, None)
+            .download_byte_range(&upload_target, 13, None, TIMEOUT, &cancel)
             .await?
             .download_stream;
         let suffix_bytes = aggregate(suffix_bytes).await?;
@@ -765,7 +788,7 @@ mod fs_tests {
         assert_eq!(upload_name, suffix);
 
         let all_bytes = storage
-            .download_byte_range(&upload_target, 0, None)
+            .download_byte_range(&upload_target, 0, None, TIMEOUT, &cancel)
             .await?
             .download_stream;
         let all_bytes = aggregate(all_bytes).await?;
@@ -789,6 +812,8 @@ mod fs_tests {
                 &upload_target,
                 start,
                 Some(end), // exclusive end
+                TIMEOUT,
+                &cancel,
             )
             .await
         {
@@ -805,7 +830,7 @@ mod fs_tests {
         let end = 234;
         assert!(start > end, "Should test an incorrect range");
         match storage
-            .download_byte_range(&upload_target, start, Some(end))
+            .download_byte_range(&upload_target, start, Some(end), TIMEOUT, &cancel)
             .await
         {
             Ok(_) => panic!("Should not allow downloading wrong ranges"),
@@ -867,7 +892,13 @@ mod fs_tests {
         let (first_part_local, _) = uploaded_bytes.split_at(3);
 
         let partial_download_with_metadata = storage
-            .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
+            .download_byte_range(
+                &upload_target,
+                0,
+                Some(first_part_local.len() as u64),
+                TIMEOUT,
+                &cancel,
+            )
             .await?;
         let first_part_remote = aggregate(partial_download_with_metadata.download_stream).await?;
         assert_eq!(
@@ -947,7 +978,13 @@ mod fs_tests {
                 .await?;
         }
 
-        let read = aggregate(storage.download(&path).await?.download_stream).await?;
+        let read = aggregate(
+            storage
+                .download(&path, TIMEOUT, &cancel)
+                .await?
+                .download_stream,
+        )
+        .await?;
         assert_eq!(body, read);
 
         let shorter = Bytes::from_static(b"shorter body");
@@ -960,7 +997,13 @@ mod fs_tests {
                 .await?;
         }
 
-        let read = aggregate(storage.download(&path).await?.download_stream).await?;
+        let read = aggregate(
+            storage
+                .download(&path, TIMEOUT, &cancel)
+                .await?
+                .download_stream,
+        )
+        .await?;
         assert_eq!(shorter, read);
         Ok(())
     }
@@ -995,7 +1038,13 @@ mod fs_tests {
                 .await?;
         }
 
-        let read = aggregate(storage.download(&path).await?.download_stream).await?;
+        let read = aggregate(
+            storage
+                .download(&path, TIMEOUT, &cancel)
+                .await?
+                .download_stream,
+        )
+        .await?;
         assert_eq!(body, read);
 
         Ok(())

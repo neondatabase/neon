@@ -216,9 +216,17 @@ impl S3Bucket {
         permit
     }
 
-    async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
+    async fn download_object(
+        &self,
+        request: GetObjectRequest,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
-        let permit = self.owned_permit(kind).await;
+        let permit = tokio::select! {
+            permit = self.owned_permit(kind) => permit,
+            _ = cancel.cancelled() => return Err(DownloadError::Cancelled)
+        };
 
         let started_at = start_measuring_requests(kind);
 
@@ -228,8 +236,13 @@ impl S3Bucket {
             .bucket(request.bucket)
             .key(request.key)
             .set_range(request.range)
-            .send()
-            .await;
+            .send();
+
+        let get_object = tokio::select! {
+            res = get_object => res,
+            _ = tokio::time::sleep(timeout) => return Err(DownloadError::Timeout),
+            _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+        };
 
         let started_at = ScopeGuard::into_inner(started_at);
 
@@ -259,6 +272,10 @@ impl S3Bucket {
             }
         };
 
+        // even if we would have no timeout left, continue anyways. the caller can decide to ignore
+        // the errors considering timeouts and cancellation.
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+
         let metadata = object_output.metadata().cloned().map(StorageMetadata);
         let etag = object_output.e_tag;
         let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
@@ -267,6 +284,9 @@ impl S3Bucket {
         let body = ByteStreamAsStream::from(body);
         let body = PermitCarrying::new(permit, body);
         let body = TimedDownload::new(started_at, body);
+
+        let cancel_or_timeout = crate::support::cancel_or_timeout(remaining, cancel.clone());
+        let body = crate::support::DownloadStream::new(cancel_or_timeout, body);
 
         Ok(Download {
             metadata,
@@ -608,14 +628,23 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    async fn download(
+        &self,
+        from: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
         // if prefix is none then download file `from`
-        self.download_object(GetObjectRequest {
-            bucket: self.bucket_name.clone(),
-            key: self.relative_path_to_s3_object(from),
-            range: None,
-        })
+        self.download_object(
+            GetObjectRequest {
+                bucket: self.bucket_name.clone(),
+                key: self.relative_path_to_s3_object(from),
+                range: None,
+            },
+            timeout,
+            cancel,
+        )
         .await
     }
 
@@ -624,6 +653,8 @@ impl RemoteStorage for S3Bucket {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
         // and needs both ends to be exclusive
@@ -633,11 +664,15 @@ impl RemoteStorage for S3Bucket {
             None => format!("bytes={start_inclusive}-"),
         });
 
-        self.download_object(GetObjectRequest {
-            bucket: self.bucket_name.clone(),
-            key: self.relative_path_to_s3_object(from),
-            range,
-        })
+        self.download_object(
+            GetObjectRequest {
+                bucket: self.bucket_name.clone(),
+                key: self.relative_path_to_s3_object(from),
+                range,
+            },
+            timeout,
+            cancel,
+        )
         .await
     }
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {

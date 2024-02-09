@@ -347,23 +347,6 @@ where
         Err(TimeoutCancellableError::Cancelled) => Err(anyhow::anyhow!("Shutting down")),
     }
 }
-/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to DownloaDError.
-async fn download_cancellable<F, R>(
-    cancel: &CancellationToken,
-    future: F,
-) -> Result<R, DownloadError>
-where
-    F: std::future::Future<Output = Result<R, DownloadError>>,
-{
-    match timeout_cancellable(DOWNLOAD_TIMEOUT, cancel, future).await {
-        Ok(Ok(r)) => Ok(r),
-        Ok(Err(e)) => Err(e),
-        Err(TimeoutCancellableError::Timeout) => {
-            Err(DownloadError::Other(anyhow::anyhow!("Timed out")))
-        }
-        Err(TimeoutCancellableError::Cancelled) => Err(DownloadError::Cancelled),
-    }
-}
 
 impl RemoteTimelineClient {
     ///

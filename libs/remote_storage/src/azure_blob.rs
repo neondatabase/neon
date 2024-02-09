@@ -122,6 +122,8 @@ impl AzureBlobStorage {
     async fn download_for_builder(
         &self,
         builder: GetBlobBuilder,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let mut response = builder.into_stream();
 
@@ -131,32 +133,42 @@ impl AzureBlobStorage {
         // TODO give proper streaming response instead of buffering into RAM
         // https://github.com/neondatabase/neon/issues/5563
 
-        let mut bufs = Vec::new();
-        while let Some(part) = response.next().await {
-            let part = part.map_err(to_download_error)?;
-            let etag_str: &str = part.blob.properties.etag.as_ref();
-            if etag.is_none() {
-                etag = Some(etag.unwrap_or_else(|| etag_str.to_owned()));
+        let download = async {
+            let mut bufs = Vec::new();
+            while let Some(part) = response.next().await {
+                let part = part.map_err(to_download_error)?;
+                let etag_str: &str = part.blob.properties.etag.as_ref();
+                if etag.is_none() {
+                    etag = Some(etag.unwrap_or_else(|| etag_str.to_owned()));
+                }
+                if last_modified.is_none() {
+                    last_modified = Some(part.blob.properties.last_modified.into());
+                }
+                if let Some(blob_meta) = part.blob.metadata {
+                    metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
+                }
+                let data = part
+                    .data
+                    .collect()
+                    .await
+                    .map_err(|e| DownloadError::Other(e.into()))?;
+                bufs.push(data);
             }
-            if last_modified.is_none() {
-                last_modified = Some(part.blob.properties.last_modified.into());
-            }
-            if let Some(blob_meta) = part.blob.metadata {
-                metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
-            }
-            let data = part
-                .data
-                .collect()
-                .await
-                .map_err(|e| DownloadError::Other(e.into()))?;
-            bufs.push(data);
+            Ok(Download {
+                // thsi is actually 'static, but we cannot mention it in the signature, but it can be
+                // substituted for the 'a on &'a CancellationToken
+                download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
+                etag,
+                last_modified,
+                metadata: Some(StorageMetadata(metadata)),
+            })
+        };
+
+        tokio::select! {
+            bufs = download => bufs,
+            _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+            _ = tokio::time::sleep(timeout) => Err(DownloadError::Timeout),
         }
-        Ok(Download {
-            download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
-            etag,
-            last_modified,
-            metadata: Some(StorageMetadata(metadata)),
-        })
     }
 
     async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
@@ -316,13 +328,18 @@ impl RemoteStorage for AzureBlobStorage {
         }
     }
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    async fn download(
+        &self,
+        from: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
         let builder = blob_client.get();
 
-        self.download_for_builder(builder).await
+        self.download_for_builder(builder, timeout, cancel).await
     }
 
     async fn download_byte_range(
@@ -330,6 +347,8 @@ impl RemoteStorage for AzureBlobStorage {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
@@ -343,7 +362,7 @@ impl RemoteStorage for AzureBlobStorage {
         };
         builder = builder.range(range);
 
-        self.download_for_builder(builder).await
+        self.download_for_builder(builder, timeout, cancel).await
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {

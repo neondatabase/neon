@@ -232,38 +232,47 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
         .await?;
 
     // Normal download request
-    let dl = ctx.client.download(&path).await?;
+    let dl = ctx.client.download(&path, TIMEOUT, &cancel).await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     // Full range (end specified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 0, Some(len as u64))
+        .download_byte_range(&path, 0, Some(len as u64), TIMEOUT, &cancel)
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     // partial range (end specified)
-    let dl = ctx.client.download_byte_range(&path, 4, Some(10)).await?;
+    let dl = ctx
+        .client
+        .download_byte_range(&path, 4, Some(10), TIMEOUT, &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..10]);
 
     // partial range (end beyond real end)
     let dl = ctx
         .client
-        .download_byte_range(&path, 8, Some(len as u64 * 100))
+        .download_byte_range(&path, 8, Some(len as u64 * 100), TIMEOUT, &cancel)
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[8..]);
 
     // Partial range (end unspecified)
-    let dl = ctx.client.download_byte_range(&path, 4, None).await?;
+    let dl = ctx
+        .client
+        .download_byte_range(&path, 4, None, TIMEOUT, &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..]);
 
     // Full range (end unspecified)
-    let dl = ctx.client.download_byte_range(&path, 0, None).await?;
+    let dl = ctx
+        .client
+        .download_byte_range(&path, 0, None, TIMEOUT, &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
@@ -305,7 +314,7 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
     // Normal download request
     ctx.client.copy_object(&path, &path_dest).await?;
 
-    let dl = ctx.client.download(&path_dest).await?;
+    let dl = ctx.client.download(&path_dest, TIMEOUT, &cancel).await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 

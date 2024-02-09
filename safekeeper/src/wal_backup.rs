@@ -532,8 +532,12 @@ pub async fn read_object(
 
     info!("segment download about to start from remote path {file_path:?} at offset {offset}");
 
+    let timeout = Duration::from_secs(120);
+    let cancel = CancellationToken::new();
+
+    // FIXME: is there a retry in caller?
     let download = storage
-        .download_storage_object(Some((offset, None)), file_path)
+        .download_storage_object(Some((offset, None)), file_path, timeout, &cancel)
         .await
         .with_context(|| {
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")
