@@ -4823,11 +4823,10 @@ impl<'a> TimelineWriter<'a> {
 
     fn get_open_layer_action(&self, lsn: Lsn, new_value_size: u64) -> OpenLayerAction {
         let state = &*self.write_guard;
-        if state.is_none() {
+        let Some(state) = &state else {
             return OpenLayerAction::Open;
-        }
+        };
 
-        let state = state.as_ref().unwrap();
         if state.prev_lsn == Some(lsn) {
             // Rolling mid LSN is not supported by downstream code.
             // Hence, only roll at LSN boundaries.
