@@ -270,9 +270,6 @@ impl InMemoryLayer {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
 
         let off = {
-            // Avoid doing allocations for "small" values.
-            // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
-            // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
             locked_inner
                 .file
                 .write_blob(
