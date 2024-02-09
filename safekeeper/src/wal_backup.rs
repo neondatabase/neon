@@ -595,6 +595,7 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
                 storage.delete_objects(&files, timeout, &cancel).await?;
             }
         },
+        // consider TimeoutOrCancel::caused_by_cancel when using cancellation
         |_| false,
         3,
         10,

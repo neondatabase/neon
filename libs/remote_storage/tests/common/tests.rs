@@ -156,12 +156,17 @@ async fn delete_non_exising_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Resu
         MaybeEnabledStorage::Disabled => return Ok(()),
     };
 
+    let cancel = CancellationToken::new();
+
     let path = RemotePath::new(Utf8Path::new(
         format!("{}/for_sure_there_is_nothing_there_really", ctx.base_prefix).as_str(),
     ))
     .with_context(|| "RemotePath conversion")?;
 
-    ctx.client.delete(&path).await.expect("should succeed");
+    ctx.client
+        .delete(&path, TIMEOUT, &cancel)
+        .await
+        .expect("should succeed");
 
     Ok(())
 }
@@ -200,13 +205,17 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
         .upload(data, len, &path3, None, TIMEOUT, &cancel)
         .await?;
 
-    ctx.client.delete_objects(&[path1, path2]).await?;
+    ctx.client
+        .delete_objects(&[path1, path2], TIMEOUT, &cancel)
+        .await?;
 
     let prefixes = ctx.client.list_prefixes(None, TIMEOUT, &cancel).await?;
 
     assert_eq!(prefixes.len(), 1);
 
-    ctx.client.delete_objects(&[path3]).await?;
+    ctx.client
+        .delete_objects(&[path3], TIMEOUT, &cancel)
+        .await?;
 
     Ok(())
 }
@@ -278,7 +287,7 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
 
     debug!("Cleanup: deleting file at path {path:?}");
     ctx.client
-        .delete(&path)
+        .delete(&path, TIMEOUT, &cancel)
         .await
         .with_context(|| format!("{path:?} removal"))?;
 
@@ -320,7 +329,7 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
 
     debug!("Cleanup: deleting file at path {path:?}");
     ctx.client
-        .delete_objects(&[path.clone(), path_dest.clone()])
+        .delete_objects(&[path.clone(), path_dest.clone()], TIMEOUT, &cancel)
         .await
         .with_context(|| format!("{path:?} removal"))?;
 

@@ -32,7 +32,7 @@ use crate::TimeTravelError;
 use crate::TimeoutOrCancel;
 use crate::{
     AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath,
-    RemoteStorage, StorageMetadata,
+    RemoteStorage, StorageMetadata, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {
@@ -365,47 +365,68 @@ impl RemoteStorage for AzureBlobStorage {
         self.download_for_builder(builder, timeout, cancel).await
     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        let _permit = self.permit(RequestKind::Delete).await;
-        let blob_client = self.client.blob_client(self.relative_path_to_name(path));
-
-        let builder = blob_client.delete();
-
-        match builder.into_future().await {
-            Ok(_response) => Ok(()),
-            Err(e) => {
-                if let Some(http_err) = e.as_http_error() {
-                    if http_err.status() == StatusCode::NotFound {
-                        return Ok(());
-                    }
-                }
-                Err(anyhow::Error::new(e))
-            }
-        }
+    async fn delete(
+        &self,
+        path: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        self.delete_objects(std::array::from_ref(path), timeout, cancel)
+            .await
     }
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
-        // Permit is already obtained by inner delete function
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let op = async {
+            let _permit = self.permit(RequestKind::Delete).await;
 
-        // TODO batch requests are also not supported by the SDK
-        // https://github.com/Azure/azure-sdk-for-rust/issues/1068
-        // https://github.com/Azure/azure-sdk-for-rust/issues/1249
-        for path in paths {
-            self.delete(path).await?;
+            let mut timeout = std::pin::pin!(tokio::time::sleep(timeout));
+
+            // TODO batch requests are also not supported by the SDK
+            // https://github.com/Azure/azure-sdk-for-rust/issues/1068
+            // https://github.com/Azure/azure-sdk-for-rust/issues/1249
+            for path in paths {
+                let blob_client = self.client.blob_client(self.relative_path_to_name(path));
+
+                let request = blob_client.delete().into_future();
+
+                let res = tokio::select! {
+                    res = request => res,
+                    _ = &mut timeout => return Err(TimeoutOrCancel::Timeout.into()),
+                };
+
+                match res {
+                    Ok(_response) => continue,
+                    Err(e) => {
+                        if let Some(http_err) = e.as_http_error() {
+                            if http_err.status() == StatusCode::NotFound {
+                                continue;
+                            }
+                        }
+                        return Err(e.into());
+                    }
+                }
+            }
+
+            Ok(())
+        };
+
+        tokio::select! {
+            res = op => res,
+            _ = cancel.cancelled() => Err(TimeoutOrCancel::Cancel.into()),
         }
-        Ok(())
     }
 
     async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
         let _permit = self.permit(RequestKind::Copy).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
-        let source_url = format!(
-            "{}/{}",
-            self.client.url()?,
-            self.relative_path_to_name(from)
-        );
-        let builder = blob_client.copy(Url::from_str(&source_url)?);
+        let op = async {
+            let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
         let result = builder.into_future().await?;
 

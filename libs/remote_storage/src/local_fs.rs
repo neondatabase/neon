@@ -498,7 +498,12 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    async fn delete(
+        &self,
+        path: &RemotePath,
+        _timeout: Duration,
+        _cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         let file_path = path.with_base(&self.storage_root);
         match fs::remove_file(&file_path).await {
             Ok(()) => Ok(()),
@@ -510,9 +515,14 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         for path in paths {
-            self.delete(path).await?
+            self.delete(path, timeout, cancel).await?
         }
         Ok(())
     }
@@ -852,11 +862,11 @@ mod fs_tests {
         let upload_target =
             upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
 
-        storage.delete(&upload_target).await?;
+        storage.delete(&upload_target, TIMEOUT, &cancel).await?;
         assert!(storage.list_all().await?.is_empty());
 
         storage
-            .delete(&upload_target)
+            .delete(&upload_target, TIMEOUT, &cancel)
             .await
             .expect("Should allow deleting non-existing storage files");
 

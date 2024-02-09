@@ -90,11 +90,17 @@ impl UnreliableWrapper {
         }
     }
 
-    async fn delete_inner(&self, path: &RemotePath, attempt: bool) -> anyhow::Result<()> {
+    async fn delete_inner(
+        &self,
+        path: &RemotePath,
+        attempt: bool,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         if attempt {
             self.attempt(RemoteOp::Delete(path.clone()))?;
         }
-        self.inner.delete(path).await
+        self.inner.delete(path, timeout, cancel).await
     }
 }
 
@@ -188,16 +194,26 @@ impl RemoteStorage for UnreliableWrapper {
             .await
     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        self.delete_inner(path, true).await
+    async fn delete(
+        &self,
+        path: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        self.delete_inner(path, true, timeout, cancel).await
     }
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::DeleteObjects(paths.to_vec()))?;
         let mut error_counter = 0;
         for path in paths {
             // Dont record attempt because it was already recorded above
-            if (self.delete_inner(path, false).await).is_err() {
+            if (self.delete_inner(path, false, timeout, cancel).await).is_err() {
                 error_counter += 1;
             }
         }

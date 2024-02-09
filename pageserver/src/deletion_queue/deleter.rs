@@ -8,6 +8,7 @@
 
 use remote_storage::GenericRemoteStorage;
 use remote_storage::RemotePath;
+use remote_storage::TimeoutOrCancel;
 use remote_storage::MAX_KEYS_PER_DELETE;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -15,7 +16,7 @@ use tracing::info;
 use tracing::warn;
 use utils::backoff;
 
-use crate::metrics;
+use crate::{metrics, tenant::remote_timeline_client::DELETION_TIMEOUT};
 
 use super::DeletionQueueError;
 use super::FlushOp;
@@ -71,9 +72,11 @@ impl Deleter {
                     Err(anyhow::anyhow!("failpoint: deletion-queue-before-execute"))
                 });
 
-                self.remote_storage.delete_objects(&self.accumulator).await
+                self.remote_storage
+                    .delete_objects(&self.accumulator, DELETION_TIMEOUT, &self.cancel)
+                    .await
             },
-            |_| false,
+            TimeoutOrCancel::caused_by_cancel,
             3,
             10,
             "executing deletion batch",

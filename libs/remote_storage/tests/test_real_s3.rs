@@ -142,7 +142,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     })
     .await?;
 
-    retry(|| ctx.client.delete(&path1)).await?;
+    retry(|| ctx.client.delete(&path1, TIMEOUT, &cancel)).await?;
     let t2_files = list_files(&ctx.client, TIMEOUT, &cancel).await?;
     let t2 = time_point().await;
     println!("at t2: {t2_files:?}");
@@ -183,7 +183,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     // cleanup
 
     let paths = &[path1, path2, path3];
-    retry(|| ctx.client.delete_objects(paths)).await?;
+    retry(|| ctx.client.delete_objects(paths, TIMEOUT, &cancel)).await?;
 
     Ok(())
 }

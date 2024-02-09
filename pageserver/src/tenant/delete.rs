@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::{models::TenantState, shard::TenantShardId};
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, Instrument};
@@ -19,7 +19,9 @@ use crate::{
 
 use super::{
     mgr::{GetTenantError, TenantSlotError, TenantSlotUpsertError, TenantsMap},
-    remote_timeline_client::{FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD},
+    remote_timeline_client::{
+        DELETION_TIMEOUT, FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD,
+    },
     span,
     timeline::delete::DeleteTimelineFlow,
     tree_sort_timelines, DeleteTimelineError, Tenant, TenantPreload,
@@ -89,14 +91,14 @@ async fn create_remote_delete_mark(
                 .upload(stream, 0, &remote_mark_path, None, UPLOAD_TIMEOUT, cancel)
                 .await
         },
-        |_e| false,
+        TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
         cancel,
     )
     .await
-    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
     .context("mark_upload")?;
 
@@ -186,15 +188,15 @@ async fn remove_tenant_remote_delete_mark(
     if let Some(remote_storage) = remote_storage {
         let path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
         backoff::retry(
-            || async { remote_storage.delete(&path).await },
-            |_e| false,
+            || async { remote_storage.delete(&path, DELETION_TIMEOUT, cancel).await },
+            TimeoutOrCancel::caused_by_cancel,
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
             cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)
         .context("remove_tenant_remote_delete_mark")?;
     }

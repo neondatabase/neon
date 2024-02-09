@@ -1171,7 +1171,10 @@ pub(crate) mod mock {
     pub struct ConsumerState {
         rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         executor_rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
+        cancel: CancellationToken,
     }
+
+    const TIMEOUT: Duration = Duration::from_secs(120);
 
     impl ConsumerState {
         async fn consume(&mut self, remote_storage: &GenericRemoteStorage) -> usize {
@@ -1184,7 +1187,7 @@ pub(crate) mod mock {
                 match msg {
                     DeleterMessage::Delete(objects) => {
                         for path in objects {
-                            match remote_storage.delete(&path).await {
+                            match remote_storage.delete(&path, TIMEOUT, &self.cancel).await {
                                 Ok(_) => {
                                     debug!("Deleted {path}");
                                 }
@@ -1217,7 +1220,7 @@ pub(crate) mod mock {
 
                         for path in objects {
                             info!("Executing deletion {path}");
-                            match remote_storage.delete(&path).await {
+                            match remote_storage.delete(&path, TIMEOUT, &self.cancel).await {
                                 Ok(_) => {
                                     debug!("Deleted {path}");
                                 }
@@ -1267,7 +1270,11 @@ pub(crate) mod mock {
                 executor_tx,
                 executed,
                 remote_storage,
-                consumer: std::sync::Mutex::new(ConsumerState { rx, executor_rx }),
+                consumer: std::sync::Mutex::new(ConsumerState {
+                    rx,
+                    executor_rx,
+                    cancel: CancellationToken::new(),
+                }),
                 lsn_table: Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new())),
             }
         }

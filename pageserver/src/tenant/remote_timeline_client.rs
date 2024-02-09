@@ -267,6 +267,7 @@ pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 /// intended to be snappy enough for prompt shutdown, as we have a CancellationToken for that.
 pub(crate) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const DELETION_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),

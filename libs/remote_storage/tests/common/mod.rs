@@ -115,13 +115,15 @@ pub(crate) async fn cleanup(
         "Removing {} objects from the remote storage during cleanup",
         objects_to_delete.len()
     );
+    let cancel = CancellationToken::new();
     let mut delete_tasks = JoinSet::new();
     for object_to_delete in objects_to_delete {
         let task_client = Arc::clone(client);
+        let cancel = cancel.clone();
         delete_tasks.spawn(async move {
             debug!("Deleting remote item at path {object_to_delete:?}");
             task_client
-                .delete(&object_to_delete)
+                .delete(&object_to_delete, TIMEOUT, &cancel)
                 .await
                 .with_context(|| format!("{object_to_delete:?} removal"))
         });

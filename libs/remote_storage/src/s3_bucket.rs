@@ -298,33 +298,61 @@ impl S3Bucket {
 
     async fn delete_oids(
         &self,
-        kind: RequestKind,
         delete_objects: &[ObjectIdentifier],
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
+        let kind = RequestKind::Delete;
+
+        let _guard = tokio::select! {
+            permit = self.permit(kind) => permit,
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
+
+        self.delete_oids0(delete_objects, timeout, cancel).await
+    }
+
+    async fn delete_oids0(
+        &self,
+        delete_objects: &[ObjectIdentifier],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let kind = RequestKind::Delete;
+        let mut cancel = std::pin::pin!(cancel.cancelled());
+        let mut timeout = std::pin::pin!(tokio::time::sleep(timeout));
+
         for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
             let started_at = start_measuring_requests(kind);
 
-            let resp = self
+            let req = self
                 .client
                 .delete_objects()
                 .bucket(self.bucket_name.clone())
                 .delete(
                     Delete::builder()
                         .set_objects(Some(chunk.to_vec()))
-                        .build()?,
+                        .build()
+                        .context("build request")?,
                 )
-                .send()
-                .await;
+                .send();
+
+            let resp = tokio::select! {
+                resp = req => resp,
+                _ = &mut timeout => return Err(TimeoutOrCancel::Timeout.into()),
+                _ = &mut cancel => return Err(TimeoutOrCancel::Cancel.into()),
+            };
 
             let started_at = ScopeGuard::into_inner(started_at);
             metrics::BUCKET_METRICS
                 .req_seconds
                 .observe_elapsed(kind, &resp, started_at);
 
-            let resp = resp?;
+            let resp = resp.context("request deletion")?;
             metrics::BUCKET_METRICS
                 .deleted_objects_total
                 .inc_by(chunk.len() as u64);
+
             if let Some(errors) = resp.errors {
                 // Log a bounded number of the errors within the response:
                 // these requests can carry 1000 keys so logging each one
@@ -340,9 +368,10 @@ impl S3Bucket {
                     );
                 }
 
-                return Err(anyhow::format_err!(
-                    "Failed to delete {} objects",
-                    errors.len()
+                return Err(anyhow::anyhow!(
+                    "Failed to delete {}/{} objects",
+                    errors.len(),
+                    chunk.len(),
                 ));
             }
         }
@@ -675,24 +704,33 @@ impl RemoteStorage for S3Bucket {
         )
         .await
     }
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
-        let kind = RequestKind::Delete;
-        let _guard = self.permit(kind).await;
 
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         let mut delete_objects = Vec::with_capacity(paths.len());
         for path in paths {
             let obj_id = ObjectIdentifier::builder()
                 .set_key(Some(self.relative_path_to_s3_object(path)))
-                .build()?;
+                .build()
+                .context("convert path to oid")?;
             delete_objects.push(obj_id);
         }
 
-        self.delete_oids(kind, &delete_objects).await
+        self.delete_oids(&delete_objects, timeout, cancel).await
     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    async fn delete(
+        &self,
+        path: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         let paths = std::array::from_ref(path);
-        self.delete_objects(paths).await
+        self.delete_objects(paths, timeout, cancel).await
     }
 
     async fn time_travel_recover(
@@ -895,9 +933,16 @@ impl RemoteStorage for S3Bucket {
                         .key(key.to_owned())
                         .build()
                         .map_err(|e| TimeTravelError::Other(anyhow::Error::new(e)))?;
-                    self.delete_oids(kind, &[oid])
+                    self.delete_oids0(&[oid], Duration::from_secs(60), cancel)
                         .await
-                        .map_err(TimeTravelError::Other)?;
+                        .map_err(|e| {
+                            // delete_oid0 will use TimeoutOrCancel
+                            if TimeoutOrCancel::caused_by_cancel(&e) {
+                                TimeTravelError::Cancelled
+                            } else {
+                                TimeTravelError::Other(e)
+                            }
+                        })?;
                 }
             }
         }

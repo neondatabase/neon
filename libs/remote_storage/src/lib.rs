@@ -251,9 +251,28 @@ pub trait RemoteStorage: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
+    /// Delete a single path from remote storage.
+    ///
+    /// If the operation fails because of timeout or cancellation, the root cause of the error will be
+    /// set to `TimeoutOrCancel`. In such situation it is unknown if the deletion went through.
+    async fn delete(
+        &self,
+        path: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()>;
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
+    /// Delete a multiple paths from remote storage.
+    ///
+    /// If the operation fails because of timeout or cancellation, the root cause of the error will be
+    /// set to `TimeoutOrCancel`. In such situation it is unknown which deletions, if any, went
+    /// through.
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()>;
 
     /// Copy a remote object inside a bucket from one path to another.
     async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()>;
@@ -517,21 +536,33 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
-    pub async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    /// See [`RemoteStorage::delete`]
+    pub async fn delete(
+        &self,
+        path: &RemotePath,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.delete(path).await,
-            Self::AwsS3(s) => s.delete(path).await,
-            Self::AzureBlob(s) => s.delete(path).await,
-            Self::Unreliable(s) => s.delete(path).await,
+            Self::LocalFs(s) => s.delete(path, timeout, cancel).await,
+            Self::AwsS3(s) => s.delete(path, timeout, cancel).await,
+            Self::AzureBlob(s) => s.delete(path, timeout, cancel).await,
+            Self::Unreliable(s) => s.delete(path, timeout, cancel).await,
         }
     }
 
-    pub async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    /// See [`RemoteStorage::delete_objects`]
+    pub async fn delete_objects(
+        &self,
+        paths: &[RemotePath],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.delete_objects(paths).await,
-            Self::AwsS3(s) => s.delete_objects(paths).await,
-            Self::AzureBlob(s) => s.delete_objects(paths).await,
-            Self::Unreliable(s) => s.delete_objects(paths).await,
+            Self::LocalFs(s) => s.delete_objects(paths, timeout, cancel).await,
+            Self::AwsS3(s) => s.delete_objects(paths, timeout, cancel).await,
+            Self::AzureBlob(s) => s.delete_objects(paths, timeout, cancel).await,
+            Self::Unreliable(s) => s.delete_objects(paths, timeout, cancel).await,
         }
     }
 
@@ -544,6 +575,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
+    /// See [`RemoteStorage::time_travel_recover`].
     pub async fn time_travel_recover(
         &self,
         prefix: Option<&RemotePath>,
