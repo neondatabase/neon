@@ -46,8 +46,9 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
-    support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode,
-    RemotePath, RemoteStorage, S3Config, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
+    support::{Cancelled, PermitCarrying},
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
+    S3Config, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
     REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
@@ -185,35 +186,45 @@ impl S3Bucket {
         }
     }
 
-    async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
+    async fn permit(
+        &self,
+        kind: RequestKind,
+        cancel: &CancellationToken,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, Cancelled> {
         let started_at = start_counting_cancelled_wait(kind);
-        let permit = self
-            .concurrency_limiter
-            .acquire(kind)
-            .await
-            .expect("semaphore is never closed");
+        let acquire = self.concurrency_limiter.acquire(kind);
+
+        let permit = tokio::select! {
+            permit = acquire => permit.expect("semaphore is never closed"),
+            _ = cancel.cancelled() => return Err(Cancelled),
+        };
 
         let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .wait_seconds
             .observe_elapsed(kind, started_at);
 
-        permit
+        Ok(permit)
     }
 
-    async fn owned_permit(&self, kind: RequestKind) -> tokio::sync::OwnedSemaphorePermit {
+    async fn owned_permit(
+        &self,
+        kind: RequestKind,
+        cancel: &CancellationToken,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, Cancelled> {
         let started_at = start_counting_cancelled_wait(kind);
-        let permit = self
-            .concurrency_limiter
-            .acquire_owned(kind)
-            .await
-            .expect("semaphore is never closed");
+        let acquire = self.concurrency_limiter.acquire_owned(kind);
+
+        let permit = tokio::select! {
+            permit = acquire => permit.expect("semaphore is never closed"),
+            _ = cancel.cancelled() => return Err(Cancelled),
+        };
 
         let started_at = ScopeGuard::into_inner(started_at);
         metrics::BUCKET_METRICS
             .wait_seconds
             .observe_elapsed(kind, started_at);
-        permit
+        Ok(permit)
     }
 
     async fn download_object(
@@ -223,10 +234,8 @@ impl S3Bucket {
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
-        let permit = tokio::select! {
-            permit = self.owned_permit(kind) => permit,
-            _ = cancel.cancelled() => return Err(DownloadError::Cancelled)
-        };
+
+        let permit = self.owned_permit(kind, cancel).await?;
 
         let started_at = start_measuring_requests(kind);
 
@@ -304,16 +313,15 @@ impl S3Bucket {
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
 
-        let _guard = tokio::select! {
-            permit = self.permit(kind) => permit,
-            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
-        };
+        let permit = self.permit(kind, cancel).await?;
 
-        self.delete_oids0(delete_objects, timeout, cancel).await
+        self.delete_oids0(&permit, delete_objects, timeout, cancel)
+            .await
     }
 
     async fn delete_oids0(
         &self,
+        _permit: &tokio::sync::SemaphorePermit<'_>,
         delete_objects: &[ObjectIdentifier],
         timeout: Duration,
         cancel: &CancellationToken,
@@ -482,10 +490,7 @@ impl RemoteStorage for S3Bucket {
                 p
             });
 
-        let _guard = tokio::select! {
-            guard = self.permit(kind) => guard,
-            _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
-        };
+        let _permit = self.permit(kind, cancel).await?;
 
         let mut continuation_token = None;
 
@@ -580,48 +585,43 @@ impl RemoteStorage for S3Bucket {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let op = async {
-            // acquiring permit is not subject to cancellation
-            let kind = RequestKind::Put;
-            let _guard = self.permit(kind).await;
+        let kind = RequestKind::Put;
+        let _permit = self.permit(kind, cancel).await?;
 
-            let started_at = start_measuring_requests(kind);
+        let started_at = start_measuring_requests(kind);
 
-            let body = Body::wrap_stream(from);
-            let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
+        let body = Body::wrap_stream(from);
+        let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
 
-            let upload = self
-                .client
-                .put_object()
-                .bucket(self.bucket_name.clone())
-                .key(self.relative_path_to_s3_object(to))
-                .set_metadata(metadata.map(|m| m.0))
-                .content_length(from_size_bytes.try_into()?)
-                .body(bytes_stream)
-                .send();
+        let upload = self
+            .client
+            .put_object()
+            .bucket(self.bucket_name.clone())
+            .key(self.relative_path_to_s3_object(to))
+            .set_metadata(metadata.map(|m| m.0))
+            .content_length(from_size_bytes.try_into()?)
+            .body(bytes_stream)
+            .send();
 
-            let upload = tokio::time::timeout(timeout, upload);
+        let upload = tokio::time::timeout(timeout, upload);
 
-            let res = upload.await;
-
-            if let Ok(inner) = &res {
-                // do not incl. timeouts as errors in metrics but cancellations
-                let started_at = ScopeGuard::into_inner(started_at);
-                metrics::BUCKET_METRICS
-                    .req_seconds
-                    .observe_elapsed(kind, inner, started_at);
-            }
-
-            match res {
-                Ok(Ok(_put)) => Ok(()),
-                Ok(Err(sdk)) => Err(sdk.into()),
-                Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
-            }
+        let res = tokio::select! {
+            res = upload => res,
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
         };
 
-        tokio::select! {
-            res = op => res,
-            _ = cancel.cancelled() => Err(TimeoutOrCancel::Cancel.into()),
+        if let Ok(inner) = &res {
+            // do not incl. timeouts as errors in metrics but cancellations
+            let started_at = ScopeGuard::into_inner(started_at);
+            metrics::BUCKET_METRICS
+                .req_seconds
+                .observe_elapsed(kind, inner, started_at);
+        }
+
+        match res {
+            Ok(Ok(_put)) => Ok(()),
+            Ok(Err(sdk)) => Err(sdk.into()),
+            Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
         }
     }
 
@@ -633,7 +633,7 @@ impl RemoteStorage for S3Bucket {
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Copy;
-        let _guard = self.permit(kind).await;
+        let _permit = self.permit(kind, cancel).await?;
 
         let timeout = tokio::time::sleep(timeout);
 
@@ -754,7 +754,7 @@ impl RemoteStorage for S3Bucket {
         cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         let kind = RequestKind::TimeTravel;
-        let _guard = self.permit(kind).await;
+        let permit = self.permit(kind, cancel).await?;
 
         let timestamp = DateTime::from(timestamp);
         let done_if_after = DateTime::from(done_if_after);
@@ -953,8 +953,9 @@ impl RemoteStorage for S3Bucket {
                     let oid = ObjectIdentifier::builder()
                         .key(key.to_owned())
                         .build()
-                        .map_err(|e| TimeTravelError::Other(anyhow::Error::new(e)))?;
-                    self.delete_oids0(&[oid], Duration::from_secs(60), cancel)
+                        .map_err(|e| TimeTravelError::Other(e.into()))?;
+
+                    self.delete_oids0(&permit, &[oid], Duration::from_secs(60), cancel)
                         .await
                         .map_err(|e| {
                             // delete_oid0 will use TimeoutOrCancel
