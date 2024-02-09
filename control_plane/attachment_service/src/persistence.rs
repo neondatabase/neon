@@ -260,12 +260,23 @@ impl Persistence {
 
     /// Ordering: call this _after_ deleting the tenant on pageservers, but _before_ dropping state for
     /// the tenant from memory on this server.
-    #[allow(unused)]
     pub(crate) async fn delete_tenant(&self, del_tenant_id: TenantId) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_conn(move |conn| -> DatabaseResult<()> {
             diesel::delete(tenant_shards)
                 .filter(tenant_id.eq(del_tenant_id.to_string()))
+                .execute(conn)?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            diesel::delete(nodes)
+                .filter(node_id.eq(del_node_id.0 as i64))
                 .execute(conn)?;
 
             Ok(())
