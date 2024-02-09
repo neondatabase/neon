@@ -287,7 +287,7 @@ impl NodeInfo {
     pub fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
         match keys {
             ComputeCredentialKeys::Password(password) => self.config.password(password),
-            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(auth_keys.clone()),
+            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
         };
     }
 }
