@@ -4675,15 +4675,25 @@ struct TimelineWriterState {
     prev_lsn: Option<Lsn>,
     // Largest Lsn which passed through the current writer
     max_lsn: Option<Lsn>,
+    // Cached details of the last freeze. Avoids going trough the atomic/lock on every put.
+    cached_last_freeze_at: Lsn,
+    cached_last_freeze_ts: Instant,
 }
 
 impl TimelineWriterState {
-    fn new(open_layer: Arc<InMemoryLayer>, current_size: u64) -> Self {
+    fn new(
+        open_layer: Arc<InMemoryLayer>,
+        current_size: u64,
+        last_freeze_at: Lsn,
+        last_freeze_ts: Instant,
+    ) -> Self {
         Self {
             open_layer,
             current_size,
             prev_lsn: None,
             max_lsn: None,
+            cached_last_freeze_at: last_freeze_at,
+            cached_last_freeze_ts: last_freeze_ts,
         }
     }
 }
@@ -4766,7 +4776,10 @@ impl<'a> TimelineWriter<'a> {
             OpenLayerAction::Roll => {
                 let max_lsn = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
                 self.tl.freeze_inmem_layer_at(max_lsn).await;
-                *(self.last_freeze_ts.write().unwrap()) = Instant::now();
+
+                let now = Instant::now();
+                *(self.last_freeze_ts.write().unwrap()) = now;
+
                 self.tl.flush_frozen_layers();
 
                 let current_size = self.write_guard.as_ref().unwrap().current_size;
@@ -4778,16 +4791,27 @@ impl<'a> TimelineWriter<'a> {
 
                 let layer = self.tl.get_layer_for_write(at).await?;
                 let initial_size = layer.size().await?;
-                self.write_guard
-                    .replace(TimelineWriterState::new(layer, initial_size));
+                self.write_guard.replace(TimelineWriterState::new(
+                    layer,
+                    initial_size,
+                    Lsn(max_lsn.0 + 1),
+                    now,
+                ));
             }
             OpenLayerAction::Open => {
                 assert!(self.write_guard.is_none());
 
                 let layer = self.tl.get_layer_for_write(at).await?;
                 let initial_size = layer.size().await?;
-                self.write_guard
-                    .replace(TimelineWriterState::new(layer, initial_size));
+
+                let last_freeze_at = self.last_freeze_at.load();
+                let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
+                self.write_guard.replace(TimelineWriterState::new(
+                    layer,
+                    initial_size,
+                    last_freeze_at,
+                    last_freeze_ts,
+                ));
             }
             OpenLayerAction::None => {
                 assert!(self.write_guard.is_some());
@@ -4810,10 +4834,7 @@ impl<'a> TimelineWriter<'a> {
             return OpenLayerAction::None;
         }
 
-        let last_freeze_at = self.last_freeze_at.load();
-        let distance = lsn.widening_sub(last_freeze_at);
-        let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
-
+        let distance = lsn.widening_sub(state.cached_last_freeze_at);
         let proposed_open_layer_size = state.current_size + new_value_size;
 
         // Rolling the open layer can be triggered by:
@@ -4838,12 +4859,14 @@ impl<'a> TimelineWriter<'a> {
             );
 
             OpenLayerAction::Roll
-        } else if distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
+        } else if distance > 0
+            && state.cached_last_freeze_ts.elapsed() >= self.get_checkpoint_timeout()
+        {
             info!(
                 "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
                 lsn,
                 state.current_size,
-                last_freeze_ts.elapsed()
+                state.cached_last_freeze_ts.elapsed()
             );
 
             OpenLayerAction::Roll
