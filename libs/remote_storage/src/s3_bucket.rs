@@ -45,8 +45,9 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
-    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    S3Config, TimeTravelError, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode,
+    RemotePath, RemoteStorage, S3Config, TimeTravelError, MAX_KEYS_PER_DELETE,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -63,7 +64,6 @@ pub struct S3Bucket {
     concurrency_limiter: ConcurrencyLimiter,
 }
 
-#[derive(Default)]
 struct GetObjectRequest {
     bucket: String,
     key: String,
@@ -232,24 +232,8 @@ impl S3Bucket {
 
         let started_at = ScopeGuard::into_inner(started_at);
 
-        match get_object {
-            Ok(object_output) => {
-                let metadata = object_output.metadata().cloned().map(StorageMetadata);
-                let etag = object_output.e_tag.clone();
-                let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
-
-                let body = object_output.body;
-                let body = ByteStreamAsStream::from(body);
-                let body = PermitCarrying::new(permit, body);
-                let body = TimedDownload::new(started_at, body);
-
-                Ok(Download {
-                    metadata,
-                    etag,
-                    last_modified,
-                    download_stream: Box::pin(body),
-                })
-            }
+        let object_output = match get_object {
+            Ok(object_output) => object_output,
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
                 // Count this in the AttemptOutcome::Ok bucket, because 404 is not
                 // an error: we expect to sometimes fetch an object and find it missing,
@@ -259,7 +243,7 @@ impl S3Bucket {
                     AttemptOutcome::Ok,
                     started_at,
                 );
-                Err(DownloadError::NotFound)
+                return Err(DownloadError::NotFound);
             }
             Err(e) => {
                 metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
@@ -268,11 +252,27 @@ impl S3Bucket {
                     started_at,
                 );
 
-                Err(DownloadError::Other(
+                return Err(DownloadError::Other(
                     anyhow::Error::new(e).context("download s3 object"),
-                ))
+                ));
             }
-        }
+        };
+
+        let metadata = object_output.metadata().cloned().map(StorageMetadata);
+        let etag = object_output.e_tag;
+        let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
+
+        let body = object_output.body;
+        let body = ByteStreamAsStream::from(body);
+        let body = PermitCarrying::new(permit, body);
+        let body = TimedDownload::new(started_at, body);
+
+        Ok(Download {
+            metadata,
+            etag,
+            last_modified,
+            download_stream: Box::pin(body),
+        })
     }
 
     async fn delete_oids(
@@ -352,33 +352,6 @@ impl Stream for ByteStreamAsStream {
 
     // cannot implement size_hint because inner.size_hint is remaining size in bytes, which makes
     // sense and Stream::size_hint does not really
-}
-
-pin_project_lite::pin_project! {
-    /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    struct PermitCarrying<S> {
-        permit: tokio::sync::OwnedSemaphorePermit,
-        #[pin]
-        inner: S,
-    }
-}
-
-impl<S> PermitCarrying<S> {
-    fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
-        Self { permit, inner }
-    }
-}
-
-impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for PermitCarrying<S> {
-    type Item = <S as Stream>::Item;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.project().inner.poll_next(cx)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
 }
 
 pin_project_lite::pin_project! {

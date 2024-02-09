@@ -2,6 +2,7 @@
 //!
 //! Handles both SQL over HTTP and SQL over Websockets.
 
+mod backend;
 mod conn_pool;
 mod json;
 mod sql_over_http;
@@ -18,11 +19,11 @@ pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
-use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::rate_limiter::EndpointRateLimiter;
+use crate::serverless::backend::PoolingBackend;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;
 use hyper::{
@@ -54,12 +55,13 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
-    let conn_pool = conn_pool::GlobalConnPool::new(config);
-
-    let conn_pool2 = Arc::clone(&conn_pool);
-    tokio::spawn(async move {
-        conn_pool2.gc_worker(StdRng::from_entropy()).await;
-    });
+    let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
+    {
+        let conn_pool = Arc::clone(&conn_pool);
+        tokio::spawn(async move {
+            conn_pool.gc_worker(StdRng::from_entropy()).await;
+        });
+    }
 
     // shutdown the connection pool
     tokio::spawn({
@@ -71,6 +73,11 @@ pub async fn task_main(
                 .await
                 .unwrap();
         }
+    });
+
+    let backend = Arc::new(PoolingBackend {
+        pool: Arc::clone(&conn_pool),
+        config,
     });
 
     let tls_config = match config.tls_config.as_ref() {
@@ -102,11 +109,10 @@ pub async fn task_main(
 
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
-            let (io, tls) = stream.get_ref();
+            let (io, _) = stream.get_ref();
             let client_addr = io.client_addr();
             let remote_addr = io.inner.remote_addr();
-            let sni_name = tls.server_name().map(|s| s.to_string());
-            let conn_pool = conn_pool.clone();
+            let backend = backend.clone();
             let ws_connections = ws_connections.clone();
             let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
@@ -118,8 +124,7 @@ pub async fn task_main(
                 };
                 Ok(MetricService::new(hyper::service::service_fn(
                     move |req: Request<Body>| {
-                        let sni_name = sni_name.clone();
-                        let conn_pool = conn_pool.clone();
+                        let backend = backend.clone();
                         let ws_connections = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
@@ -130,12 +135,10 @@ pub async fn task_main(
                             request_handler(
                                 req,
                                 config,
-                                tls_config,
-                                conn_pool,
+                                backend,
                                 ws_connections,
                                 cancel_map,
                                 session_id,
-                                sni_name,
                                 peer_addr.ip(),
                                 endpoint_rate_limiter,
                             )
@@ -200,12 +203,10 @@ where
 async fn request_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
-    tls: &'static TlsConfig,
-    conn_pool: Arc<conn_pool::GlobalConnPool>,
+    backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
-    sni_hostname: Option<String>,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Body>, ApiError> {
@@ -225,11 +226,11 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
-                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+                let ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
 
                 if let Err(e) = websocket::serve_websocket(
                     config,
-                    &mut ctx,
+                    ctx,
                     websocket,
                     cancel_map,
                     host,
@@ -246,17 +247,9 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let mut ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+        let ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
 
-        sql_over_http::handle(
-            tls,
-            &config.http_config,
-            &mut ctx,
-            request,
-            sni_hostname,
-            conn_pool,
-        )
-        .await
+        sql_over_http::handle(config, ctx, request, backend).await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")
