@@ -40,12 +40,15 @@ impl FormatTime for SimClock {
 
 static LOGGING_DONE: OnceCell<SimClock> = OnceCell::new();
 
+/// Returns ptr to clocks attached to tracing logger to update them when the
+/// world is (re)created.
 pub fn init_tracing_logger(debug_enabled: bool) -> SimClock {
     LOGGING_DONE
         .get_or_init(|| {
             let clock = SimClock::default();
             let base_logger = tracing_subscriber::fmt()
                 .with_target(false)
+                // prefix log lines with simulated time timestamp
                 .with_timer(clock.clone())
                 // .with_ansi(true) TODO
                 .with_max_level(match debug_enabled {
