@@ -121,7 +121,8 @@ where
 
     error!(error = ?err, "could not connect to compute node");
 
-    let node_info = if node_info.cached() || !err.could_retry() {
+    // TODO(anna): do not retry if the connection was established.
+    let node_info = if true {
         // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
         info!("compute node's state has likely changed; requesting a wake-up");
         ctx.latency_timer.cache_miss();
