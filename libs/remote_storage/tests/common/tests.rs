@@ -48,13 +48,15 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         }
     };
 
+    let cancel = CancellationToken::new();
+
     let test_client = Arc::clone(&ctx.enabled.client);
     let expected_remote_prefixes = ctx.remote_prefixes.clone();
 
     let base_prefix = RemotePath::new(Utf8Path::new(ctx.enabled.base_prefix))
         .context("common_prefix construction")?;
     let root_remote_prefixes = test_client
-        .list_prefixes(None)
+        .list_prefixes(None, TIMEOUT, &cancel)
         .await
         .context("client list root prefixes failure")?
         .into_iter()
@@ -65,7 +67,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     );
 
     let nested_remote_prefixes = test_client
-        .list_prefixes(Some(&base_prefix))
+        .list_prefixes(Some(&base_prefix), TIMEOUT, &cancel)
         .await
         .context("client list nested prefixes failure")?
         .into_iter()
@@ -102,11 +104,12 @@ async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> a
             anyhow::bail!("S3 init failed: {e:?}")
         }
     };
+    let cancel = CancellationToken::new();
     let test_client = Arc::clone(&ctx.enabled.client);
     let base_prefix =
         RemotePath::new(Utf8Path::new("folder1")).context("common_prefix construction")?;
     let root_files = test_client
-        .list_files(None, None)
+        .list_files(None, None, TIMEOUT, &cancel)
         .await
         .context("client list root files failure")?
         .into_iter()
@@ -120,13 +123,13 @@ async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> a
     // Test that max_keys limit works. In total there are about 21 files (see
     // upload_simple_remote_data call in test_real_s3.rs).
     let limited_root_files = test_client
-        .list_files(None, Some(NonZeroU32::new(2).unwrap()))
+        .list_files(None, Some(NonZeroU32::new(2).unwrap()), TIMEOUT, &cancel)
         .await
         .context("client list root files failure")?;
     assert_eq!(limited_root_files.len(), 2);
 
     let nested_remote_files = test_client
-        .list_files(Some(&base_prefix), None)
+        .list_files(Some(&base_prefix), None, TIMEOUT, &cancel)
         .await
         .context("client list nested files failure")?
         .into_iter()
@@ -199,7 +202,7 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
 
     ctx.client.delete_objects(&[path1, path2]).await?;
 
-    let prefixes = ctx.client.list_prefixes(None).await?;
+    let prefixes = ctx.client.list_prefixes(None, TIMEOUT, &cancel).await?;
 
     assert_eq!(prefixes.len(), 1);
 

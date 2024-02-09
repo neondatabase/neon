@@ -565,7 +565,9 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     // Note: listing segments might take a long time if there are many of them.
     // We don't currently have http requests timeout cancellation, but if/once
     // we have listing should get streaming interface to make progress.
-    let token = CancellationToken::new(); // not really used
+
+    let timeout = Duration::from_secs(120);
+    let cancel = CancellationToken::new(); // not really used
     backoff::retry(
         || async {
             // Do list-delete in batch_size batches to make progress even if there a lot of files.
@@ -573,7 +575,7 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
             // I'm not sure deleting while iterating is expected in s3.
             loop {
                 let files = storage
-                    .list_files(Some(&remote_path), Some(batch_size))
+                    .list_files(Some(&remote_path), Some(batch_size), timeout, &cancel)
                     .await?;
                 if files.is_empty() {
                     return Ok(()); // done
@@ -586,14 +588,14 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
                     files.first().unwrap().object_name().unwrap_or(""),
                     files.last().unwrap().object_name().unwrap_or("")
                 );
-                storage.delete_objects(&files).await?;
+                storage.delete_objects(&files, timeout, &cancel).await?;
             }
         },
         |_| false,
         3,
         10,
         "executing WAL segments deletion batch",
-        &token,
+        &cancel,
     )
     .await
     .ok_or_else(|| anyhow::anyhow!("canceled"))
@@ -623,7 +625,14 @@ pub async fn copy_s3_segments(
 
     let remote_path = RemotePath::new(&relative_dst_path)?;
 
-    let files = storage.list_files(Some(&remote_path), None).await?;
+    let timeout = Duration::from_secs(120);
+    let cancel = CancellationToken::new();
+
+    // FIXME: is there upper retry?
+    let files = storage
+        .list_files(Some(&remote_path), None, timeout, &cancel)
+        .await?;
+
     let uploaded_segments = &files
         .iter()
         .filter_map(|file| file.object_name().map(ToOwned::to_owned))

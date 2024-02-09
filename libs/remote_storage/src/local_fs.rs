@@ -284,64 +284,85 @@ impl RemoteStorage for LocalFs {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError> {
-        let mut result = Listing::default();
+        let op = async {
+            let mut result = Listing::default();
 
-        if let ListingMode::NoDelimiter = mode {
-            let keys = self
-                .list_recursive(prefix)
+            if let ListingMode::NoDelimiter = mode {
+                let keys = self
+                    .list_recursive(prefix)
+                    .await
+                    .map_err(DownloadError::Other)?;
+
+                result.keys = keys
+                    .into_iter()
+                    .filter(|k| {
+                        let path = k.with_base(&self.storage_root);
+                        !path.is_dir()
+                    })
+                    .collect();
+
+                if let Some(max_keys) = max_keys {
+                    result.keys.truncate(max_keys.get() as usize);
+                }
+
+                return Ok(result);
+            }
+
+            let path = match prefix {
+                Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
+                None => Cow::Borrowed(&self.storage_root),
+            };
+
+            let prefixes_to_filter = get_all_files(path.as_ref(), false)
                 .await
                 .map_err(DownloadError::Other)?;
 
-            result.keys = keys
-                .into_iter()
-                .filter(|k| {
-                    let path = k.with_base(&self.storage_root);
-                    !path.is_dir()
-                })
-                .collect();
-            if let Some(max_keys) = max_keys {
-                result.keys.truncate(max_keys.get() as usize);
+            // filter out empty directories to mirror s3 behavior.
+            for prefix in prefixes_to_filter {
+                if prefix.is_dir()
+                    && is_directory_empty(&prefix)
+                        .await
+                        .map_err(DownloadError::Other)?
+                {
+                    continue;
+                }
+
+                let stripped = prefix
+                    .strip_prefix(&self.storage_root)
+                    .context("Failed to strip prefix")
+                    .and_then(RemotePath::new)
+                    .expect(
+                        "We list files for storage root, hence should be able to remote the prefix",
+                    );
+
+                if prefix.is_dir() {
+                    result.prefixes.push(stripped);
+                } else {
+                    result.keys.push(stripped);
+                }
             }
 
-            return Ok(result);
-        }
-
-        let path = match prefix {
-            Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
-            None => Cow::Borrowed(&self.storage_root),
+            Ok(result)
         };
 
-        let prefixes_to_filter = get_all_files(path.as_ref(), false)
-            .await
-            .map_err(DownloadError::Other)?;
+        let timeout = async {
+            tokio::time::sleep(timeout).await;
+            Err(DownloadError::Timeout)
+        };
 
-        // filter out empty directories to mirror s3 behavior.
-        for prefix in prefixes_to_filter {
-            if prefix.is_dir()
-                && is_directory_empty(&prefix)
-                    .await
-                    .map_err(DownloadError::Other)?
-            {
-                continue;
-            }
+        let cancelled = async {
+            cancel.cancelled().await;
+            Err(DownloadError::Cancelled)
+        };
 
-            let stripped = prefix
-                .strip_prefix(&self.storage_root)
-                .context("Failed to strip prefix")
-                .and_then(RemotePath::new)
-                .expect(
-                    "We list files for storage root, hence should be able to remote the prefix",
-                );
-
-            if prefix.is_dir() {
-                result.prefixes.push(stripped);
-            } else {
-                result.keys.push(stripped);
-            }
+        tokio::select! {
+            res = op => res,
+            res = timeout => res,
+            res = cancelled => res,
         }
-
-        Ok(result)
     }
 
     async fn upload(
@@ -873,12 +894,16 @@ mod fs_tests {
         let uncle =
             upload_dummy_file(&storage, "grandparent/uncle", None, TIMEOUT, &cancel).await?;
 
-        let listing = storage.list(None, ListingMode::NoDelimiter, None).await?;
+        let listing = storage
+            .list(None, ListingMode::NoDelimiter, None, TIMEOUT, &cancel)
+            .await?;
         assert!(listing.prefixes.is_empty());
         assert_eq!(listing.keys, [uncle.clone(), child.clone()].to_vec());
 
         // Delimiter: should only go one deep
-        let listing = storage.list(None, ListingMode::WithDelimiter, None).await?;
+        let listing = storage
+            .list(None, ListingMode::WithDelimiter, None, TIMEOUT, &cancel)
+            .await?;
 
         assert_eq!(
             listing.prefixes,
@@ -892,6 +917,8 @@ mod fs_tests {
                 Some(&RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()),
                 ListingMode::WithDelimiter,
                 None,
+                TIMEOUT,
+                &cancel,
             )
             .await?;
         assert_eq!(

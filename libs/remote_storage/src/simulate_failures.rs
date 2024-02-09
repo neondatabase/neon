@@ -105,20 +105,26 @@ impl RemoteStorage for UnreliableWrapper {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner.list_prefixes(prefix).await
+        self.inner.list_prefixes(prefix, timeout, cancel).await
     }
 
     async fn list_files(
         &self,
         folder: Option<&RemotePath>,
         max_keys: Option<NonZeroU32>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(folder.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner.list_files(folder, max_keys).await
+        self.inner
+            .list_files(folder, max_keys, timeout, cancel)
+            .await
     }
 
     async fn list(
@@ -126,10 +132,14 @@ impl RemoteStorage for UnreliableWrapper {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner.list(prefix, mode, max_keys).await
+        self.inner
+            .list(prefix, mode, max_keys, timeout, cancel)
+            .await
     }
 
     async fn upload(

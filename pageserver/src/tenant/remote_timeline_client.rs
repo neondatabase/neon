@@ -1151,7 +1151,12 @@ impl RemoteTimelineClient {
         let remaining = download_retry(
             || async {
                 self.storage_impl
-                    .list_files(Some(&timeline_storage_path), None)
+                    .list_files(
+                        Some(&timeline_storage_path),
+                        None,
+                        DOWNLOAD_TIMEOUT,
+                        &cancel,
+                    )
                     .await
             },
             "list remaining files",

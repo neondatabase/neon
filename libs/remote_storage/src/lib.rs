@@ -160,9 +160,11 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         let result = self
-            .list(prefix, ListingMode::WithDelimiter, None)
+            .list(prefix, ListingMode::WithDelimiter, None, timeout, cancel)
             .await?
             .prefixes;
         Ok(result)
@@ -184,9 +186,11 @@ pub trait RemoteStorage: Send + Sync + 'static {
         &self,
         prefix: Option<&RemotePath>,
         max_keys: Option<NonZeroU32>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         let result = self
-            .list(prefix, ListingMode::NoDelimiter, max_keys)
+            .list(prefix, ListingMode::NoDelimiter, max_keys, timeout, cancel)
             .await?
             .keys;
         Ok(result)
@@ -197,6 +201,8 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
         _mode: ListingMode,
         max_keys: Option<NonZeroU32>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
@@ -368,12 +374,14 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Listing, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.list(prefix, mode, max_keys).await,
-            Self::AwsS3(s) => s.list(prefix, mode, max_keys).await,
-            Self::AzureBlob(s) => s.list(prefix, mode, max_keys).await,
-            Self::Unreliable(s) => s.list(prefix, mode, max_keys).await,
+            Self::LocalFs(s) => s.list(prefix, mode, max_keys, timeout, cancel).await,
+            Self::AwsS3(s) => s.list(prefix, mode, max_keys, timeout, cancel).await,
+            Self::AzureBlob(s) => s.list(prefix, mode, max_keys, timeout, cancel).await,
+            Self::Unreliable(s) => s.list(prefix, mode, max_keys, timeout, cancel).await,
         }
     }
 
@@ -386,12 +394,14 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         &self,
         folder: Option<&RemotePath>,
         max_keys: Option<NonZeroU32>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.list_files(folder, max_keys).await,
-            Self::AwsS3(s) => s.list_files(folder, max_keys).await,
-            Self::AzureBlob(s) => s.list_files(folder, max_keys).await,
-            Self::Unreliable(s) => s.list_files(folder, max_keys).await,
+            Self::LocalFs(s) => s.list_files(folder, max_keys, timeout, cancel).await,
+            Self::AwsS3(s) => s.list_files(folder, max_keys, timeout, cancel).await,
+            Self::AzureBlob(s) => s.list_files(folder, max_keys, timeout, cancel).await,
+            Self::Unreliable(s) => s.list_files(folder, max_keys, timeout, cancel).await,
         }
     }
 
@@ -401,12 +411,14 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     pub async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.list_prefixes(prefix).await,
-            Self::AwsS3(s) => s.list_prefixes(prefix).await,
-            Self::AzureBlob(s) => s.list_prefixes(prefix).await,
-            Self::Unreliable(s) => s.list_prefixes(prefix).await,
+            Self::LocalFs(s) => s.list_prefixes(prefix, timeout, cancel).await,
+            Self::AwsS3(s) => s.list_prefixes(prefix, timeout, cancel).await,
+            Self::AzureBlob(s) => s.list_prefixes(prefix, timeout, cancel).await,
+            Self::Unreliable(s) => s.list_prefixes(prefix, timeout, cancel).await,
         }
     }
 

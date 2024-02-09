@@ -410,6 +410,8 @@ impl RemoteStorage for S3Bucket {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
+        timeout: Duration,
+        cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError> {
         let kind = RequestKind::List;
         // s3 sdk wants i32
@@ -431,10 +433,19 @@ impl RemoteStorage for S3Bucket {
                 p
             });
 
+        let _guard = tokio::select! {
+            guard = self.permit(kind) => guard,
+            _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+        };
+
         let mut continuation_token = None;
 
+        // TODO: REVIEW: does it really make sense to have an multiple request timeout? because our
+        // timeout is 120s then yes, but we are timing out a non-constant operation with a constant
+        // timeout.
+        let mut timeout = std::pin::pin!(tokio::time::sleep(timeout));
+
         loop {
-            let _guard = self.permit(kind).await;
             let started_at = start_measuring_requests(kind);
 
             // min of two Options, returning Some if one is value and another is
@@ -456,9 +467,15 @@ impl RemoteStorage for S3Bucket {
                 request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
             }
 
-            let response = request
-                .send()
-                .await
+            let request = request.send();
+
+            let response = tokio::select! {
+                res = request => res,
+                _ = &mut timeout => return Err(DownloadError::Timeout),
+                _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+            };
+
+            let response = response
                 .context("Failed to list S3 prefixes")
                 .map_err(DownloadError::Other);
 
