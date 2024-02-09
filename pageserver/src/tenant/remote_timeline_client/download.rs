@@ -379,17 +379,13 @@ pub(super) async fn download_index_part(
     // objects, and select the highest one with a generation <= my_generation.  Constructing the prefix is equivalent
     // to constructing a full index path with no generation, because the generation is a suffix.
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
-    let indices = backoff::retry(
+
+    let indices = download_retry(
         || async { storage.list_files(Some(&index_prefix)).await },
-        |_| false,
-        FAILED_DOWNLOAD_WARN_THRESHOLD,
-        FAILED_REMOTE_OP_RETRIES,
-        "listing index_part files",
+        "list index_part files",
         &cancel,
     )
-    .await
-    .ok_or_else(|| DownloadError::Cancelled)
-    .and_then(|x| x)?;
+    .await?;
 
     // General case logic for which index to use: the latest index whose generation
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
@@ -515,7 +511,7 @@ pub(crate) async fn download_initdb_tar_zst(
 /// with backoff.
 ///
 /// (See similar logic for uploads in `perform_upload_task`)
-async fn download_retry<T, O, F>(
+pub(super) async fn download_retry<T, O, F>(
     op: O,
     description: &str,
     cancel: &CancellationToken,

@@ -217,6 +217,7 @@ use crate::metrics::{
 };
 use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::remote_timeline_client::download::download_retry;
 use crate::tenant::storage_layer::AsLayerDesc;
 use crate::tenant::upload_queue::Delete;
 use crate::tenant::TIMELINES_SEGMENT_NAME;
@@ -1147,22 +1148,17 @@ impl RemoteTimelineClient {
 
         let cancel = shutdown_token();
 
-        let remaining = backoff::retry(
+        let remaining = download_retry(
             || async {
                 self.storage_impl
                     .list_files(Some(&timeline_storage_path))
                     .await
             },
-            |_e| false,
-            FAILED_DOWNLOAD_WARN_THRESHOLD,
-            FAILED_REMOTE_OP_RETRIES,
-            "list_prefixes",
+            "list remaining files",
             &cancel,
         )
         .await
-        .ok_or_else(|| DownloadError::Cancelled)
-        .and_then(|x| x)
-        .context("list prefixes")?;
+        .context("list files remaining files")?;
 
         // We will delete the current index_part object last, since it acts as a deletion
         // marker via its deleted_at attribute
