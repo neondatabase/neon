@@ -7,6 +7,7 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
+    num::NonZeroU32,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -408,8 +409,11 @@ impl RemoteStorage for S3Bucket {
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
     ) -> Result<Listing, DownloadError> {
         let kind = RequestKind::List;
+        // s3 sdk wants i32
+        let mut max_keys = max_keys.map(|mk| mk.get() as i32);
         let mut result = Listing::default();
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
@@ -433,13 +437,20 @@ impl RemoteStorage for S3Bucket {
             let _guard = self.permit(kind).await;
             let started_at = start_measuring_requests(kind);
 
+            // min of two Options, returning Some if one is value and another is
+            // None (None is smaller than anything, so plain min doesn't work).
+            let request_max_keys = self
+                .max_keys_per_list_response
+                .into_iter()
+                .chain(max_keys.into_iter())
+                .min();
             let mut request = self
                 .client
                 .list_objects_v2()
                 .bucket(self.bucket_name.clone())
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
-                .set_max_keys(self.max_keys_per_list_response);
+                .set_max_keys(request_max_keys);
 
             if let ListingMode::WithDelimiter = mode {
                 request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
@@ -469,6 +480,14 @@ impl RemoteStorage for S3Bucket {
                 let object_path = object.key().expect("response does not contain a key");
                 let remote_path = self.s3_object_to_relative_path(object_path);
                 result.keys.push(remote_path);
+                if let Some(mut mk) = max_keys {
+                    assert!(mk > 0);
+                    mk -= 1;
+                    if mk == 0 {
+                        return Ok(result); // limit reached
+                    }
+                    max_keys = Some(mk);
+                }
             }
 
             result.prefixes.extend(
