@@ -514,10 +514,8 @@ mod fs_tests {
     use futures_util::Stream;
     use std::{collections::HashMap, io::Write};
 
-    async fn read_and_assert_remote_file_contents(
+    async fn read_and_check_metadata(
         storage: &LocalFs,
-        #[allow(clippy::ptr_arg)]
-        // have to use &Utf8PathBuf due to `storage.local_path` parameter requirements
         remote_storage_path: &RemotePath,
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
@@ -596,7 +594,7 @@ mod fs_tests {
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
-        let contents = read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
+        let contents = read_and_check_metadata(&storage, &upload_target, None).await?;
         assert_eq!(
             dummy_contents(upload_name),
             contents,
@@ -618,7 +616,7 @@ mod fs_tests {
         let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
         let full_range_download_contents =
-            read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
+            read_and_check_metadata(&storage, &upload_target, None).await?;
         assert_eq!(
             dummy_contents(upload_name),
             full_range_download_contents,
@@ -736,7 +734,7 @@ mod fs_tests {
             upload_dummy_file(&storage, upload_name, Some(metadata.clone())).await?;
 
         let full_range_download_contents =
-            read_and_assert_remote_file_contents(&storage, &upload_target, Some(&metadata)).await?;
+            read_and_check_metadata(&storage, &upload_target, Some(&metadata)).await?;
         assert_eq!(
             dummy_contents(upload_name),
             full_range_download_contents,
