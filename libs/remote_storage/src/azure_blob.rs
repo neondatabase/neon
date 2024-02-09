@@ -153,8 +153,6 @@ impl AzureBlobStorage {
                 bufs.push(data);
             }
             Ok(Download {
-                // thsi is actually 'static, but we cannot mention it in the signature, but it can be
-                // substituted for the 'a on &'a CancellationToken
                 download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
                 etag,
                 last_modified,
