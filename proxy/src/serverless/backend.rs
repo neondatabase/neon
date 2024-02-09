@@ -115,8 +115,6 @@ pub enum HttpConnError {
     AuthError(#[from] AuthError),
     #[error("wake_compute returned error")]
     WakeCompute(#[from] WakeComputeError),
-    #[error("wake_compute returned nothing")]
-    NoComputeInfo,
 }
 
 struct TokioMechanism {
