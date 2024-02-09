@@ -4063,7 +4063,6 @@ pub(crate) mod harness {
 
         /// For tests that specifically want to exercise the local load path, which does
         /// not use remote storage.
-        #[cfg(test)]
         pub(crate) async fn try_load_local(
             &self,
             ctx: &RequestContext,
@@ -4072,7 +4071,6 @@ pub(crate) mod harness {
         }
 
         /// The 'load' in this function is either a local load or a normal attachment,
-        #[cfg(test)]
         pub(crate) async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
             // If we have nothing in remote storage, must use load_local instead of attach: attach
             // will error out if there are no timelines.
@@ -4087,8 +4085,7 @@ pub(crate) mod harness {
             self.do_try_load(ctx, mode).await
         }
 
-        #[cfg(test)]
-        #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), ?mode))]
+        #[instrument(skip_all, fields(?mode))]
         async fn do_try_load(
             &self,
             ctx: &RequestContext,
@@ -4132,7 +4129,6 @@ pub(crate) mod harness {
             Ok(tenant)
         }
 
-        #[cfg(test)]
         fn remote_empty(&self) -> bool {
             let tenant_path = self.conf.tenant_path(&self.tenant_shard_id);
             let remote_tenant_dir = self
