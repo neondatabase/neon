@@ -793,7 +793,7 @@ pub(crate) async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_shard_id, true)?;
 
-    if tenant.tenant_shard_id().shard_count > ShardCount(0) {
+    if !tenant.tenant_shard_id().shard_count.is_unsharded() {
         // Note that we use ShardParameters::default below.
         return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
             "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
@@ -1375,7 +1375,7 @@ impl TenantManager {
         result
     }
 
-    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), new_shard_count=%new_shard_count.0))]
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), new_shard_count=%new_shard_count.literal()))]
     pub(crate) async fn shard_split(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1385,11 +1385,10 @@ impl TenantManager {
         let tenant = get_tenant(tenant_shard_id, true)?;
 
         // Plan: identify what the new child shards will be
-        let effective_old_shard_count = std::cmp::max(tenant_shard_id.shard_count.0, 1);
-        if new_shard_count <= ShardCount(effective_old_shard_count) {
+        if new_shard_count.count() <= tenant_shard_id.shard_count.count() {
             anyhow::bail!("Requested shard count is not an increase");
         }
-        let expansion_factor = new_shard_count.0 / effective_old_shard_count;
+        let expansion_factor = new_shard_count.count() / tenant_shard_id.shard_count.count();
         if !expansion_factor.is_power_of_two() {
             anyhow::bail!("Requested split is not a power of two");
         }

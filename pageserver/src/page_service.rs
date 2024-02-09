@@ -26,7 +26,7 @@ use pageserver_api::models::{
     PagestreamNblocksResponse,
 };
 use pageserver_api::shard::ShardIndex;
-use pageserver_api::shard::{ShardCount, ShardNumber};
+use pageserver_api::shard::ShardNumber;
 use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, QueryError};
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
@@ -991,7 +991,7 @@ impl PageServerHandler {
     ) -> Result<&Arc<Timeline>, Key> {
         let key = if let Some((first_idx, first_timeline)) = self.shard_timelines.iter().next() {
             // Fastest path: single sharded case
-            if first_idx.shard_count < ShardCount(2) {
+            if first_idx.shard_count.count() == 1 {
                 return Ok(&first_timeline.timeline);
             }
 

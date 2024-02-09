@@ -222,7 +222,7 @@ impl Persistence {
             let tenant_shard_id = TenantShardId {
                 tenant_id: TenantId::from_str(tsp.tenant_id.as_str())?,
                 shard_number: ShardNumber(tsp.shard_number as u8),
-                shard_count: ShardCount(tsp.shard_count as u8),
+                shard_count: ShardCount::new(tsp.shard_count as u8),
             };
 
             tenants_map.insert(tenant_shard_id, tsp);
@@ -307,7 +307,7 @@ impl Persistence {
                 tenant_id: TenantId::from_str(tsp.tenant_id.as_str())
                     .map_err(|e| DatabaseError::Logical(format!("Malformed tenant id: {e}")))?,
                 shard_number: ShardNumber(tsp.shard_number as u8),
-                shard_count: ShardCount(tsp.shard_count as u8),
+                shard_count: ShardCount::new(tsp.shard_count as u8),
             };
             result.insert(tenant_shard_id, Generation::new(tsp.generation as u32));
         }
@@ -329,7 +329,7 @@ impl Persistence {
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                     .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
-                    .filter(shard_count.eq(tenant_shard_id.shard_count.0 as i32))
+                    .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
                     .set((
                         generation.eq(generation + 1),
                         generation_pageserver.eq(node_id.0 as i64),
@@ -351,7 +351,7 @@ impl Persistence {
             let updated = diesel::update(tenant_shards)
                 .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                 .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
-                .filter(shard_count.eq(tenant_shard_id.shard_count.0 as i32))
+                .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
                 .set((
                     generation_pageserver.eq(i64::MAX),
                     placement_policy.eq(serde_json::to_string(&PlacementPolicy::Detached).unwrap()),
@@ -382,21 +382,19 @@ impl Persistence {
             conn.transaction(|conn| -> DatabaseResult<()> {
                 // Mark parent shards as splitting
 
-                let expect_parent_records = std::cmp::max(1, old_shard_count.0);
-
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
-                    .filter(shard_count.eq(old_shard_count.0 as i32))
+                    .filter(shard_count.eq(old_shard_count.literal() as i32))
                     .set((splitting.eq(1),))
                     .execute(conn)?;
                 if u8::try_from(updated)
                     .map_err(|_| DatabaseError::Logical(
                         format!("Overflow existing shard count {} while splitting", updated))
-                    )? != expect_parent_records {
+                    )? != old_shard_count.count() {
                     // Perhaps a deletion or another split raced with this attempt to split, mutating
                     // the parent shards that we intend to split. In this case the split request should fail.
                     return Err(DatabaseError::Logical(
-                        format!("Unexpected existing shard count {updated} when preparing tenant for split (expected {expect_parent_records})")
+                        format!("Unexpected existing shard count {updated} when preparing tenant for split (expected {})", old_shard_count.count())
                     ));
                 }
 
@@ -408,7 +406,7 @@ impl Persistence {
                     let mut parent = crate::schema::tenant_shards::table
                         .filter(tenant_id.eq(parent_shard_id.tenant_id.to_string()))
                         .filter(shard_number.eq(parent_shard_id.shard_number.0 as i32))
-                        .filter(shard_count.eq(parent_shard_id.shard_count.0 as i32))
+                        .filter(shard_count.eq(parent_shard_id.shard_count.literal() as i32))
                         .load::<TenantShardPersistence>(conn)?;
                     let parent = if parent.len() != 1 {
                         return Err(DatabaseError::Logical(format!(
@@ -450,7 +448,7 @@ impl Persistence {
                 // Drop parent shards
                 diesel::delete(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
-                    .filter(shard_count.eq(old_shard_count.0 as i32))
+                    .filter(shard_count.eq(old_shard_count.literal() as i32))
                     .execute(conn)?;
 
                 // Clear sharding flag

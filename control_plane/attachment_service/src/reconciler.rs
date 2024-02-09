@@ -263,7 +263,7 @@ impl Reconciler {
                 secondary_conf,
                 tenant_conf: config.clone(),
                 shard_number: shard.number.0,
-                shard_count: shard.count.0,
+                shard_count: shard.count.literal(),
                 shard_stripe_size: shard.stripe_size.0,
             }
         }
@@ -458,7 +458,7 @@ impl Reconciler {
                     generation: None,
                     secondary_conf: None,
                     shard_number: self.shard.number.0,
-                    shard_count: self.shard.count.0,
+                    shard_count: self.shard.count.literal(),
                     shard_stripe_size: self.shard.stripe_size.0,
                     tenant_conf: self.config.clone(),
                 },
@@ -506,7 +506,7 @@ pub(crate) fn attached_location_conf(
         generation: generation.into(),
         secondary_conf: None,
         shard_number: shard.number.0,
-        shard_count: shard.count.0,
+        shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
         tenant_conf: config.clone(),
     }
@@ -521,7 +521,7 @@ pub(crate) fn secondary_location_conf(
         generation: None,
         secondary_conf: Some(LocationConfigSecondary { warm: true }),
         shard_number: shard.number.0,
-        shard_count: shard.count.0,
+        shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
         tenant_conf: config.clone(),
     }

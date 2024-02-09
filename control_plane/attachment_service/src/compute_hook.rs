@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use hyper::{Method, StatusCode};
-use pageserver_api::shard::{ShardCount, ShardIndex, ShardNumber, TenantShardId};
+use pageserver_api::shard::{ShardIndex, ShardNumber, TenantShardId};
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -77,7 +77,7 @@ impl ComputeHookTenant {
         self.shards
             .sort_by_key(|(shard, _node_id)| shard.shard_number);
 
-        if self.shards.len() == shard_count.0 as usize || shard_count == ShardCount(0) {
+        if self.shards.len() == shard_count.count() as usize || shard_count.is_unsharded() {
             // We have pageservers for all the shards: emit a configuration update
             return Some(ComputeHookNotifyRequest {
                 tenant_id,
@@ -94,7 +94,7 @@ impl ComputeHookTenant {
             tracing::info!(
                 "ComputeHookTenant::maybe_reconfigure: not enough shards ({}/{})",
                 self.shards.len(),
-                shard_count.0
+                shard_count.count()
             );
         }
 
