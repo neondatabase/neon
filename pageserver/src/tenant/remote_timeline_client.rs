@@ -1160,7 +1160,7 @@ impl RemoteTimelineClient {
             &cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled!"))
+        .ok_or_else(|| DownloadError::Cancelled)
         .and_then(|x| x)
         .context("list prefixes")?;
 

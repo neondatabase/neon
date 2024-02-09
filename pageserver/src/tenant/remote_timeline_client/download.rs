@@ -388,9 +388,8 @@ pub(super) async fn download_index_part(
         &cancel,
     )
     .await
-    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
-    .and_then(|x| x)
-    .map_err(DownloadError::Other)?;
+    .ok_or_else(|| DownloadError::Cancelled)
+    .and_then(|x| x)?;
 
     // General case logic for which index to use: the latest index whose generation
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md

@@ -171,7 +171,10 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// whereas,
     /// list_prefixes("foo/bar/") = ["cat", "dog"]
     /// See `test_real_s3.rs` for more details.
-    async fn list_files(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    async fn list_files(
+        &self,
+        prefix: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
         let result = self.list(prefix, ListingMode::NoDelimiter).await?.keys;
         Ok(result)
     }
@@ -180,7 +183,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         &self,
         prefix: Option<&RemotePath>,
         _mode: ListingMode,
-    ) -> anyhow::Result<Listing, DownloadError>;
+    ) -> Result<Listing, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -350,7 +353,10 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     // A function for listing all the files in a "directory"
     // Example:
     // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
-    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    pub async fn list_files(
+        &self,
+        folder: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
             Self::LocalFs(s) => s.list_files(folder).await,
             Self::AwsS3(s) => s.list_files(folder).await,
