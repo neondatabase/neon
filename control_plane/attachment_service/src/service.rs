@@ -37,6 +37,7 @@ use utils::{
     http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
     seqwait::SeqWait,
+    sync::gate::Gate,
 };
 
 use crate::{
@@ -124,6 +125,12 @@ pub struct Service {
     config: Config,
     persistence: Arc<Persistence>,
 
+    // Process shutdown will fire this token
+    cancel: CancellationToken,
+
+    // Background tasks will hold this gate
+    gate: Gate,
+
     /// This waits for initial reconciliation with pageservers to complete.  Until this barrier
     /// passes, it isn't safe to do any actions that mutate tenants.
     pub(crate) startup_complete: Barrier,
@@ -152,9 +159,6 @@ impl Service {
         let mut observed = HashMap::new();
 
         let mut nodes_online = HashSet::new();
-
-        // TODO: give Service a cancellation token for clean shutdown
-        let cancel = CancellationToken::new();
 
         // TODO: issue these requests concurrently
         {
@@ -190,7 +194,7 @@ impl Service {
                     1,
                     5,
                     "Location config listing",
-                    &cancel,
+                    &self.cancel,
                 )
                 .await;
                 let Some(list_response) = list_response else {
@@ -331,7 +335,7 @@ impl Service {
         let stream = futures::stream::iter(compute_notifications.into_iter())
             .map(|(tenant_shard_id, node_id)| {
                 let compute_hook = compute_hook.clone();
-                let cancel = cancel.clone();
+                let cancel = self.cancel.clone();
                 async move {
                     if let Err(e) = compute_hook.notify(tenant_shard_id, node_id, &cancel).await {
                         tracing::error!(
@@ -439,6 +443,8 @@ impl Service {
             config,
             persistence,
             startup_complete: startup_complete.clone(),
+            cancel: CancellationToken::new(),
+            gate: Gate::default(),
         });
 
         let result_task_this = this.clone();
@@ -1424,9 +1430,6 @@ impl Service {
         let mut policy = None;
         let mut shard_ident = None;
 
-        // TODO: put a cancellation token on Service for clean shutdown
-        let cancel = CancellationToken::new();
-
         // A parent shard which will be split
         struct SplitTarget {
             parent_id: TenantShardId,
@@ -1716,7 +1719,7 @@ impl Service {
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
         for (child_id, child_ps) in child_locations {
-            if let Err(e) = compute_hook.notify(child_id, child_ps, &cancel).await {
+            if let Err(e) = compute_hook.notify(child_id, child_ps, &self.cancel).await {
                 tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
                         child_id, child_ps);
                 failed_notifications.push(child_id);
@@ -2098,5 +2101,10 @@ impl Service {
                 )
             })
             .count()
+    }
+
+    pub async fn shutdown(&self) {
+        self.cancel.cancel();
+        self.gate.close().await;
     }
 }
