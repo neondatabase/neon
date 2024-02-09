@@ -462,6 +462,18 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
     assert "password authentication failed for user" in res["message"]
 
 
+def test_sql_over_http_urlencoding(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user \"http+auth$$\" with password '%+$^&*@!' superuser")
+
+    static_proxy.http_query(
+        "select 1",
+        [],
+        user="http+auth$$",
+        password="%+$^&*@!",
+        expected_code=200,
+    )
+
+
 # Beginning a transaction should not impact the next query,
 # which might come from a completely different client.
 def test_http_pool_begin(static_proxy: NeonProxy):
