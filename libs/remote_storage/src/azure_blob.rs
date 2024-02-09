@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
+use crate::support::Cancelled;
 use crate::TimeTravelError;
 use crate::{
     AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath,
@@ -123,7 +124,11 @@ impl AzureBlobStorage {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
-        let mut response = builder.into_stream();
+        let kind = RequestKind::Get;
+
+        let _permit = self.permit(kind, cancel).await?;
+
+        let timeout = tokio::time::sleep(timeout);
 
         let mut etag = None;
         let mut last_modified = None;
@@ -132,6 +137,7 @@ impl AzureBlobStorage {
         // https://github.com/neondatabase/neon/issues/5563
 
         let download = async {
+            let mut response = builder.into_stream();
             let mut bufs = Vec::new();
             while let Some(part) = response.next().await {
                 let part = part.map_err(to_download_error)?;
@@ -163,15 +169,21 @@ impl AzureBlobStorage {
         tokio::select! {
             bufs = download => bufs,
             _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-            _ = tokio::time::sleep(timeout) => Err(DownloadError::Timeout),
+            _ = timeout => Err(DownloadError::Timeout),
         }
     }
 
-    async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
-        self.concurrency_limiter
-            .acquire(kind)
-            .await
-            .expect("semaphore is never closed")
+    async fn permit(
+        &self,
+        kind: RequestKind,
+        cancel: &CancellationToken,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, Cancelled> {
+        let acquire = self.concurrency_limiter.acquire(kind);
+
+        tokio::select! {
+            permit = acquire => Ok(permit.expect("never closed")),
+            _ = cancel.cancelled() => Err(Cancelled),
+        }
     }
 }
 
@@ -204,9 +216,9 @@ impl RemoteStorage for AzureBlobStorage {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Listing, DownloadError> {
-        let op = async {
-            let _permit = self.permit(RequestKind::List).await;
+        let _permit = self.permit(RequestKind::List, cancel).await?;
 
+        let op = async {
             // get the passed prefix or if it is not set use prefix_in_bucket value
             let list_prefix = prefix
                 .map(|p| self.relative_path_to_name(p))
@@ -289,10 +301,9 @@ impl RemoteStorage for AzureBlobStorage {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let op = async {
-            // acquiring the permit is not timed, but it is subject to cancellation
-            let _permit = self.permit(RequestKind::Put).await;
+        let _permit = self.permit(RequestKind::Put, cancel).await?;
 
+        let op = async {
             let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
             let from: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>> =
@@ -330,7 +341,6 @@ impl RemoteStorage for AzureBlobStorage {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
-        let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
         let builder = blob_client.get();
@@ -346,7 +356,6 @@ impl RemoteStorage for AzureBlobStorage {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
-        let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
         let mut builder = blob_client.get();
@@ -377,9 +386,9 @@ impl RemoteStorage for AzureBlobStorage {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let op = async {
-            let _permit = self.permit(RequestKind::Delete).await;
+        let _permit = self.permit(RequestKind::Delete, cancel).await?;
 
+        let op = async {
             let mut timeout = std::pin::pin!(tokio::time::sleep(timeout));
 
             // TODO batch requests are also not supported by the SDK
@@ -424,10 +433,7 @@ impl RemoteStorage for AzureBlobStorage {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let _permit = tokio::select! {
-            permit = self.permit(RequestKind::Copy) => permit,
-            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
-        };
+        let _permit = self.permit(RequestKind::Copy, cancel).await?;
 
         let timeout = tokio::time::sleep(timeout);
 
