@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::Context;
 use async_trait::async_trait;
 use tracing::info;
 
@@ -8,7 +7,10 @@ use crate::{
     auth::{backend::ComputeCredentialKeys, check_peer_addr_is_in_list, AuthError},
     compute,
     config::ProxyConfig,
-    console::CachedNodeInfo,
+    console::{
+        errors::{GetAuthInfoError, WakeComputeError},
+        CachedNodeInfo,
+    },
     context::RequestMonitoring,
     proxy::connect_compute::ConnectMechanism,
 };
@@ -66,7 +68,7 @@ impl PoolingBackend {
         conn_info: ConnInfo,
         keys: ComputeCredentialKeys,
         force_new: bool,
-    ) -> anyhow::Result<Client<tokio_postgres::Client>> {
+    ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         let maybe_client = if !force_new {
             info!("pool: looking for an existing connection");
             self.pool.get(ctx, &conn_info).await?
@@ -90,7 +92,7 @@ impl PoolingBackend {
         let mut node_info = backend
             .wake_compute(ctx)
             .await?
-            .context("missing cache entry from wake_compute")?;
+            .ok_or(HttpConnError::NoComputeInfo)?;
 
         match keys {
             #[cfg(any(test, feature = "testing"))]
@@ -114,6 +116,23 @@ impl PoolingBackend {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum HttpConnError {
+    #[error("pooled connection closed at inconsistent state")]
+    ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
+    #[error("could not connection to compute")]
+    ConnectionError(#[from] tokio_postgres::Error),
+
+    #[error("could not get auth info")]
+    GetAuthInfo(#[from] GetAuthInfoError),
+    #[error("user not authenticated")]
+    AuthError(#[from] AuthError),
+    #[error("wake_compute returned error")]
+    WakeCompute(#[from] WakeComputeError),
+    #[error("wake_compute returned nothing")]
+    NoComputeInfo,
+}
+
 struct TokioMechanism {
     pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     conn_info: ConnInfo,
@@ -124,7 +143,7 @@ struct TokioMechanism {
 impl ConnectMechanism for TokioMechanism {
     type Connection = Client<tokio_postgres::Client>;
     type ConnectError = tokio_postgres::Error;
-    type Error = anyhow::Error;
+    type Error = HttpConnError;
 
     async fn connect_once(
         &self,

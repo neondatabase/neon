@@ -1,9 +1,11 @@
 use crate::{
+    compute::PostgresConnection,
     console::messages::MetricsAuxInfo,
-    context::RequestMonitoring,
     metrics::NUM_BYTES_PROXIED_COUNTER,
+    stream::Stream,
     usage_metrics::{Ids, USAGE_METRICS},
 };
+use metrics::IntCounterPairGuard;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 use utils::measured_stream::MeasuredStream;
@@ -11,14 +13,10 @@ use utils::measured_stream::MeasuredStream;
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
 pub async fn proxy_pass(
-    ctx: &mut RequestMonitoring,
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
-    ctx.set_success();
-    ctx.log();
-
     let usage = USAGE_METRICS.register(Ids {
         endpoint_id: aux.endpoint_id.clone(),
         branch_id: aux.branch_id.clone(),
@@ -50,4 +48,19 @@ pub async fn proxy_pass(
     let _ = tokio::io::copy_bidirectional(&mut client, &mut compute).await?;
 
     Ok(())
+}
+
+pub struct ProxyPassthrough<S> {
+    pub client: Stream<S>,
+    pub compute: PostgresConnection,
+    pub aux: MetricsAuxInfo,
+
+    pub req: IntCounterPairGuard,
+    pub conn: IntCounterPairGuard,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
+    pub async fn proxy_pass(self) -> anyhow::Result<()> {
+        proxy_pass(self.client, self.compute.stream, self.aux).await
+    }
 }

@@ -1377,7 +1377,7 @@ impl Tenant {
                 async move {
                     debug!("starting index part download");
 
-                    let index_part = client.download_index_file(cancel_clone).await;
+                    let index_part = client.download_index_file(&cancel_clone).await;
 
                     debug!("finished index part download");
 
@@ -2434,7 +2434,7 @@ impl Tenant {
             // operation is rare, so it's simpler to just download it (and robustly guarantees that the index
             // we use here really is the remotely persistent one).
             let result = tl_client
-                .download_index_file(self.cancel.clone())
+                .download_index_file(&self.cancel)
                 .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))
                 .await?;
             let index_part = match result {
