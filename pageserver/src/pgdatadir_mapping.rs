@@ -1443,8 +1443,7 @@ impl<'a> DatadirModification<'a> {
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            let mut prev_pending_updates = HashMap::new();
-            std::mem::swap(&mut self.pending_updates, &mut prev_pending_updates);
+            let prev_pending_updates = std::mem::take(&mut self.pending_updates);
 
             let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = prev_pending_updates
                 .into_iter()
