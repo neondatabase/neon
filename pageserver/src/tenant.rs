@@ -4085,7 +4085,7 @@ pub(crate) mod harness {
             self.do_try_load(ctx, mode).await
         }
 
-        #[instrument(skip_all, fields(?mode))]
+        #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), ?mode))]
         async fn do_try_load(
             &self,
             ctx: &RequestContext,
