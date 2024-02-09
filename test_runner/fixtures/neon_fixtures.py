@@ -23,7 +23,7 @@ from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
@@ -2822,8 +2822,8 @@ class NeonProxy(PgProtocol):
 
     def http_query(self, query, args, **kwargs):
         # TODO maybe use default values if not provided
-        user = kwargs["user"]
-        password = kwargs["password"]
+        user = quote(kwargs["user"])
+        password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"

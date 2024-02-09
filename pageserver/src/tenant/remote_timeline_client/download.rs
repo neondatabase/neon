@@ -220,7 +220,7 @@ pub async fn list_remote_timelines(
         || {
             download_cancellable(
                 &cancel,
-                storage.list(Some(&remote_path), ListingMode::WithDelimiter),
+                storage.list(Some(&remote_path), ListingMode::WithDelimiter, None),
             )
         },
         &format!("list timelines for {tenant_shard_id}"),
@@ -373,7 +373,7 @@ pub(super) async fn download_index_part(
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
 
     let indices = download_retry(
-        || async { storage.list_files(Some(&index_prefix)).await },
+        || async { storage.list_files(Some(&index_prefix), None).await },
         "list index_part files",
         cancel,
     )

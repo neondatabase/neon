@@ -70,7 +70,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     }
 
     async fn list_files(client: &Arc<GenericRemoteStorage>) -> anyhow::Result<HashSet<RemotePath>> {
-        Ok(retry(|| client.list_files(None))
+        Ok(retry(|| client.list_files(None, None))
             .await
             .context("list root files failure")?
             .into_iter()
