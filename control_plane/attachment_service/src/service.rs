@@ -401,6 +401,20 @@ impl Service {
 
         let mut scheduler = Scheduler::new(&nodes);
 
+        #[cfg(feature = "testing")]
+        {
+            // Hack: insert scheduler state for all nodes referenced by shards, as compatibility
+            // tests only store the shards, not the nodes.  The nodes will be loaded shortly
+            // after when pageservers start up and register.
+            let mut node_ids = HashSet::new();
+            for tsp in &tenant_shard_persistence {
+                node_ids.insert(tsp.generation_pageserver);
+            }
+            for node_id in node_ids {
+                tracing::info!("Creating node {} in scheduler for tests", node_id);
+                scheduler.node_upsert(NodeId(node_id as u64), true);
+            }
+        }
         for tsp in tenant_shard_persistence {
             let tenant_shard_id = TenantShardId {
                 tenant_id: TenantId::from_str(tsp.tenant_id.as_str())?,
