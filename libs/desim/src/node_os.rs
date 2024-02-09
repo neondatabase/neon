@@ -37,6 +37,11 @@ impl NodeOs {
         self.internal.node_events()
     }
 
+    /// Get current time.
+    pub fn now(&self) -> u64 {
+        self.world.now()
+    }
+
     /// Generate a random number in range [0, max).
     pub fn random(&self, max: u64) -> u64 {
         self.internal.rng.lock().gen_range(0..max)

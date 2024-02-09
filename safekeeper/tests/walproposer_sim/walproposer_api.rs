@@ -259,8 +259,9 @@ impl SimulationApi {
 impl ApiImpl for SimulationApi {
     fn get_current_timestamp(&self) -> i64 {
         debug!("get_current_timestamp");
-        // TODO: use simulation time
-        0
+        // PG TimestampTZ is microseconds, but simulation unit is assumed to be
+        // milliseconds, so add 10^3
+        self.os.now() as i64 * 1000
     }
 
     fn conn_status(
