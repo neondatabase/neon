@@ -1816,6 +1816,7 @@ class NeonCli(AbstractNeonCli):
         endpoint_id: str,
         destroy=False,
         check_return_code=True,
+        mode: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1823,6 +1824,8 @@ class NeonCli(AbstractNeonCli):
         ]
         if destroy:
             args.append("--destroy")
+        if mode is not None:
+            args.append(f"--mode={mode}")
         if endpoint_id is not None:
             args.append(endpoint_id)
 
@@ -3162,7 +3165,7 @@ class Endpoint(PgProtocol):
         with open(remote_extensions_spec_path, "w") as file:
             json.dump(spec, file, indent=4)
 
-    def stop(self) -> "Endpoint":
+    def stop(self, mode: str = "fast") -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
         Returns self.
@@ -3171,13 +3174,13 @@ class Endpoint(PgProtocol):
         if self.running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
-                self.endpoint_id, check_return_code=self.check_stop_result
+                self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
             )
             self.running = False
 
         return self
 
-    def stop_and_destroy(self) -> "Endpoint":
+    def stop_and_destroy(self, mode: str = "immediate") -> "Endpoint":
         """
         Stop the Postgres instance, then destroy the endpoint.
         Returns self.
@@ -3185,7 +3188,7 @@ class Endpoint(PgProtocol):
 
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, True, check_return_code=self.check_stop_result
+            self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
         )
         self.endpoint_id = None
         self.running = False
