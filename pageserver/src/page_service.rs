@@ -91,8 +91,8 @@ const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 /// `tokio_tar` already read the first such block. Read the second all-zeros block,
 /// and check that there is no more data after the EOF marker.
 ///
-/// XXX: Currently, any trailing data after the EOF marker prints a warning.
-/// Perhaps it should be a hard error?
+/// 'tar' command can also write extra blocks of zeros, up to a record
+/// size, controlled by the --record-size argument. Ignore them too.
 async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()> {
     use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 512];
@@ -113,17 +113,24 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
         anyhow::bail!("invalid tar EOF marker");
     }
 
-    // Drain any data after the EOF marker
+    // Drain any extra zero-blocks after the EOF marker
     let mut trailing_bytes = 0;
+    let mut seen_nonzero_bytes = false;
     loop {
         let nbytes = reader.read(&mut buf).await?;
         trailing_bytes += nbytes;
+        if !buf.iter().all(|&x| x == 0) {
+            seen_nonzero_bytes = true;
+        }
         if nbytes == 0 {
             break;
         }
     }
-    if trailing_bytes > 0 {
-        warn!("ignored {trailing_bytes} unexpected bytes after the tar archive");
+    if seen_nonzero_bytes {
+        anyhow::bail!("unexpected non-zero bytes after the tar archive");
+    }
+    if trailing_bytes % 512 != 0 {
+        anyhow::bail!("unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive");
     }
     Ok(())
 }
