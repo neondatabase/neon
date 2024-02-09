@@ -4774,24 +4774,23 @@ impl<'a> TimelineWriter<'a> {
                     warn!("Flushed oversized open layer with size {}", current_size)
                 }
 
-                let state = &mut *self.write_guard;
-                assert!(state.is_some());
+                assert!(self.write_guard.is_some());
 
                 let layer = self.tl.get_layer_for_write(at).await?;
                 let initial_size = layer.size().await?;
-                state.replace(TimelineWriterState::new(layer, initial_size));
+                self.write_guard
+                    .replace(TimelineWriterState::new(layer, initial_size));
             }
             OpenLayerAction::Open => {
-                let state = &mut *self.write_guard;
-                assert!(state.is_none());
+                assert!(self.write_guard.is_none());
 
                 let layer = self.tl.get_layer_for_write(at).await?;
                 let initial_size = layer.size().await?;
-                state.replace(TimelineWriterState::new(layer, initial_size));
+                self.write_guard
+                    .replace(TimelineWriterState::new(layer, initial_size));
             }
             OpenLayerAction::None => {
-                let state = &*self.write_guard;
-                assert!(state.is_some());
+                assert!(self.write_guard.is_some());
             }
         }
 
