@@ -122,7 +122,7 @@ pub async fn task_main(
                 match res {
                     Err(e) => {
                         // todo: log and push to ctx the error kind
-                        ctx.set_error_kind(e.get_error_type());
+                        ctx.set_error_kind(e.get_error_kind());
                         ctx.log();
                         Err(e.into())
                     }
@@ -212,13 +212,13 @@ pub enum ClientRequestError {
 }
 
 impl ReportableError for ClientRequestError {
-    fn get_error_type(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            ClientRequestError::Cancellation(e) => e.get_error_type(),
-            ClientRequestError::Handshake(e) => e.get_error_type(),
+            ClientRequestError::Cancellation(e) => e.get_error_kind(),
+            ClientRequestError::Handshake(e) => e.get_error_kind(),
             ClientRequestError::HandshakeTimeout(_) => crate::error::ErrorKind::RateLimit,
-            ClientRequestError::ReportedError(e) => e.get_error_type(),
-            ClientRequestError::PrepareClient(_) => crate::error::ErrorKind::Disconnect,
+            ClientRequestError::ReportedError(e) => e.get_error_kind(),
+            ClientRequestError::PrepareClient(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }

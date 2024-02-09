@@ -192,7 +192,7 @@ pub async fn handle(
                 r
             }
             Err(e) => {
-                // ctx.set_error_kind(e.get_error_type());
+                // TODO: ctx.set_error_kind(e.get_error_type());
 
                 let mut message = format!("{:?}", e);
                 let db_error = e
@@ -270,7 +270,7 @@ pub async fn handle(
             }
         },
         Err(e) => {
-            ctx.set_error_kind(e.get_error_type());
+            ctx.set_error_kind(e.get_error_kind());
 
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
@@ -283,8 +283,6 @@ pub async fn handle(
             )?
         }
     };
-
-    ctx.log();
 
     response.headers_mut().insert(
         "Access-Control-Allow-Origin",

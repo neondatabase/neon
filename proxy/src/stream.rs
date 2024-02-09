@@ -91,7 +91,7 @@ impl std::error::Error for ReportedError {
 }
 
 impl ReportableError for ReportedError {
-    fn get_error_type(&self) -> ErrorKind {
+    fn get_error_kind(&self) -> ErrorKind {
         self.error_kind
     }
 }
@@ -149,7 +149,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     where
         E: UserFacingError + Into<anyhow::Error>,
     {
-        let error_kind = error.get_error_type();
+        let error_kind = error.get_error_kind();
         let msg = error.to_string_client();
         tracing::info!(
             kind=error_kind.to_metric_label(),

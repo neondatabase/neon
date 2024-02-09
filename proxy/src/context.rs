@@ -110,16 +110,16 @@ impl RequestMonitoring {
         self.user = Some(user);
     }
 
-    pub fn set_error_kind(&mut self, error: ErrorKind) {
+    pub fn set_error_kind(&mut self, kind: ErrorKind) {
         ERROR_BY_KIND
-            .with_label_values(&[error.to_metric_label()])
+            .with_label_values(&[kind.to_metric_label()])
             .inc();
         if let Some(ep) = &self.endpoint_id {
             ENDPOINT_ERRORS_BY_KIND
-                .with_label_values(&[error.to_metric_label()])
+                .with_label_values(&[kind.to_metric_label()])
                 .measure(ep);
         }
-        self.error_kind = Some(error);
+        self.error_kind = Some(kind);
     }
 
     pub fn set_success(&mut self) {

@@ -134,18 +134,18 @@ impl UserFacingError for AuthError {
 }
 
 impl ReportableError for AuthError {
-    fn get_error_type(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         use AuthErrorImpl::*;
         match self.0.as_ref() {
-            Link(e) => e.get_error_type(),
-            GetAuthInfo(e) => e.get_error_type(),
-            WakeCompute(e) => e.get_error_type(),
-            Sasl(e) => e.get_error_type(),
+            Link(e) => e.get_error_kind(),
+            GetAuthInfo(e) => e.get_error_kind(),
+            WakeCompute(e) => e.get_error_kind(),
+            Sasl(e) => e.get_error_kind(),
             AuthFailed(_) => crate::error::ErrorKind::User,
             BadAuthMethod(_) => crate::error::ErrorKind::User,
             MalformedPassword(_) => crate::error::ErrorKind::User,
             MissingEndpointName => crate::error::ErrorKind::User,
-            Io(_) => crate::error::ErrorKind::Disconnect,
+            Io(_) => crate::error::ErrorKind::ClientDisconnect,
             IpAddressNotAllowed => crate::error::ErrorKind::User,
             TooManyConnections => crate::error::ErrorKind::RateLimit,
             UserTimeout(_) => crate::error::ErrorKind::User,

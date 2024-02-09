@@ -35,7 +35,7 @@ pub enum ErrorKind {
     User,
 
     /// Network error between user and proxy. Not necessarily user error
-    Disconnect,
+    ClientDisconnect,
 
     /// Proxy self-imposed rate limits
     RateLimit,
@@ -54,7 +54,7 @@ impl ErrorKind {
     pub fn to_str(&self) -> &'static str {
         match self {
             ErrorKind::User => "request failed due to user error",
-            ErrorKind::Disconnect => "client disconnected",
+            ErrorKind::ClientDisconnect => "client disconnected",
             ErrorKind::RateLimit => "request cancelled due to rate limit",
             ErrorKind::Service => "internal service error",
             ErrorKind::ControlPlane => "non-retryable control plane error",
@@ -65,7 +65,7 @@ impl ErrorKind {
     pub fn to_metric_label(&self) -> &'static str {
         match self {
             ErrorKind::User => "user",
-            ErrorKind::Disconnect => "disconnect",
+            ErrorKind::ClientDisconnect => "clientdisconnect",
             ErrorKind::RateLimit => "ratelimit",
             ErrorKind::Service => "service",
             ErrorKind::ControlPlane => "controlplane",
@@ -75,11 +75,11 @@ impl ErrorKind {
 }
 
 pub trait ReportableError: fmt::Display + Send + 'static {
-    fn get_error_type(&self) -> ErrorKind;
+    fn get_error_kind(&self) -> ErrorKind;
 }
 
 impl ReportableError for tokio::time::error::Elapsed {
-    fn get_error_type(&self) -> ErrorKind {
+    fn get_error_kind(&self) -> ErrorKind {
         ErrorKind::RateLimit
     }
 }

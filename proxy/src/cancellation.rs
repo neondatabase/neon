@@ -21,7 +21,7 @@ pub enum CancelError {
 }
 
 impl ReportableError for CancelError {
-    fn get_error_type(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             CancelError::IO(_) => crate::error::ErrorKind::Compute,
             CancelError::Postgres(_) => crate::error::ErrorKind::Compute,

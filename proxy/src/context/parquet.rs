@@ -108,7 +108,7 @@ impl From<RequestMonitoring> for RequestData {
             branch: value.branch.as_deref().map(String::from),
             protocol: value.protocol,
             region: value.region,
-            error: value.error_kind.as_ref().map(|e| e.to_str()),
+            error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
             duration_us: SystemTime::from(value.first_packet)
                 .elapsed()

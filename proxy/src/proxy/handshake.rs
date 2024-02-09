@@ -32,7 +32,7 @@ pub enum HandshakeError {
 }
 
 impl ReportableError for HandshakeError {
-    fn get_error_type(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             HandshakeError::EarlyData => crate::error::ErrorKind::User,
             HandshakeError::ProtocolViolation => crate::error::ErrorKind::User,
@@ -42,10 +42,10 @@ impl ReportableError for HandshakeError {
             HandshakeError::MissingCertificate => crate::error::ErrorKind::Service,
             HandshakeError::StreamUpgradeError(upgrade) => match upgrade {
                 StreamUpgradeError::AlreadyTls => crate::error::ErrorKind::Service,
-                StreamUpgradeError::Io(_) => crate::error::ErrorKind::Disconnect,
+                StreamUpgradeError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
             },
-            HandshakeError::Io(_) => crate::error::ErrorKind::Disconnect,
-            HandshakeError::ReportedError(e) => e.get_error_type(),
+            HandshakeError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
+            HandshakeError::ReportedError(e) => e.get_error_kind(),
         }
     }
 }

@@ -16,21 +16,19 @@ use std::{
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
-use uuid::Uuid;
 
 use crate::console::messages::MetricsAuxInfo;
 use crate::metrics::{ENDPOINT_POOLS, GC_LATENCY, NUM_OPEN_CLIENTS_IN_HTTP_POOL};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{
-    auth::{backend::ComputeUserInfo, AuthError},
-    console::errors::{GetAuthInfoError, WakeComputeError},
-    context::RequestMonitoring,
-    metrics::NUM_DB_CONNECTIONS_GAUGE,
+    auth::backend::ComputeUserInfo, context::RequestMonitoring, metrics::NUM_DB_CONNECTIONS_GAUGE,
     DbName, EndpointCacheKey, RoleName,
 };
 
 use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
+
+use super::backend::HttpConnError;
 
 pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
 
@@ -265,23 +263,6 @@ pub struct GlobalConnPoolOptions {
     pub max_total_conns: usize,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ConnPoolError {
-    #[error("pooled connection closed at inconsistent state")]
-    ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<Uuid>),
-    #[error("could not connection to compute")]
-    ConnectionError(#[from] tokio_postgres::Error),
-
-    #[error("could not get auth info")]
-    GetAuthInfo(#[from] GetAuthInfoError),
-    #[error("user not authenticated")]
-    AuthError(#[from] AuthError),
-    #[error("wake_compute returned error")]
-    WakeCompute(#[from] WakeComputeError),
-    #[error("wake_compute returned nothing")]
-    NoComputeInfo,
-}
-
 impl<C: ClientInnerExt> GlobalConnPool<C> {
     pub fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         let shards = config.pool_options.pool_shards;
@@ -379,7 +360,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         self: &Arc<Self>,
         ctx: &mut RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> Result<Option<Client<C>>, ConnPoolError> {
+    ) -> Result<Option<Client<C>>, HttpConnError> {
         let mut client: Option<ClientInner<C>> = None;
 
         let endpoint_pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());

@@ -63,12 +63,12 @@ impl UserFacingError for ConnectionError {
 }
 
 impl ReportableError for ConnectionError {
-    fn get_error_type(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
             ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
-            ConnectionError::WakeComputeError(e) => e.get_error_type(),
+            ConnectionError::WakeComputeError(e) => e.get_error_kind(),
         }
     }
 }

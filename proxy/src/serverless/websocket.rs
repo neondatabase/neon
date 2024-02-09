@@ -151,7 +151,7 @@ pub async fn serve_websocket(
     match res {
         Err(e) => {
             // todo: log and push to ctx the error kind
-            ctx.set_error_kind(e.get_error_type());
+            ctx.set_error_kind(e.get_error_kind());
             ctx.log();
             Err(e.into())
         }

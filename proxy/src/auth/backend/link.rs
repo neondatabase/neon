@@ -31,11 +31,11 @@ impl UserFacingError for LinkAuthError {
 }
 
 impl ReportableError for LinkAuthError {
-    fn get_error_type(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             LinkAuthError::WaiterRegister(_) => crate::error::ErrorKind::Service,
             LinkAuthError::WaiterWait(_) => crate::error::ErrorKind::Service,
-            LinkAuthError::Io(_) => crate::error::ErrorKind::Disconnect,
+            LinkAuthError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }

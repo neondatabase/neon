@@ -44,7 +44,7 @@ pub enum ComputeUserInfoParseError {
 impl UserFacingError for ComputeUserInfoParseError {}
 
 impl ReportableError for ComputeUserInfoParseError {
-    fn get_error_type(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         crate::error::ErrorKind::User
     }
 }

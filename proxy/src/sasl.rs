@@ -49,13 +49,13 @@ impl UserFacingError for Error {
 }
 
 impl ReportableError for Error {
-    fn get_error_type(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             Error::ChannelBindingFailed(_) => crate::error::ErrorKind::User,
             Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
             Error::BadClientMessage(_) => crate::error::ErrorKind::User,
             Error::MissingBinding => crate::error::ErrorKind::Service,
-            Error::Io(_) => crate::error::ErrorKind::Disconnect,
+            Error::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }
