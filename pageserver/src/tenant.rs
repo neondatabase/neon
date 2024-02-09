@@ -4050,7 +4050,6 @@ pub(crate) mod harness {
             info_span!("TenantHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
         }
 
-        #[cfg(test)]
         pub(crate) async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
@@ -4160,7 +4159,6 @@ pub(crate) mod harness {
     }
 
     // Mock WAL redo manager that doesn't do much
-    #[cfg(test)]
     pub(crate) struct TestRedoManager;
 
     impl TestRedoManager {
