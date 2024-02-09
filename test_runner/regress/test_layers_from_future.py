@@ -1,7 +1,7 @@
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 from fixtures.pageserver.types import (
     DeltaLayerFileName,
     ImageLayerFileName,
@@ -115,8 +115,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
                     )
                     == 0
                 )
-
-    endpoint.stop()
+    last_record_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
 
     wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
