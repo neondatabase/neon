@@ -326,8 +326,8 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     Ok(Some(ProxyPassthrough {
         client: stream,
+        aux: node.aux.clone(),
         compute: node,
-        aux: node.aux,
         req: _request_gauge,
         conn: _client_gauge,
     }))

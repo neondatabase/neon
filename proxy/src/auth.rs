@@ -36,9 +36,6 @@ pub enum AuthErrorImpl {
     #[error(transparent)]
     GetAuthInfo(#[from] console::errors::GetAuthInfoError),
 
-    #[error(transparent)]
-    WakeCompute(#[from] console::errors::WakeComputeError),
-
     /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]
     Sasl(#[from] crate::sasl::Error),
@@ -119,7 +116,6 @@ impl UserFacingError for AuthError {
         match self.0.as_ref() {
             Link(e) => e.to_string_client(),
             GetAuthInfo(e) => e.to_string_client(),
-            WakeCompute(e) => e.to_string_client(),
             Sasl(e) => e.to_string_client(),
             AuthFailed(_) => self.to_string(),
             BadAuthMethod(_) => self.to_string(),
@@ -139,7 +135,6 @@ impl ReportableError for AuthError {
         match self.0.as_ref() {
             Link(e) => e.get_error_kind(),
             GetAuthInfo(e) => e.get_error_kind(),
-            WakeCompute(e) => e.get_error_kind(),
             Sasl(e) => e.get_error_kind(),
             AuthFailed(_) => crate::error::ErrorKind::User,
             BadAuthMethod(_) => crate::error::ErrorKind::User,
