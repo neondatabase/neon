@@ -1,8 +1,8 @@
 use anyhow::Context;
 use camino::Utf8Path;
 use remote_storage::RemotePath;
-use std::collections::HashSet;
 use std::sync::Arc;
+use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
 use tracing::debug;
 
@@ -103,7 +103,7 @@ async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> a
     let base_prefix =
         RemotePath::new(Utf8Path::new("folder1")).context("common_prefix construction")?;
     let root_files = test_client
-        .list_files(None)
+        .list_files(None, None)
         .await
         .context("client list root files failure")?
         .into_iter()
@@ -113,8 +113,17 @@ async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> a
         ctx.remote_blobs.clone(),
         "remote storage list_files on root mismatches with the uploads."
     );
+
+    // Test that max_keys limit works. In total there are about 21 files (see
+    // upload_simple_remote_data call in test_real_s3.rs).
+    let limited_root_files = test_client
+        .list_files(None, Some(NonZeroU32::new(2).unwrap()))
+        .await
+        .context("client list root files failure")?;
+    assert_eq!(limited_root_files.len(), 2);
+
     let nested_remote_files = test_client
-        .list_files(Some(&base_prefix))
+        .list_files(Some(&base_prefix), None)
         .await
         .context("client list nested files failure")?
         .into_iter()

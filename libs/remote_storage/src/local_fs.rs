@@ -4,7 +4,9 @@
 //! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
-use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin, time::SystemTime};
+use std::{
+    borrow::Cow, future::Future, io::ErrorKind, num::NonZeroU32, pin::Pin, time::SystemTime,
+};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -162,6 +164,7 @@ impl RemoteStorage for LocalFs {
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
     ) -> Result<Listing, DownloadError> {
         let mut result = Listing::default();
 
@@ -178,6 +181,9 @@ impl RemoteStorage for LocalFs {
                     !path.is_dir()
                 })
                 .collect();
+            if let Some(max_keys) = max_keys {
+                result.keys.truncate(max_keys.get() as usize);
+            }
 
             return Ok(result);
         }
@@ -790,12 +796,12 @@ mod fs_tests {
         let child = upload_dummy_file(&storage, "grandparent/parent/child", None).await?;
         let uncle = upload_dummy_file(&storage, "grandparent/uncle", None).await?;
 
-        let listing = storage.list(None, ListingMode::NoDelimiter).await?;
+        let listing = storage.list(None, ListingMode::NoDelimiter, None).await?;
         assert!(listing.prefixes.is_empty());
         assert_eq!(listing.keys, [uncle.clone(), child.clone()].to_vec());
 
         // Delimiter: should only go one deep
-        let listing = storage.list(None, ListingMode::WithDelimiter).await?;
+        let listing = storage.list(None, ListingMode::WithDelimiter, None).await?;
 
         assert_eq!(
             listing.prefixes,
@@ -808,6 +814,7 @@ mod fs_tests {
             .list(
                 Some(&RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()),
                 ListingMode::WithDelimiter,
+                None,
             )
             .await?;
         assert_eq!(
