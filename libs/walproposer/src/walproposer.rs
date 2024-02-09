@@ -142,7 +142,7 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn process_safekeeper_feedback(&self, _wp: &mut WalProposer, _commit_lsn: u64) {
+    fn process_safekeeper_feedback(&mut self, _wp: &mut WalProposer) {
         todo!()
     }
 
