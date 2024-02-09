@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
-use tracing::{debug, error, info, instrument, warn, Instrument, Span};
+use tracing::{debug, error, info, instrument, warn, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId};
 
 use crate::{

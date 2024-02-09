@@ -6,7 +6,7 @@ use pageserver_api::{models::TenantState, shard::TenantShardId};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, instrument, Instrument, Span};
+use tracing::{error, instrument, Instrument};
 
 use utils::{backoff, completion, crashsafe, fs_ext, id::TimelineId};
 
