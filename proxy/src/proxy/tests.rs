@@ -2,14 +2,16 @@
 
 mod mitm;
 
+use std::time::Duration;
+
 use super::connect_compute::ConnectMechanism;
 use super::retry::ShouldRetry;
 use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
-use crate::cache::Cached;
 use crate::config::CertResolver;
+use crate::console::caches::NodeInfoCache;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
@@ -381,6 +383,7 @@ enum ConnectAction {
 struct TestConnectMechanism {
     counter: Arc<std::sync::Mutex<usize>>,
     sequence: Vec<ConnectAction>,
+    cache: &'static NodeInfoCache,
 }
 
 impl TestConnectMechanism {
@@ -399,6 +402,12 @@ impl TestConnectMechanism {
         Self {
             counter: Arc::new(std::sync::Mutex::new(0)),
             sequence,
+            cache: Box::leak(Box::new(NodeInfoCache::new(
+                "test",
+                1,
+                Duration::from_secs(100),
+                false,
+            ))),
         }
     }
 }
@@ -478,7 +487,7 @@ impl TestBackend for TestConnectMechanism {
         let action = self.sequence[*counter];
         *counter += 1;
         match action {
-            ConnectAction::Wake => Ok(helper_create_cached_node_info()),
+            ConnectAction::Wake => Ok(helper_create_cached_node_info(&self.cache)),
             ConnectAction::WakeFail => {
                 let err = console::errors::ApiError::Console {
                     status: http::StatusCode::FORBIDDEN,
@@ -510,13 +519,14 @@ impl TestBackend for TestConnectMechanism {
     }
 }
 
-fn helper_create_cached_node_info() -> CachedNodeInfo {
+fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
         config: compute::ConnCfg::new(),
         aux: Default::default(),
         allow_self_signed_compute: false,
     };
-    Cached::new_uncached(node)
+    let (_, node) = cache.insert("key".into(), node);
+    node
 }
 
 fn helper_create_connect_info(
