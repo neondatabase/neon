@@ -167,7 +167,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     }
 }
 
-pub(super) fn validate_password_and_exchange(
+pub(crate) fn validate_password_and_exchange(
     password: &[u8],
     secret: AuthSecret,
 ) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
