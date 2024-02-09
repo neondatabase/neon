@@ -676,7 +676,7 @@ mod fs_tests {
             .download_stream;
         let all_bytes = aggregate(all_bytes).await?;
         let all_bytes = std::str::from_utf8(&all_bytes)?;
-        assert_eq!("contents for upload_1", all_bytes);
+        assert_eq!(dummy_contents("upload_1"), all_bytes);
 
         Ok(())
     }
