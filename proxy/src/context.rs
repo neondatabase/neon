@@ -11,7 +11,7 @@ use crate::{
     console::messages::MetricsAuxInfo,
     error::ErrorKind,
     metrics::{LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND},
-    BranchId, EndpointId, ProjectId, RoleName,
+    BranchId, DbName, EndpointId, ProjectId, RoleName,
 };
 
 pub mod parquet;
@@ -34,6 +34,7 @@ pub struct RequestMonitoring {
     project: Option<ProjectId>,
     branch: Option<BranchId>,
     endpoint_id: Option<EndpointId>,
+    dbname: Option<DbName>,
     user: Option<RoleName>,
     application: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
@@ -71,6 +72,7 @@ impl RequestMonitoring {
             project: None,
             branch: None,
             endpoint_id: None,
+            dbname: None,
             user: None,
             application: None,
             error_kind: None,
@@ -114,6 +116,10 @@ impl RequestMonitoring {
 
     pub fn set_application(&mut self, app: Option<SmolStr>) {
         self.application = app.or_else(|| self.application.clone());
+    }
+
+    pub fn set_dbname(&mut self, dbname: DbName) {
+        self.dbname = Some(dbname);
     }
 
     pub fn set_user(&mut self, user: RoleName) {

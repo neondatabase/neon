@@ -84,6 +84,7 @@ struct RequestData {
     username: Option<String>,
     application_name: Option<String>,
     endpoint_id: Option<String>,
+    database: Option<String>,
     project: Option<String>,
     branch: Option<String>,
     auth_method: Option<&'static str>,
@@ -105,6 +106,7 @@ impl From<RequestMonitoring> for RequestData {
             username: value.user.as_deref().map(String::from),
             application_name: value.application.as_deref().map(String::from),
             endpoint_id: value.endpoint_id.as_deref().map(String::from),
+            database: value.dbname.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
             branch: value.branch.as_deref().map(String::from),
             auth_method: value.auth_method.as_ref().map(|x| match x {
@@ -438,6 +440,7 @@ mod tests {
             application_name: Some("test".to_owned()),
             username: Some(hex::encode(rng.gen::<[u8; 4]>())),
             endpoint_id: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            database: Some(hex::encode(rng.gen::<[u8; 16]>())),
             project: Some(hex::encode(rng.gen::<[u8; 16]>())),
             branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
             auth_method: None,
@@ -513,15 +516,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1088200, 3, 6000),
-                (1087853, 3, 6000),
-                (1088009, 3, 6000),
-                (1088137, 3, 6000),
-                (1088033, 3, 6000),
-                (1088065, 3, 6000),
-                (1088098, 3, 6000),
-                (1088131, 3, 6000),
-                (362872, 1, 2000)
+                (1313727, 3, 6000),
+                (1313720, 3, 6000),
+                (1313780, 3, 6000),
+                (1313737, 3, 6000),
+                (1313867, 3, 6000),
+                (1313709, 3, 6000),
+                (1313501, 3, 6000),
+                (1313737, 3, 6000),
+                (438118, 1, 2000)
             ],
         );
 
@@ -551,11 +554,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1029632, 5, 10000),
-                (1032964, 5, 10000),
-                (1020895, 5, 10000),
-                (1021360, 5, 10000),
-                (1026005, 5, 10000)
+                (1219459, 5, 10000),
+                (1225609, 5, 10000),
+                (1227403, 5, 10000),
+                (1226765, 5, 10000),
+                (1218043, 5, 10000)
             ],
         );
 
@@ -587,11 +590,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1211977, 6, 12000),
-                (1212243, 6, 12000),
-                (1212197, 6, 12000),
-                (1212068, 6, 12000),
-                (202292, 1, 2000)
+                (1205106, 5, 10000),
+                (1204837, 5, 10000),
+                (1205130, 5, 10000),
+                (1205118, 5, 10000),
+                (1205373, 5, 10000)
             ],
         );
 
@@ -616,15 +619,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1088200, 3, 6000),
-                (1087853, 3, 6000),
-                (1088009, 3, 6000),
-                (1088137, 3, 6000),
-                (1088033, 3, 6000),
-                (1088065, 3, 6000),
-                (1088098, 3, 6000),
-                (1088131, 3, 6000),
-                (362872, 1, 2000)
+                (1313727, 3, 6000),
+                (1313720, 3, 6000),
+                (1313780, 3, 6000),
+                (1313737, 3, 6000),
+                (1313867, 3, 6000),
+                (1313709, 3, 6000),
+                (1313501, 3, 6000),
+                (1313737, 3, 6000),
+                (438118, 1, 2000)
             ],
         );
 
@@ -661,7 +664,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(545641, 2, 3001), (545402, 2, 3000), (545234, 2, 2999)],
+            [(658383, 2, 3001), (658097, 2, 3000), (657893, 2, 2999)],
         );
 
         tmpdir.close().unwrap();
