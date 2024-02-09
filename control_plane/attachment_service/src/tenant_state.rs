@@ -7,10 +7,12 @@ use pageserver_api::{
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::{instrument, Instrument};
 use utils::{
     generation::Generation,
     id::NodeId,
     seqwait::{SeqWait, SeqWaitError},
+    sync::gate::Gate,
 };
 
 use crate::{
@@ -415,6 +417,8 @@ impl TenantState {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn maybe_reconcile(
         &mut self,
         result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
@@ -422,6 +426,8 @@ impl TenantState {
         compute_hook: &Arc<ComputeHook>,
         service_config: &service::Config,
         persistence: &Arc<Persistence>,
+        gate: &Gate,
+        cancel: &CancellationToken,
     ) -> Option<ReconcilerWaiter> {
         // If there are any ambiguous observed states, and the nodes they refer to are available,
         // we should reconcile to clean them up.
@@ -460,7 +466,12 @@ impl TenantState {
         // doing our sequence's work.
         let old_handle = self.reconciler.take();
 
-        let cancel = CancellationToken::new();
+        let Ok(gate_guard) = gate.enter() else {
+            // Shutting down, don't start a reconciler
+            return None;
+        };
+
+        let reconciler_cancel = cancel.child_token();
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
@@ -471,59 +482,66 @@ impl TenantState {
             pageservers: pageservers.clone(),
             compute_hook: compute_hook.clone(),
             service_config: service_config.clone(),
-            cancel: cancel.clone(),
+            _gate_guard: gate_guard,
+            cancel: reconciler_cancel.clone(),
             persistence: persistence.clone(),
             compute_notify_failure: false,
         };
 
         let reconcile_seq = self.sequence;
 
-        tracing::info!("Spawning Reconciler for sequence {}", self.sequence);
+        tracing::info!(seq=%reconcile_seq, "Spawning Reconciler for sequence {}", self.sequence);
         let must_notify = self.pending_compute_notification;
-        let join_handle = tokio::task::spawn(async move {
-            // Wait for any previous reconcile task to complete before we start
-            if let Some(old_handle) = old_handle {
-                old_handle.cancel.cancel();
-                if let Err(e) = old_handle.handle.await {
-                    // We can't do much with this other than log it: the task is done, so
-                    // we may proceed with our work.
-                    tracing::error!("Unexpected join error waiting for reconcile task: {e}");
+        let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
+                                                        tenant_id=%reconciler.tenant_shard_id.tenant_id,
+                                                        shard_id=%reconciler.tenant_shard_id.shard_slug());
+        let join_handle = tokio::task::spawn(
+            async move {
+                // Wait for any previous reconcile task to complete before we start
+                if let Some(old_handle) = old_handle {
+                    old_handle.cancel.cancel();
+                    if let Err(e) = old_handle.handle.await {
+                        // We can't do much with this other than log it: the task is done, so
+                        // we may proceed with our work.
+                        tracing::error!("Unexpected join error waiting for reconcile task: {e}");
+                    }
                 }
+
+                // Early check for cancellation before doing any work
+                // TODO: wrap all remote API operations in cancellation check
+                // as well.
+                if reconciler.cancel.is_cancelled() {
+                    return;
+                }
+
+                // Attempt to make observed state match intent state
+                let result = reconciler.reconcile().await;
+
+                // If we know we had a pending compute notification from some previous action, send a notification irrespective
+                // of whether the above reconcile() did any work
+                if result.is_ok() && must_notify {
+                    // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
+                    reconciler.compute_notify().await.ok();
+                }
+
+                result_tx
+                    .send(ReconcileResult {
+                        sequence: reconcile_seq,
+                        result,
+                        tenant_shard_id: reconciler.tenant_shard_id,
+                        generation: reconciler.generation,
+                        observed: reconciler.observed,
+                        pending_compute_notification: reconciler.compute_notify_failure,
+                    })
+                    .ok();
             }
-
-            // Early check for cancellation before doing any work
-            // TODO: wrap all remote API operations in cancellation check
-            // as well.
-            if reconciler.cancel.is_cancelled() {
-                return;
-            }
-
-            // Attempt to make observed state match intent state
-            let result = reconciler.reconcile().await;
-
-            // If we know we had a pending compute notification from some previous action, send a notification irrespective
-            // of whether the above reconcile() did any work
-            if result.is_ok() && must_notify {
-                // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
-                reconciler.compute_notify().await.ok();
-            }
-
-            result_tx
-                .send(ReconcileResult {
-                    sequence: reconcile_seq,
-                    result,
-                    tenant_shard_id: reconciler.tenant_shard_id,
-                    generation: reconciler.generation,
-                    observed: reconciler.observed,
-                    pending_compute_notification: reconciler.compute_notify_failure,
-                })
-                .ok();
-        });
+            .instrument(reconciler_span),
+        );
 
         self.reconciler = Some(ReconcilerHandle {
             sequence: self.sequence,
             handle: join_handle,
-            cancel,
+            cancel: reconciler_cancel,
         });
 
         Some(ReconcilerWaiter {

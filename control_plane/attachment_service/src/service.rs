@@ -936,6 +936,8 @@ impl Service {
                         &compute_hook,
                         &self.config,
                         &self.persistence,
+                        &self.gate,
+                        &self.cancel,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1038,6 +1040,8 @@ impl Service {
                     &compute_hook,
                     &self.config,
                     &self.persistence,
+                    &self.gate,
+                    &self.cancel,
                 );
                 if let Some(waiter) = maybe_waiter {
                     waiters.push(waiter);
@@ -1850,6 +1854,8 @@ impl Service {
                 &compute_hook,
                 &self.config,
                 &self.persistence,
+                &self.gate,
+                &self.cancel,
             )
         };
 
@@ -2051,6 +2057,8 @@ impl Service {
                                 &compute_hook,
                                 &self.config,
                                 &self.persistence,
+                                &self.gate,
+                                &self.cancel,
                             );
                         }
                     }
@@ -2072,6 +2080,8 @@ impl Service {
                             &compute_hook,
                             &self.config,
                             &self.persistence,
+                            &self.gate,
+                            &self.cancel,
                         );
                     }
                 }
@@ -2111,6 +2121,8 @@ impl Service {
                 &compute_hook,
                 &self.config,
                 &self.persistence,
+                &self.gate,
+                &self.cancel,
             ) {
                 waiters.push(waiter);
             }
@@ -2153,13 +2165,25 @@ impl Service {
                     &compute_hook,
                     &self.config,
                     &self.persistence,
+                    &self.gate,
+                    &self.cancel,
                 )
             })
             .count()
     }
 
     pub async fn shutdown(&self) {
+        // Note that this already stops processing any results from reconciles: so
+        // we do not expect that our [`TenantState`] objects will reach a neat
+        // final state.
         self.cancel.cancel();
+
+        // The cancellation tokens in [`crate::reconciler::Reconciler`] are children
+        // of our cancellation token, so we do not need to explicitly cancel each of
+        // them.
+
+        // Background tasks and reconcilers hold gate guards: this waits for them all
+        // to complete.
         self.gate.close().await;
     }
 }
