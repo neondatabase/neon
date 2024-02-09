@@ -169,10 +169,14 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
 
     # The VM page in shared buffer cache, and the same page as reconstructed
     # by the pageserver, should be equal.
+    #
+    # Ignore the LSN on the page though (first 8 bytes). If the dirty
+    # VM page is flushed from the cache for some reason, it gets WAL-logged,
+    # which changes the LSN on the page.
     cur.execute("select get_raw_page( 'vmtest_lock', 'vm', 0 )")
-    vm_page_in_cache = (cur.fetchall()[0][0])[:100].hex()
+    vm_page_in_cache = (cur.fetchall()[0][0])[8:100].hex()
     cur.execute("select get_raw_page_at_lsn( 'vmtest_lock', 'vm', 0, pg_current_wal_insert_lsn() )")
-    vm_page_at_pageserver = (cur.fetchall()[0][0])[:100].hex()
+    vm_page_at_pageserver = (cur.fetchall()[0][0])[8:100].hex()
 
     assert vm_page_at_pageserver == vm_page_in_cache
 
@@ -203,16 +207,6 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
     for _ in range(1000):
         cur.execute("select test_consume_xids(10000);")
     for _ in range(1000):
-        cur.execute(
-            "select get_raw_page_at_lsn( 'vmtest_lock', 'vm', 0, pg_current_wal_insert_lsn() )"
-        )
-        page = (cur.fetchall()[0][0])[:100].hex()
-        log.info(f"VM page contents: {page}")
-
-        cur.execute("select get_raw_page( 'vmtest_lock', 'vm', 0 )")
-        page = (cur.fetchall()[0][0])[:100].hex()
-        log.info(f"VM page contents in cache: {page}")
-
         cur.execute("select min(datfrozenxid::text::int) from pg_database")
         datfrozenxid = int(cur.fetchall()[0][0])
         log.info(f"datfrozenxid {datfrozenxid} locking_xid: {locking_xid}")
