@@ -23,7 +23,7 @@ from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
-from urllib.parse import quote, quote_from_bytes, urlparse
+from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
