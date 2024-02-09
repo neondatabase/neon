@@ -86,6 +86,7 @@ struct RequestData {
     endpoint_id: Option<String>,
     project: Option<String>,
     branch: Option<String>,
+    auth_method: Option<&'static str>,
     error: Option<&'static str>,
     /// Success is counted if we form a HTTP response with sql rows inside
     /// Or if we make it to proxy_pass
@@ -106,6 +107,12 @@ impl From<RequestMonitoring> for RequestData {
             endpoint_id: value.endpoint_id.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
             branch: value.branch.as_deref().map(String::from),
+            auth_method: value.auth_method.as_ref().map(|x| match x {
+                super::AuthMethod::Web => "web",
+                super::AuthMethod::ScramSha256 => "scram_sha_256",
+                super::AuthMethod::ScramSha256Plus => "scram_sha_256_plus",
+                super::AuthMethod::Cleartext => "cleartext",
+            }),
             protocol: value.protocol,
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
@@ -433,6 +440,7 @@ mod tests {
             endpoint_id: Some(hex::encode(rng.gen::<[u8; 16]>())),
             project: Some(hex::encode(rng.gen::<[u8; 16]>())),
             branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            auth_method: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
             region: "us-east-1",
             error: None,
@@ -505,15 +513,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1087635, 3, 6000),
-                (1087288, 3, 6000),
-                (1087444, 3, 6000),
-                (1087572, 3, 6000),
-                (1087468, 3, 6000),
-                (1087500, 3, 6000),
-                (1087533, 3, 6000),
-                (1087566, 3, 6000),
-                (362671, 1, 2000)
+                (1088200, 3, 6000),
+                (1087853, 3, 6000),
+                (1088009, 3, 6000),
+                (1088137, 3, 6000),
+                (1088033, 3, 6000),
+                (1088065, 3, 6000),
+                (1088098, 3, 6000),
+                (1088131, 3, 6000),
+                (362872, 1, 2000)
             ],
         );
 
@@ -543,11 +551,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1028637, 5, 10000),
-                (1031969, 5, 10000),
-                (1019900, 5, 10000),
-                (1020365, 5, 10000),
-                (1025010, 5, 10000)
+                (1029632, 5, 10000),
+                (1032964, 5, 10000),
+                (1020895, 5, 10000),
+                (1021360, 5, 10000),
+                (1026005, 5, 10000)
             ],
         );
 
@@ -579,11 +587,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1210770, 6, 12000),
-                (1211036, 6, 12000),
-                (1210990, 6, 12000),
-                (1210861, 6, 12000),
-                (202073, 1, 2000)
+                (1211977, 6, 12000),
+                (1212243, 6, 12000),
+                (1212197, 6, 12000),
+                (1212068, 6, 12000),
+                (202292, 1, 2000)
             ],
         );
 
@@ -608,15 +616,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1087635, 3, 6000),
-                (1087288, 3, 6000),
-                (1087444, 3, 6000),
-                (1087572, 3, 6000),
-                (1087468, 3, 6000),
-                (1087500, 3, 6000),
-                (1087533, 3, 6000),
-                (1087566, 3, 6000),
-                (362671, 1, 2000)
+                (1088200, 3, 6000),
+                (1087853, 3, 6000),
+                (1088009, 3, 6000),
+                (1088137, 3, 6000),
+                (1088033, 3, 6000),
+                (1088065, 3, 6000),
+                (1088098, 3, 6000),
+                (1088131, 3, 6000),
+                (362872, 1, 2000)
             ],
         );
 
@@ -653,7 +661,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(545264, 2, 3001), (545025, 2, 3000), (544857, 2, 2999)],
+            [(545641, 2, 3001), (545402, 2, 3000), (545234, 2, 2999)],
         );
 
         tmpdir.close().unwrap();

@@ -194,8 +194,7 @@ async fn auth_quirks(
     // We now expect to see a very specific payload in the place of password.
     let (info, unauthenticated_password) = match user_info.try_into() {
         Err(info) => {
-            let res = hacks::password_hack_no_authentication(info, client, &mut ctx.latency_timer)
-                .await?;
+            let res = hacks::password_hack_no_authentication(ctx, info, client).await?;
 
             ctx.set_endpoint_id(res.info.endpoint.clone());
             tracing::Span::current().record("ep", &tracing::field::display(&res.info.endpoint));
@@ -276,11 +275,12 @@ async fn authenticate_with_secret(
     // Perform cleartext auth if we're allowed to do that.
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
-        return hacks::authenticate_cleartext(info, client, &mut ctx.latency_timer, secret).await;
+        ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
+        return hacks::authenticate_cleartext(ctx, info, client, secret).await;
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
-    classic::authenticate(info, client, config, &mut ctx.latency_timer, secret).await
+    classic::authenticate(ctx, info, client, config, secret).await
 }
 
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
