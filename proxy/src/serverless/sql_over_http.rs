@@ -100,6 +100,8 @@ pub enum ConnInfoError {
     InvalidDbName,
     #[error("missing username")]
     MissingUsername,
+    #[error("invalid username: {0}")]
+    InvalidUsername(#[from] std::string::FromUtf8Error),
     #[error("missing password")]
     MissingPassword,
     #[error("missing hostname")]
@@ -134,7 +136,7 @@ fn get_conn_info(
 
     let dbname = url_path.next().ok_or(ConnInfoError::InvalidDbName)?;
 
-    let username = RoleName::from(connection_url.username());
+    let username = RoleName::from(urlencoding::decode(connection_url.username())?);
     if username.is_empty() {
         return Err(ConnInfoError::MissingUsername);
     }
@@ -143,6 +145,7 @@ fn get_conn_info(
     let password = connection_url
         .password()
         .ok_or(ConnInfoError::MissingPassword)?;
+    let password = urlencoding::decode_binary(password.as_bytes());
 
     let hostname = connection_url
         .host_str()
@@ -172,7 +175,10 @@ fn get_conn_info(
     Ok(ConnInfo {
         user_info,
         dbname: dbname.into(),
-        password: password.into(),
+        password: match password {
+            std::borrow::Cow::Borrowed(b) => b.into(),
+            std::borrow::Cow::Owned(b) => b.into(),
+        },
     })
 }
 
