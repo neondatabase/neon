@@ -1400,7 +1400,6 @@ class AbstractNeonCli(abc.ABC):
 
         args = [bin_neon] + arguments
         log.info('Running command "{}"'.format(" ".join(args)))
-        log.info(f'Running in "{self.env.repo_dir}"')
 
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
