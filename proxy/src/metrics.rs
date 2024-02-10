@@ -301,7 +301,7 @@ impl NumConnectionRequestsGauge {
 pub struct ComputeConnectionLatencyGroup {
     protocol: Protocol,
     cold_start_info: ColdStartInfo,
-    outcome: Outcome,
+    outcome: ConnectOutcome,
     excluded: LatencyExclusions,
 }
 
@@ -403,7 +403,7 @@ pub struct LatencyTimer {
     // label data
     protocol: Protocol,
     cold_start_info: ColdStartInfo,
-    outcome: Outcome,
+    outcome: ConnectOutcome,
 }
 
 pub struct LatencyTimerPause<'a> {
@@ -421,7 +421,7 @@ impl LatencyTimer {
             protocol,
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
-            outcome: Outcome::Failed,
+            outcome: ConnectOutcome::Failed,
         }
     }
 
@@ -442,7 +442,7 @@ impl LatencyTimer {
         self.stop = Some(time::Instant::now());
 
         // success
-        self.outcome = Outcome::Success;
+        self.outcome = ConnectOutcome::Success;
     }
 }
 
@@ -455,6 +455,12 @@ impl Drop for LatencyTimerPause<'_> {
             Waiting::Compute => self.timer.accumulated.compute += dur,
         }
     }
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+enum ConnectOutcome {
+    Success,
+    Failed,
 }
 
 impl Drop for LatencyTimer {
@@ -500,14 +506,6 @@ impl From<bool> for Bool {
         } else {
             Bool::False
         }
-    }
-}
-
-pub const fn bool_to_str(x: bool) -> &'static str {
-    if x {
-        "true"
-    } else {
-        "false"
     }
 }
 
