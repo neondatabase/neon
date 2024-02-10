@@ -1,5 +1,7 @@
 use std::{error::Error as StdError, fmt, io};
 
+use measured::FixedCardinalityLabel;
+
 /// Upcast (almost) any error into an opaque [`io::Error`].
 pub fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
@@ -29,7 +31,8 @@ pub trait UserFacingError: ReportableError {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, FixedCardinalityLabel)]
+#[label(singleton = "kind")]
 pub enum ErrorKind {
     /// Wrong password, unknown endpoint, protocol violation, etc...
     User,

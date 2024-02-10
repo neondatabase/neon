@@ -1,6 +1,6 @@
 use crate::console::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::context::RequestMonitoring;
-use crate::metrics::{bool_to_str, NUM_WAKEUP_FAILURES};
+use crate::metrics::{ConnectionFailuresBreakdownGroup, Metrics, WakeupFailureKind};
 use crate::proxy::retry::retry_after;
 use hyper::StatusCode;
 use std::ops::ControlFlow;
@@ -57,39 +57,46 @@ pub fn handle_try_wake(
 
 fn report_error(e: &WakeComputeError, retry: bool) {
     use crate::console::errors::ApiError;
-    let retry = bool_to_str(retry);
     let kind = match e {
-        WakeComputeError::BadComputeAddress(_) => "bad_compute_address",
-        WakeComputeError::ApiError(ApiError::Transport(_)) => "api_transport_error",
+        WakeComputeError::BadComputeAddress(_) => WakeupFailureKind::BadComputeAddress,
+        WakeComputeError::ApiError(ApiError::Transport(_)) => WakeupFailureKind::ApiTransportError,
         WakeComputeError::ApiError(ApiError::Console {
             status: StatusCode::LOCKED,
             ref text,
         }) if text.contains("written data quota exceeded")
             || text.contains("the limit for current plan reached") =>
         {
-            "quota_exceeded"
+            WakeupFailureKind::QuotaExceeded
         }
         WakeComputeError::ApiError(ApiError::Console {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             ref text,
         }) if text.contains("compute time quota of non-primary branches is exceeded") => {
-            "quota_exceeded"
+            WakeupFailureKind::QuotaExceeded
         }
         WakeComputeError::ApiError(ApiError::Console {
             status: StatusCode::LOCKED,
             ..
-        }) => "api_console_locked",
+        }) => WakeupFailureKind::ApiConsoleLocked,
         WakeComputeError::ApiError(ApiError::Console {
             status: StatusCode::BAD_REQUEST,
             ..
-        }) => "api_console_bad_request",
+        }) => WakeupFailureKind::ApiConsoleBadRequest,
         WakeComputeError::ApiError(ApiError::Console { status, .. })
             if status.is_server_error() =>
         {
-            "api_console_other_server_error"
+            WakeupFailureKind::ApiConsoleOtherServerError
         }
-        WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
-        WakeComputeError::TimeoutError => "timeout_error",
+        WakeComputeError::ApiError(ApiError::Console { .. }) => {
+            WakeupFailureKind::ApiConsoleOtherError
+        }
+        WakeComputeError::TimeoutError => WakeupFailureKind::TimeoutError,
     };
-    NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
+    Metrics::get()
+        .proxy
+        .connection_failures_breakdown
+        .inc(ConnectionFailuresBreakdownGroup {
+            kind,
+            retry: retry.into(),
+        });
 }

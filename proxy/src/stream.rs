@@ -1,6 +1,6 @@
 use crate::config::TlsServerEndPoint;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::metrics::TLS_HANDSHAKE_FAILURES;
+use crate::metrics::Metrics;
 use bytes::BytesMut;
 
 use pq_proto::framed::{ConnectionError, Framed};
@@ -228,7 +228,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
             Stream::Raw { raw } => Ok(tokio_rustls::TlsAcceptor::from(cfg)
                 .accept(raw)
                 .await
-                .inspect_err(|_| TLS_HANDSHAKE_FAILURES.inc())?),
+                .inspect_err(|_| Metrics::get().proxy.tls_handshake_failures.inc())?),
             Stream::Tls { .. } => Err(StreamUpgradeError::AlreadyTls),
         }
     }

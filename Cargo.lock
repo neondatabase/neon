@@ -4322,6 +4322,7 @@ dependencies = [
  "itertools",
  "lasso",
  "md5",
+ "measured",
  "metrics",
  "native-tls",
  "once_cell",

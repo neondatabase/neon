@@ -18,7 +18,6 @@ use proxy::config::ProjectInfoCacheOptions;
 use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
-use proxy::metrics::NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT;
 use proxy::rate_limiter::AuthRateLimiter;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
@@ -349,7 +348,7 @@ async fn main() -> anyhow::Result<()> {
     >::new(
         cancel_map.clone(),
         redis_publisher,
-        NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT,
+        proxy::metrics::CancellationSource::FromClient,
     ));
 
     // client facing tasks. these will exit on error or on cancellation
