@@ -1562,12 +1562,44 @@ get_request_lsn_for_slru(bool *latest)
 	XLogRecPtr	request_lsn;
 
 	/*
-	 * GetRedoStartLsn() returns LSN of basebackup.
-	 * We need to download SLRU segments only once after node startup,
-	 * then SLRUs are maintained locally.
+	 * SLRUs are never evicted from local cache, so if we need to download an
+	 * SLRU, we know that it hasn't changed since the server startup. So no
+	 * need for last-written LSN tracking, the "last-written LSN" is simply
+	 * the LSN at server startup (GetRedoStartLsn()).
 	 */
-	*latest = false;
-	request_lsn = GetRedoStartLsn();
+	if (RecoveryInProgress())
+	{
+		/*
+		 * Conservative value, see comments in get_request_common(). We don't
+		 * dare to use the old GetRedoStartLsn() value here, because
+		 * GetRedoStartLsn() is more likely to be very old than last-written
+		 * LSN, so we're much more like to hit the case that the pageserver
+		 * has already GC'd the LSN. SLRU download is pretty rare so the
+		 * performance hit of some extra waiting for the latest record to
+		 * arrive in pageserver is acceptable.
+		 *
+		 * (In general case, the safe, conservative value would be
+		 * GetCurrentReplayRecPtr() rather than GetXLogReplayRecPtr(). It only
+		 * makes a difference if you read a page that is being modified by the
+		 * record that the startup process is concurrently replaying. But for
+		 * this SLRU download, GetXLogReplayRecPtr() is just as good.
+		 * GetCurrentReplayRecPtr() was introduced in v15 so we couldn't use it
+		 * in v14 anyway.)
+		 */
+		*latest = false;
+		request_lsn = GetXLogReplayRecPtr(NULL);
+		/*
+		 * In a read-only replica that's not following the primary, no WAL
+		 * replay happens and we just use the RedoStartLsn
+		 */
+		if (request_lsn == InvalidXLogRecPtr)
+			request_lsn = GetRedoStartLsn();
+	}
+	else
+	{
+		*latest = true;
+		request_lsn = GetRedoStartLsn();
+	}
 	return nm_adjust_lsn(request_lsn);
 }
 
