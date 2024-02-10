@@ -487,7 +487,7 @@ impl TestBackend for TestConnectMechanism {
         let action = self.sequence[*counter];
         *counter += 1;
         match action {
-            ConnectAction::Wake => Ok(helper_create_cached_node_info(&self.cache)),
+            ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
                 let err = console::errors::ApiError::Console {
                     status: http::StatusCode::FORBIDDEN,
