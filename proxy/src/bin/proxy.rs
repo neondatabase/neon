@@ -92,7 +92,7 @@ struct ProxyCliArgs {
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     handshake_timeout: tokio::time::Duration,
     /// timeout for the control plane requests
-    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    #[clap(long, default_value = "70s", value_parser = humantime::parse_duration)]
     cplane_timeout: tokio::time::Duration,
     /// http endpoint to receive periodic metric updates
     #[clap(long)]
