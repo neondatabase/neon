@@ -159,11 +159,6 @@ def test_import_from_pageserver_small(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_small")
     endpoint = env.endpoints.create_start("test_import_from_pageserver_small")
 
