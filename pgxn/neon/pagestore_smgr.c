@@ -280,8 +280,13 @@ static bool prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup_trailing_unused(void);
 static inline void prefetch_set_unused(uint64 ring_index);
 
-static XLogRecPtr neon_get_request_lsn(bool *latest, NRelFileInfo rinfo,
-									   ForkNumber forknum, BlockNumber blkno);
+static XLogRecPtr get_request_lsn(bool *latest);
+static XLogRecPtr get_request_lsn_for_rel(bool *latest, NRelFileInfo rinfo,
+										  ForkNumber forknum);
+static XLogRecPtr get_request_lsn_for_block(bool *latest, NRelFileInfo rinfo,
+											ForkNumber forknum, BlockNumber blkno);
+static XLogRecPtr get_request_lsn_common(bool *latest, NRelFileInfo rinfo,
+										 ForkNumber forknum, BlockNumber blkno);
 
 static bool
 compact_prefetch_buffers(void)
@@ -697,12 +702,12 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	}
 	else
 	{
-		XLogRecPtr	lsn = neon_get_request_lsn(
-											   &request.req.latest,
-											   BufTagGetNRelFileInfo(slot->buftag),
-											   slot->buftag.forkNum,
-											   slot->buftag.blockNum
-			);
+		XLogRecPtr	lsn = get_request_lsn_for_block(
+			&request.req.latest,
+			BufTagGetNRelFileInfo(slot->buftag),
+			slot->buftag.forkNum,
+			slot->buftag.blockNum
+		);
 
 		/*
 		 * Note: effective_request_lsn is potentially higher than the
@@ -1519,18 +1524,80 @@ nm_adjust_lsn(XLogRecPtr lsn)
 }
 
 /*
- * Return LSN for requesting pages and number of blocks from page server
+ * Calculate a request LSN to use for a GetPage request
  */
 static XLogRecPtr
-neon_get_request_lsn(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
+get_request_lsn_for_block(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
+{
+	return get_request_lsn_common(latest, rinfo, forknum, blkno);
+}
+
+/*
+ * Calculate a request LSN to use for an Nblocks or Exists request on a relation
+ */
+static XLogRecPtr
+get_request_lsn_for_rel(bool *latest, NRelFileInfo rinfo, ForkNumber forknum)
+{
+	return get_request_lsn_common(latest, rinfo, forknum, REL_METADATA_PSEUDO_BLOCKNO);
+}
+
+/*
+ * Calculate a conservative request LSN to use for a request not related to
+ * any particular relation. Currently used for DbSize requests.
+ */
+static XLogRecPtr
+get_request_lsn(bool *latest)
+{
+	NRelFileInfo dummy_node = {0};
+
+	return get_request_lsn_common(latest, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+}
+
+/*
+ * Calculate a request LSN value to use for an SLRU download request.
+ */
+static XLogRecPtr
+get_request_lsn_for_slru(bool *latest)
+{
+	XLogRecPtr	request_lsn;
+
+	/*
+	 * GetRedoStartLsn() returns LSN of basebackup.
+	 * We need to download SLRU segments only once after node startup,
+	 * then SLRUs are maintained locally.
+	 */
+	*latest = false;
+	request_lsn = GetRedoStartLsn();
+	return nm_adjust_lsn(request_lsn);
+}
+
+/*
+ * Calculate an LSN to use in a GetPage or similar request to page server.
+ */
+static XLogRecPtr
+get_request_lsn_common(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
 {
 	XLogRecPtr	lsn;
 
 	if (RecoveryInProgress())
 	{
 		/*
-		 * We don't know if WAL has been generated but not yet replayed, so
-		 * we're conservative in our estimates about latest pages.
+		 * In a read replica, we want to read the page as it was at the
+		 * current redo LSN. So a correct but conservative value would
+		 * be latest = false and lsn = GetCurrentReplayRecPtr().
+		 *
+		 * If the replica is fully caught up, that could lead to lots of
+		 * waiting in the pageserver for the most recent records to arrive
+		 * there, though. So we apply the same last-written LSN tracking to
+		 * optimize that, like in the primary.
+		 *
+		 * FIXME: Using latest = false and an older LSN can go wrong, if we
+		 * pick a very old LSN, and that LSN has already been garbage
+		 * collected in pageserver. With latest = true, the pageserver knows
+		 * that the LSN is just a hint, but with latest = false, it will throw
+		 * an error. What we'd really want to do is to send both LSNs, the
+		 * last-written LSN and the current replay LSN, but the protocol doesn't
+		 * allow that currently.
 		 */
 		*latest = false;
 
@@ -1540,7 +1607,7 @@ neon_get_request_lsn(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, Block
 		lsn = GetLastWrittenLSN(rinfo, forknum, blkno);
 		lsn = nm_adjust_lsn(lsn);
 
-		neon_log(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
+		neon_log(DEBUG1, "get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 	}
 	else
@@ -1555,7 +1622,7 @@ neon_get_request_lsn(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, Block
 		*latest = true;
 		lsn = GetLastWrittenLSN(rinfo, forknum, blkno);
 		Assert(lsn != InvalidXLogRecPtr);
-		neon_log(DEBUG1, "neon_get_request_lsn GetLastWrittenLSN lsn %X/%X ",
+		neon_log(DEBUG1, "get_request_lsn GetLastWrittenLSN lsn %X/%X ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 
 		lsn = nm_adjust_lsn(lsn);
@@ -1650,7 +1717,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, InfoFromSMgrRel(reln), forkNum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = get_request_lsn_for_rel(&latest, InfoFromSMgrRel(reln), forkNum);
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
@@ -2261,7 +2328,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		return;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, InfoFromSMgrRel(reln), forkNum, blkno);
+	request_lsn = get_request_lsn_for_block(&latest, InfoFromSMgrRel(reln), forkNum, blkno);
 	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsn, latest, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
@@ -2459,7 +2526,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		return n_blocks;
 	}
 
-	request_lsn = neon_get_request_lsn(&latest, InfoFromSMgrRel(reln), forknum, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = get_request_lsn_for_rel(&latest, InfoFromSMgrRel(reln), forknum);
 	{
 		NeonNblocksRequest request = {
 			.req.tag = T_NeonNblocksRequest,
@@ -2514,9 +2581,8 @@ neon_dbsize(Oid dbNode)
 	int64		db_size;
 	XLogRecPtr	request_lsn;
 	bool		latest;
-	NRelFileInfo dummy_node = {0};
 
-	request_lsn = neon_get_request_lsn(&latest, dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+	request_lsn = get_request_lsn(&latest);
 	{
 		NeonDbSizeRequest request = {
 			.req.tag = T_NeonDbSizeRequest,
@@ -2794,16 +2860,12 @@ neon_end_unlogged_build(SMgrRelation reln)
 static int
 neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buffer)
 {
-	XLogRecPtr request_lsn;
-	/*
-	 * GetRedoStartLsn() returns LSN of basebackup.
-	 * We need to download SLRU segments only once after node startup,
-	 * then SLRUs are maintained locally.
-	 */
-	request_lsn = GetRedoStartLsn();
-	request_lsn = nm_adjust_lsn(request_lsn);
-	SlruKind kind;
+	XLogRecPtr	request_lsn;
+	bool		request_latest;
 
+	request_lsn = get_request_lsn_for_slru(&request_latest);
+
+	SlruKind kind;
     if (STRPREFIX(path, "pg_xact"))
         kind = SLRU_CLOG;
     else if (STRPREFIX(path, "pg_multixact/members"))
@@ -2816,7 +2878,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	NeonResponse *resp;
 	NeonGetSlruSegmentRequest request = {
 		.req.tag = T_NeonGetSlruSegmentRequest,
-		.req.latest = false,
+		.req.latest = request_latest,
 		.req.lsn = request_lsn,
 
 		.kind = kind,
