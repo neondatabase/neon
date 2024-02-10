@@ -579,7 +579,6 @@ def test_timeline_size_metrics(
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
-        vanilla_pg.configure([f"port={port}"])
         vanilla_pg.start()
 
         # Create database based on template0 because we can't connect to template0

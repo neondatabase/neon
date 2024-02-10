@@ -66,12 +66,6 @@ def test_fullbackup(
     # Restore from the backup and find the data we inserted
     port = port_distributor.get_port()
     with VanillaPostgres(restored_dir_path, pg_bin, port, init=False) as vanilla_pg:
-        # TODO make port an optional argument
-        vanilla_pg.configure(
-            [
-                f"port={port}",
-            ]
-        )
         vanilla_pg.start()
         num_rows_found = vanilla_pg.safe_psql("select count(*) from tbl;", user="cloud_admin")[0][0]
         assert num_rows == num_rows_found

@@ -2458,6 +2458,7 @@ def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
+# TODO make port an optional argument
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: Path, pg_bin: PgBin, port: int, init: bool = True):
         super().__init__(host="localhost", port=port, dbname="postgres")
