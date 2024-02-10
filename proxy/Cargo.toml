@@ -60,6 +60,8 @@ scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+smol_str.workspace = true
+smallvec.workspace = true
 socket2.workspace = true
 sync_wrapper.workspace = true
 task-local-extensions.workspace = true
@@ -76,6 +78,7 @@ tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 tracing.workspace = true
 url.workspace = true
+urlencoding.workspace = true
 utils.workspace = true
 uuid.workspace = true
 webpki-roots.workspace = true
@@ -84,7 +87,6 @@ native-tls.workspace = true
 postgres-native-tls.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
-smol_str.workspace = true
 
 workspace_hack.workspace = true
 

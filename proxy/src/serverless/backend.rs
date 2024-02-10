@@ -48,7 +48,7 @@ impl PoolingBackend {
             }
         };
         let auth_outcome =
-            crate::auth::validate_password_and_exchange(conn_info.password.as_bytes(), secret)?;
+            crate::auth::validate_password_and_exchange(&conn_info.password, secret)?;
         match auth_outcome {
             crate::sasl::Outcome::Success(key) => Ok(key),
             crate::sasl::Outcome::Failure(reason) => {

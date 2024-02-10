@@ -3,6 +3,7 @@ use futures::{future::poll_fn, Future};
 use metrics::IntCounterPairGuard;
 use parking_lot::RwLock;
 use rand::Rng;
+use smallvec::SmallVec;
 use smol_str::SmolStr;
 use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use std::{
@@ -36,7 +37,7 @@ pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
 pub struct ConnInfo {
     pub user_info: ComputeUserInfo,
     pub dbname: DbName,
-    pub password: SmolStr,
+    pub password: SmallVec<[u8; 16]>,
 }
 
 impl ConnInfo {
@@ -731,7 +732,7 @@ mod tests {
                 options: Default::default(),
             },
             dbname: "dbname".into(),
-            password: "password".into(),
+            password: "password".as_bytes().into(),
         };
         let ep_pool =
             Arc::downgrade(&pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key()));
@@ -788,7 +789,7 @@ mod tests {
                 options: Default::default(),
             },
             dbname: "dbname".into(),
-            password: "password".into(),
+            password: "password".as_bytes().into(),
         };
         let ep_pool =
             Arc::downgrade(&pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key()));

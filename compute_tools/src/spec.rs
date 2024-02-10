@@ -776,6 +776,7 @@ BEGIN
     END IF;
 END
 $$;"#,
+        "GRANT pg_monitor TO neon_superuser WITH ADMIN OPTION",
     ];
 
     let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
