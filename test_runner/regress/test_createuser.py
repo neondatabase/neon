@@ -1,4 +1,3 @@
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import query_scalar
 
@@ -10,7 +9,6 @@ def test_createuser(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_createuser", "empty")
     endpoint = env.endpoints.create_start("test_createuser")
-    log.info("postgres is running on 'test_createuser' branch")
 
     with endpoint.cursor() as cur:
         # Cause a 'relmapper' change in the original branch

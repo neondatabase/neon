@@ -26,7 +26,6 @@ def test_fullbackup(
 
     env.neon_cli.create_branch("test_fullbackup")
     endpoint_main = env.endpoints.create_start("test_fullbackup")
-    log.info("postgres is running on 'test_fullbackup' branch")
 
     with endpoint_main.cursor() as cur:
         timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))

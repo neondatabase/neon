@@ -25,7 +25,6 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
     ]
 
     endpoint = env.endpoints.create_start("test_clog_truncate", config_lines=config)
-    log.info("postgres is running on test_clog_truncate branch")
 
     # Install extension containing function needed for test
     endpoint.safe_psql("CREATE EXTENSION neon_test_utils")
@@ -62,7 +61,6 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
         "test_clog_truncate_new", "test_clog_truncate", ancestor_start_lsn=lsn_after_truncation
     )
     endpoint2 = env.endpoints.create_start("test_clog_truncate_new")
-    log.info("postgres is running on test_clog_truncate_new branch")
 
     # check that new node doesn't contain truncated segment
     pg_xact_0000_path_new = os.path.join(endpoint2.pg_xact_dir_path(), "0000")
