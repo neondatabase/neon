@@ -1,10 +1,17 @@
 use anyhow::{anyhow, bail};
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
-use measured::{text::BufferedTextEncoder, MetricGroup};
+use measured::{
+    metric::{
+        name::{MetricName, WithNamespace},
+        MetricFamilyEncoding,
+    },
+    text::BufferedTextEncoder,
+    Counter, MetricGroup,
+};
 use std::{
     convert::Infallible,
     net::TcpListener,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 use tracing::{info, info_span};
 use utils::http::{
@@ -14,24 +21,36 @@ use utils::http::{
     RouterBuilder, RouterService,
 };
 
+use crate::jemalloc;
+
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, "")
 }
 
-fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
+fn make_router(jemalloc: Option<jemalloc::MetricRecorder>) -> RouterBuilder<hyper::Body, ApiError> {
+    let state = Arc::new(Mutex::new(PrometheusHandler {
+        encoder: BufferedTextEncoder::new(),
+        jemalloc,
+        serve_count: Counter::new(),
+    }));
+
     endpoint::make_router()
         .get("/metrics", move |r| {
-            request_span(r, prometheus_metrics_handler)
+            let state = state.clone();
+            request_span(r, move |b| prometheus_metrics_handler(b, state))
         })
         .get("/v1/status", status_handler)
 }
 
-pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<Infallible> {
+pub async fn task_main(
+    http_listener: TcpListener,
+    jemalloc: Option<jemalloc::MetricRecorder>,
+) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("http has shut down");
     }
 
-    let service = || RouterService::new(make_router().build()?);
+    let service = || RouterService::new(make_router(jemalloc).build()?);
 
     hyper::Server::from_tcp(http_listener)?
         .serve(service().map_err(|e| anyhow!(e))?)
@@ -40,34 +59,48 @@ pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<Infallible>
     bail!("hyper server without shutdown handling cannot shutdown successfully");
 }
 
-// static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
-//     register_int_counter!(
-//         "libmetrics_metric_handler_requests_total",
-//         "Number of metric requests made"
-//     )
-//     .expect("failed to define a metric")
-// });
+struct PrometheusHandler {
+    encoder: BufferedTextEncoder,
+    jemalloc: Option<jemalloc::MetricRecorder>,
+    /// Number of metric requests made
+    serve_count: Counter,
+}
 
-async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    // SERVE_METRICS_COUNT.inc();
-    static ENCODER: OnceLock<Mutex<BufferedTextEncoder>> =
-        OnceLock::<Mutex<BufferedTextEncoder>>::new();
-
+async fn prometheus_metrics_handler(
+    _req: Request<Body>,
+    state: Arc<Mutex<PrometheusHandler>>,
+) -> Result<Response<Body>, ApiError> {
     let started_at = std::time::Instant::now();
 
     let span = info_span!("blocking");
     let body = tokio::task::spawn_blocking(move || {
         let _span = span.entered();
 
-        let mut enc = ENCODER
-            .get_or_init(|| Mutex::new(BufferedTextEncoder::new()))
-            .lock()
-            .unwrap();
-        crate::metrics::Metrics::get()
-            .collect_group_into(&mut *enc)
+        let mut state = state.lock().unwrap();
+        let PrometheusHandler {
+            encoder,
+            jemalloc,
+            serve_count,
+        } = &mut *state;
+        serve_count.inc_mut();
+
+        const SERVE_COUNT: &MetricName =
+            MetricName::from_str("libmetrics_metric_handler_requests_total");
+        serve_count
+            .collect_family_into(SERVE_COUNT, &mut *encoder)
             .unwrap_or_else(|infallible| match infallible {});
 
-        let body = enc.finish();
+        if let Some(jemalloc) = &jemalloc {
+            WithNamespace::new("jemalloc", jemalloc)
+                .collect_group_into(&mut *encoder)
+                .unwrap_or_else(|infallible| match infallible {});
+        }
+
+        crate::metrics::Metrics::get()
+            .collect_group_into(&mut *encoder)
+            .unwrap_or_else(|infallible| match infallible {});
+
+        let body = encoder.finish();
 
         tracing::info!(
             bytes = body.len(),
