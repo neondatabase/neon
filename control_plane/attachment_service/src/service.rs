@@ -686,6 +686,13 @@ impl Service {
             // request in flight over the network: TODO handle that by making location_conf API refuse
             // to go backward in generations.
         }
+
+        tracing::info!(
+            "Responding with {} shards to node {}",
+            response.tenants.len(),
+            reattach_req.node_id
+        );
+
         Ok(response)
     }
 
