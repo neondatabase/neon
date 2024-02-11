@@ -108,6 +108,20 @@ def test_sharding_service_smoke(
     time.sleep(1)
     assert get_node_shard_counts(env, tenant_ids)[env.pageservers[0].id] == 0
 
+    # Restarting a pageserver should not detach any tenants (i.e. /re-attach works)
+    before_restart = env.pageservers[1].http_client().tenant_list_locations()
+    env.pageservers[1].stop()
+    env.pageservers[1].start()
+    after_restart = env.pageservers[1].http_client().tenant_list_locations()
+    assert len(after_restart) == len(before_restart)
+
+    # Locations should be the same before & after restart, apart from generations
+    for _shard_id, tenant in after_restart["tenant_shards"]:
+        del tenant["generation"]
+    for _shard_id, tenant in before_restart["tenant_shards"]:
+        del tenant["generation"]
+    assert before_restart == after_restart
+
     # Delete all the tenants
     for tid in tenant_ids:
         tenant_delete_wait_completed(env.attachment_service.pageserver_api(), tid, 10)
