@@ -1517,7 +1517,7 @@ impl TenantManager {
             }
         }
 
-        // Phase 5: Shut down the parent shard.
+        // Phase 5: Shut down the parent shard, and erase it from disk
         let (_guard, progress) = completion::channel();
         match parent.shutdown(progress, false).await {
             Ok(()) => {}
@@ -1525,6 +1525,24 @@ impl TenantManager {
                 other.wait().await;
             }
         }
+        let local_tenant_directory = self.conf.tenant_path(&tenant_shard_id);
+        let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
+            .await
+            .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            TaskKind::MgmtRequest,
+            None,
+            None,
+            "tenant_files_delete",
+            false,
+            async move {
+                fs::remove_dir_all(tmp_path.as_path())
+                    .await
+                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
+            },
+        );
+
         parent_slot_guard.drop_old_value()?;
 
         // Phase 6: Release the InProgress on the parent shard
