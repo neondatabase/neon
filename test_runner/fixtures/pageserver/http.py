@@ -302,6 +302,15 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
 
+    def tenant_list_locations(self):
+        res = self.get(
+            f"http://localhost:{self.port}/v1/location_config",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json["tenant_shards"], list)
+        return res_json
+
     def tenant_delete(self, tenant_id: Union[TenantId, TenantShardId]):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
