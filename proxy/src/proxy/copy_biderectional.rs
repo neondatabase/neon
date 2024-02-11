@@ -58,7 +58,8 @@ where
         match a_to_b {
             TransferState::Done(_) => {
                 if let TransferState::Running(_) = b_to_a {
-                    b_to_a = TransferState::ShuttingDown(0); // Initiate shutdown
+                    // Initiate shutdown
+                    b_to_a = TransferState::ShuttingDown(0);
                     b_to_a_result = transfer_one_direction(cx, &mut b_to_a, b, a)?;
                 }
             }
@@ -67,7 +68,8 @@ where
         match b_to_a {
             TransferState::Done(_) => {
                 if let TransferState::Running(_) = a_to_b {
-                    a_to_b = TransferState::ShuttingDown(0); // Initiate shutdown
+                    // Initiate shutdown
+                    a_to_b = TransferState::ShuttingDown(0);
                     a_to_b_result = transfer_one_direction(cx, &mut a_to_b, a, b)?;
                 }
             }
