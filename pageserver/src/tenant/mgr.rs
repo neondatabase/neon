@@ -31,6 +31,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
+use crate::disk_usage_eviction_task::EvictionLayer;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
@@ -1439,8 +1440,10 @@ impl TenantManager {
             }
         };
 
-        // TODO: hardlink layers from the parent into the child shard directories so that they don't immediately re-download
-        // TODO: erase the dentries from the parent
+        // Optimization: hardlink layers from the parent into the children, so that they don't have to
+        // re-download & duplicate the data referenced in their initial IndexPart
+        self.shard_split_hardlink(parent, child_shards.clone())
+            .await?;
 
         // Take a snapshot of where the parent's WAL ingest had got to: we will wait for
         // child shards to reach this point.
@@ -1479,10 +1482,11 @@ impl TenantManager {
 
         // Phase 4: wait for child chards WAL ingest to catch up to target LSN
         for child_shard_id in &child_shards {
+            let child_shard_id = *child_shard_id;
             let child_shard = {
                 let locked = TENANTS.read().unwrap();
                 let peek_slot =
-                    tenant_map_peek_slot(&locked, child_shard_id, TenantSlotPeekMode::Read)?;
+                    tenant_map_peek_slot(&locked, &child_shard_id, TenantSlotPeekMode::Read)?;
                 peek_slot.and_then(|s| s.get_attached()).cloned()
             };
             if let Some(t) = child_shard {
@@ -1549,6 +1553,113 @@ impl TenantManager {
         drop(parent_slot_guard);
 
         Ok(child_shards)
+    }
+
+    /// Part of [`Self::shard_split`]: hard link parent shard layers into child shards, as an optimization
+    /// to avoid the children downloading them again.
+    ///
+    /// For each resident layer in the parent shard, we will hard link it into all of the child shards.
+    async fn shard_split_hardlink(
+        &self,
+        parent_shard: &Tenant,
+        child_shards: Vec<TenantShardId>,
+    ) -> anyhow::Result<()> {
+        let parent_path = self.conf.tenant_path(parent_shard.get_tenant_shard_id());
+        let (parent_timelines, parent_layers) = {
+            let mut parent_layers = Vec::new();
+            let timelines = parent_shard.timelines.lock().unwrap().clone();
+            let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
+            for timeline in timelines.values() {
+                let timeline_layers = timeline.get_local_layers_for_disk_usage_eviction().await;
+                for layer in timeline_layers.resident_layers.into_iter().map(|r| r.layer) {
+                    let layer = match layer {
+                        EvictionLayer::Attached(l) => l,
+                        EvictionLayer::Secondary(_) => {
+                            // Unreachable, because we fetched layers from an object of type `Tenant`, it can
+                            // only return attached layers
+                            unreachable!();
+                        }
+                    };
+
+                    let relative_path = layer
+                        .local_path()
+                        .strip_prefix(&parent_path)
+                        .context("Removing prefix from parent layer path")?;
+                    parent_layers.push(relative_path.to_owned());
+                }
+            }
+            (parent_timelines, parent_layers)
+        };
+        for child in child_shards {
+            let child_prefix = self.conf.tenant_path(&child);
+            let mut create_dirs = vec![child_prefix.clone()];
+            create_dirs.extend(
+                parent_timelines
+                    .iter()
+                    .map(|t| self.conf.timeline_path(&child, t)),
+            );
+            let layers_clone = parent_layers.clone();
+            let parent_path = parent_path.clone();
+
+            // Since we will do a large number of small filesystem metadata operations, batch them into
+            // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
+            let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                for dir in create_dirs {
+                    if let Err(e) = std::fs::create_dir_all(&dir) {
+                        // Ignore AlreadyExists errors, drop out on all other errors
+                        match e.kind() {
+                            std::io::ErrorKind::AlreadyExists => {}
+                            _ => {
+                                return Err(anyhow::anyhow!(e).context(format!("Creating {dir}")));
+                            }
+                        }
+                    }
+                }
+
+                for relative_layer in layers_clone {
+                    let parent_path = parent_path.join(&relative_layer);
+                    let child_path = child_prefix.join(&relative_layer);
+                    if let Err(e) = std::fs::hard_link(&parent_path, &child_path) {
+                        match e.kind() {
+                            std::io::ErrorKind::AlreadyExists => {}
+                            std::io::ErrorKind::NotFound => {
+                                tracing::info!(
+                                    "Layer {} not found during hard-linking, evicted during split?",
+                                    relative_layer
+                                );
+                            }
+                            _ => {
+                                return Err(anyhow::anyhow!(e).context(format!(
+                                    "Hard linking {relative_layer} into {child}"
+                                )))
+                            }
+                        }
+                    }
+                }
+
+                Ok(())
+            });
+
+            match jh.await {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        "Linked {} layers into child shard {}",
+                        parent_layers.len(),
+                        child
+                    );
+                }
+                Ok(Err(e)) => {
+                    // This is an optimization, so we tolerate failure.
+                    tracing::warn!("Error hard-linking layers, proceeding anyway: {e}")
+                }
+                Err(e) => {
+                    // This is something totally unexpected like a panic, so bail out.
+                    anyhow::bail!("Error joining hard linking task: {e}");
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
