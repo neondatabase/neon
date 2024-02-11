@@ -30,6 +30,8 @@
 PG_MODULE_MAGIC;
 void		_PG_init(void);
 
+bool primary_is_running = false;
+
 void
 _PG_init(void)
 {
@@ -47,6 +49,16 @@ _PG_init(void)
 	InitControlPlaneConnector();
 
 	pg_init_extension_server();
+
+	DefineCustomBoolVariable(
+		"neon.primary_is_running",
+		"For replica it is true, if primary is running, false otherwise",
+		NULL,
+		&primary_is_running,
+		false,
+		PGC_POSTMASTER,
+		0,
+		NULL, NULL, NULL);
 
 	/*
 	 * Important: This must happen after other parts of the extension are
