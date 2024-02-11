@@ -2,6 +2,7 @@
 mod tests;
 
 pub mod connect_compute;
+mod copy_biderectional;
 pub mod handshake;
 pub mod passthrough;
 pub mod retry;
