@@ -9,7 +9,7 @@ pub mod wake_compute;
 
 use crate::{
     auth,
-    cancellation::{self, CancelMap},
+    cancellation::{self, CancellationHandler},
     compute,
     config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
@@ -61,6 +61,7 @@ pub async fn task_main(
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    cancellation_handler: Arc<CancellationHandler>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -71,7 +72,6 @@ pub async fn task_main(
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
-    let cancel_map = Arc::new(CancelMap::default());
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -79,7 +79,7 @@ pub async fn task_main(
         let (socket, peer_addr) = accept_result?;
 
         let session_id = uuid::Uuid::new_v4();
-        let cancel_map = Arc::clone(&cancel_map);
+        let cancellation_handler = Arc::clone(&cancellation_handler);
         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
         let session_span = info_span!(
@@ -112,7 +112,7 @@ pub async fn task_main(
                 let res = handle_client(
                     config,
                     &mut ctx,
-                    cancel_map,
+                    cancellation_handler,
                     socket,
                     ClientMode::Tcp,
                     endpoint_rate_limiter,
@@ -226,7 +226,7 @@ impl ReportableError for ClientRequestError {
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    cancel_map: Arc<CancelMap>,
+    cancellation_handler: Arc<CancellationHandler>,
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -252,7 +252,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
-                return Ok(cancel_map
+                return Ok(cancellation_handler
                     .cancel_session(cancel_key_data)
                     .await
                     .map(|()| None)?)
@@ -317,7 +317,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     .or_else(|e| stream.throw_error(e))
     .await?;
 
-    let session = cancel_map.get_session();
+    let session = cancellation_handler.get_session();
     prepare_client_connection(&node, &session, &mut stream).await?;
 
     // Before proxy passing, forward to compute whatever data is left in the

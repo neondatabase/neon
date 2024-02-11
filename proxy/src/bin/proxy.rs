@@ -1,6 +1,8 @@
 use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::MaybeOwned;
+use proxy::cancellation::CancelMap;
+use proxy::cancellation::CancellationHandler;
 use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
@@ -12,6 +14,7 @@ use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
 use proxy::redis::notifications;
+use proxy::redis::publisher::RedisPublisherClient;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
 
@@ -22,6 +25,7 @@ use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -225,6 +229,18 @@ async fn main() -> anyhow::Result<()> {
     let cancellation_token = CancellationToken::new();
 
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
+    let cancel_map = CancelMap::default();
+    let redis_publisher = match &args.redis_notifications {
+        Some(url) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
+            url,
+            args.region.clone(),
+        )?))),
+        None => None,
+    };
+    let cancellation_handler = Arc::new(CancellationHandler::new(
+        cancel_map.clone(),
+        redis_publisher,
+    ));
 
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
@@ -234,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         proxy_listener,
         cancellation_token.clone(),
         endpoint_rate_limiter.clone(),
+        cancellation_handler.clone(),
     ));
 
     // TODO: rename the argument to something like serverless.
@@ -248,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
             serverless_listener,
             cancellation_token.clone(),
             endpoint_rate_limiter.clone(),
+            cancellation_handler.clone(),
         ));
     }
 
@@ -271,7 +289,12 @@ async fn main() -> anyhow::Result<()> {
             let cache = api.caches.project_info.clone();
             if let Some(url) = args.redis_notifications {
                 info!("Starting redis notifications listener ({url})");
-                maintenance_tasks.spawn(notifications::task_main(url.to_owned(), cache.clone()));
+                maintenance_tasks.spawn(notifications::task_main(
+                    url.to_owned(),
+                    cache.clone(),
+                    cancel_map.clone(),
+                    args.region.clone(),
+                ));
             }
             maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
         }
