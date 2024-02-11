@@ -1,13 +1,7 @@
 use anyhow::{anyhow, bail};
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
-use measured::{
-    metric::{
-        name::{MetricName, WithNamespace},
-        MetricFamilyEncoding,
-    },
-    text::BufferedTextEncoder,
-    Counter, MetricGroup,
-};
+use measured::{metric::name::WithNamespace, text::BufferedTextEncoder, MetricGroup};
+use metrics::NeonMetrics;
 use std::{
     convert::Infallible,
     net::TcpListener,
@@ -27,11 +21,14 @@ async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, "")
 }
 
-fn make_router(jemalloc: Option<jemalloc::MetricRecorder>) -> RouterBuilder<hyper::Body, ApiError> {
+fn make_router(
+    neon_metrics: NeonMetrics,
+    jemalloc: Option<jemalloc::MetricRecorder>,
+) -> RouterBuilder<hyper::Body, ApiError> {
     let state = Arc::new(Mutex::new(PrometheusHandler {
         encoder: BufferedTextEncoder::new(),
         jemalloc,
-        serve_count: Counter::new(),
+        neon_metrics,
     }));
 
     endpoint::make_router()
@@ -44,13 +41,14 @@ fn make_router(jemalloc: Option<jemalloc::MetricRecorder>) -> RouterBuilder<hype
 
 pub async fn task_main(
     http_listener: TcpListener,
+    neon_metrics: NeonMetrics,
     jemalloc: Option<jemalloc::MetricRecorder>,
 ) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("http has shut down");
     }
 
-    let service = || RouterService::new(make_router(jemalloc).build()?);
+    let service = || RouterService::new(make_router(neon_metrics, jemalloc).build()?);
 
     hyper::Server::from_tcp(http_listener)?
         .serve(service().map_err(|e| anyhow!(e))?)
@@ -62,8 +60,7 @@ pub async fn task_main(
 struct PrometheusHandler {
     encoder: BufferedTextEncoder,
     jemalloc: Option<jemalloc::MetricRecorder>,
-    /// Number of metric requests made
-    serve_count: Counter,
+    neon_metrics: NeonMetrics,
 }
 
 async fn prometheus_metrics_handler(
@@ -80,22 +77,15 @@ async fn prometheus_metrics_handler(
         let PrometheusHandler {
             encoder,
             jemalloc,
-            serve_count,
+            neon_metrics,
         } = &mut *state;
-        serve_count.inc_mut();
 
-        const SERVE_COUNT: &MetricName =
-            MetricName::from_str("libmetrics_metric_handler_requests_total");
-        serve_count
-            .collect_family_into(SERVE_COUNT, &mut *encoder)
+        neon_metrics
+            .collect_group_into(&mut *encoder)
             .unwrap_or_else(|infallible| match infallible {});
-
-        if let Some(jemalloc) = &jemalloc {
-            WithNamespace::new("jemalloc", jemalloc)
-                .collect_group_into(&mut *encoder)
-                .unwrap_or_else(|infallible| match infallible {});
-        }
-
+        WithNamespace::new("jemalloc", &*jemalloc)
+            .collect_group_into(&mut *encoder)
+            .unwrap_or_else(|infallible| match infallible {});
         crate::metrics::Metrics::get()
             .collect_group_into(&mut *encoder)
             .unwrap_or_else(|infallible| match infallible {});

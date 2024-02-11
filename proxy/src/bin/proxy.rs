@@ -248,7 +248,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Version: {GIT_VERSION}");
     info!("Build_tag: {BUILD_TAG}");
-    ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
+    let neon_metrics = ::metrics::NeonMetrics::new(::metrics::BuildInfo {
+        revision: GIT_VERSION,
+        build_tag: BUILD_TAG,
+    });
 
     let jemalloc = match proxy::jemalloc::MetricRecorder::new() {
         Ok(t) => Some(t),
@@ -387,7 +390,11 @@ async fn main() -> anyhow::Result<()> {
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
-    maintenance_tasks.spawn(http::health_server::task_main(http_listener, jemalloc));
+    maintenance_tasks.spawn(http::health_server::task_main(
+        http_listener,
+        neon_metrics,
+        jemalloc,
+    ));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
