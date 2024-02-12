@@ -1661,19 +1661,7 @@ impl TenantManager {
         let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
             .await
             .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
-        task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
-            TaskKind::MgmtRequest,
-            None,
-            None,
-            "tenant_files_delete",
-            false,
-            async move {
-                fs::remove_dir_all(tmp_path.as_path())
-                    .await
-                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
-            },
-        );
+        self.spawn_background_purge(tmp_path);
 
         fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
             "failpoint"
@@ -1828,6 +1816,28 @@ impl TenantManager {
         shutdown_all_tenants0(self.tenants).await
     }
 
+    /// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
+    /// the background, and thereby avoid blocking any API requests on this deletion completing.
+    fn spawn_background_purge(&self, tmp_path: Utf8PathBuf) {
+        // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
+        // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
+        let task_tenant_id = None;
+
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            TaskKind::MgmtRequest,
+            task_tenant_id,
+            None,
+            "tenant_files_delete",
+            false,
+            async move {
+                fs::remove_dir_all(tmp_path.as_path())
+                    .await
+                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
+            },
+        );
+    }
+
     pub(crate) async fn detach_tenant(
         &self,
         conf: &'static PageServerConf,
@@ -1844,22 +1854,8 @@ impl TenantManager {
                 deletion_queue_client,
             )
             .await?;
-        // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
-        // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
-        let task_tenant_id = None;
-        task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
-            TaskKind::MgmtRequest,
-            task_tenant_id,
-            None,
-            "tenant_files_delete",
-            false,
-            async move {
-                fs::remove_dir_all(tmp_path.as_path())
-                    .await
-                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
-            },
-        );
+        self.spawn_background_purge(tmp_path);
+
         Ok(())
     }
 
