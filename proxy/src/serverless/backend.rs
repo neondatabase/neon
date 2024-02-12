@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use tracing::info;
+use tracing::{field::display, info};
 
 use crate::{
     auth::{backend::ComputeCredentialKeys, check_peer_addr_is_in_list, AuthError},
@@ -15,7 +15,7 @@ use crate::{
     proxy::connect_compute::ConnectMechanism,
 };
 
-use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool, APP_NAME};
+use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
 
 pub struct PoolingBackend {
     pub pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
@@ -81,8 +81,8 @@ impl PoolingBackend {
             return Ok(client);
         }
         let conn_id = uuid::Uuid::new_v4();
-        info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        ctx.set_application(Some(APP_NAME));
+        tracing::Span::current().record("conn_id", display(conn_id));
+        info!("pool: opening a new connection '{conn_info}'");
         let backend = self
             .config
             .auth_backend
