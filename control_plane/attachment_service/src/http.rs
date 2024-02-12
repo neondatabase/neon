@@ -3,7 +3,8 @@ use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
-    TenantCreateRequest, TenantLocationConfigRequest, TimelineCreateRequest,
+    TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
+    TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -41,7 +42,7 @@ pub struct HttpState {
 
 impl HttpState {
     pub fn new(service: Arc<crate::service::Service>, auth: Option<Arc<SwappableJwtAuth>>) -> Self {
-        let allowlist_routes = ["/status"]
+        let allowlist_routes = ["/status", "/ready", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
             .collect::<Vec<_>>();
@@ -279,6 +280,12 @@ async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError
     json_response(StatusCode::OK, state.service.node_list().await?)
 }
 
+async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
+}
+
 async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     let config_req = json_request::<NodeConfigureRequest>(&mut req).await?;
@@ -290,6 +297,19 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
     let state = get_state(&req);
 
     json_response(StatusCode::OK, state.service.node_configure(config_req)?)
+}
+
+async fn handle_tenant_shard_split(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let split_req = json_request::<TenantShardSplitRequest>(&mut req).await?;
+
+    json_response(
+        StatusCode::OK,
+        service.tenant_shard_split(tenant_id, split_req).await?,
+    )
 }
 
 async fn handle_tenant_shard_migrate(
@@ -306,9 +326,27 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
+async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let state = get_state(&req);
+
+    json_response(StatusCode::OK, state.service.tenant_drop(tenant_id).await?)
+}
+
 /// Status endpoint is just used for checking that our HTTP listener is up
 async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, ())
+}
+
+/// Readiness endpoint indicates when we're done doing startup I/O (e.g. reconciling
+/// with remote pageserver nodes).  This is intended for use as a kubernetes readiness probe.
+async fn handle_ready(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+    if state.service.startup_complete.is_ready() {
+        json_response(StatusCode::OK, ())
+    } else {
+        json_response(StatusCode::SERVICE_UNAVAILABLE, ())
+    }
 }
 
 impl From<ReconcileError> for ApiError {
@@ -366,6 +404,7 @@ pub fn make_router(
         .data(Arc::new(HttpState::new(service, auth)))
         // Non-prefixed generic endpoints (status, metrics)
         .get("/status", |r| request_span(r, handle_status))
+        .get("/ready", |r| request_span(r, handle_ready))
         // Upcalls for the pageserver: point the pageserver's `control_plane_api` config to this prefix
         .post("/upcall/v1/re-attach", |r| {
             request_span(r, handle_re_attach)
@@ -376,6 +415,12 @@ pub fn make_router(
             request_span(r, handle_attach_hook)
         })
         .post("/debug/v1/inspect", |r| request_span(r, handle_inspect))
+        .post("/debug/v1/tenant/:tenant_id/drop", |r| {
+            request_span(r, handle_tenant_drop)
+        })
+        .post("/debug/v1/node/:node_id/drop", |r| {
+            request_span(r, handle_node_drop)
+        })
         .get("/control/v1/tenant/:tenant_id/locate", |r| {
             tenant_service_handler(r, handle_tenant_locate)
         })
@@ -390,6 +435,9 @@ pub fn make_router(
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(r, handle_tenant_shard_migrate)
+        })
+        .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
+            tenant_service_handler(r, handle_tenant_shard_split)
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into

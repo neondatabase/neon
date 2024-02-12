@@ -19,7 +19,6 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_branch("test_pageserver_recovery", "main")
 
     endpoint = env.endpoints.create_start("test_pageserver_recovery")
-    log.info("postgres is running on 'test_pageserver_recovery' branch")
 
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:

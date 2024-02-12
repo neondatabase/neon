@@ -19,11 +19,14 @@ use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
 use pageserver_api::models::TenantShardLocation;
+use pageserver_api::models::TenantShardSplitRequest;
+use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
 };
+use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
@@ -485,7 +488,9 @@ async fn timeline_create_handler(
     let state = get_state(&request);
 
     async {
-        let tenant = state.tenant_manager.get_attached_tenant_shard(tenant_shard_id, false)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id, false)?;
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -495,48 +500,62 @@ async fn timeline_create_handler(
             tracing::info!("bootstrapping");
         }
 
-        match tenant.create_timeline(
-            new_timeline_id,
-            request_data.ancestor_timeline_id.map(TimelineId::from),
-            request_data.ancestor_start_lsn,
-            request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
-            request_data.existing_initdb_timeline_id,
-            state.broker_client.clone(),
-            &ctx,
-        )
-        .await {
+        match tenant
+            .create_timeline(
+                new_timeline_id,
+                request_data.ancestor_timeline_id,
+                request_data.ancestor_start_lsn,
+                request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+                request_data.existing_initdb_timeline_id,
+                state.broker_client.clone(),
+                &ctx,
+            )
+            .await
+        {
             Ok(new_timeline) => {
                 // Created. Construct a TimelineInfo for it.
-                let timeline_info = build_timeline_info_common(&new_timeline, &ctx, tenant::timeline::GetLogicalSizePriority::User)
-                    .await
-                    .map_err(ApiError::InternalServerError)?;
+                let timeline_info = build_timeline_info_common(
+                    &new_timeline,
+                    &ctx,
+                    tenant::timeline::GetLogicalSizePriority::User,
+                )
+                .await
+                .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
             Err(_) if tenant.cancel.is_cancelled() => {
                 // In case we get some ugly error type during shutdown, cast it into a clean 503.
-                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg("Tenant shutting down".to_string()))
+                json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    HttpErrorBody::from_msg("Tenant shutting down".to_string()),
+                )
             }
-            Err(tenant::CreateTimelineError::Conflict | tenant::CreateTimelineError::AlreadyCreating) => {
-                json_response(StatusCode::CONFLICT, ())
-            }
-            Err(tenant::CreateTimelineError::AncestorLsn(err)) => {
-                json_response(StatusCode::NOT_ACCEPTABLE, HttpErrorBody::from_msg(
-                    format!("{err:#}")
-                ))
-            }
-            Err(e @ tenant::CreateTimelineError::AncestorNotActive) => {
-                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg(e.to_string()))
-            }
-            Err(tenant::CreateTimelineError::ShuttingDown) => {
-                json_response(StatusCode::SERVICE_UNAVAILABLE,HttpErrorBody::from_msg("tenant shutting down".to_string()))
-            }
+            Err(
+                tenant::CreateTimelineError::Conflict
+                | tenant::CreateTimelineError::AlreadyCreating,
+            ) => json_response(StatusCode::CONFLICT, ()),
+            Err(tenant::CreateTimelineError::AncestorLsn(err)) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
+                HttpErrorBody::from_msg(format!("{err:#}")),
+            ),
+            Err(e @ tenant::CreateTimelineError::AncestorNotActive) => json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
+            Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                HttpErrorBody::from_msg("tenant shutting down".to_string()),
+            ),
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
     .instrument(info_span!("timeline_create",
         tenant_id = %tenant_shard_id.tenant_id,
         shard_id = %tenant_shard_id.shard_slug(),
-        timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
+        timeline_id = %new_timeline_id,
+        lsn=?request_data.ancestor_start_lsn,
+        pg_version=?request_data.pg_version
+    ))
     .await
 }
 
@@ -875,7 +894,7 @@ async fn tenant_reset_handler(
     let state = get_state(&request);
     state
         .tenant_manager
-        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), ctx)
+        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1102,6 +1121,25 @@ async fn tenant_size_handler(
             inputs,
         },
     )
+}
+
+async fn tenant_shard_split_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let req: TenantShardSplitRequest = json_request(&mut request).await?;
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let state = get_state(&request);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
+    let new_shards = state
+        .tenant_manager
+        .shard_split(tenant_shard_id, ShardCount(req.new_shard_count), &ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, TenantShardSplitResponse { new_shards })
 }
 
 async fn layer_map_info_handler(
@@ -2062,6 +2100,9 @@ pub fn make_router(
         })
         .put("/v1/tenant/config", |r| {
             api_handler(r, update_tenant_config_handler)
+        })
+        .put("/v1/tenant/:tenant_shard_id/shard_split", |r| {
+            api_handler(r, tenant_shard_split_handler)
         })
         .get("/v1/tenant/:tenant_shard_id/config", |r| {
             api_handler(r, get_tenant_config_handler)

@@ -171,6 +171,7 @@ tracing-opentelemetry = "0.20.0"
 tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 twox-hash = { version = "1.6.3", default-features = false }
 url = "2.2"
+urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 webpki-roots = "0.25"
