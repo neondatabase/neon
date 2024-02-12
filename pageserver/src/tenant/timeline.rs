@@ -1655,6 +1655,17 @@ impl Timeline {
         ));
     }
 
+    /// For terminating wal ingestion without tearing down the rest of the Timeline (i.e. reads to
+    /// already ingested data should still work)
+    pub(super) async fn kill_wal_receiver(&self) {
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.tenant_shard_id),
+            Some(self.timeline_id),
+        )
+        .await;
+    }
+
     /// Initialize with an empty layer map. Used when creating a new timeline.
     pub(super) fn init_empty_layer_map(&self, start_lsn: Lsn) {
         let mut layers = self.layers.try_write().expect(

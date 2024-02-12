@@ -1936,11 +1936,52 @@ impl Tenant {
             timelines_to_compact
         };
 
+        let mut total_physical = 0;
         for (timeline_id, timeline) in &timelines_to_compact {
-            timeline
+            let timeline_result = timeline
                 .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
-                .await?;
+                .await;
+
+            if let Some(remote_client) = &timeline.remote_client {
+                total_physical += remote_client.get_remote_physical_size();
+            }
+
+            timeline_result?;
+        }
+
+        // Circuit breaker: if a timeline's statistics indicate a pathological storage issue, such
+        // as extremely high write inflation, then we will stop ingesting data for that timeline.  This
+        // reduces the blast radius of postgres/walingest bugs that might enable one tenant to generate
+        // an extremely large storage size, and thereby interfere with other tenants on the same pageserver.
+        let synthetic_size = self.cached_synthetic_tenant_size.load(Ordering::Relaxed);
+        if synthetic_size > 0 {
+            let amplification = total_physical as f64 / synthetic_size as f64;
+
+            // We only try to evaluate amplification once synthetic size reaches some threshold, to avoid
+            // noisy results on very small/new tenants.
+            const SIZE_THRESHOLD_FOR_AMPLIFICATION_CHECK: u64 = 1000000000;
+
+            // Typical storage amplification is something like 3x-10x.  100x would be really extreme.
+            // 1000x is unthinkable: if we see an amplification this extreme, then something bad and
+            // dangerous is going on.
+            const PATHOLOGICAL_AMPLIFICATION_FACTOR: f64 = 1000.0;
+
+            if synthetic_size > SIZE_THRESHOLD_FOR_AMPLIFICATION_CHECK
+                && amplification > PATHOLOGICAL_AMPLIFICATION_FACTOR
+            {
+                tracing::error!("Pathological storage amplification detected (synthetic size {synthetic_size}, physical size {total_physical}): shutting down ingest");
+                for (timeline_id, timeline) in timelines_to_compact {
+                    if tokio::time::timeout(Duration::from_secs(5), timeline.kill_wal_receiver())
+                        .await
+                        .is_err()
+                    {
+                        tracing::error!(
+                            "Timed out shutting down WAL intest on timeline {timeline_id}"
+                        );
+                    }
+                }
+            }
         }
 
         Ok(())
