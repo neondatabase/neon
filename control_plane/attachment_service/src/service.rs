@@ -382,17 +382,15 @@ impl Service {
     async fn background_reconcile(&self) {
         self.startup_complete.clone().wait().await;
 
-        const BACKGROUND_RECONCILE_INTERVAL: Duration = Duration::from_secs(18);
+        const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
 
         while !self.cancel.is_cancelled() {
-            if tokio::time::timeout(BACKGROUND_RECONCILE_INTERVAL, self.cancel.cancelled())
-                .await
-                .is_ok()
-            {
-                break;
-            }
+            let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
 
-            self.reconcile_all();
+            tokio::select! {
+              _ = interval.tick() => { self.reconcile_all(); }
+              _ = self.cancel.cancelled() => return
+            }
         }
     }
 
