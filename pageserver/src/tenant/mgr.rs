@@ -1603,7 +1603,9 @@ impl TenantManager {
 
             // Since we will do a large number of small filesystem metadata operations, batch them into
             // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
+            let span = tracing::info_span!("link_layers", child=%child.shard_id);
             let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let _e = span.entered();
                 for dir in create_dirs {
                     if let Err(e) = std::fs::create_dir_all(&dir) {
                         // Ignore AlreadyExists errors, drop out on all other errors
