@@ -48,7 +48,7 @@ impl RedisPublisherClient {
         let payload = serde_json::to_string(&Notification::Cancel(CancelSession {
             region_id: Some(self.region_id.clone()),
             cancel_key_data,
-            session_id: session_id.into(),
+            session_id,
         }))?;
         conn.publish(PROXY_CHANNEL_NAME, payload).await?;
         Ok(())
