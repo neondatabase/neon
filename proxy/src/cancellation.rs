@@ -42,21 +42,31 @@ impl ReportableError for CancelError {
     }
 }
 
+#[async_trait]
+trait NotificationsCancellationHandler {
+    async fn cancel_session_no_publish(&self, key: CancelKeyData) -> Result<(), CancelError>;
+}
+
 impl CancellationHandler {
     pub fn new(map: CancelMap, redis_client: Option<Arc<Mutex<RedisPublisherClient>>>) -> Self {
         Self { map, redis_client }
     }
     /// Cancel a running query for the corresponding connection.
-    pub async fn cancel_session(&self, key: CancelKeyData) -> Result<(), CancelError> {
+    pub async fn cancel_session(
+        &self,
+        ctx: &mut RequestMonitoring,
+        key: CancelKeyData,
+    ) -> Result<(), CancelError> {
+        let from = "from_client";
         // NB: we should immediately release the lock after cloning the token.
         let Some(cancel_closure) = self.map.get(&key).and_then(|x| x.clone()) else {
             tracing::warn!("query cancellation key not found: {key}");
             if let Some(redis_client) = &self.redis_client {
                 NUM_CANCELLATION_REQUESTS
-                    .with_label_values(&["not_found"])
+                    .with_label_values(&[from, "not_found"])
                     .inc();
                 info!("publishing cancellation key to Redis");
-                match redis_client.lock().await.try_publish(key).await {
+                match redis_client.lock().await.try_publish(ctx, key).await {
                     Ok(()) => {
                         info!("cancellation key successfuly published to Redis");
                     }
@@ -72,7 +82,7 @@ impl CancellationHandler {
             return Ok(());
         };
         NUM_CANCELLATION_REQUESTS
-            .with_label_values(&["found"])
+            .with_label_values(&[from_client, "found"])
             .inc();
         info!("cancelling query per user's request using key {key}");
         cancel_closure.try_cancel_query().await
@@ -114,6 +124,29 @@ impl CancellationHandler {
     #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+}
+
+#[async_trait]
+impl NotificationsCancellationHandler for CancellationHandler {
+    async fn cancel_session_no_publish(&self, key: CancelKeyData) -> Result<(), CancelError> {
+        let from = "from_redis";
+        let cancel_closure = self.map.get(&key).and_then(|x| x.clone());
+        match cancel_closure {
+            Some(cancel_closure) => {
+                NUM_CANCELLATION_REQUESTS
+                    .with_label_values(&[from, "found"])
+                    .inc();
+                cancel_closure.try_cancel_query().await
+            }
+            None => {
+                NUM_CANCELLATION_REQUESTS
+                    .with_label_values(&[from, "not_found"])
+                    .inc();
+                tracing::warn!("query cancellation key not found: {key}");
+                Ok(())
+            }
+        }
     }
 }
 

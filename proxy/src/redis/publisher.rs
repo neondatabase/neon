@@ -18,8 +18,12 @@ impl RedisPublisherClient {
             region_id,
         })
     }
-    pub async fn try_publish(&mut self, cancel_key_data: CancelKeyData) -> anyhow::Result<()> {
-        match self.publish(cancel_key_data).await {
+    pub async fn try_publish(
+        &mut self,
+        ctx: &mut RequestMonitoring,
+        cancel_key_data: CancelKeyData,
+    ) -> anyhow::Result<()> {
+        match self.publish(ctx, cancel_key_data).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::error!("failed to publish a message: {e}");
@@ -28,10 +32,14 @@ impl RedisPublisherClient {
         }
         tracing::info!("Publisher is disconnected. Reconnectiong...");
         self.try_connect().await?;
-        self.publish(cancel_key_data).await
+        self.publish(ctx, cancel_key_data).await
     }
 
-    async fn publish(&mut self, cancel_key_data: CancelKeyData) -> anyhow::Result<()> {
+    async fn publish(
+        &mut self,
+        ctx: &mut RequestMonitoring,
+        cancel_key_data: CancelKeyData,
+    ) -> anyhow::Result<()> {
         let conn = self
             .publisher
             .as_mut()
@@ -39,6 +47,7 @@ impl RedisPublisherClient {
         let payload = serde_json::to_string(&Notification::Cancel(CancelSession {
             region_id: Some(self.region_id.clone()),
             cancel_key_data,
+            session_id: ctx.session_id.clone(),
         }))?;
         conn.publish(PROXY_CHANNEL_NAME, payload).await?;
         Ok(())

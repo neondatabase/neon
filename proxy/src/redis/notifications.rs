@@ -4,6 +4,7 @@ use futures::StreamExt;
 use pq_proto::CancelKeyData;
 use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
+use tracing::span;
 
 use crate::{
     cache::project_info::ProjectInfoCache,
@@ -66,6 +67,7 @@ pub(crate) struct PasswordUpdate {
 pub(crate) struct CancelSession {
     pub region_id: Option<String>,
     pub cancel_key_data: CancelKeyData,
+    pub session_id: String,
 }
 
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -77,17 +79,24 @@ where
     serde_json::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
 }
 
-struct MessageHandler<C: ProjectInfoCache + Send + Sync + 'static> {
+struct MessageHandler<
+    C: ProjectInfoCache + Send + Sync + 'static,
+    H: NotificationsCancellationHandler + Send + Sync + 'static,
+> {
     cache: Arc<C>,
-    cancellation_handler: CancellationHandler,
+    cancellation_handler: Arc<H>,
     region_id: String,
 }
 
-impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
-    pub fn new(cache: Arc<C>, cancel_map: CancellationHandler, region_id: String) -> Self {
+impl<
+        C: ProjectInfoCache + Send + Sync + 'static,
+        H: NotificationsCancellationHandler + Send + Sync + 'static,
+    > MessageHandler<C>
+{
+    pub fn new(cache: Arc<C>, cancellation_handler: Arc<H>, region_id: String) -> Self {
         Self {
             cache,
-            cancellation_handler: cancel_map,
+            cancellation_handler,
             region_id,
         }
     }
@@ -97,6 +106,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
     pub fn enable_ttl(&self) {
         self.cache.enable_ttl();
     }
+    #[tracing::instrument(skip(self, msg), fields(session_id = tracing::field::Empty))]
     async fn handle_message(&self, msg: redis::Msg) -> anyhow::Result<()> {
         use Notification::*;
         let payload: String = msg.get_payload()?;
@@ -112,6 +122,10 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
         tracing::debug!(?msg, "received a message");
         match msg {
             Cancel(cancel_session) => {
+                tracing::Span::current().record(
+                    "session_id",
+                    &tracing::field::display(cancel_session.session_id),
+                );
                 if let Some(cancel_region) = cancel_session.region_id {
                     // If the message is not for this region, ignore it.
                     if cancel_region != self.region_id {
@@ -121,7 +135,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                 // This instance of cancellation_handler doesn't have a RedisPublisherClient so it can't publish the message.
                 match self
                     .cancellation_handler
-                    .cancel_session(cancel_session.cancel_key_data)
+                    .cancel_session_no_publish(cancel_session.cancel_key_data)
                     .await
                 {
                     Ok(()) => {}
@@ -173,7 +187,11 @@ where
     C: ProjectInfoCache + Send + Sync + 'static,
 {
     cache.enable_ttl();
-    let handler = MessageHandler::new(cache, CancellationHandler::new(cancel_map, None), region_id);
+    let handler = MessageHandler::new(
+        cache,
+        Arc::new(CancellationHandler::new(cancel_map, None)),
+        region_id,
+    );
 
     loop {
         let redis = RedisConsumerClient::new(&url)?;
@@ -271,6 +289,7 @@ mod tests {
         let msg = Notification::Cancel(CancelSession {
             cancel_key_data,
             region_id: None,
+            session_id: "session".to_string(),
         });
         let text = serde_json::to_string(&msg)?;
         let result: Notification = serde_json::from_str(&text)?;
@@ -279,6 +298,7 @@ mod tests {
         let msg = Notification::Cancel(CancelSession {
             cancel_key_data,
             region_id: Some("region".to_string()),
+            session_id: "session".to_string(),
         });
         let text = serde_json::to_string(&msg)?;
         let result: Notification = serde_json::from_str(&text)?;
