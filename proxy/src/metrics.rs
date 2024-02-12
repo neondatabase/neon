@@ -152,6 +152,15 @@ pub static NUM_OPEN_CLIENTS_IN_HTTP_POOL: Lazy<IntGauge> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static NUM_CANCELLATION_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_cancellation_requests_total",
+        "Number of cancellation requests (per found/not_found).",
+        &["kind"],
+    )
+    .unwrap()
+});
+
 #[derive(Clone)]
 pub struct LatencyTimer {
     // time since the stopwatch was started

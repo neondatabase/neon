@@ -7,7 +7,10 @@ use tokio::sync::Mutex;
 use tokio_postgres::{CancelToken, NoTls};
 use tracing::info;
 
-use crate::{error::ReportableError, redis::publisher::RedisPublisherClient};
+use crate::{
+    error::ReportableError, metrics::NUM_CANCELLATION_REQUESTS,
+    redis::publisher::RedisPublisherClient,
+};
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
 
@@ -49,6 +52,9 @@ impl CancellationHandler {
         let Some(cancel_closure) = self.map.get(&key).and_then(|x| x.clone()) else {
             tracing::warn!("query cancellation key not found: {key}");
             if let Some(redis_client) = &self.redis_client {
+                NUM_CANCELLATION_REQUESTS
+                    .with_label_values(&["not_found"])
+                    .inc();
                 info!("publishing cancellation key to Redis");
                 match redis_client.lock().await.try_publish(key).await {
                     Ok(()) => {
@@ -62,10 +68,12 @@ impl CancellationHandler {
                         )));
                     }
                 }
-            };
+            }
             return Ok(());
         };
-
+        NUM_CANCELLATION_REQUESTS
+            .with_label_values(&["found"])
+            .inc();
         info!("cancelling query per user's request using key {key}");
         cancel_closure.try_cancel_query().await
     }
