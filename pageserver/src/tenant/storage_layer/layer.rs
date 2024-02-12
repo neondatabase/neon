@@ -1413,10 +1413,6 @@ impl ResidentLayer {
         &self.owner.0.path
     }
 
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        self.owner.access_stats()
-    }
-
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.owner.metadata()
     }

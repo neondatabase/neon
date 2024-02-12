@@ -12,6 +12,7 @@ use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::stream::StreamExt;
 use itertools::Itertools;
 use pageserver_api::{
     keyspace::{key_range_size, KeySpaceAccum},
@@ -105,7 +106,7 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
+use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
@@ -1458,7 +1459,7 @@ impl Timeline {
                 generation,
                 shard_identity,
                 pg_version,
-                layers: Arc::new(tokio::sync::RwLock::new(LayerManager::create())),
+                layers: Default::default(),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
@@ -2283,45 +2284,28 @@ impl Timeline {
     /// should treat this as a cue to simply skip doing any heatmap uploading
     /// for this timeline.
     pub(crate) async fn generate_heatmap(&self) -> Option<HeatMapTimeline> {
-        let eviction_info = self.get_local_layers_for_disk_usage_eviction().await;
+        // no point in heatmaps without remote client
+        let _remote_client = self.remote_client.as_ref()?;
 
-        let remote_client = match &self.remote_client {
-            Some(c) => c,
-            None => return None,
-        };
+        if !self.is_active() {
+            return None;
+        }
 
-        let layer_file_names = eviction_info
-            .resident_layers
-            .iter()
-            .map(|l| l.layer.get_name())
-            .collect::<Vec<_>>();
+        let guard = self.layers.read().await;
 
-        let decorated = match remote_client.get_layers_metadata(layer_file_names) {
-            Ok(d) => d,
-            Err(_) => {
-                // Getting metadata only fails on Timeline in bad state.
-                return None;
-            }
-        };
+        let resident = guard.resident_layers().map(|layer| {
+            let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
-        let heatmap_layers = std::iter::zip(
-            eviction_info.resident_layers.into_iter(),
-            decorated.into_iter(),
-        )
-        .filter_map(|(layer, remote_info)| {
-            remote_info.map(|remote_info| {
-                HeatMapLayer::new(
-                    layer.layer.get_name(),
-                    IndexLayerMetadata::from(remote_info),
-                    layer.last_activity_ts,
-                )
-            })
+            HeatMapLayer::new(
+                layer.layer_desc().filename(),
+                layer.metadata().into(),
+                last_activity_ts,
+            )
         });
 
-        Some(HeatMapTimeline::new(
-            self.timeline_id,
-            heatmap_layers.collect(),
-        ))
+        let layers = resident.collect().await;
+
+        Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
 }
 
@@ -4662,41 +4646,24 @@ impl Timeline {
     /// Returns non-remote layers for eviction.
     pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
         let guard = self.layers.read().await;
-        let layers = guard.layer_map();
-
         let mut max_layer_size: Option<u64> = None;
-        let mut resident_layers = Vec::new();
 
-        for l in layers.iter_historic_layers() {
-            let file_size = l.file_size();
-            max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
+        let resident_layers = guard
+            .resident_layers()
+            .map(|layer| {
+                let file_size = layer.layer_desc().file_size;
+                max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-            let l = guard.get_from_desc(&l);
+                let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
-            let l = match l.keep_resident().await {
-                Ok(Some(l)) => l,
-                Ok(None) => continue,
-                Err(e) => {
-                    // these should not happen, but we cannot make them statically impossible right
-                    // now.
-                    tracing::warn!(layer=%l, "failed to keep the layer resident: {e:#}");
-                    continue;
+                EvictionCandidate {
+                    layer: layer.into(),
+                    last_activity_ts,
+                    relative_last_activity: finite_f32::FiniteF32::ZERO,
                 }
-            };
-
-            let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
-                // We only use this fallback if there's an implementation error.
-                // `latest_activity` already does rate-limited warn!() log.
-                debug!(layer=%l, "last_activity returns None, using SystemTime::now");
-                SystemTime::now()
-            });
-
-            resident_layers.push(EvictionCandidate {
-                layer: l.drop_eviction_guard().into(),
-                last_activity_ts,
-                relative_last_activity: finite_f32::FiniteF32::ZERO,
-            });
-        }
+            })
+            .collect()
+            .await;
 
         DiskUsageEvictionInfo {
             max_layer_size,
