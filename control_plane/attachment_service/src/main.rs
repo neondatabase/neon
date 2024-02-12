@@ -245,12 +245,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Start HTTP server
     let server_shutdown = CancellationToken::new();
-    let server_shutdown_bg = server_shutdown.clone();
     let server = hyper::Server::from_tcp(http_listener)?
         .serve(router_service)
-        .with_graceful_shutdown(async move {
-            server_shutdown_bg.cancelled().await;
-        });
+        .with_graceful_shutdown({
+        let server_shutdown = server_shutdown.clone();
+        async move {
+            server_shutdown.cancelled().await;
+        }});
     tracing::info!("Serving on {0}", args.listen);
     let server_task = tokio::task::spawn(server);
 
