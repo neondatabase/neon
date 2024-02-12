@@ -45,7 +45,7 @@ pub async fn proxy_pass(
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
-    let _ = crate::proxy::copy_biderectional::copy_bidirectional(&mut client, &mut compute).await?;
+    let _ = crate::proxy::copy_bidirectional::copy_bidirectional(&mut client, &mut compute).await?;
 
     Ok(())
 }
