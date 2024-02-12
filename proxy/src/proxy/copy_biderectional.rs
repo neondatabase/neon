@@ -63,11 +63,11 @@ where
             }
         }
         if let TransferState::Done(_) = b_to_a {
-                if let TransferState::Running(_) = a_to_b {
-                    // Initiate shutdown
-                    a_to_b = TransferState::ShuttingDown(0);
-                    a_to_b_result = transfer_one_direction(cx, &mut a_to_b, a, b)?;
-                }
+            if let TransferState::Running(_) = a_to_b {
+                // Initiate shutdown
+                a_to_b = TransferState::ShuttingDown(0);
+                a_to_b_result = transfer_one_direction(cx, &mut a_to_b, a, b)?;
+            }
         }
 
         // It is not a problem if ready! returns early ... (comment remains the same)
