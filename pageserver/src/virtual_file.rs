@@ -404,12 +404,7 @@ impl VirtualFile {
         Ok(vfile)
     }
 
-    /// Writes a file to the specified `final_path` in a crash safe fasion
-    ///
-    /// The file is first written to the specified tmp_path, and in a second
-    /// step, the tmp path is renamed to the final path. As renames are
-    /// atomic, a crash during the write operation will never leave behind a
-    /// partially written file.
+    /// Async & [`VirtualFile`]-enabled version of [`::utils::crashsafe::overwrite`].
     pub async fn crashsafe_overwrite(
         final_path: &Utf8Path,
         tmp_path: &Utf8Path,
