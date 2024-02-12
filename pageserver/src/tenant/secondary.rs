@@ -160,7 +160,7 @@ impl SecondaryTenant {
         &self.tenant_shard_id
     }
 
-    pub(crate) fn get_layers_for_eviction(self: &Arc<Self>) -> DiskUsageEvictionInfo {
+    pub(crate) fn get_layers_for_eviction(self: &Arc<Self>) -> (DiskUsageEvictionInfo, usize) {
         self.detail.lock().unwrap().get_layers_for_eviction(self)
     }
 

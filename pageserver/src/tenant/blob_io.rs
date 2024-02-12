@@ -123,10 +123,10 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
 
     const CAPACITY: usize = if BUFFERED { PAGE_SZ } else { 0 };
 
-    #[inline(always)]
     /// Writes the given buffer directly to the underlying `VirtualFile`.
     /// You need to make sure that the internal buffer is empty, otherwise
     /// data will be written in wrong order.
+    #[inline(always)]
     async fn write_all_unbuffered<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         src_buf: B,
