@@ -156,7 +156,7 @@ pub static NUM_CANCELLATION_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_cancellation_requests_total",
         "Number of cancellation requests (per found/not_found).",
-        &["kind"],
+        &["source", "kind"],
     )
     .unwrap()
 });
