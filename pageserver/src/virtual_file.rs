@@ -19,10 +19,9 @@ use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
+use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
@@ -412,7 +411,7 @@ impl VirtualFile {
     /// step, the tmp path is renamed to the final path. As renames are
     /// atomic, a crash during the write operation will never leave behind a
     /// partially written file.
-    pub async fn crashsafe_overwrite<B: BoundedBuf>(
+    pub async fn crashsafe_overwrite<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         final_path: &Utf8Path,
         tmp_path: &Utf8Path,
         content: B,
@@ -596,7 +595,7 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
-    pub async fn write_all_at<B: BoundedBuf>(
+    pub async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &self,
         buf: B,
         mut offset: u64,
@@ -607,8 +606,9 @@ impl VirtualFile {
         }
         let mut buf = buf.slice(0..buf_len);
         while !buf.is_empty() {
-            // TODO: push `buf` further down
-            match self.write_at(&buf, offset).await {
+            let res;
+            (buf, res) = self.write_at(buf, offset).await;
+            match res {
                 Ok(0) => {
                     return (
                         Slice::into_inner(buf),
@@ -622,7 +622,7 @@ impl VirtualFile {
                     buf = buf.slice(n..);
                     offset += n as u64;
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return (Slice::into_inner(buf), Err(e)),
             }
         }
@@ -633,15 +633,19 @@ impl VirtualFile {
     /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
     /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
     /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
-    pub async fn write_all<B: BoundedBuf>(&mut self, buf: B) -> (B::Buf, Result<usize, Error>) {
+    pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        buf: B,
+    ) -> (B::Buf, Result<usize, Error>) {
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
             return (Slice::into_inner(buf.slice_full()), Ok(0));
         }
         let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
-            // TODO: push `Slice` further down
-            match self.write(&buf).await {
+            let res;
+            (buf, res) = self.write(buf).await;
+            match res {
                 Ok(0) => {
                     return (
                         Slice::into_inner(buf),
@@ -661,11 +665,18 @@ impl VirtualFile {
         (Slice::into_inner(buf), Ok(nbytes))
     }
 
-    async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+    async fn write<B: IoBuf + Send>(
+        &mut self,
+        buf: Slice<B>,
+    ) -> (Slice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
-        let n = self.write_at(buf, pos).await?;
+        let (buf, res) = self.write_at(buf, pos).await;
+        let n = match res {
+            Ok(n) => n,
+            Err(e) => return (buf, Err(e)),
+        };
         self.pos += n as u64;
-        Ok(n)
+        (buf, Ok(n))
     }
 
     pub(crate) async fn read_at<B>(&self, buf: B, offset: u64) -> (B, Result<usize, Error>)
@@ -693,16 +704,30 @@ impl VirtualFile {
         })
     }
 
-    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, StorageIoOperation::Write, |file_guard| {
-            file_guard.with_std_file(|std_file| std_file.write_at(buf, offset))
-        });
-        if let Ok(size) = result {
-            STORAGE_IO_SIZE
-                .with_label_values(&["write", &self.tenant_id, &self.shard_id, &self.timeline_id])
-                .add(size as i64);
-        }
-        result
+    async fn write_at<B: IoBuf + Send>(
+        &self,
+        buf: Slice<B>,
+        offset: u64,
+    ) -> (Slice<B>, Result<usize, Error>) {
+        let file_guard = match self.lock_file().await {
+            Ok(file_guard) => file_guard,
+            Err(e) => return (buf, Err(e)),
+        };
+        observe_duration!(StorageIoOperation::Write, {
+            let ((_file_guard, buf), result) =
+                io_engine::get().write_at(file_guard, offset, buf).await;
+            if let Ok(size) = result {
+                STORAGE_IO_SIZE
+                    .with_label_values(&[
+                        "write",
+                        &self.tenant_id,
+                        &self.shard_id,
+                        &self.timeline_id,
+                    ])
+                    .add(size as i64);
+            }
+            (buf, result)
+        })
     }
 }
 
@@ -1071,6 +1096,7 @@ mod tests {
     use rand::Rng;
     use std::future::Future;
     use std::io::Write;
+    use std::os::unix::fs::FileExt;
     use std::sync::Arc;
 
     enum MaybeVirtualFile {
@@ -1091,7 +1117,11 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
             }
         }
-        async fn write_all_at<B: BoundedBuf>(&self, buf: B, offset: u64) -> Result<(), Error> {
+        async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+            &self,
+            buf: B,
+            offset: u64,
+        ) -> Result<(), Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
                     let (_buf, res) = file.write_all_at(buf, offset).await;
@@ -1112,7 +1142,10 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all<B: BoundedBuf>(&mut self, buf: B) -> Result<(), Error> {
+        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+            &mut self,
+            buf: B,
+        ) -> Result<(), Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
                     let (_buf, res) = file.write_all(buf).await;

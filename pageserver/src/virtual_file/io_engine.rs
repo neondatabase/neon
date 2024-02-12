@@ -7,6 +7,8 @@
 //!
 //! Then use [`get`] and  [`super::OpenOptions`].
 
+use tokio_epoll_uring::{IoBuf, Slice};
+
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -199,6 +201,26 @@ impl IoEngine {
                     resources,
                     res.map_err(epoll_uring_error_to_std).map(Metadata::from),
                 )
+            }
+        }
+    }
+    pub(super) async fn write_at<B: IoBuf + Send>(
+        &self,
+        file_guard: FileGuard,
+        offset: u64,
+        buf: Slice<B>,
+    ) -> ((FileGuard, Slice<B>), std::io::Result<usize>) {
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                let result = file_guard.with_std_file(|std_file| std_file.write_at(&buf, offset));
+                ((file_guard, buf), result)
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.write(file_guard, offset, buf).await;
+                (resources, res.map_err(epoll_uring_error_to_std))
             }
         }
     }
