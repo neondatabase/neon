@@ -415,6 +415,9 @@ impl VirtualFile {
         tmp_path: Utf8PathBuf,
         content: B,
     ) -> std::io::Result<()> {
+        // TODO: use tokio_epoll_uring if configured as `io_engine`.
+        // See https://github.com/neondatabase/neon/issues/6663
+
         tokio::task::spawn_blocking(move || {
             let slice_storage;
             let content_len = content.bytes_init();
