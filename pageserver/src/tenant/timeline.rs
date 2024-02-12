@@ -3328,7 +3328,7 @@ impl Timeline {
                                     }
                                 };
 
-                                image_layer_writer.put_image(img_key, &img).await?;
+                                image_layer_writer.put_image(img_key, img).await?;
                             }
                         }
 
