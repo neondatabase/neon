@@ -264,9 +264,10 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     // case we miss some events for some reason. Not strictly necessary, but
     // better safe than sorry.
     let (tx, rx) = std::sync::mpsc::channel();
-    let (mut watcher, rx): (Box<dyn Watcher>, _) = match notify::recommended_watcher(move |res| {
+    let watcher_res = notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
-    }) {
+    });
+    let (mut watcher, rx): (Box<dyn Watcher>, _) = match watcher_res {
         Ok(watcher) => (Box::new(watcher), rx),
         Err(e) => {
             match e.kind {

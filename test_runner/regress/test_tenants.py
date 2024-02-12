@@ -285,7 +285,6 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
             ".*load failed.*list timelines directory.*",
         ]
     )

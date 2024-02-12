@@ -144,7 +144,7 @@ impl TestAuth for Scram {
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
         let outcome = auth::AuthFlow::new(stream)
-            .begin(auth::Scram(&self.0))
+            .begin(auth::Scram(&self.0, &mut RequestMonitoring::test()))
             .await?
             .authenticate()
             .await?;
@@ -163,11 +163,11 @@ async fn dummy_proxy(
     tls: Option<TlsConfig>,
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
-    let cancel_map = CancelMap::default();
     let client = WithClientIp::new(client);
-    let (mut stream, _params) = handshake(client, tls.as_ref(), &cancel_map)
-        .await?
-        .context("handshake failed")?;
+    let mut stream = match handshake(client, tls.as_ref()).await? {
+        HandshakeData::Startup(stream, _) => stream,
+        HandshakeData::Cancel(_) => bail!("cancellation not supported"),
+    };
 
     auth.authenticate(&mut stream).await?;
 
@@ -476,6 +476,9 @@ impl TestBackend for TestConnectMechanism {
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>
     {
+        unimplemented!("not used in tests")
+    }
+    fn get_role_secret(&self) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError> {
         unimplemented!("not used in tests")
     }
 }

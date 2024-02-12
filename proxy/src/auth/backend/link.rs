@@ -2,7 +2,7 @@ use crate::{
     auth, compute,
     console::{self, provider::NodeInfo},
     context::RequestMonitoring,
-    error::UserFacingError,
+    error::{ReportableError, UserFacingError},
     stream::PqStream,
     waiters,
 };
@@ -14,10 +14,6 @@ use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
 pub enum LinkAuthError {
-    /// Authentication error reported by the console.
-    #[error("Authentication failed: {0}")]
-    AuthFailed(String),
-
     #[error(transparent)]
     WaiterRegister(#[from] waiters::RegisterError),
 
@@ -30,10 +26,16 @@ pub enum LinkAuthError {
 
 impl UserFacingError for LinkAuthError {
     fn to_string_client(&self) -> String {
-        use LinkAuthError::*;
+        "Internal error".to_string()
+    }
+}
+
+impl ReportableError for LinkAuthError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            AuthFailed(_) => self.to_string(),
-            _ => "Internal error".to_string(),
+            LinkAuthError::WaiterRegister(_) => crate::error::ErrorKind::Service,
+            LinkAuthError::WaiterWait(_) => crate::error::ErrorKind::Service,
+            LinkAuthError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }
@@ -59,6 +61,8 @@ pub(super) async fn authenticate(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {
+    ctx.set_auth_method(crate::context::AuthMethod::Web);
+
     // registering waiter can fail if we get unlucky with rng.
     // just try again.
     let (psql_session_id, waiter) = loop {

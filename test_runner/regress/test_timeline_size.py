@@ -43,7 +43,6 @@ def test_timeline_size(neon_simple_env: NeonEnv):
     client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
 
     endpoint_main = env.endpoints.create_start("test_timeline_size")
-    log.info("postgres is running on 'test_timeline_size' branch")
 
     with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
@@ -79,7 +78,6 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
     )
 
     endpoint_main = env.endpoints.create_start("test_timeline_size_createdropdb")
-    log.info("postgres is running on 'test_timeline_size_createdropdb' branch")
 
     with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
@@ -162,8 +160,6 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
     )
     endpoint_main.start()
 
-    log.info("postgres is running on 'test_timeline_size_quota_on_startup' branch")
-
     with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE TABLE foo (t text)")
@@ -230,8 +226,6 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     # which is needed for pg_cluster_size() to work
     endpoint_main.respec(skip_pg_catalog_updates=False)
     endpoint_main.start()
-
-    log.info("postgres is running on 'test_timeline_size_quota' branch")
 
     with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
@@ -585,7 +579,6 @@ def test_timeline_size_metrics(
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
-        vanilla_pg.configure([f"port={port}"])
         vanilla_pg.start()
 
         # Create database based on template0 because we can't connect to template0

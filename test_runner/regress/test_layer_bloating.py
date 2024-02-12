@@ -21,7 +21,6 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
         "test_logical_replication", config_lines=["log_statement=all"]
     )
 
-    log.info("postgres is running on 'test_logical_replication' branch")
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 

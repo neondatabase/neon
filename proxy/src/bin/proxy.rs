@@ -88,6 +88,9 @@ struct ProxyCliArgs {
     /// path to directory with TLS certificates for client postgres connections
     #[clap(long)]
     certs_dir: Option<String>,
+    /// timeout for the TLS handshake
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    handshake_timeout: tokio::time::Duration,
     /// http endpoint to receive periodic metric updates
     #[clap(long)]
     metric_collection_endpoint: Option<String>,
@@ -164,6 +167,10 @@ struct SqlOverHttpArgs {
     /// How many connections to pool for each endpoint. Excess connections are discarded
     #[clap(long, default_value_t = 20)]
     sql_over_http_pool_max_conns_per_endpoint: usize,
+
+    /// How many connections to pool for each endpoint. Excess connections are discarded
+    #[clap(long, default_value_t = 20000)]
+    sql_over_http_pool_max_total_conns: usize,
 
     /// How long pooled connections should remain idle for before closing
     #[clap(long, default_value = "5m", value_parser = humantime::parse_duration)]
@@ -387,6 +394,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             pool_shards: args.sql_over_http.sql_over_http_pool_shards,
             idle_timeout: args.sql_over_http.sql_over_http_idle_timeout,
             opt_in: args.sql_over_http.sql_over_http_pool_opt_in,
+            max_total_conns: args.sql_over_http.sql_over_http_pool_max_total_conns,
         },
     };
     let authentication_config = AuthenticationConfig {
@@ -406,6 +414,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
+        handshake_timeout: args.handshake_timeout,
         // TODO: add this argument
         region: args.region.clone(),
     }));
