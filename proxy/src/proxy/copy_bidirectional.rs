@@ -56,16 +56,16 @@ where
 
         // Early termination checks
         if let TransferState::Done(_) = a_to_b {
-            if let TransferState::Running(_) = b_to_a {
+            if let TransferState::Running(buf) = &b_to_a {
                 // Initiate shutdown
-                b_to_a = TransferState::ShuttingDown(0);
+                b_to_a = TransferState::ShuttingDown(buf.amt);
                 b_to_a_result = transfer_one_direction(cx, &mut b_to_a, b, a)?;
             }
         }
         if let TransferState::Done(_) = b_to_a {
-            if let TransferState::Running(_) = a_to_b {
+            if let TransferState::Running(buf) = &a_to_b {
                 // Initiate shutdown
-                a_to_b = TransferState::ShuttingDown(0);
+                a_to_b = TransferState::ShuttingDown(buf.amt);
                 a_to_b_result = transfer_one_direction(cx, &mut a_to_b, a, b)?;
             }
         }
@@ -220,39 +220,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_early_termination_a_to_d() {
-        let (mut a_mock, mut b_mock) = tokio::io::duplex(10); // Create a mock duplex stream
-        let (mut c_mock, mut d_mock) = tokio::io::duplex(10); // Create a mock duplex stream
+        let (mut a_mock, mut b_mock) = tokio::io::duplex(8); // Create a mock duplex stream
+        let (mut c_mock, mut d_mock) = tokio::io::duplex(32); // Create a mock duplex stream
 
         // Simulate 'a' finishing while there's still data for 'b'
         a_mock.write_all(b"hello").await.unwrap();
         a_mock.shutdown().await.unwrap();
-        d_mock.write_all(b"world").await.unwrap();
+        d_mock.write_all(b"Neon Serverless Postgres").await.unwrap();
 
-        let result = copy_bidirectional(&mut b_mock, &mut c_mock).await;
-        assert!(result.is_ok());
+        let result = copy_bidirectional(&mut b_mock, &mut c_mock).await.unwrap();
 
         // Assert correct transferred amounts
-        let (a_to_d_count, d_to_a_count) = result.unwrap();
+        let (a_to_d_count, d_to_a_count) = result;
         assert_eq!(a_to_d_count, 5); // 'hello' was transferred
-        assert!(d_to_a_count < 5); // 'world' only partially transferred or not at all
+        assert!(d_to_a_count <= 8); // response only partially transferred or not at all
     }
 
     #[tokio::test]
     async fn test_early_termination_d_to_a() {
-        let (mut a_mock, mut b_mock) = tokio::io::duplex(10); // Create a mock duplex stream
-        let (mut c_mock, mut d_mock) = tokio::io::duplex(10); // Create a mock duplex stream
+        let (mut a_mock, mut b_mock) = tokio::io::duplex(32); // Create a mock duplex stream
+        let (mut c_mock, mut d_mock) = tokio::io::duplex(8); // Create a mock duplex stream
 
         // Simulate 'a' finishing while there's still data for 'b'
         d_mock.write_all(b"hello").await.unwrap();
         d_mock.shutdown().await.unwrap();
-        a_mock.write_all(b"world").await.unwrap();
+        a_mock.write_all(b"Neon Serverless Postgres").await.unwrap();
 
-        let result = copy_bidirectional(&mut b_mock, &mut c_mock).await;
-        assert!(result.is_ok());
+        let result = copy_bidirectional(&mut b_mock, &mut c_mock).await.unwrap();
 
         // Assert correct transferred amounts
-        let (a_to_d_count, d_to_a_count) = result.unwrap();
+        let (a_to_d_count, d_to_a_count) = result;
         assert_eq!(d_to_a_count, 5); // 'hello' was transferred
-        assert!(a_to_d_count < 5); // 'world' only partially transferred or not at all
+        assert!(a_to_d_count <= 8); // response only partially transferred or not at all
     }
 }
