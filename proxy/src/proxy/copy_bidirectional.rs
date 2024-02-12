@@ -88,7 +88,7 @@ pub(super) struct CopyBuffer {
     amt: u64,
     buf: Box<[u8]>,
 }
-const DEFAULT_BUF_SIZE: usize = 8;
+const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
 impl CopyBuffer {
     pub(super) fn new() -> Self {
