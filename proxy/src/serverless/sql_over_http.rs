@@ -36,6 +36,7 @@ use crate::error::ReportableError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
+use crate::serverless::backend::HttpConnError;
 use crate::DbName;
 use crate::RoleName;
 
@@ -305,7 +306,14 @@ pub async fn handle(
     Ok(response)
 }
 
-#[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
+#[instrument(
+    name = "sql-over-http",
+    skip_all,
+    fields(
+        pid = tracing::field::Empty,
+        conn_id = tracing::field::Empty
+    )
+)]
 async fn handle_inner(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
@@ -359,12 +367,10 @@ async fn handle_inner(
     let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
     let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
-    let paused = ctx.latency_timer.pause();
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
     };
-    drop(paused);
     info!(request_content_length, "request size in bytes");
     HTTP_CONTENT_LENGTH.observe(request_content_length as f64);
 
@@ -380,15 +386,20 @@ async fn handle_inner(
         let body = hyper::body::to_bytes(request.into_body())
             .await
             .map_err(anyhow::Error::from)?;
+        info!(length = body.len(), "request payload read");
         let payload: Payload = serde_json::from_slice(&body)?;
         Ok::<Payload, anyhow::Error>(payload) // Adjust error type accordingly
     };
 
     let authenticate_and_connect = async {
         let keys = backend.authenticate(ctx, &conn_info).await?;
-        backend
+        let client = backend
             .connect_to_compute(ctx, conn_info, keys, !allow_pool)
-            .await
+            .await?;
+        // not strictly necessary to mark success here,
+        // but it's just insurance for if we forget it somewhere else
+        ctx.latency_timer.success();
+        Ok::<_, HttpConnError>(client)
     };
 
     // Run both operations in parallel
@@ -420,6 +431,7 @@ async fn handle_inner(
             results
         }
         Payload::Batch(statements) => {
+            info!("starting transaction");
             let (inner, mut discard) = client.inner();
             let mut builder = inner.build_transaction();
             if let Some(isolation_level) = txn_isolation_level {
@@ -449,6 +461,7 @@ async fn handle_inner(
             .await
             {
                 Ok(results) => {
+                    info!("commit");
                     let status = transaction.commit().await.map_err(|e| {
                         // if we cannot commit - for now don't return connection to pool
                         // TODO: get a query status from the error
@@ -459,6 +472,7 @@ async fn handle_inner(
                     results
                 }
                 Err(err) => {
+                    info!("rollback");
                     let status = transaction.rollback().await.map_err(|e| {
                         // if we cannot rollback - for now don't return connection to pool
                         // TODO: get a query status from the error
@@ -533,8 +547,10 @@ async fn query_to_json<T: GenericClient>(
     raw_output: bool,
     default_array_mode: bool,
 ) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
+    info!("executing query");
     let query_params = data.params;
     let row_stream = client.query_raw_txt(&data.query, query_params).await?;
+    info!("finished executing query");
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
@@ -568,6 +584,13 @@ async fn query_to_json<T: GenericClient>(
         command_tag_split.next()
     }
     .and_then(|s| s.parse::<i64>().ok());
+
+    info!(
+        rows = rows.len(),
+        ?ready,
+        command_tag,
+        "finished reading rows"
+    );
 
     let mut fields = vec![];
     let mut columns = vec![];
