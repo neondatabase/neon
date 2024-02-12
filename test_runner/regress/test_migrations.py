@@ -10,12 +10,12 @@ def test_migrations(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create("test_migrations")
     log_path = endpoint.endpoint_path() / "compute.log"
 
-    endpoint.respec(skip_pg_catalog_updates=False, features=["migrations"])
+    endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
 
     endpoint.wait_for_migrations()
 
-    num_migrations = 3
+    num_migrations = 4
 
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
@@ -24,7 +24,7 @@ def test_migrations(neon_simple_env: NeonEnv):
 
     with open(log_path, "r") as log_file:
         logs = log_file.read()
-        assert "INFO handle_migrations: Ran 3 migrations" in logs
+        assert f"INFO handle_migrations: Ran {num_migrations} migrations" in logs
 
     endpoint.stop()
     endpoint.start()

@@ -191,6 +191,7 @@ impl RemoteStorage for AzureBlobStorage {
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
     ) -> anyhow::Result<Listing, DownloadError> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
@@ -223,6 +224,8 @@ impl RemoteStorage for AzureBlobStorage {
 
         let mut response = builder.into_stream();
         let mut res = Listing::default();
+        // NonZeroU32 doesn't support subtraction apparently
+        let mut max_keys = max_keys.map(|mk| mk.get());
         while let Some(l) = response.next().await {
             let entry = l.map_err(to_download_error)?;
             let prefix_iter = entry
@@ -235,7 +238,18 @@ impl RemoteStorage for AzureBlobStorage {
                 .blobs
                 .blobs()
                 .map(|k| self.name_to_relative_path(&k.name));
-            res.keys.extend(blob_iter);
+
+            for key in blob_iter {
+                res.keys.push(key);
+                if let Some(mut mk) = max_keys {
+                    assert!(mk > 0);
+                    mk -= 1;
+                    if mk == 0 {
+                        return Ok(res); // limit reached
+                    }
+                    max_keys = Some(mk);
+                }
+            }
         }
         Ok(res)
     }
@@ -379,7 +393,7 @@ impl RemoteStorage for AzureBlobStorage {
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
-        _cancel: CancellationToken,
+        _cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         // TODO use Azure point in time recovery feature for this
         // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview

@@ -213,8 +213,6 @@ def test_tenant_relocation(
 
     env.pageservers[0].allowed_errors.extend(
         [
-            # FIXME: Is this expected?
-            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
             # Needed for detach polling on the original pageserver
             f".*NotFound: tenant {tenant_id}.*",
             # We will dual-attach in this test, so stale generations are expected

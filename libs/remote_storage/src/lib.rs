@@ -13,9 +13,15 @@ mod azure_blob;
 mod local_fs;
 mod s3_bucket;
 mod simulate_failures;
+mod support;
 
 use std::{
-    collections::HashMap, fmt::Debug, num::NonZeroUsize, pin::Pin, sync::Arc, time::SystemTime,
+    collections::HashMap,
+    fmt::Debug,
+    num::{NonZeroU32, NonZeroUsize},
+    pin::Pin,
+    sync::Arc,
+    time::SystemTime,
 };
 
 use anyhow::{bail, Context};
@@ -154,7 +160,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         let result = self
-            .list(prefix, ListingMode::WithDelimiter)
+            .list(prefix, ListingMode::WithDelimiter, None)
             .await?
             .prefixes;
         Ok(result)
@@ -170,8 +176,17 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// whereas,
     /// list_prefixes("foo/bar/") = ["cat", "dog"]
     /// See `test_real_s3.rs` for more details.
-    async fn list_files(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let result = self.list(prefix, ListingMode::NoDelimiter).await?.keys;
+    ///
+    /// max_keys limits max number of keys returned; None means unlimited.
+    async fn list_files(
+        &self,
+        prefix: Option<&RemotePath>,
+        max_keys: Option<NonZeroU32>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
+        let result = self
+            .list(prefix, ListingMode::NoDelimiter, max_keys)
+            .await?
+            .keys;
         Ok(result)
     }
 
@@ -179,7 +194,8 @@ pub trait RemoteStorage: Send + Sync + 'static {
         &self,
         prefix: Option<&RemotePath>,
         _mode: ListingMode,
-    ) -> anyhow::Result<Listing, DownloadError>;
+        max_keys: Option<NonZeroU32>,
+    ) -> Result<Listing, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -218,7 +234,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError>;
 }
 
@@ -268,6 +284,19 @@ impl std::fmt::Display for DownloadError {
 }
 
 impl std::error::Error for DownloadError {}
+
+impl DownloadError {
+    /// Returns true if the error should not be retried with backoff
+    pub fn is_permanent(&self) -> bool {
+        use DownloadError::*;
+        match self {
+            BadInput(_) => true,
+            NotFound => true,
+            Cancelled => true,
+            Other(_) => false,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum TimeTravelError {
@@ -324,24 +353,31 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
     ) -> anyhow::Result<Listing, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.list(prefix, mode).await,
-            Self::AwsS3(s) => s.list(prefix, mode).await,
-            Self::AzureBlob(s) => s.list(prefix, mode).await,
-            Self::Unreliable(s) => s.list(prefix, mode).await,
+            Self::LocalFs(s) => s.list(prefix, mode, max_keys).await,
+            Self::AwsS3(s) => s.list(prefix, mode, max_keys).await,
+            Self::AzureBlob(s) => s.list(prefix, mode, max_keys).await,
+            Self::Unreliable(s) => s.list(prefix, mode, max_keys).await,
         }
     }
 
     // A function for listing all the files in a "directory"
     // Example:
     // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
-    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    //
+    // max_keys limits max number of keys returned; None means unlimited.
+    pub async fn list_files(
+        &self,
+        folder: Option<&RemotePath>,
+        max_keys: Option<NonZeroU32>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.list_files(folder).await,
-            Self::AwsS3(s) => s.list_files(folder).await,
-            Self::AzureBlob(s) => s.list_files(folder).await,
-            Self::Unreliable(s) => s.list_files(folder).await,
+            Self::LocalFs(s) => s.list_files(folder, max_keys).await,
+            Self::AwsS3(s) => s.list_files(folder, max_keys).await,
+            Self::AzureBlob(s) => s.list_files(folder, max_keys).await,
+            Self::Unreliable(s) => s.list_files(folder, max_keys).await,
         }
     }
 
@@ -442,7 +478,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         match self {
             Self::LocalFs(s) => {

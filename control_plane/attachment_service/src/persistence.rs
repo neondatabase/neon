@@ -1,6 +1,9 @@
+pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Duration;
 
+use self::split_state::SplitState;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
@@ -44,7 +47,7 @@ use crate::PlacementPolicy;
 /// updated, and reads of nodes are always from memory, not the database.  We only require that
 /// we can UPDATE a node's scheduling mode reasonably quickly to mark a bad node offline.
 pub struct Persistence {
-    database_url: String,
+    connection_pool: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<PgConnection>>,
 
     // In test environments, we support loading+saving a JSON file.  This is temporary, for the benefit of
     // test_compatibility.py, so that we don't have to commit to making the database contents fully backward/forward
@@ -64,6 +67,8 @@ pub(crate) enum DatabaseError {
     Query(#[from] diesel::result::Error),
     #[error(transparent)]
     Connection(#[from] diesel::result::ConnectionError),
+    #[error(transparent)]
+    ConnectionPool(#[from] r2d2::Error),
     #[error("Logical error: {0}")]
     Logical(String),
 }
@@ -71,9 +76,31 @@ pub(crate) enum DatabaseError {
 pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 
 impl Persistence {
+    // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
+    // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
+    pub const MAX_CONNECTIONS: u32 = 99;
+
+    // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
+    const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+    const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
+
     pub fn new(database_url: String, json_path: Option<Utf8PathBuf>) -> Self {
+        let manager = diesel::r2d2::ConnectionManager::<PgConnection>::new(database_url);
+
+        // We will use a connection pool: this is primarily to _limit_ our connection count, rather than to optimize time
+        // to execute queries (database queries are not generally on latency-sensitive paths).
+        let connection_pool = diesel::r2d2::Pool::builder()
+            .max_size(Self::MAX_CONNECTIONS)
+            .max_lifetime(Some(Self::MAX_CONNECTION_LIFETIME))
+            .idle_timeout(Some(Self::IDLE_CONNECTION_TIMEOUT))
+            // Always keep at least one connection ready to go
+            .min_idle(Some(1))
+            .test_on_check_out(true)
+            .build(manager)
+            .expect("Could not build connection pool");
+
         Self {
-            database_url,
+            connection_pool,
             json_path,
         }
     }
@@ -84,14 +111,10 @@ impl Persistence {
         F: Fn(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        let database_url = self.database_url.clone();
-        tokio::task::spawn_blocking(move || -> DatabaseResult<R> {
-            // TODO: connection pooling, such as via diesel::r2d2
-            let mut conn = PgConnection::establish(&database_url)?;
-            func(&mut conn)
-        })
-        .await
-        .expect("Task panic")
+        let mut conn = self.connection_pool.get()?;
+        tokio::task::spawn_blocking(move || -> DatabaseResult<R> { func(&mut conn) })
+            .await
+            .expect("Task panic")
     }
 
     /// When a node is first registered, persist it before using it for anything
@@ -237,12 +260,23 @@ impl Persistence {
 
     /// Ordering: call this _after_ deleting the tenant on pageservers, but _before_ dropping state for
     /// the tenant from memory on this server.
-    #[allow(unused)]
     pub(crate) async fn delete_tenant(&self, del_tenant_id: TenantId) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_conn(move |conn| -> DatabaseResult<()> {
             diesel::delete(tenant_shards)
                 .filter(tenant_id.eq(del_tenant_id.to_string()))
+                .execute(conn)?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            diesel::delete(nodes)
+                .filter(node_id.eq(del_node_id.0 as i64))
                 .execute(conn)?;
 
             Ok(())
@@ -342,19 +376,107 @@ impl Persistence {
         Ok(())
     }
 
-    // TODO: when we start shard splitting, we must durably mark the tenant so that
-    // on restart, we know that we must go through recovery (list shards that exist
-    // and pick up where we left off and/or revert to parent shards).
+    // When we start shard splitting, we must durably mark the tenant so that
+    // on restart, we know that we must go through recovery.
+    //
+    // We create the child shards here, so that they will be available for increment_generation calls
+    // if some pageserver holding a child shard needs to restart before the overall tenant split is complete.
     #[allow(dead_code)]
-    pub(crate) async fn begin_shard_split(&self, _tenant_id: TenantId) -> anyhow::Result<()> {
-        todo!();
+    pub(crate) async fn begin_shard_split(
+        &self,
+        old_shard_count: ShardCount,
+        split_tenant_id: TenantId,
+        parent_to_children: Vec<(TenantShardId, Vec<TenantShardPersistence>)>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::tenant_shards::dsl::*;
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            conn.transaction(|conn| -> DatabaseResult<()> {
+                // Mark parent shards as splitting
+
+                let expect_parent_records = std::cmp::max(1, old_shard_count.0);
+
+                let updated = diesel::update(tenant_shards)
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(old_shard_count.0 as i32))
+                    .set((splitting.eq(1),))
+                    .execute(conn)?;
+                if u8::try_from(updated)
+                    .map_err(|_| DatabaseError::Logical(
+                        format!("Overflow existing shard count {} while splitting", updated))
+                    )? != expect_parent_records {
+                    // Perhaps a deletion or another split raced with this attempt to split, mutating
+                    // the parent shards that we intend to split. In this case the split request should fail.
+                    return Err(DatabaseError::Logical(
+                        format!("Unexpected existing shard count {updated} when preparing tenant for split (expected {expect_parent_records})")
+                    ));
+                }
+
+                // FIXME: spurious clone to sidestep closure move rules
+                let parent_to_children = parent_to_children.clone();
+
+                // Insert child shards
+                for (parent_shard_id, children) in parent_to_children {
+                    let mut parent = crate::schema::tenant_shards::table
+                        .filter(tenant_id.eq(parent_shard_id.tenant_id.to_string()))
+                        .filter(shard_number.eq(parent_shard_id.shard_number.0 as i32))
+                        .filter(shard_count.eq(parent_shard_id.shard_count.0 as i32))
+                        .load::<TenantShardPersistence>(conn)?;
+                    let parent = if parent.len() != 1 {
+                        return Err(DatabaseError::Logical(format!(
+                            "Parent shard {parent_shard_id} not found"
+                        )));
+                    } else {
+                        parent.pop().unwrap()
+                    };
+                    for mut shard in children {
+                        // Carry the parent's generation into the child
+                        shard.generation = parent.generation;
+
+                        debug_assert!(shard.splitting == SplitState::Splitting);
+                        diesel::insert_into(tenant_shards)
+                            .values(shard)
+                            .execute(conn)?;
+                    }
+                }
+
+                Ok(())
+            })?;
+
+            Ok(())
+        })
+        .await
     }
 
-    // TODO: when we finish shard splitting, we must atomically clean up the old shards
+    // When we finish shard splitting, we must atomically clean up the old shards
     // and insert the new shards, and clear the splitting marker.
     #[allow(dead_code)]
-    pub(crate) async fn complete_shard_split(&self, _tenant_id: TenantId) -> anyhow::Result<()> {
-        todo!();
+    pub(crate) async fn complete_shard_split(
+        &self,
+        split_tenant_id: TenantId,
+        old_shard_count: ShardCount,
+    ) -> DatabaseResult<()> {
+        use crate::schema::tenant_shards::dsl::*;
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            conn.transaction(|conn| -> QueryResult<()> {
+                // Drop parent shards
+                diesel::delete(tenant_shards)
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(old_shard_count.0 as i32))
+                    .execute(conn)?;
+
+                // Clear sharding flag
+                let updated = diesel::update(tenant_shards)
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .set((splitting.eq(0),))
+                    .execute(conn)?;
+                debug_assert!(updated > 0);
+
+                Ok(())
+            })?;
+
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -381,6 +503,8 @@ pub(crate) struct TenantShardPersistence {
 
     #[serde(default)]
     pub(crate) placement_policy: String,
+    #[serde(default)]
+    pub(crate) splitting: SplitState,
     #[serde(default)]
     pub(crate) config: String,
 }

@@ -575,6 +575,26 @@ async fn handle_tenant(
             println!("{tenant_table}");
             println!("{shard_table}");
         }
+        Some(("shard-split", matches)) => {
+            let tenant_id = get_tenant_id(matches, env)?;
+            let shard_count: u8 = matches.get_one::<u8>("shard-count").cloned().unwrap_or(0);
+
+            let attachment_service = AttachmentService::from_env(env);
+            let result = attachment_service
+                .tenant_split(tenant_id, shard_count)
+                .await?;
+            println!(
+                "Split tenant {} into shards {}",
+                tenant_id,
+                result
+                    .new_shards
+                    .iter()
+                    .map(|s| format!("{:?}", s))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
         None => bail!("no tenant subcommand provided"),
     }
@@ -994,12 +1014,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to stop"))?;
             let destroy = sub_args.get_flag("destroy");
+            let mode = sub_args.get_one::<String>("mode").expect("has a default");
 
             let endpoint = cplane
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            endpoint.stop(destroy)?;
+            endpoint.stop(mode, destroy)?;
         }
 
         _ => bail!("Unexpected endpoint subcommand '{sub_name}'"),
@@ -1283,7 +1304,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(false) {
+                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast " }, false) {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }
@@ -1524,6 +1545,11 @@ fn cli() -> Command {
             .subcommand(Command::new("status")
                 .about("Human readable summary of the tenant's shards and attachment locations")
                 .arg(tenant_id_arg.clone()))
+            .subcommand(Command::new("shard-split")
+                .about("Increase the number of shards in the tenant")
+                .arg(tenant_id_arg.clone())
+                .arg(Arg::new("shard-count").value_parser(value_parser!(u8)).long("shard-count").action(ArgAction::Set).help("Number of shards in the new tenant (default 1)"))
+                )
         )
         .subcommand(
             Command::new("pageserver")
@@ -1627,7 +1653,16 @@ fn cli() -> Command {
                             .long("destroy")
                             .action(ArgAction::SetTrue)
                             .required(false)
-                        )
+                    )
+                    .arg(
+                        Arg::new("mode")
+                            .help("Postgres shutdown mode, passed to \"pg_ctl -m <mode>\"")
+                            .long("mode")
+                            .action(ArgAction::Set)
+                            .required(false)
+                            .value_parser(["smart", "fast", "immediate"])
+                            .default_value("fast")
+                    )
                 )
 
         )

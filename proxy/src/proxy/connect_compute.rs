@@ -34,21 +34,6 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg 
     node_info.invalidate().config
 }
 
-/// Try to connect to the compute node once.
-#[tracing::instrument(name = "connect_once", fields(pid = tracing::field::Empty), skip_all)]
-async fn connect_to_compute_once(
-    ctx: &mut RequestMonitoring,
-    node_info: &console::CachedNodeInfo,
-    timeout: time::Duration,
-) -> Result<PostgresConnection, compute::ConnectionError> {
-    let allow_self_signed_compute = node_info.allow_self_signed_compute;
-
-    node_info
-        .config
-        .connect(ctx, allow_self_signed_compute, timeout)
-        .await
-}
-
 #[async_trait]
 pub trait ConnectMechanism {
     type Connection;
@@ -75,13 +60,18 @@ impl ConnectMechanism for TcpMechanism<'_> {
     type ConnectError = compute::ConnectionError;
     type Error = compute::ConnectionError;
 
+    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     async fn connect_once(
         &self,
         ctx: &mut RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
-        connect_to_compute_once(ctx, node_info, timeout).await
+        let allow_self_signed_compute = node_info.allow_self_signed_compute;
+        node_info
+            .config
+            .connect(ctx, allow_self_signed_compute, timeout)
+            .await
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {

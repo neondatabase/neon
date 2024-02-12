@@ -215,8 +215,8 @@ pub struct Timeline {
     // Atomic would be more appropriate here.
     last_freeze_ts: RwLock<Instant>,
 
-    // WAL redo manager
-    walredo_mgr: Arc<super::WalRedoManager>,
+    // WAL redo manager. `None` only for broken tenants.
+    walredo_mgr: Option<Arc<super::WalRedoManager>>,
 
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
@@ -1138,7 +1138,7 @@ impl Timeline {
     /// Shut down immediately, without waiting for any open layers to flush to disk.  This is a subset of
     /// the graceful [`Timeline::flush_and_shutdown`] function.
     pub(crate) async fn shutdown(&self) {
-        span::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Signal any subscribers to our cancellation token to drop out
         tracing::debug!("Cancelling CancellationToken");
@@ -1427,7 +1427,7 @@ impl Timeline {
         tenant_shard_id: TenantShardId,
         generation: Generation,
         shard_identity: ShardIdentity,
-        walredo_mgr: Arc<super::WalRedoManager>,
+        walredo_mgr: Option<Arc<super::WalRedoManager>>,
         resources: TimelineResources,
         pg_version: u32,
         state: TimelineState,
@@ -1964,7 +1964,7 @@ impl Timeline {
                     .await;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "initial_size_calculation", tenant_id=%self.tenant_shard_id.tenant_id, timeline_id=%self.timeline_id)),
+            .instrument(info_span!(parent: None, "initial_size_calculation", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id)),
         );
     }
 
@@ -2151,7 +2151,7 @@ impl Timeline {
         cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        span::debug_assert_current_span_has_tenant_and_timeline_id();
+        crate::span::debug_assert_current_span_has_tenant_and_timeline_id();
         // We should never be calculating logical sizes on shard !=0, because these shards do not have
         // accurate relation sizes, and they do not emit consumption metrics.
         debug_assert!(self.tenant_shard_id.is_zero());
@@ -2849,7 +2849,7 @@ impl Timeline {
         frozen_layer: Arc<InMemoryLayer>,
         ctx: &RequestContext,
     ) -> Result<(), FlushLayerError> {
-        span::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id();
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
@@ -4457,6 +4457,9 @@ impl Timeline {
 
                 let img = match self
                     .walredo_mgr
+                    .as_ref()
+                    .context("timeline has no walredo manager")
+                    .map_err(PageReconstructError::WalRedo)?
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
                     .await
                     .context("reconstruct a page image")

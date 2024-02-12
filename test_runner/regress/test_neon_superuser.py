@@ -12,10 +12,10 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
     env.neon_cli.create_branch("test_neon_superuser_subscriber")
     sub = env.endpoints.create("test_neon_superuser_subscriber")
 
-    pub.respec(skip_pg_catalog_updates=False, features=["migrations"])
+    pub.respec(skip_pg_catalog_updates=False)
     pub.start()
 
-    sub.respec(skip_pg_catalog_updates=False, features=["migrations"])
+    sub.respec(skip_pg_catalog_updates=False)
     sub.start()
 
     pub.wait_for_migrations()
@@ -76,3 +76,21 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
             assert [r[0] for r in res] == [10, 20, 30, 40]
 
         wait_until(10, 0.5, check_that_changes_propagated)
+
+        # Test that pg_monitor is working for neon_superuser role
+        cur.execute("SELECT query from pg_stat_activity LIMIT 1")
+        assert cur.fetchall()[0][0] != "<insufficient privilege>"
+        # Test that pg_monitor is not working for non neon_superuser role without grant
+        cur.execute("CREATE ROLE not_a_superuser LOGIN PASSWORD 'Password42!'")
+        cur.execute("GRANT not_a_superuser TO neon_superuser WITH ADMIN OPTION")
+        cur.execute("SET ROLE not_a_superuser")
+        cur.execute("SELECT query from pg_stat_activity LIMIT 1")
+        assert cur.fetchall()[0][0] == "<insufficient privilege>"
+        cur.execute("RESET ROLE")
+        # Test that pg_monitor is working for non neon_superuser role with grant
+        cur.execute("GRANT pg_monitor TO not_a_superuser")
+        cur.execute("SET ROLE not_a_superuser")
+        cur.execute("SELECT query from pg_stat_activity LIMIT 1")
+        assert cur.fetchall()[0][0] != "<insufficient privilege>"
+        cur.execute("RESET ROLE")
+        cur.execute("DROP ROLE not_a_superuser")

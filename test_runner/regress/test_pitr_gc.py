@@ -16,7 +16,6 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
     endpoint_main = env.endpoints.create_start("main")
-    log.info("postgres is running on 'main' branch")
 
     main_pg_conn = endpoint_main.connect()
     main_cur = main_pg_conn.cursor()

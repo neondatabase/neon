@@ -1,6 +1,5 @@
 from contextlib import closing
 
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
@@ -13,8 +12,6 @@ def test_neon_extension(neon_env_builder: NeonEnvBuilder):
     # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
     endpoint_main.respec(skip_pg_catalog_updates=False)
     endpoint_main.start()
-
-    log.info("postgres is running on 'test_create_extension_neon' branch")
 
     with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:

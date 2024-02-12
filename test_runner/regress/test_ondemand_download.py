@@ -197,6 +197,14 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
     ##### Stop the first pageserver instance, erase all its data
     env.endpoints.stop_all()
 
+    # Stop safekeepers and take another checkpoint. The endpoints might
+    # have written a few more bytes during shutdown.
+    for sk in env.safekeepers:
+        sk.stop()
+
+    client.timeline_checkpoint(tenant_id, timeline_id)
+    current_lsn = Lsn(client.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
+
     # wait until pageserver has successfully uploaded all the data to remote storage
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
 

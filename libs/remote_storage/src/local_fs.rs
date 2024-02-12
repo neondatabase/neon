@@ -4,7 +4,9 @@
 //! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
-use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin, time::SystemTime};
+use std::{
+    borrow::Cow, future::Future, io::ErrorKind, num::NonZeroU32, pin::Pin, time::SystemTime,
+};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -18,9 +20,7 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
-use crate::{
-    Download, DownloadError, DownloadStream, Listing, ListingMode, RemotePath, TimeTravelError,
-};
+use crate::{Download, DownloadError, Listing, ListingMode, RemotePath, TimeTravelError};
 
 use super::{RemoteStorage, StorageMetadata};
 
@@ -164,6 +164,7 @@ impl RemoteStorage for LocalFs {
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
     ) -> Result<Listing, DownloadError> {
         let mut result = Listing::default();
 
@@ -180,6 +181,9 @@ impl RemoteStorage for LocalFs {
                     !path.is_dir()
                 })
                 .collect();
+            if let Some(max_keys) = max_keys {
+                result.keys.truncate(max_keys.get() as usize);
+            }
 
             return Ok(result);
         }
@@ -365,27 +369,33 @@ impl RemoteStorage for LocalFs {
                     format!("Failed to open source file {target_path:?} to use in the download")
                 })
                 .map_err(DownloadError::Other)?;
+
+            let len = source
+                .metadata()
+                .await
+                .context("query file length")
+                .map_err(DownloadError::Other)?
+                .len();
+
             source
                 .seek(io::SeekFrom::Start(start_inclusive))
                 .await
                 .context("Failed to seek to the range start in a local storage file")
                 .map_err(DownloadError::Other)?;
+
             let metadata = self
                 .read_storage_metadata(&target_path)
                 .await
                 .map_err(DownloadError::Other)?;
 
-            let download_stream: DownloadStream = match end_exclusive {
-                Some(end_exclusive) => Box::pin(ReaderStream::new(
-                    source.take(end_exclusive - start_inclusive),
-                )),
-                None => Box::pin(ReaderStream::new(source)),
-            };
+            let source = source.take(end_exclusive.unwrap_or(len) - start_inclusive);
+            let source = ReaderStream::new(source);
+
             Ok(Download {
                 metadata,
                 last_modified: None,
                 etag: None,
-                download_stream,
+                download_stream: Box::pin(source),
             })
         } else {
             Err(DownloadError::NotFound)
@@ -431,7 +441,7 @@ impl RemoteStorage for LocalFs {
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
-        _cancel: CancellationToken,
+        _cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         Err(TimeTravelError::Unimplemented)
     }
@@ -514,10 +524,8 @@ mod fs_tests {
     use futures_util::Stream;
     use std::{collections::HashMap, io::Write};
 
-    async fn read_and_assert_remote_file_contents(
+    async fn read_and_check_metadata(
         storage: &LocalFs,
-        #[allow(clippy::ptr_arg)]
-        // have to use &Utf8PathBuf due to `storage.local_path` parameter requirements
         remote_storage_path: &RemotePath,
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
@@ -596,7 +604,7 @@ mod fs_tests {
         let upload_name = "upload_1";
         let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
-        let contents = read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
+        let contents = read_and_check_metadata(&storage, &upload_target, None).await?;
         assert_eq!(
             dummy_contents(upload_name),
             contents,
@@ -618,7 +626,7 @@ mod fs_tests {
         let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
 
         let full_range_download_contents =
-            read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
+            read_and_check_metadata(&storage, &upload_target, None).await?;
         assert_eq!(
             dummy_contents(upload_name),
             full_range_download_contents,
@@ -659,6 +667,22 @@ mod fs_tests {
             second_part_local, second_part_remote,
             "Second part bytes should be returned when requested"
         );
+
+        let suffix_bytes = storage
+            .download_byte_range(&upload_target, 13, None)
+            .await?
+            .download_stream;
+        let suffix_bytes = aggregate(suffix_bytes).await?;
+        let suffix = std::str::from_utf8(&suffix_bytes)?;
+        assert_eq!(upload_name, suffix);
+
+        let all_bytes = storage
+            .download_byte_range(&upload_target, 0, None)
+            .await?
+            .download_stream;
+        let all_bytes = aggregate(all_bytes).await?;
+        let all_bytes = std::str::from_utf8(&all_bytes)?;
+        assert_eq!(dummy_contents("upload_1"), all_bytes);
 
         Ok(())
     }
@@ -736,7 +760,7 @@ mod fs_tests {
             upload_dummy_file(&storage, upload_name, Some(metadata.clone())).await?;
 
         let full_range_download_contents =
-            read_and_assert_remote_file_contents(&storage, &upload_target, Some(&metadata)).await?;
+            read_and_check_metadata(&storage, &upload_target, Some(&metadata)).await?;
         assert_eq!(
             dummy_contents(upload_name),
             full_range_download_contents,
@@ -772,12 +796,12 @@ mod fs_tests {
         let child = upload_dummy_file(&storage, "grandparent/parent/child", None).await?;
         let uncle = upload_dummy_file(&storage, "grandparent/uncle", None).await?;
 
-        let listing = storage.list(None, ListingMode::NoDelimiter).await?;
+        let listing = storage.list(None, ListingMode::NoDelimiter, None).await?;
         assert!(listing.prefixes.is_empty());
         assert_eq!(listing.keys, [uncle.clone(), child.clone()].to_vec());
 
         // Delimiter: should only go one deep
-        let listing = storage.list(None, ListingMode::WithDelimiter).await?;
+        let listing = storage.list(None, ListingMode::WithDelimiter, None).await?;
 
         assert_eq!(
             listing.prefixes,
@@ -790,6 +814,7 @@ mod fs_tests {
             .list(
                 Some(&RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()),
                 ListingMode::WithDelimiter,
+                None,
             )
             .await?;
         assert_eq!(

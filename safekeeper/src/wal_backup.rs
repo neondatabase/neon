@@ -10,6 +10,7 @@ use utils::id::NodeId;
 
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -546,6 +547,10 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     let ttid_path = Utf8Path::new(&ttid.tenant_id.to_string()).join(ttid.timeline_id.to_string());
     let remote_path = RemotePath::new(&ttid_path)?;
 
+    // see DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
+    // const Option unwrap is not stable, otherwise it would be const.
+    let batch_size: NonZeroU32 = NonZeroU32::new(1000).unwrap();
+
     // A backoff::retry is used here for two reasons:
     // - To provide a backoff rather than busy-polling the API on errors
     // - To absorb transient 429/503 conditions without hitting our error
@@ -557,17 +562,36 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     let token = CancellationToken::new(); // not really used
     backoff::retry(
         || async {
-            let files = storage.list_files(Some(&remote_path)).await?;
-            storage.delete_objects(&files).await?;
-            Ok(())
+            // Do list-delete in batch_size batches to make progress even if there a lot of files.
+            // Alternatively we could make list_files return iterator, but it is more complicated and
+            // I'm not sure deleting while iterating is expected in s3.
+            loop {
+                let files = storage
+                    .list_files(Some(&remote_path), Some(batch_size))
+                    .await?;
+                if files.is_empty() {
+                    return Ok(()); // done
+                }
+                // (at least) s3 results are sorted, so can log min/max:
+                // "List results are always returned in UTF-8 binary order."
+                info!(
+                    "deleting batch of {} WAL segments [{}-{}]",
+                    files.len(),
+                    files.first().unwrap().object_name().unwrap_or(""),
+                    files.last().unwrap().object_name().unwrap_or("")
+                );
+                storage.delete_objects(&files).await?;
+            }
         },
         |_| false,
         3,
         10,
         "executing WAL segments deletion batch",
-        backoff::Cancel::new(token, || anyhow::anyhow!("canceled")),
+        &token,
     )
-    .await?;
+    .await
+    .ok_or_else(|| anyhow::anyhow!("canceled"))
+    .and_then(|x| x)?;
 
     Ok(())
 }
@@ -593,7 +617,7 @@ pub async fn copy_s3_segments(
 
     let remote_path = RemotePath::new(&relative_dst_path)?;
 
-    let files = storage.list_files(Some(&remote_path)).await?;
+    let files = storage.list_files(Some(&remote_path), None).await?;
     let uploaded_segments = &files
         .iter()
         .filter_map(|file| file.object_name().map(ToOwned::to_owned))
