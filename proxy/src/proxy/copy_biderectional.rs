@@ -252,7 +252,7 @@ mod tests {
 
         // Assert correct transferred amounts
         let (a_to_d_count, d_to_a_count) = result.unwrap();
-        assert_eq!(a_to_d_count, 5); // 'hello' was transferred
-        assert!(d_to_a_count < 5); // 'world' only partially transferred or not at all
+        assert_eq!(d_to_a_count, 5); // 'hello' was transferred
+        assert!(a_to_d_count < 5); // 'world' only partially transferred or not at all
     }
 }
