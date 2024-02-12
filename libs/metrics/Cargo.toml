@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 prometheus.workspace = true
 libc.workspace = true
+measured.workspace = true
 once_cell.workspace = true
 chrono.workspace = true
 twox-hash.workspace = true

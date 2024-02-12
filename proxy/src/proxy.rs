@@ -14,7 +14,7 @@ use crate::{
     config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
     error::ReportableError,
-    metrics::{NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE},
+    metrics::Metrics,
     protocol2::WithClientIp,
     proxy::handshake::{handshake, HandshakeData},
     rate_limiter::EndpointRateLimiter,
@@ -107,7 +107,12 @@ pub async fn task_main(
                     .set_nodelay(true)
                     .context("failed to set socket option")?;
 
-                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+                let mut ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr,
+                    crate::metrics::Protocol::Tcp,
+                    &config.region,
+                );
 
                 let res = handle_client(
                     config,
@@ -232,17 +237,14 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
     info!(
-        protocol = ctx.protocol,
+        protocol = %ctx.protocol,
         "handling interactive connection from client"
     );
 
+    let metrics = &Metrics::get().proxy;
     let proto = ctx.protocol;
-    let _client_gauge = NUM_CLIENT_CONNECTION_GAUGE
-        .with_label_values(&[proto])
-        .guard();
-    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
-        .with_label_values(&[proto])
-        .guard();
+    let _client_gauge = metrics.client_connections.guard(proto);
+    let _request_gauge = metrics.connection_requests.guard(proto);
 
     let tls = config.tls_config.as_ref();
 

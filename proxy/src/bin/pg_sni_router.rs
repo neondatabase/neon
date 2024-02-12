@@ -171,8 +171,12 @@ async fn task_main(
                     .context("failed to set socket option")?;
 
                 info!(%peer_addr, "serving");
-                let mut ctx =
-                    RequestMonitoring::new(session_id, peer_addr.ip(), "sni_router", "sni");
+                let mut ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr.ip(),
+                    proxy::metrics::Protocol::SniRouter,
+                    "sni",
+                );
                 handle_client(
                     &mut ctx,
                     dest_suffix,

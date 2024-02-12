@@ -4,6 +4,18 @@
 //! a default registry.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+use ::measured::label::LabelGroupVisitor;
+use ::measured::label::LabelName;
+use measured::label::NoLabels;
+use measured::metric::counter::CounterState;
+use measured::metric::gauge::GaugeState;
+use measured::metric::group::Encoding;
+use measured::metric::name::MetricName;
+use measured::metric::MetricEncoding;
+use measured::metric::MetricFamilyEncoding;
+use measured::FixedCardinalityLabel;
+use measured::LabelGroup;
+use measured::MetricGroup;
 use once_cell::sync::Lazy;
 use prometheus::core::{
     Atomic, AtomicU64, Collector, GenericCounter, GenericCounterVec, GenericGauge, GenericGaugeVec,
@@ -97,6 +109,133 @@ pub const DISK_WRITE_SECONDS_BUCKETS: &[f64] = &[
     0.000_050, 0.000_100, 0.000_500, 0.001, 0.003, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5,
 ];
 
+pub struct BuildInfo {
+    pub revision: &'static str,
+    pub build_tag: &'static str,
+}
+
+// todo: allow label group without the set
+impl LabelGroup for BuildInfo {
+    fn visit_values(&self, v: &mut impl LabelGroupVisitor) {
+        const REVISION: &LabelName = LabelName::from_static("revision");
+        v.write_value(REVISION, &self.revision);
+        const BUILD_TAG: &LabelName = LabelName::from_static("build_tag");
+        v.write_value(BUILD_TAG, &self.build_tag);
+    }
+}
+
+impl<T: Encoding> MetricFamilyEncoding<T> for BuildInfo
+where
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_into(&self, name: impl measured::metric::name::MetricNameEncoder, enc: &mut T) {
+        enc.write_help(&name, "Build/version information");
+        GaugeState::write_type(&name, enc);
+        GaugeState {
+            count: std::sync::atomic::AtomicU64::new(1),
+        }
+        .collect_into(&(), self, name, enc);
+    }
+}
+
+#[derive(MetricGroup)]
+#[metric(new(build_info: BuildInfo))]
+pub struct LibMetrics {
+    #[metric(init = build_info)]
+    build_info: BuildInfo,
+
+    #[metric(flatten)]
+    rusage: Rusage,
+
+    serve_count: CollectionCounter,
+}
+
+#[derive(Default)]
+struct Rusage;
+
+#[derive(Default)]
+struct RusageDiskIo(i64, i64);
+
+impl<T: Encoding> MetricFamilyEncoding<T> for RusageDiskIo
+where
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_into(&self, name: impl measured::metric::name::MetricNameEncoder, enc: &mut T) {
+        enc.write_help(
+            &name,
+            "Bytes written and read from disk, grouped by the operation (read|write)",
+        );
+        GaugeState::write_type(&name, enc);
+        GaugeState {
+            count: std::sync::atomic::AtomicU64::new((self.0 * BYTES_IN_BLOCK) as u64),
+        }
+        .collect_into(&(), IoOperation::Read, &name, enc);
+        GaugeState {
+            count: std::sync::atomic::AtomicU64::new((self.1 * BYTES_IN_BLOCK) as u64),
+        }
+        .collect_into(&(), IoOperation::Write, &name, enc);
+    }
+}
+#[derive(Default)]
+struct RusageMaxRss(i64);
+
+impl<T: Encoding> MetricFamilyEncoding<T> for RusageMaxRss
+where
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_into(&self, name: impl measured::metric::name::MetricNameEncoder, enc: &mut T) {
+        enc.write_help(&name, "Memory usage (Maximum Resident Set Size)");
+        GaugeState::write_type(&name, enc);
+        GaugeState {
+            count: std::sync::atomic::AtomicU64::new(self.0 as u64),
+        }
+        .collect_into(&(), IoOperation::Read, &name, enc);
+    }
+}
+
+#[derive(FixedCardinalityLabel)]
+#[label(singleton = "io_operation")]
+enum IoOperation {
+    Read,
+    Write,
+}
+
+impl<T: Encoding> MetricGroup<T> for Rusage
+where
+    RusageDiskIo: MetricFamilyEncoding<T>,
+    RusageMaxRss: MetricFamilyEncoding<T>,
+{
+    fn collect_into(&self, enc: &mut T) {
+        const DISK_IO: &MetricName = MetricName::from_static("disk_io_bytes_total");
+        const MAXRSS: &MetricName = MetricName::from_static("maxrss_kb");
+
+        let rusage_stats = get_rusage_stats();
+
+        MetricFamilyEncoding::collect_into(
+            &RusageDiskIo(rusage_stats.ru_inblock, rusage_stats.ru_oublock),
+            DISK_IO,
+            enc,
+        );
+        MetricFamilyEncoding::collect_into(&RusageMaxRss(rusage_stats.ru_maxrss), MAXRSS, enc);
+    }
+}
+
+#[derive(Default)]
+struct CollectionCounter(CounterState);
+
+impl<T: Encoding> MetricFamilyEncoding<T> for CollectionCounter
+where
+    CounterState: MetricEncoding<T>,
+{
+    fn collect_into(&self, name: impl measured::metric::name::MetricNameEncoder, enc: &mut T) {
+        self.0
+            .count
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        enc.write_help(&name, "Number of metric requests made");
+        self.0.collect_into(&(), NoLabels, name, enc);
+    }
+}
+
 pub fn set_build_info_metric(revision: &str, build_tag: &str) {
     let metric = register_int_gauge_vec!(
         "libmetrics_build_info",
@@ -106,6 +245,7 @@ pub fn set_build_info_metric(revision: &str, build_tag: &str) {
     .expect("Failed to register build info metric");
     metric.with_label_values(&[revision, build_tag]).set(1);
 }
+const BYTES_IN_BLOCK: i64 = 512;
 
 // Records I/O stats in a "cross-platform" way.
 // Compiles both on macOS and Linux, but current macOS implementation always returns 0 as values for I/O stats.
@@ -119,7 +259,6 @@ pub fn set_build_info_metric(revision: &str, build_tag: &str) {
 fn update_rusage_metrics() {
     let rusage_stats = get_rusage_stats();
 
-    const BYTES_IN_BLOCK: i64 = 512;
     DISK_IO_BYTES
         .with_label_values(&["read"])
         .set(rusage_stats.ru_inblock * BYTES_IN_BLOCK);

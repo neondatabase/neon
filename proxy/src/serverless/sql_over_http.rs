@@ -33,8 +33,7 @@ use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::error::ReportableError;
-use crate::metrics::HTTP_CONTENT_LENGTH;
-use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::metrics::Metrics;
 use crate::proxy::NeonOptions;
 use crate::RoleName;
 
@@ -307,11 +306,9 @@ async fn handle_inner(
     request: Request<Body>,
     backend: Arc<PoolingBackend>,
 ) -> anyhow::Result<Response<Body>> {
-    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
-        .with_label_values(&[ctx.protocol])
-        .guard();
+    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
     info!(
-        protocol = ctx.protocol,
+        protocol = %ctx.protocol,
         "handling interactive connection from client"
     );
 
@@ -361,7 +358,10 @@ async fn handle_inner(
     };
     drop(paused);
     info!(request_content_length, "request size in bytes");
-    HTTP_CONTENT_LENGTH.observe(request_content_length as f64);
+    Metrics::get()
+        .proxy
+        .http_conn_content_length_bytes
+        .observe(request_content_length as f64);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body

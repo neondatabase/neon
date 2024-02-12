@@ -303,7 +303,7 @@ pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'stati
     })
 }
 
-async fn add_request_id_header_to_response(
+pub async fn add_request_id_header_to_response(
     mut res: Response<Body>,
     req_info: RequestInfo,
 ) -> Result<Response<Body>, ApiError> {

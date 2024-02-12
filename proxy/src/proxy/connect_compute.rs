@@ -3,7 +3,7 @@ use crate::{
     compute::{self, PostgresConnection},
     console::{self, errors::WakeComputeError},
     context::RequestMonitoring,
-    metrics::NUM_CONNECTION_FAILURES,
+    metrics::{ConnectionFailureKind, Metrics},
     proxy::{
         retry::{retry_after, ShouldRetry},
         wake_compute::wake_compute,
@@ -26,10 +26,10 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg 
         warn!("invalidating stalled compute node info cache entry");
     }
     let label = match is_cached {
-        true => "compute_cached",
-        false => "compute_uncached",
+        true => ConnectionFailureKind::ComputeCached,
+        false => ConnectionFailureKind::ComputeUncached,
     };
-    NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+    Metrics::get().proxy.connection_failures_total.inc(label);
 
     node_info.invalidate().config
 }

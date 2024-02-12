@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     console::messages::MetricsAuxInfo,
     error::ErrorKind,
-    metrics::{LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND},
+    metrics::{LatencyTimer, Metrics, Protocol, ENDPOINT_ERRORS_BY_KIND},
     BranchId, EndpointId, ProjectId, RoleName,
 };
 
@@ -26,7 +26,7 @@ static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestMonitoring>> = OnceCe
 pub struct RequestMonitoring {
     pub peer_addr: IpAddr,
     pub session_id: Uuid,
-    pub protocol: &'static str,
+    pub protocol: Protocol,
     first_packet: chrono::DateTime<Utc>,
     region: &'static str,
 
@@ -49,7 +49,7 @@ impl RequestMonitoring {
     pub fn new(
         session_id: Uuid,
         peer_addr: IpAddr,
-        protocol: &'static str,
+        protocol: Protocol,
         region: &'static str,
     ) -> Self {
         Self {
@@ -74,7 +74,7 @@ impl RequestMonitoring {
 
     #[cfg(test)]
     pub fn test() -> Self {
-        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), "test", "test")
+        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), Protocol::Tcp, "test")
     }
 
     pub fn console_application_name(&self) -> String {
@@ -97,7 +97,7 @@ impl RequestMonitoring {
 
     pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
         crate::metrics::CONNECTING_ENDPOINTS
-            .with_label_values(&[self.protocol])
+            .with_label_values(&[self.protocol.as_str()])
             .measure(&endpoint_id);
         self.endpoint_id = Some(endpoint_id);
     }
@@ -111,9 +111,7 @@ impl RequestMonitoring {
     }
 
     pub fn set_error_kind(&mut self, kind: ErrorKind) {
-        ERROR_BY_KIND
-            .with_label_values(&[kind.to_metric_label()])
-            .inc();
+        Metrics::get().proxy.errors_total.inc(kind);
         if let Some(ep) = &self.endpoint_id {
             ENDPOINT_ERRORS_BY_KIND
                 .with_label_values(&[kind.to_metric_label()])

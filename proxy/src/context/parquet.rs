@@ -106,7 +106,7 @@ impl From<RequestMonitoring> for RequestData {
             endpoint_id: value.endpoint_id.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
             branch: value.branch.as_deref().map(String::from),
-            protocol: value.protocol,
+            protocol: value.protocol.as_str(),
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,

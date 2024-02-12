@@ -12,7 +12,6 @@ pub use conn_pool::GlobalConnPoolOptions;
 
 use anyhow::bail;
 use hyper::StatusCode;
-use metrics::IntCounterPairGuard;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
@@ -20,7 +19,7 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
 use crate::context::RequestMonitoring;
-use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
+use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
@@ -168,16 +167,17 @@ pub async fn task_main(
 
 struct MetricService<S> {
     inner: S,
-    _gauge: IntCounterPairGuard,
+    _gauge: NumClientConnectionsGuard<'static>,
 }
 
 impl<S> MetricService<S> {
     fn new(inner: S) -> MetricService<S> {
         MetricService {
             inner,
-            _gauge: NUM_CLIENT_CONNECTION_GAUGE
-                .with_label_values(&["http"])
-                .guard(),
+            _gauge: Metrics::get()
+                .proxy
+                .client_connections
+                .guard(crate::metrics::Protocol::Http),
         }
     }
 }
@@ -226,7 +226,12 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
-                let ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+                let ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr,
+                    crate::metrics::Protocol::Ws,
+                    &config.region,
+                );
 
                 if let Err(e) = websocket::serve_websocket(
                     config,
@@ -247,7 +252,12 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+        let ctx = RequestMonitoring::new(
+            session_id,
+            peer_addr,
+            crate::metrics::Protocol::Http,
+            &config.region,
+        );
 
         sql_over_http::handle(config, ctx, request, backend).await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {

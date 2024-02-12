@@ -196,14 +196,19 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Version: {GIT_VERSION}");
     info!("Build_tag: {BUILD_TAG}");
-    ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
+    // ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
+    let libmetrics = ::metrics::LibMetrics::new(::metrics::BuildInfo {
+        revision: GIT_VERSION,
+        build_tag: BUILD_TAG,
+    });
 
-    match proxy::jemalloc::MetricRecorder::new(prometheus::default_registry()) {
-        Ok(t) => {
-            t.start();
+    let jemalloc = match proxy::jemalloc::MetricRecorder::new() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::error!(error = ?e, "could not start jemalloc metrics loop");
+            None
         }
-        Err(e) => tracing::error!(error = ?e, "could not start jemalloc metrics loop"),
-    }
+    };
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
@@ -259,7 +264,11 @@ async fn main() -> anyhow::Result<()> {
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
-    maintenance_tasks.spawn(http::health_server::task_main(http_listener));
+    maintenance_tasks.spawn(http::health_server::task_main(
+        http_listener,
+        libmetrics,
+        jemalloc,
+    ));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
