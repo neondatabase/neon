@@ -222,7 +222,7 @@ pub struct InitPermit(Arc<tokio::sync::Semaphore>);
 
 impl Drop for InitPermit {
     fn drop(&mut self) {
-        debug_assert_eq!(
+        assert_eq!(
             self.0.available_permits(),
             0,
             "InitPermit should only exist as the unique permit"
