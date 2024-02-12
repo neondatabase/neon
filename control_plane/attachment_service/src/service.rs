@@ -384,9 +384,8 @@ impl Service {
 
         const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
 
+        let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
         while !self.cancel.is_cancelled() {
-            let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
-
             tokio::select! {
               _ = interval.tick() => { self.reconcile_all(); }
               _ = self.cancel.cancelled() => return
