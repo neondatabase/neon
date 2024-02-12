@@ -85,8 +85,8 @@ impl PoolingBackend {
             return Ok(client);
         }
         let conn_id = uuid::Uuid::new_v4();
+        tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        ctx.set_application(Some(APP_NAME));
         let backend = self.config.auth_backend.as_ref().map(|_| keys);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
