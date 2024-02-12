@@ -1643,9 +1643,9 @@ impl TenantManager {
             match jh.await {
                 Ok(Ok(())) => {
                     tracing::info!(
-                        "Linked {} layers into child shard {}",
-                        parent_layers.len(),
-                        child
+                        count=parent_layers.len(),
+                        child=shard.shard_id,
+                        "Hard-linked layers into child shard",
                     );
                 }
                 Ok(Err(e)) => {
