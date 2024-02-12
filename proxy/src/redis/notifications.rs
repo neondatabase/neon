@@ -269,7 +269,7 @@ mod tests {
             cancel_key: 41,
         };
         let msg = Notification::Cancel(CancelSession {
-            cancel_key_data: cancel_key_data.clone(),
+            cancel_key_data,
             region_id: None,
         });
         let text = serde_json::to_string(&msg)?;
