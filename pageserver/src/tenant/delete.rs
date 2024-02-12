@@ -6,7 +6,7 @@ use pageserver_api::{models::TenantState, shard::TenantShardId};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, instrument, Instrument, Span};
+use tracing::{error, instrument, Instrument};
 
 use utils::{backoff, completion, crashsafe, fs_ext, id::TimelineId};
 
@@ -496,11 +496,7 @@ impl DeleteTenantFlow {
                 };
                 Ok(())
             }
-            .instrument({
-                let span = tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
-                span.follows_from(Span::current());
-                span
-            }),
+            .instrument(tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
         );
     }
 

@@ -209,8 +209,9 @@ impl LatencyTimer {
 
     pub fn success(&mut self) {
         // stop the stopwatch and record the time that we have accumulated
-        let start = self.start.take().expect("latency timer should be started");
-        self.accumulated += start.elapsed();
+        if let Some(start) = self.start.take() {
+            self.accumulated += start.elapsed();
+        }
 
         // success
         self.outcome = "success";

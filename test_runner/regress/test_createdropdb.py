@@ -20,7 +20,6 @@ def test_createdb(neon_simple_env: NeonEnv, strategy: str):
     env.neon_cli.create_branch("test_createdb", "empty")
 
     endpoint = env.endpoints.create_start("test_createdb")
-    log.info("postgres is running on 'test_createdb' branch")
 
     with endpoint.cursor() as cur:
         # Cause a 'relmapper' change in the original branch
@@ -65,7 +64,6 @@ def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
     env = neon_simple_env
     env.neon_cli.create_branch("test_dropdb", "empty")
     endpoint = env.endpoints.create_start("test_dropdb")
-    log.info("postgres is running on 'test_dropdb' branch")
 
     with endpoint.cursor() as cur:
         cur.execute("CREATE DATABASE foodb")

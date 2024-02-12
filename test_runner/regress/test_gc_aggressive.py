@@ -71,7 +71,6 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     timeline = env.neon_cli.create_branch("test_gc_aggressive", "main")
     endpoint = env.endpoints.create_start("test_gc_aggressive")
-    log.info("postgres is running on test_gc_aggressive branch")
 
     with endpoint.cursor() as cur:
         # Create table, and insert the first 100 rows

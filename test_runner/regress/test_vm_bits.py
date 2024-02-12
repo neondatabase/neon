@@ -14,7 +14,6 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch("test_vm_bit_clear", "empty")
     endpoint = env.endpoints.create_start("test_vm_bit_clear")
 
-    log.info("postgres is running on 'test_vm_bit_clear' branch")
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
@@ -93,7 +92,6 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     # server at the right point-in-time avoids that full-page image.
     endpoint_new = env.endpoints.create_start("test_vm_bit_clear_new")
 
-    log.info("postgres is running on 'test_vm_bit_clear_new' branch")
     pg_new_conn = endpoint_new.connect()
     cur_new = pg_new_conn.cursor()
 

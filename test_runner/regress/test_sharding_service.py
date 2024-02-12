@@ -387,3 +387,27 @@ def test_sharding_service_compute_hook(
         assert notifications[1] == expect
 
     wait_until(10, 1, received_restart_notification)
+
+
+def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
+    """
+    Verify that occasional-use debug APIs work as expected.  This is a lightweight test
+    that just hits the endpoints to check that they don't bitrot.
+    """
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_start()
+
+    tenant_id = TenantId.generate()
+    env.attachment_service.tenant_create(tenant_id, shard_count=2, shard_stripe_size=8192)
+
+    # These APIs are intentionally not implemented as methods on NeonAttachmentService, as
+    # they're just for use in unanticipated circumstances.
+    env.attachment_service.request(
+        "POST", f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop"
+    )
+    assert len(env.attachment_service.node_list()) == 1
+
+    env.attachment_service.request(
+        "POST", f"{env.attachment_service_api}/debug/v1/tenant/{tenant_id}/drop"
+    )

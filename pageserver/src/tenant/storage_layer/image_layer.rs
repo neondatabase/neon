@@ -528,9 +528,11 @@ impl ImageLayerWriterInner {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+    async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img).await?;
+        let (_img, res) = self.blob_writer.write_blob(img).await;
+        // TODO: re-use the buffer for `img` further upstack
+        let off = res?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -659,7 +661,7 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+    pub async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         self.inner.as_mut().unwrap().put_image(key, img).await
     }
 

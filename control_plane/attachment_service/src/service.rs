@@ -1804,6 +1804,45 @@ impl Service {
         Ok(TenantShardMigrateResponse {})
     }
 
+    /// This is for debug/support only: we simply drop all state for a tenant, without
+    /// detaching or deleting it on pageservers.
+    pub(crate) async fn tenant_drop(&self, tenant_id: TenantId) -> Result<(), ApiError> {
+        self.persistence.delete_tenant(tenant_id).await?;
+
+        let mut locked = self.inner.write().unwrap();
+        let mut shards = Vec::new();
+        for (tenant_shard_id, _) in locked.tenants.range(TenantShardId::tenant_range(tenant_id)) {
+            shards.push(*tenant_shard_id);
+        }
+
+        for shard in shards {
+            locked.tenants.remove(&shard);
+        }
+
+        Ok(())
+    }
+
+    /// This is for debug/support only: we simply drop all state for a tenant, without
+    /// detaching or deleting it on pageservers.  We do not try and re-schedule any
+    /// tenants that were on this node.
+    ///
+    /// TODO: proper node deletion API that unhooks things more gracefully
+    pub(crate) async fn node_drop(&self, node_id: NodeId) -> Result<(), ApiError> {
+        self.persistence.delete_node(node_id).await?;
+
+        let mut locked = self.inner.write().unwrap();
+
+        for shard in locked.tenants.values_mut() {
+            shard.deref_node(node_id);
+        }
+
+        let mut nodes = (*locked.nodes).clone();
+        nodes.remove(&node_id);
+        locked.nodes = Arc::new(nodes);
+
+        Ok(())
+    }
+
     pub(crate) async fn node_list(&self) -> Result<Vec<NodePersistence>, ApiError> {
         // It is convenient to avoid taking the big lock and converting Node to a serializable
         // structure, by fetching from storage instead of reading in-memory state.

@@ -1700,23 +1700,6 @@ impl RemoteTimelineClient {
             }
         }
     }
-
-    pub(crate) fn get_layers_metadata(
-        &self,
-        layers: Vec<LayerFileName>,
-    ) -> anyhow::Result<Vec<Option<LayerFileMetadata>>> {
-        let q = self.upload_queue.lock().unwrap();
-        let q = match &*q {
-            UploadQueue::Stopped(_) | UploadQueue::Uninitialized => {
-                anyhow::bail!("queue is in state {}", q.as_str())
-            }
-            UploadQueue::Initialized(inner) => inner,
-        };
-
-        let decorated = layers.into_iter().map(|l| q.latest_files.get(&l).cloned());
-
-        Ok(decorated.collect())
-    }
 }
 
 pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {
