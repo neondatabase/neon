@@ -4,7 +4,10 @@ pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::{backend::ComputeUserInfo, IpPattern},
+    auth::{
+        backend::{ComputeCredentialKeys, ComputeUserInfo},
+        IpPattern,
+    },
     cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
@@ -259,6 +262,34 @@ pub struct NodeInfo {
 
     /// Whether we should accept self-signed certificates (for testing)
     pub allow_self_signed_compute: bool,
+}
+
+impl NodeInfo {
+    pub async fn connect(
+        &self,
+        ctx: &mut RequestMonitoring,
+        timeout: Duration,
+    ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
+        self.config
+            .connect(
+                ctx,
+                self.allow_self_signed_compute,
+                self.aux.clone(),
+                timeout,
+            )
+            .await
+    }
+    pub fn reuse_settings(&mut self, other: Self) {
+        self.allow_self_signed_compute = other.allow_self_signed_compute;
+        self.config.reuse_password(other.config);
+    }
+
+    pub fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
+        match keys {
+            ComputeCredentialKeys::Password(password) => self.config.password(password),
+            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
+        };
+    }
 }
 
 pub type NodeInfoCache = TimedLru<EndpointCacheKey, NodeInfo>;
