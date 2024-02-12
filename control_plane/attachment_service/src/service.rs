@@ -1846,13 +1846,16 @@ impl Service {
         self.persistence.delete_tenant(tenant_id).await?;
 
         let mut locked = self.inner.write().unwrap();
+        let (_nodes, tenants, scheduler) = locked.parts_mut();
         let mut shards = Vec::new();
-        for (tenant_shard_id, _) in locked.tenants.range(TenantShardId::tenant_range(tenant_id)) {
+        for (tenant_shard_id, _) in tenants.range(TenantShardId::tenant_range(tenant_id)) {
             shards.push(*tenant_shard_id);
         }
 
-        for shard in shards {
-            locked.tenants.remove(&shard);
+        for shard_id in shards {
+            if let Some(mut shard) = tenants.remove(&shard_id) {
+                shard.intent.clear(scheduler);
+            }
         }
 
         Ok(())
