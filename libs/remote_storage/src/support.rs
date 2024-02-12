@@ -9,7 +9,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 use tokio_util::sync::CancellationToken;
 
-use crate::DownloadError;
+use crate::{DownloadError, TimeTravelError};
 
 pin_project_lite::pin_project! {
     /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
@@ -83,6 +83,36 @@ where
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
+    }
+}
+
+/// Root cause for cancellations however this type does not implement `std::error::Error` so it
+/// cannot be put as the root cause of `anyhow::Error`. It should never need to be exposed out of
+/// this crate.
+#[derive(Debug)]
+pub(crate) struct Cancelled;
+
+impl From<Cancelled> for anyhow::Error {
+    fn from(_: Cancelled) -> Self {
+        anyhow::Error::new(TimeoutOrCancel::Cancel)
+    }
+}
+
+impl From<Cancelled> for TimeTravelError {
+    fn from(_: Cancelled) -> Self {
+        TimeTravelError::Cancelled
+    }
+}
+
+impl From<Cancelled> for TimeoutOrCancel {
+    fn from(_: Cancelled) -> Self {
+        TimeoutOrCancel::Cancel
+    }
+}
+
+impl From<Cancelled> for DownloadError {
+    fn from(_: Cancelled) -> Self {
+        DownloadError::Cancelled
     }
 }
 
