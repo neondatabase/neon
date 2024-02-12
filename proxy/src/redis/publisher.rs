@@ -2,6 +2,7 @@ use pq_proto::CancelKeyData;
 use redis::AsyncCommands;
 
 use super::notifications::{CancelSession, Notification, PROXY_CHANNEL_NAME};
+use crate::context::RequestMonitoring;
 
 pub struct RedisPublisherClient {
     client: redis::Client,

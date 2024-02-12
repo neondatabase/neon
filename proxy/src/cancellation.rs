@@ -1,3 +1,5 @@
+use crate::context::RequestMonitoring;
+use async_trait::async_trait;
 use dashmap::DashMap;
 use pq_proto::CancelKeyData;
 use std::{net::SocketAddr, sync::Arc};
@@ -43,7 +45,7 @@ impl ReportableError for CancelError {
 }
 
 #[async_trait]
-trait NotificationsCancellationHandler {
+pub trait NotificationsCancellationHandler {
     async fn cancel_session_no_publish(&self, key: CancelKeyData) -> Result<(), CancelError>;
 }
 

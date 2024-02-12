@@ -4,11 +4,10 @@ use futures::StreamExt;
 use pq_proto::CancelKeyData;
 use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
-use tracing::span;
 
 use crate::{
     cache::project_info::ProjectInfoCache,
-    cancellation::{CancelMap, CancellationHandler},
+    cancellation::{CancelMap, CancellationHandler, NotificationsCancellationHandler},
     intern::{ProjectIdInt, RoleNameInt},
 };
 
@@ -91,7 +90,7 @@ struct MessageHandler<
 impl<
         C: ProjectInfoCache + Send + Sync + 'static,
         H: NotificationsCancellationHandler + Send + Sync + 'static,
-    > MessageHandler<C>
+    > MessageHandler<C, H>
 {
     pub fn new(cache: Arc<C>, cancellation_handler: Arc<H>, region_id: String) -> Self {
         Self {
