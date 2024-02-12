@@ -254,7 +254,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
                 return Ok(cancellation_handler
-                    .cancel_session(ctx, cancel_key_data)
+                    .cancel_session(cancel_key_data, ctx.session_id)
                     .await
                     .map(|()| None)?)
             }

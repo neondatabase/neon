@@ -1,4 +1,3 @@
-use crate::context::RequestMonitoring;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use pq_proto::CancelKeyData;
@@ -8,6 +7,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_postgres::{CancelToken, NoTls};
 use tracing::info;
+use uuid::Uuid;
 
 use crate::{
     error::ReportableError, metrics::NUM_CANCELLATION_REQUESTS,
@@ -44,11 +44,6 @@ impl ReportableError for CancelError {
     }
 }
 
-#[async_trait]
-pub trait NotificationsCancellationHandler {
-    async fn cancel_session_no_publish(&self, key: CancelKeyData) -> Result<(), CancelError>;
-}
-
 impl CancellationHandler {
     pub fn new(map: CancelMap, redis_client: Option<Arc<Mutex<RedisPublisherClient>>>) -> Self {
         Self { map, redis_client }
@@ -56,8 +51,8 @@ impl CancellationHandler {
     /// Cancel a running query for the corresponding connection.
     pub async fn cancel_session(
         &self,
-        ctx: &mut RequestMonitoring,
         key: CancelKeyData,
+        session_id: Uuid,
     ) -> Result<(), CancelError> {
         let from = "from_client";
         // NB: we should immediately release the lock after cloning the token.
@@ -68,7 +63,7 @@ impl CancellationHandler {
                     .with_label_values(&[from, "not_found"])
                     .inc();
                 info!("publishing cancellation key to Redis");
-                match redis_client.lock().await.try_publish(ctx, key).await {
+                match redis_client.lock().await.try_publish(key, session_id).await {
                     Ok(()) => {
                         info!("cancellation key successfuly published to Redis");
                     }
@@ -84,7 +79,7 @@ impl CancellationHandler {
             return Ok(());
         };
         NUM_CANCELLATION_REQUESTS
-            .with_label_values(&[from_client, "found"])
+            .with_label_values(&[from, "found"])
             .inc();
         info!("cancelling query per user's request using key {key}");
         cancel_closure.try_cancel_query().await
@@ -127,6 +122,11 @@ impl CancellationHandler {
     fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+}
+
+#[async_trait]
+pub trait NotificationsCancellationHandler {
+    async fn cancel_session_no_publish(&self, key: CancelKeyData) -> Result<(), CancelError>;
 }
 
 #[async_trait]

@@ -1,8 +1,8 @@
 use pq_proto::CancelKeyData;
 use redis::AsyncCommands;
+use uuid::Uuid;
 
 use super::notifications::{CancelSession, Notification, PROXY_CHANNEL_NAME};
-use crate::context::RequestMonitoring;
 
 pub struct RedisPublisherClient {
     client: redis::Client,
@@ -21,10 +21,10 @@ impl RedisPublisherClient {
     }
     pub async fn try_publish(
         &mut self,
-        ctx: &mut RequestMonitoring,
         cancel_key_data: CancelKeyData,
+        session_id: Uuid,
     ) -> anyhow::Result<()> {
-        match self.publish(ctx, cancel_key_data).await {
+        match self.publish(cancel_key_data, session_id).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::error!("failed to publish a message: {e}");
@@ -33,13 +33,13 @@ impl RedisPublisherClient {
         }
         tracing::info!("Publisher is disconnected. Reconnectiong...");
         self.try_connect().await?;
-        self.publish(ctx, cancel_key_data).await
+        self.publish(cancel_key_data, session_id).await
     }
 
     async fn publish(
         &mut self,
-        ctx: &mut RequestMonitoring,
         cancel_key_data: CancelKeyData,
+        session_id: Uuid,
     ) -> anyhow::Result<()> {
         let conn = self
             .publisher
@@ -48,7 +48,7 @@ impl RedisPublisherClient {
         let payload = serde_json::to_string(&Notification::Cancel(CancelSession {
             region_id: Some(self.region_id.clone()),
             cancel_key_data,
-            session_id: ctx.session_id.into(),
+            session_id: session_id.into(),
         }))?;
         conn.publish(PROXY_CHANNEL_NAME, payload).await?;
         Ok(())

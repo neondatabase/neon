@@ -4,6 +4,7 @@ use futures::StreamExt;
 use pq_proto::CancelKeyData;
 use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     cache::project_info::ProjectInfoCache,
@@ -66,7 +67,7 @@ pub(crate) struct PasswordUpdate {
 pub(crate) struct CancelSession {
     pub region_id: Option<String>,
     pub cancel_key_data: CancelKeyData,
-    pub session_id: String,
+    pub session_id: Uuid,
 }
 
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -285,10 +286,11 @@ mod tests {
             backend_pid: 42,
             cancel_key: 41,
         };
+        let uuid = uuid::Uuid::new_v4();
         let msg = Notification::Cancel(CancelSession {
             cancel_key_data,
             region_id: None,
-            session_id: "session".to_string(),
+            session_id: uuid,
         });
         let text = serde_json::to_string(&msg)?;
         let result: Notification = serde_json::from_str(&text)?;
@@ -297,7 +299,7 @@ mod tests {
         let msg = Notification::Cancel(CancelSession {
             cancel_key_data,
             region_id: Some("region".to_string()),
-            session_id: "session".to_string(),
+            session_id: uuid,
         });
         let text = serde_json::to_string(&msg)?;
         let result: Notification = serde_json::from_str(&text)?;
