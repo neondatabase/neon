@@ -1130,6 +1130,8 @@ impl Service {
     }
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
+        self.ensure_attached_wait(tenant_id).await?;
+
         // TODO: refactor into helper
         let targets = {
             let locked = self.inner.read().unwrap();
@@ -1150,8 +1152,6 @@ impl Service {
             }
             targets
         };
-
-        // TODO: error out if the tenant is not attached anywhere.
 
         // Phase 1: delete on the pageservers
         let mut any_pending = false;
@@ -2148,6 +2148,17 @@ impl Service {
     async fn ensure_attached_wait(&self, tenant_id: TenantId) -> Result<(), ApiError> {
         let ensure_waiters = {
             let locked = self.inner.write().unwrap();
+
+            // Check if the tenant is splitting: in this case, even if it is attached,
+            // we must act as if it is not: this blocks e.g. timeline creation/deletion
+            // operations during the split.
+            for (_shard_id, shard) in locked.tenants.range(TenantShardId::tenant_range(tenant_id)) {
+                if !matches!(shard.splitting, SplitState::Idle) {
+                    return Err(ApiError::ResourceUnavailable(
+                        "Tenant shards are currently splitting".into(),
+                    ));
+                }
+            }
 
             self.ensure_attached_schedule(locked, tenant_id)
                 .map_err(ApiError::InternalServerError)?

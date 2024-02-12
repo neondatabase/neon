@@ -455,6 +455,14 @@ impl TenantState {
             return None;
         }
 
+        // If we are currently splitting, then never start a reconciler task: the splitting logic
+        // requires that shards are not interfered with while it runs. Do this check here rather than
+        // up top, so that we only log this message if we would otherwise have done a reconciliation.
+        if !matches!(self.splitting, SplitState::Idle) {
+            tracing::info!("Refusing to reconcile, splitting in progress");
+            return None;
+        }
+
         // Reconcile already in flight for the current sequence?
         if let Some(handle) = &self.reconciler {
             if handle.sequence == self.sequence {
