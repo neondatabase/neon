@@ -28,7 +28,6 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     timeline_id = env.neon_cli.create_branch("test_lsn_mapping", tenant_id=tenant_id)
     endpoint_main = env.endpoints.create_start("test_lsn_mapping", tenant_id=tenant_id)
     timeline_id = endpoint_main.safe_psql("show neon.timeline_id")[0][0]
-    log.info("postgres is running on 'main' branch")
 
     cur = endpoint_main.connect().cursor()
 
@@ -114,7 +113,6 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
     new_timeline_id = env.neon_cli.create_branch("test_ts_of_lsn_api")
     endpoint_main = env.endpoints.create_start("test_ts_of_lsn_api")
-    log.info("postgres is running on 'test_ts_of_lsn_api' branch")
 
     cur = endpoint_main.connect().cursor()
     # Create table, and insert rows, each in a separate transaction

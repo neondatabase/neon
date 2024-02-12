@@ -7,6 +7,7 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
+    num::NonZeroU32,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -45,8 +46,9 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
-    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    S3Config, TimeTravelError, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode,
+    RemotePath, RemoteStorage, S3Config, TimeTravelError, MAX_KEYS_PER_DELETE,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -63,7 +65,6 @@ pub struct S3Bucket {
     concurrency_limiter: ConcurrencyLimiter,
 }
 
-#[derive(Default)]
 struct GetObjectRequest {
     bucket: String,
     key: String,
@@ -232,24 +233,8 @@ impl S3Bucket {
 
         let started_at = ScopeGuard::into_inner(started_at);
 
-        match get_object {
-            Ok(object_output) => {
-                let metadata = object_output.metadata().cloned().map(StorageMetadata);
-                let etag = object_output.e_tag.clone();
-                let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
-
-                let body = object_output.body;
-                let body = ByteStreamAsStream::from(body);
-                let body = PermitCarrying::new(permit, body);
-                let body = TimedDownload::new(started_at, body);
-
-                Ok(Download {
-                    metadata,
-                    etag,
-                    last_modified,
-                    download_stream: Box::pin(body),
-                })
-            }
+        let object_output = match get_object {
+            Ok(object_output) => object_output,
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
                 // Count this in the AttemptOutcome::Ok bucket, because 404 is not
                 // an error: we expect to sometimes fetch an object and find it missing,
@@ -259,7 +244,7 @@ impl S3Bucket {
                     AttemptOutcome::Ok,
                     started_at,
                 );
-                Err(DownloadError::NotFound)
+                return Err(DownloadError::NotFound);
             }
             Err(e) => {
                 metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
@@ -268,11 +253,27 @@ impl S3Bucket {
                     started_at,
                 );
 
-                Err(DownloadError::Other(
+                return Err(DownloadError::Other(
                     anyhow::Error::new(e).context("download s3 object"),
-                ))
+                ));
             }
-        }
+        };
+
+        let metadata = object_output.metadata().cloned().map(StorageMetadata);
+        let etag = object_output.e_tag;
+        let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
+
+        let body = object_output.body;
+        let body = ByteStreamAsStream::from(body);
+        let body = PermitCarrying::new(permit, body);
+        let body = TimedDownload::new(started_at, body);
+
+        Ok(Download {
+            metadata,
+            etag,
+            last_modified,
+            download_stream: Box::pin(body),
+        })
     }
 
     async fn delete_oids(
@@ -355,33 +356,6 @@ impl Stream for ByteStreamAsStream {
 }
 
 pin_project_lite::pin_project! {
-    /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    struct PermitCarrying<S> {
-        permit: tokio::sync::OwnedSemaphorePermit,
-        #[pin]
-        inner: S,
-    }
-}
-
-impl<S> PermitCarrying<S> {
-    fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
-        Self { permit, inner }
-    }
-}
-
-impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for PermitCarrying<S> {
-    type Item = <S as Stream>::Item;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.project().inner.poll_next(cx)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
-pin_project_lite::pin_project! {
     /// Times and tracks the outcome of the request.
     struct TimedDownload<S> {
         started_at: std::time::Instant,
@@ -435,8 +409,11 @@ impl RemoteStorage for S3Bucket {
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
     ) -> Result<Listing, DownloadError> {
         let kind = RequestKind::List;
+        // s3 sdk wants i32
+        let mut max_keys = max_keys.map(|mk| mk.get() as i32);
         let mut result = Listing::default();
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
@@ -460,13 +437,20 @@ impl RemoteStorage for S3Bucket {
             let _guard = self.permit(kind).await;
             let started_at = start_measuring_requests(kind);
 
+            // min of two Options, returning Some if one is value and another is
+            // None (None is smaller than anything, so plain min doesn't work).
+            let request_max_keys = self
+                .max_keys_per_list_response
+                .into_iter()
+                .chain(max_keys.into_iter())
+                .min();
             let mut request = self
                 .client
                 .list_objects_v2()
                 .bucket(self.bucket_name.clone())
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
-                .set_max_keys(self.max_keys_per_list_response);
+                .set_max_keys(request_max_keys);
 
             if let ListingMode::WithDelimiter = mode {
                 request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
@@ -496,6 +480,14 @@ impl RemoteStorage for S3Bucket {
                 let object_path = object.key().expect("response does not contain a key");
                 let remote_path = self.s3_object_to_relative_path(object_path);
                 result.keys.push(remote_path);
+                if let Some(mut mk) = max_keys {
+                    assert!(mk > 0);
+                    mk -= 1;
+                    if mk == 0 {
+                        return Ok(result); // limit reached
+                    }
+                    max_keys = Some(mk);
+                }
             }
 
             result.prefixes.extend(

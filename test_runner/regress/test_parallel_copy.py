@@ -1,7 +1,6 @@
 import asyncio
 from io import BytesIO
 
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import Endpoint, NeonEnv
 
 
@@ -44,7 +43,6 @@ def test_parallel_copy(neon_simple_env: NeonEnv, n_parallel=5):
     env = neon_simple_env
     env.neon_cli.create_branch("test_parallel_copy", "empty")
     endpoint = env.endpoints.create_start("test_parallel_copy")
-    log.info("postgres is running on 'test_parallel_copy' branch")
 
     # Create test table
     conn = endpoint.connect()

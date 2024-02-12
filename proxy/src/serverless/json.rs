@@ -9,23 +9,23 @@ use tokio_postgres::Row;
 // as parameters.
 //
 pub fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
-    json.iter()
-        .map(|value| {
-            match value {
-                // special care for nulls
-                Value::Null => None,
+    json.iter().map(json_value_to_pg_text).collect()
+}
 
-                // convert to text with escaping
-                v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
+fn json_value_to_pg_text(value: &Value) -> Option<String> {
+    match value {
+        // special care for nulls
+        Value::Null => None,
 
-                // avoid escaping here, as we pass this as a parameter
-                Value::String(s) => Some(s.to_string()),
+        // convert to text with escaping
+        v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
 
-                // special care for arrays
-                Value::Array(_) => json_array_to_pg_array(value),
-            }
-        })
-        .collect()
+        // avoid escaping here, as we pass this as a parameter
+        Value::String(s) => Some(s.to_string()),
+
+        // special care for arrays
+        Value::Array(_) => json_array_to_pg_array(value),
+    }
 }
 
 //
@@ -60,6 +60,20 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum JsonConversionError {
+    #[error("internal error compute returned invalid data: {0}")]
+    AsTextError(tokio_postgres::Error),
+    #[error("parse int error: {0}")]
+    ParseIntError(#[from] std::num::ParseIntError),
+    #[error("parse float error: {0}")]
+    ParseFloatError(#[from] std::num::ParseFloatError),
+    #[error("parse json error: {0}")]
+    ParseJsonError(#[from] serde_json::Error),
+    #[error("unbalanced array")]
+    UnbalancedArray,
+}
+
 //
 // Convert postgres row with text-encoded values to JSON object
 //
@@ -68,7 +82,7 @@ pub fn pg_text_row_to_json(
     columns: &[Type],
     raw_output: bool,
     array_mode: bool,
-) -> Result<Value, anyhow::Error> {
+) -> Result<Value, JsonConversionError> {
     let iter = row
         .columns()
         .iter()
@@ -76,7 +90,7 @@ pub fn pg_text_row_to_json(
         .enumerate()
         .map(|(i, (column, typ))| {
             let name = column.name();
-            let pg_value = row.as_text(i)?;
+            let pg_value = row.as_text(i).map_err(JsonConversionError::AsTextError)?;
             let json_value = if raw_output {
                 match pg_value {
                     Some(v) => Value::String(v.to_string()),
@@ -92,10 +106,10 @@ pub fn pg_text_row_to_json(
         // drop keys and aggregate into array
         let arr = iter
             .map(|r| r.map(|(_key, val)| val))
-            .collect::<Result<Vec<Value>, anyhow::Error>>()?;
+            .collect::<Result<Vec<Value>, JsonConversionError>>()?;
         Ok(Value::Array(arr))
     } else {
-        let obj = iter.collect::<Result<Map<String, Value>, anyhow::Error>>()?;
+        let obj = iter.collect::<Result<Map<String, Value>, JsonConversionError>>()?;
         Ok(Value::Object(obj))
     }
 }
@@ -103,7 +117,7 @@ pub fn pg_text_row_to_json(
 //
 // Convert postgres text-encoded value to JSON value
 //
-fn pg_text_to_json(pg_value: Option<&str>, pg_type: &Type) -> Result<Value, anyhow::Error> {
+fn pg_text_to_json(pg_value: Option<&str>, pg_type: &Type) -> Result<Value, JsonConversionError> {
     if let Some(val) = pg_value {
         if let Kind::Array(elem_type) = pg_type.kind() {
             return pg_array_parse(val, elem_type);
@@ -142,7 +156,7 @@ fn pg_text_to_json(pg_value: Option<&str>, pg_type: &Type) -> Result<Value, anyh
 // values. Unlike postgres we don't check that all nested arrays have the same
 // dimensions, we just return them as is.
 //
-fn pg_array_parse(pg_array: &str, elem_type: &Type) -> Result<Value, anyhow::Error> {
+fn pg_array_parse(pg_array: &str, elem_type: &Type) -> Result<Value, JsonConversionError> {
     _pg_array_parse(pg_array, elem_type, false).map(|(v, _)| v)
 }
 
@@ -150,7 +164,7 @@ fn _pg_array_parse(
     pg_array: &str,
     elem_type: &Type,
     nested: bool,
-) -> Result<(Value, usize), anyhow::Error> {
+) -> Result<(Value, usize), JsonConversionError> {
     let mut pg_array_chr = pg_array.char_indices();
     let mut level = 0;
     let mut quote = false;
@@ -170,7 +184,7 @@ fn _pg_array_parse(
         entry: &mut String,
         entries: &mut Vec<Value>,
         elem_type: &Type,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), JsonConversionError> {
         if !entry.is_empty() {
             // While in usual postgres response we get nulls as None and everything else
             // as Some(&str), in arrays we get NULL as unquoted 'NULL' string (while
@@ -234,7 +248,7 @@ fn _pg_array_parse(
     }
 
     if level != 0 {
-        return Err(anyhow::anyhow!("unbalanced array"));
+        return Err(JsonConversionError::UnbalancedArray);
     }
 
     Ok((Value::Array(entries), 0))
