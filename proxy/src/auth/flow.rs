@@ -4,9 +4,11 @@ use super::{backend::ComputeCredentialKeys, AuthErrorImpl, PasswordHackPayload};
 use crate::{
     config::TlsServerEndPoint,
     console::AuthSecret,
+    context::RequestMonitoring,
     sasl, scram,
     stream::{PqStream, Stream},
 };
+use postgres_protocol::authentication::sasl::{SCRAM_SHA_256, SCRAM_SHA_256_PLUS};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -23,7 +25,7 @@ pub trait AuthMethod {
 pub struct Begin;
 
 /// Use [SCRAM](crate::scram)-based auth in [`AuthFlow`].
-pub struct Scram<'a>(pub &'a scram::ServerSecret);
+pub struct Scram<'a>(pub &'a scram::ServerSecret, pub &'a mut RequestMonitoring);
 
 impl AuthMethod for Scram<'_> {
     #[inline(always)]
@@ -138,6 +140,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     /// Perform user authentication. Raise an error in case authentication failed.
     pub async fn authenticate(self) -> super::Result<sasl::Outcome<scram::ScramKey>> {
+        let Scram(secret, ctx) = self.state;
+
+        // pause the timer while we communicate with the client
+        let _paused = ctx.latency_timer.pause();
+
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
         let sasl = sasl::FirstMessage::parse(&msg)
@@ -148,9 +155,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
             return Err(super::AuthError::bad_auth_method(sasl.method));
         }
 
+        match sasl.method {
+            SCRAM_SHA_256 => ctx.auth_method = Some(crate::context::AuthMethod::ScramSha256),
+            SCRAM_SHA_256_PLUS => {
+                ctx.auth_method = Some(crate::context::AuthMethod::ScramSha256Plus)
+            }
+            _ => {}
+        }
         info!("client chooses {}", sasl.method);
 
-        let secret = self.state.0;
         let outcome = sasl::SaslStream::new(self.stream, sasl.message)
             .authenticate(scram::Exchange::new(
                 secret,

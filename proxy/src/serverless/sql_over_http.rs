@@ -36,6 +36,7 @@ use crate::error::ReportableError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
+use crate::DbName;
 use crate::RoleName;
 
 use super::backend::PoolingBackend;
@@ -117,6 +118,9 @@ fn get_conn_info(
     headers: &HeaderMap,
     tls: &TlsConfig,
 ) -> Result<ConnInfo, ConnInfoError> {
+    // HTTP only uses cleartext (for now and likely always)
+    ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
+
     let connection_string = headers
         .get("Neon-Connection-String")
         .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
@@ -134,7 +138,8 @@ fn get_conn_info(
         .path_segments()
         .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname = url_path.next().ok_or(ConnInfoError::InvalidDbName)?;
+    let dbname: DbName = url_path.next().ok_or(ConnInfoError::InvalidDbName)?.into();
+    ctx.set_dbname(dbname.clone());
 
     let username = RoleName::from(urlencoding::decode(connection_url.username())?);
     if username.is_empty() {
@@ -174,7 +179,7 @@ fn get_conn_info(
 
     Ok(ConnInfo {
         user_info,
-        dbname: dbname.into(),
+        dbname,
         password: match password {
             std::borrow::Cow::Borrowed(b) => b.into(),
             std::borrow::Cow::Owned(b) => b.into(),
