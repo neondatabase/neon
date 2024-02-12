@@ -18,7 +18,7 @@ use utils::{
 use crate::{
     compute_hook::ComputeHook,
     node::Node,
-    persistence::Persistence,
+    persistence::{split_state::SplitState, Persistence},
     reconciler::{attached_location_conf, secondary_location_conf, ReconcileError, Reconciler},
     scheduler::{ScheduleError, Scheduler},
     service, PlacementPolicy, Sequence,
@@ -59,6 +59,11 @@ pub(crate) struct TenantState {
     /// only safe to join if either the result has been received or the reconciler's
     /// cancellation token has been fired)
     pub(crate) reconciler: Option<ReconcilerHandle>,
+
+    /// If a tenant is being split, then all shards with that TenantId will have a
+    /// SplitState set, this acts as a guard against other operations such as background
+    /// reconciliation, and timeline creation.
+    pub(crate) splitting: SplitState,
 
     /// Optionally wait for reconciliation to complete up to a particular
     /// sequence number.
@@ -240,6 +245,7 @@ impl TenantState {
             observed: ObservedState::default(),
             config: TenantConfig::default(),
             reconciler: None,
+            splitting: SplitState::Idle,
             sequence: Sequence(1),
             waiter: Arc::new(SeqWait::new(Sequence(0))),
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),

@@ -515,6 +515,7 @@ impl Service {
                 observed: ObservedState::new(),
                 config: serde_json::from_str(&tsp.config).unwrap(),
                 reconciler: None,
+                splitting: tsp.splitting,
                 waiter: Arc::new(SeqWait::new(Sequence::initial())),
                 error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
                 last_error: Arc::default(),
@@ -1658,6 +1659,18 @@ impl Service {
             }
         }
 
+        // Now that I have persisted the splitting state, apply it in-memory.  This is infallible, so
+        // callers may assume that if splitting is set in memory, then it was persisted, and if splitting
+        // is not set in memory, then it was not persisted.
+        {
+            let mut locked = self.inner.write().unwrap();
+            for target in &targets {
+                if let Some(parent_shard) = locked.tenants.get_mut(&target.parent_id) {
+                    parent_shard.splitting = SplitState::Splitting;
+                }
+            }
+        }
+
         // FIXME: we have now committed the shard split state to the database, so any subsequent
         // failure needs to roll it back.  We will later wrap this function in logic to roll back
         // the split if it fails.
@@ -1717,7 +1730,7 @@ impl Service {
             .complete_shard_split(tenant_id, old_shard_count)
             .await?;
 
-        // Replace all the shards we just split with their children
+        // Replace all the shards we just split with their children: this phase is infallible.
         let mut response = TenantShardSplitResponse {
             new_shards: Vec::new(),
         };
@@ -1764,6 +1777,10 @@ impl Service {
                     };
                     child_state.generation = generation;
                     child_state.config = config.clone();
+
+                    // The child's TenantState::splitting is intentionally left at the default value of Idle,
+                    // as at this point in the split process we have succeeded and this part is infallible:
+                    // we will never need to do any special recovery from this state.
 
                     child_locations.push((child, pageserver));
 
