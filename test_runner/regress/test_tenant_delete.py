@@ -696,7 +696,8 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
     wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
     env.stop()
 
-    scrubber.scan_metadata()
+    result = scrubber.scan_metadata()
+    assert result["with_warnings"] == []
 
     env.start()
     ps_http = env.pageserver.http_client()
@@ -705,3 +706,4 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
     env.stop()
 
     scrubber.scan_metadata()
+    assert result["with_warnings"] == []
