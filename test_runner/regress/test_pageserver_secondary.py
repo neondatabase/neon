@@ -498,7 +498,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # Scrub the remote storage
     # ========================
     # This confirms that the scrubber isn't upset by the presence of the heatmap
-    S3Scrubber(neon_env_builder.test_output_dir, neon_env_builder).scan_metadata()
+    S3Scrubber(neon_env_builder).scan_metadata()
 
     # Detach secondary and delete tenant
     # ===================================
