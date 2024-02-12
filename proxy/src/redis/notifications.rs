@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(msg, result);
 
         let msg = Notification::Cancel(CancelSession {
-            cancel_key_data: cancel_key_data,
+            cancel_key_data,
             region_id: Some("region".to_string()),
         });
         let text = serde_json::to_string(&msg)?;
