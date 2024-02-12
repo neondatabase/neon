@@ -207,6 +207,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
 
 /// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
 /// that we give to customers
+#[instrument(skip_all)]
 fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let roles = spec
         .cluster
@@ -764,7 +765,12 @@ impl ComputeNode {
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, connstr.as_str(), &mut client)?;
-        handle_grants(spec, &mut client, connstr.as_str())?;
+        handle_grants(
+            spec,
+            &mut client,
+            connstr.as_str(),
+            self.has_feature(ComputeFeature::AnonExtension),
+        )?;
         handle_extensions(spec, &mut client)?;
         handle_extension_neon(&mut client)?;
         create_availability_check_data(&mut client)?;
@@ -772,12 +778,11 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
-        if self.has_feature(ComputeFeature::Migrations) {
-            thread::spawn(move || {
-                let mut client = Client::connect(connstr.as_str(), NoTls)?;
-                handle_migrations(&mut client)
-            });
-        }
+        // Run migrations separately to not hold up cold starts
+        thread::spawn(move || {
+            let mut client = Client::connect(connstr.as_str(), NoTls)?;
+            handle_migrations(&mut client)
+        });
         Ok(())
     }
 
@@ -839,7 +844,12 @@ impl ComputeNode {
             handle_roles(&spec, &mut client)?;
             handle_databases(&spec, &mut client)?;
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-            handle_grants(&spec, &mut client, self.connstr.as_str())?;
+            handle_grants(
+                &spec,
+                &mut client,
+                self.connstr.as_str(),
+                self.has_feature(ComputeFeature::AnonExtension),
+            )?;
             handle_extensions(&spec, &mut client)?;
             handle_extension_neon(&mut client)?;
             // We can skip handle_migrations here because a new migration can only appear

@@ -95,6 +95,7 @@ inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
 jsonwebtoken = "9"
+lasso = "0.7"
 libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"
@@ -112,6 +113,7 @@ parquet = { version = "49.0.0", default-features = false, features = ["zstd"] }
 parquet_derive = "49.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
+procfs = "0.14"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
@@ -169,6 +171,7 @@ tracing-opentelemetry = "0.20.0"
 tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 twox-hash = { version = "1.6.3", default-features = false }
 url = "2.2"
+urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 webpki-roots = "0.25"

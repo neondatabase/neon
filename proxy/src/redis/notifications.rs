@@ -4,7 +4,10 @@ use futures::StreamExt;
 use redis::aio::PubSub;
 use serde::Deserialize;
 
-use crate::{cache::project_info::ProjectInfoCache, ProjectId, RoleName};
+use crate::{
+    cache::project_info::ProjectInfoCache,
+    intern::{ProjectIdInt, RoleNameInt},
+};
 
 const CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -45,12 +48,12 @@ enum Notification {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct AllowedIpsUpdate {
-    project_id: ProjectId,
+    project_id: ProjectIdInt,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct PasswordUpdate {
-    project_id: ProjectId,
-    role_name: RoleName,
+    project_id: ProjectIdInt,
+    role_name: RoleNameInt,
 }
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -65,11 +68,11 @@ fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
     use Notification::*;
     match msg {
         AllowedIpsUpdate { allowed_ips_update } => {
-            cache.invalidate_allowed_ips_for_project(&allowed_ips_update.project_id)
+            cache.invalidate_allowed_ips_for_project(allowed_ips_update.project_id)
         }
         PasswordUpdate { password_update } => cache.invalidate_role_secret_for_project(
-            &password_update.project_id,
-            &password_update.role_name,
+            password_update.project_id,
+            password_update.role_name,
         ),
     }
 }
@@ -141,12 +144,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::{ProjectId, RoleName};
+
     use super::*;
     use serde_json::json;
 
     #[test]
     fn parse_allowed_ips() -> anyhow::Result<()> {
-        let project_id = "new_project".to_string();
+        let project_id: ProjectId = "new_project".into();
         let data = format!("{{\"project_id\": \"{project_id}\"}}");
         let text = json!({
             "type": "message",
@@ -161,7 +166,7 @@ mod tests {
             result,
             Notification::AllowedIpsUpdate {
                 allowed_ips_update: AllowedIpsUpdate {
-                    project_id: project_id.into()
+                    project_id: (&project_id).into()
                 }
             }
         );
@@ -171,8 +176,8 @@ mod tests {
 
     #[test]
     fn parse_password_updated() -> anyhow::Result<()> {
-        let project_id = "new_project".to_string();
-        let role_name = "new_role".to_string();
+        let project_id: ProjectId = "new_project".into();
+        let role_name: RoleName = "new_role".into();
         let data = format!("{{\"project_id\": \"{project_id}\", \"role_name\": \"{role_name}\"}}");
         let text = json!({
             "type": "message",
@@ -187,8 +192,8 @@ mod tests {
             result,
             Notification::PasswordUpdate {
                 password_update: PasswordUpdate {
-                    project_id: project_id.into(),
-                    role_name: role_name.into()
+                    project_id: (&project_id).into(),
+                    role_name: (&role_name).into(),
                 }
             }
         );

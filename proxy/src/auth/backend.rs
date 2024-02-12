@@ -68,6 +68,7 @@ pub trait TestBackend: Send + Sync + 'static {
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
+    fn get_role_secret(&self) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, ()> {
@@ -358,6 +359,17 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
 }
 
 impl BackendType<'_, ComputeUserInfo> {
+    pub async fn get_role_secret(
+        &self,
+        ctx: &mut RequestMonitoring,
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        use BackendType::*;
+        match self {
+            Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
+            Link(_) => Ok(Cached::new_uncached(None)),
+        }
+    }
+
     pub async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,

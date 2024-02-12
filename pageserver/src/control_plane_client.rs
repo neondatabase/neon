@@ -82,46 +82,29 @@ impl ControlPlaneClient {
         R: Serialize,
         T: DeserializeOwned,
     {
-        #[derive(thiserror::Error, Debug)]
-        enum RemoteAttemptError {
-            #[error("shutdown")]
-            Shutdown,
-            #[error("remote: {0}")]
-            Remote(reqwest::Error),
-        }
-
-        match backoff::retry(
+        let res = backoff::retry(
             || async {
                 let response = self
                     .http_client
                     .post(url.clone())
                     .json(&request)
                     .send()
-                    .await
-                    .map_err(RemoteAttemptError::Remote)?;
+                    .await?;
 
-                response
-                    .error_for_status_ref()
-                    .map_err(RemoteAttemptError::Remote)?;
-                response
-                    .json::<T>()
-                    .await
-                    .map_err(RemoteAttemptError::Remote)
+                response.error_for_status_ref()?;
+                response.json::<T>().await
             },
             |_| false,
             3,
             u32::MAX,
             "calling control plane generation validation API",
-            backoff::Cancel::new(self.cancel.clone(), || RemoteAttemptError::Shutdown),
+            &self.cancel,
         )
         .await
-        {
-            Err(RemoteAttemptError::Shutdown) => Err(RetryForeverError::ShuttingDown),
-            Err(RemoteAttemptError::Remote(_)) => {
-                panic!("We retry forever, this should never be reached");
-            }
-            Ok(r) => Ok(r),
-        }
+        .ok_or(RetryForeverError::ShuttingDown)?
+        .expect("We retry forever, this should never be reached");
+
+        Ok(res)
     }
 }
 

@@ -56,10 +56,18 @@ pub enum ForceAwaitLogicalSize {
 
 impl Client {
     pub fn new(mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
+        Self::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt)
+    }
+
+    pub fn from_client(
+        client: reqwest::Client,
+        mgmt_api_endpoint: String,
+        jwt: Option<&str>,
+    ) -> Self {
         Self {
             mgmt_api_endpoint,
             authorization_header: jwt.map(|jwt| format!("Bearer {jwt}")),
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -310,6 +318,22 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    pub async fn tenant_shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        req: TenantShardSplitRequest,
+    ) -> Result<TenantShardSplitResponse> {
+        let uri = format!(
+            "{}/v1/tenant/{}/shard_split",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
+        self.request(Method::PUT, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_list(
         &self,
         tenant_shard_id: &TenantShardId,
@@ -334,6 +358,18 @@ impl Client {
             self.mgmt_api_endpoint, tenant_shard_id
         );
         self.get(&uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn put_io_engine(
+        &self,
+        engine: &pageserver_api::models::virtual_file::IoEngineKind,
+    ) -> Result<()> {
+        let uri = format!("{}/v1/io_engine", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, engine)
             .await?
             .json()
             .await

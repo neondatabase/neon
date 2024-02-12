@@ -192,6 +192,16 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct TenantShardSplitRequest {
+    pub new_shard_count: u8,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantShardSplitResponse {
+    pub new_shards: Vec<TenantShardId>,
+}
+
 /// Parameters that apply to all shards in a tenant.  Used during tenant creation.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -647,6 +657,27 @@ pub struct TimelineGcRequest {
 pub struct WalRedoManagerStatus {
     pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
     pub pid: Option<u32>,
+}
+
+pub mod virtual_file {
+    #[derive(
+        Copy,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        strum_macros::EnumString,
+        strum_macros::Display,
+        serde_with::DeserializeFromStr,
+        serde_with::SerializeDisplay,
+        Debug,
+    )]
+    #[strum(serialize_all = "kebab-case")]
+    pub enum IoEngineKind {
+        StdFs,
+        #[cfg(target_os = "linux")]
+        TokioEpollUring,
+    }
 }
 
 // Wrapped in libpq CopyData

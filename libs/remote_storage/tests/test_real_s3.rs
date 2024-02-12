@@ -56,9 +56,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
             warn_threshold,
             max_retries,
             "test retry",
-            backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            &CancellationToken::new(),
         )
         .await
+        .expect("never cancelled")
     }
 
     async fn time_point() -> SystemTime {
@@ -69,12 +70,14 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     }
 
     async fn list_files(client: &Arc<GenericRemoteStorage>) -> anyhow::Result<HashSet<RemotePath>> {
-        Ok(retry(|| client.list_files(None))
+        Ok(retry(|| client.list_files(None, None))
             .await
             .context("list root files failure")?
             .into_iter()
             .collect::<HashSet<_>>())
     }
+
+    let cancel = CancellationToken::new();
 
     let path1 = RemotePath::new(Utf8Path::new(format!("{}/path1", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
@@ -142,7 +145,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     // No changes after recovery to t2 (no-op)
     let t_final = time_point().await;
     ctx.client
-        .time_travel_recover(None, t2, t_final, CancellationToken::new())
+        .time_travel_recover(None, t2, t_final, &cancel)
         .await?;
     let t2_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t2: {t2_files_recovered:?}");
@@ -153,7 +156,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     // after recovery to t1: path1 is back, path2 has the old content
     let t_final = time_point().await;
     ctx.client
-        .time_travel_recover(None, t1, t_final, CancellationToken::new())
+        .time_travel_recover(None, t1, t_final, &cancel)
         .await?;
     let t1_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t1: {t1_files_recovered:?}");
@@ -164,7 +167,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     // after recovery to t0: everything is gone except for path1
     let t_final = time_point().await;
     ctx.client
-        .time_travel_recover(None, t0, t_final, CancellationToken::new())
+        .time_travel_recover(None, t0, t_final, &cancel)
         .await?;
     let t0_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t0: {t0_files_recovered:?}");

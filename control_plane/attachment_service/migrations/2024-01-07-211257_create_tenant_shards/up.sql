@@ -7,6 +7,7 @@ CREATE TABLE tenant_shards (
   generation INTEGER NOT NULL,
   generation_pageserver BIGINT NOT NULL,
   placement_policy VARCHAR NOT NULL,
+  splitting SMALLINT NOT NULL,
   -- config is JSON encoded, opaque to the database.
   config TEXT NOT NULL
 );

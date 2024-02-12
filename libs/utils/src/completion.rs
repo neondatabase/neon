@@ -27,6 +27,11 @@ impl Barrier {
             b.wait().await
         }
     }
+
+    /// Return true if a call to wait() would complete immediately
+    pub fn is_ready(&self) -> bool {
+        futures::future::FutureExt::now_or_never(self.0.wait()).is_some()
+    }
 }
 
 impl PartialEq for Barrier {

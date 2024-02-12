@@ -35,6 +35,11 @@ def test_sharding_service_smoke(
     neon_env_builder.num_pageservers = 3
     env = neon_env_builder.init_configs()
 
+    for pageserver in env.pageservers:
+        # This test detaches tenants during migration, which can race with deletion queue operations,
+        # during detach we only do an advisory flush, we don't wait for it.
+        pageserver.allowed_errors.extend([".*Dropped remote consistent LSN updates.*"])
+
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.try_start()
     env.attachment_service.start()
@@ -123,6 +128,38 @@ def test_sharding_service_smoke(
     assert counts[env.pageservers[2].id] == tenant_shard_count // 2
 
 
+def test_node_status_after_restart(
+    neon_env_builder: NeonEnvBuilder,
+):
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_start()
+
+    # Initially we have two online pageservers
+    nodes = env.attachment_service.node_list()
+    assert len(nodes) == 2
+
+    env.pageservers[1].stop()
+
+    env.attachment_service.stop()
+    env.attachment_service.start()
+
+    # Initially readiness check should fail because we're trying to connect to the offline node
+    assert env.attachment_service.ready() is False
+
+    def is_ready():
+        assert env.attachment_service.ready() is True
+
+    wait_until(30, 1, is_ready)
+
+    # We loaded nodes from database on restart
+    nodes = env.attachment_service.node_list()
+    assert len(nodes) == 2
+
+    # We should still be able to create a tenant, because the pageserver which is still online
+    # should have had its availabilty state set to Active.
+    env.attachment_service.tenant_create(TenantId.generate())
+
+
 def test_sharding_service_passthrough(
     neon_env_builder: NeonEnvBuilder,
 ):
@@ -139,6 +176,13 @@ def test_sharding_service_passthrough(
     client = PageserverHttpClient(env.attachment_service_port, lambda: True)
     timelines = client.timeline_list(tenant_id=env.initial_tenant)
     assert len(timelines) == 1
+
+    status = client.tenant_status(env.initial_tenant)
+    assert TenantId(status["id"]) == env.initial_tenant
+    assert set(TimelineId(t) for t in status["timelines"]) == {
+        env.initial_timeline,
+    }
+    assert status["state"]["slug"] == "Active"
 
 
 def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
@@ -298,7 +342,7 @@ def test_sharding_service_compute_hook(
         notifications.append(request.json)
         return Response(status=200)
 
-    httpserver.expect_request("/notify", method="POST").respond_with_handler(handler)
+    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
     # Start running
     env = neon_env_builder.init_start()
@@ -343,3 +387,27 @@ def test_sharding_service_compute_hook(
         assert notifications[1] == expect
 
     wait_until(10, 1, received_restart_notification)
+
+
+def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
+    """
+    Verify that occasional-use debug APIs work as expected.  This is a lightweight test
+    that just hits the endpoints to check that they don't bitrot.
+    """
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_start()
+
+    tenant_id = TenantId.generate()
+    env.attachment_service.tenant_create(tenant_id, shard_count=2, shard_stripe_size=8192)
+
+    # These APIs are intentionally not implemented as methods on NeonAttachmentService, as
+    # they're just for use in unanticipated circumstances.
+    env.attachment_service.request(
+        "POST", f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop"
+    )
+    assert len(env.attachment_service.node_list()) == 1
+
+    env.attachment_service.request(
+        "POST", f"{env.attachment_service_api}/debug/v1/tenant/{tenant_id}/drop"
+    )

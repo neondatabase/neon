@@ -19,11 +19,14 @@ use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
 use pageserver_api::models::TenantShardLocation;
+use pageserver_api::models::TenantShardSplitRequest;
+use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
 };
+use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
@@ -489,6 +492,12 @@ async fn timeline_create_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
+        if let Some(ancestor_id) = request_data.ancestor_timeline_id.as_ref() {
+            tracing::info!(%ancestor_id, "starting to branch");
+        } else {
+            tracing::info!("bootstrapping");
+        }
+
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -529,7 +538,7 @@ async fn timeline_create_handler(
     }
     .instrument(info_span!("timeline_create",
         tenant_id = %tenant_shard_id.tenant_id,
-        shard = %tenant_shard_id.shard_slug(),
+        shard_id = %tenant_shard_id.shard_slug(),
         timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await
 }
@@ -825,7 +834,7 @@ async fn timeline_delete_handler(
             }
         })?;
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-    tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
+    tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -850,7 +859,7 @@ async fn tenant_detach_handler(
         detach_ignored.unwrap_or(false),
         &state.deletion_queue_client,
     )
-    .instrument(info_span!("tenant_detach", %tenant_id))
+    .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
     .await?;
 
     json_response(StatusCode::OK, ())
@@ -869,7 +878,7 @@ async fn tenant_reset_handler(
     let state = get_state(&request);
     state
         .tenant_manager
-        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), ctx)
+        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1001,7 +1010,7 @@ async fn tenant_delete_handler(
         .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
-            shard = %tenant_shard_id.shard_slug()
+            shard_id = %tenant_shard_id.shard_slug()
         ))
         .await?;
 
@@ -1096,6 +1105,25 @@ async fn tenant_size_handler(
             inputs,
         },
     )
+}
+
+async fn tenant_shard_split_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let req: TenantShardSplitRequest = json_request(&mut request).await?;
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let state = get_state(&request);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
+    let new_shards = state
+        .tenant_manager
+        .shard_split(tenant_shard_id, ShardCount(req.new_shard_count), &ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, TenantShardSplitResponse { new_shards })
 }
 
 async fn layer_map_info_handler(
@@ -1357,7 +1385,7 @@ async fn put_tenant_location_config_handler(
             mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
                 .instrument(info_span!("tenant_detach",
                     tenant_id = %tenant_shard_id.tenant_id,
-                    shard = %tenant_shard_id.shard_slug()
+                    shard_id = %tenant_shard_id.shard_slug()
                 ))
                 .await
         {
@@ -1902,6 +1930,15 @@ async fn post_tracing_event_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn put_io_engine_handler(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
+    crate::virtual_file::io_engine::set(kind);
+    json_response(StatusCode::OK, ())
+}
+
 /// Common functionality of all the HTTP API handlers.
 ///
 /// - Adds a tracing span to each request (by `request_span`)
@@ -2048,6 +2085,9 @@ pub fn make_router(
         .put("/v1/tenant/config", |r| {
             api_handler(r, update_tenant_config_handler)
         })
+        .put("/v1/tenant/:tenant_shard_id/shard_split", |r| {
+            api_handler(r, tenant_shard_split_handler)
+        })
         .get("/v1/tenant/:tenant_shard_id/config", |r| {
             api_handler(r, get_tenant_config_handler)
         })
@@ -2159,5 +2199,6 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/keyspace",
             |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
         )
+        .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .any(handler_404))
 }

@@ -108,7 +108,7 @@ impl From<RequestMonitoring> for RequestData {
             branch: value.branch.as_deref().map(String::from),
             protocol: value.protocol,
             region: value.region,
-            error: value.error_kind.as_ref().map(|e| e.to_str()),
+            error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
             duration_us: SystemTime::from(value.first_packet)
                 .elapsed()
@@ -315,9 +315,11 @@ async fn upload_parquet(
         FAILED_UPLOAD_MAX_RETRIES,
         "request_data_upload",
         // we don't want cancellation to interrupt here, so we make a dummy cancel token
-        backoff::Cancel::new(CancellationToken::new(), || anyhow::anyhow!("Cancelled")),
+        &CancellationToken::new(),
     )
     .await
+    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .and_then(|x| x)
     .context("request_data_upload")?;
 
     Ok(buffer.writer())

@@ -281,6 +281,7 @@ dependencies = [
  "clap",
  "control_plane",
  "diesel",
+ "diesel_migrations",
  "futures",
  "git-version",
  "hyper",
@@ -288,6 +289,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "postgres_connection",
+ "r2d2",
  "reqwest",
  "serde",
  "serde_json",
@@ -1327,8 +1329,6 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
- "diesel",
- "diesel_migrations",
  "futures",
  "git-version",
  "hex",
@@ -1650,6 +1650,7 @@ dependencies = [
  "diesel_derives",
  "itoa",
  "pq-sys",
+ "r2d2",
  "serde_json",
 ]
 
@@ -2719,6 +2720,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lasso"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4644821e1c3d7a560fe13d842d13f587c07348a1a05d3a797152d41c90c56df2"
+dependencies = [
+ "dashmap",
+ "hashbrown 0.13.2",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2856,6 +2867,7 @@ dependencies = [
  "chrono",
  "libc",
  "once_cell",
+ "procfs",
  "prometheus",
  "rand 0.8.5",
  "rand_distr",
@@ -3973,6 +3985,8 @@ checksum = "b1de8dacb0873f77e6aefc6d71e044761fcc68060290f5b1089fcdf84626bb69"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",
+ "chrono",
+ "flate2",
  "hex",
  "lazy_static",
  "rustix 0.36.16",
@@ -4063,6 +4077,7 @@ dependencies = [
  "clap",
  "consumption_metrics",
  "dashmap",
+ "env_logger",
  "futures",
  "git-version",
  "hashbrown 0.13.2",
@@ -4075,6 +4090,7 @@ dependencies = [
  "hyper-tungstenite",
  "ipnet",
  "itertools",
+ "lasso",
  "md5",
  "metrics",
  "native-tls",
@@ -4091,6 +4107,7 @@ dependencies = [
  "pq_proto",
  "prometheus",
  "rand 0.8.5",
+ "rand_distr",
  "rcgen",
  "redis",
  "regex",
@@ -4108,6 +4125,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smallvec",
  "smol_str",
  "socket2 0.5.5",
  "sync_wrapper",
@@ -4126,6 +4144,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-utils",
  "url",
+ "urlencoding",
  "utils",
  "uuid",
  "walkdir",
@@ -4151,6 +4170,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50f3b39ccfb720540debaa0164757101c08ecb8d326b15358ce76a62c7e85965"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "r2d2"
+version = "0.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51de85fb3fb6524929c8a2eb85e6b6d363de4e8c48f9e2c2eac4944abc181c93"
+dependencies = [
+ "log",
+ "parking_lot 0.12.1",
+ "scheduled-thread-pool",
 ]
 
 [[package]]
@@ -4864,6 +4894,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "713cfb06c7059f3588fb8044c0fad1d09e3c01d225e25b9220dbfdcf16dbb1b3"
 dependencies = [
  "windows-sys 0.42.0",
+]
+
+[[package]]
+name = "scheduled-thread-pool"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cbc66816425a074528352f5789333ecff06ca41b36b0b0efdfbb29edc391a19"
+dependencies = [
+ "parking_lot 0.12.1",
 ]
 
 [[package]]
@@ -5701,7 +5740,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#0e1af4ccddf2f01805cfc9eaefa97ee13c04b52d"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#d6a1c93442fb6b3a5bec490204961134e54925dc"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6226,7 +6265,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#0e1af4ccddf2f01805cfc9eaefa97ee13c04b52d"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#d6a1c93442fb6b3a5bec490204961134e54925dc"
 dependencies = [
  "io-uring",
  "libc",
@@ -6793,7 +6832,6 @@ dependencies = [
  "clap",
  "clap_builder",
  "crossbeam-utils",
- "diesel",
  "either",
  "fail",
  "futures-channel",
@@ -6803,6 +6841,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "getrandom 0.2.11",
+ "hashbrown 0.13.2",
  "hashbrown 0.14.0",
  "hex",
  "hmac",

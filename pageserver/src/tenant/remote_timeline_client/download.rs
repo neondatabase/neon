@@ -17,11 +17,11 @@ use utils::timeout::timeout_cancellable;
 use utils::{backoff, crashsafe};
 
 use crate::config::PageServerConf;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{
     download_cancellable, remote_layer_path, remote_timelines_path, DOWNLOAD_TIMEOUT,
 };
 use crate::tenant::storage_layer::LayerFileName;
-use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::Generation;
 use crate::virtual_file::on_fatal_io_error;
 use crate::TEMP_FILE_SUFFIX;
@@ -76,7 +76,6 @@ pub async fn download_layer_file<'a>(
     // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
     let temp_file_path = path_with_suffix_extension(&local_path, TEMP_DOWNLOAD_EXTENSION);
 
-    let cancel_inner = cancel.clone();
     let (mut destination_file, bytes_amount) = download_retry(
         || async {
             let destination_file = tokio::fs::File::create(&temp_file_path)
@@ -87,7 +86,7 @@ pub async fn download_layer_file<'a>(
             // Cancellation safety: it is safe to cancel this future, because it isn't writing to a local
             // file: the write to local file doesn't start until after the request header is returned
             // and we start draining the body stream below
-            let download = download_cancellable(&cancel_inner, storage.download(&remote_path))
+            let download = download_cancellable(cancel, storage.download(&remote_path))
                 .await
                 .with_context(|| {
                     format!(
@@ -107,7 +106,7 @@ pub async fn download_layer_file<'a>(
             // we will imminiently try and write to again.
             let bytes_amount: u64 = match timeout_cancellable(
                 DOWNLOAD_TIMEOUT,
-                &cancel_inner,
+                cancel,
                 tokio::io::copy_buf(&mut reader, &mut destination_file),
             )
             .await
@@ -217,16 +216,15 @@ pub async fn list_remote_timelines(
         anyhow::bail!("storage-sync-list-remote-timelines");
     });
 
-    let cancel_inner = cancel.clone();
     let listing = download_retry_forever(
         || {
             download_cancellable(
-                &cancel_inner,
-                storage.list(Some(&remote_path), ListingMode::WithDelimiter),
+                &cancel,
+                storage.list(Some(&remote_path), ListingMode::WithDelimiter, None),
             )
         },
         &format!("list timelines for {tenant_shard_id}"),
-        cancel,
+        &cancel,
     )
     .await?;
 
@@ -259,19 +257,18 @@ async fn do_download_index_part(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     index_generation: Generation,
-    cancel: CancellationToken,
+    cancel: &CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
     use futures::stream::StreamExt;
 
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
-    let cancel_inner = cancel.clone();
     let index_part_bytes = download_retry_forever(
         || async {
             // Cancellation: if is safe to cancel this future because we're just downloading into
             // a memory buffer, not touching local disk.
             let index_part_download =
-                download_cancellable(&cancel_inner, storage.download(&remote_path)).await?;
+                download_cancellable(cancel, storage.download(&remote_path)).await?;
 
             let mut index_part_bytes = Vec::new();
             let mut stream = std::pin::pin!(index_part_download.download_stream);
@@ -289,7 +286,7 @@ async fn do_download_index_part(
     .await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
-        .with_context(|| format!("download index part file at {remote_path:?}"))
+        .with_context(|| format!("deserialize index part file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
     Ok(index_part)
@@ -306,7 +303,7 @@ pub(super) async fn download_index_part(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     my_generation: Generation,
-    cancel: CancellationToken,
+    cancel: &CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -326,14 +323,8 @@ pub(super) async fn download_index_part(
     // index in our generation.
     //
     // This is an optimization to avoid doing the listing for the general case below.
-    let res = do_download_index_part(
-        storage,
-        tenant_shard_id,
-        timeline_id,
-        my_generation,
-        cancel.clone(),
-    )
-    .await;
+    let res =
+        do_download_index_part(storage, tenant_shard_id, timeline_id, my_generation, cancel).await;
     match res {
         Ok(index_part) => {
             tracing::debug!(
@@ -358,7 +349,7 @@ pub(super) async fn download_index_part(
         tenant_shard_id,
         timeline_id,
         my_generation.previous(),
-        cancel.clone(),
+        cancel,
     )
     .await;
     match res {
@@ -380,16 +371,13 @@ pub(super) async fn download_index_part(
     // objects, and select the highest one with a generation <= my_generation.  Constructing the prefix is equivalent
     // to constructing a full index path with no generation, because the generation is a suffix.
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
-    let indices = backoff::retry(
-        || async { storage.list_files(Some(&index_prefix)).await },
-        |_| false,
-        FAILED_DOWNLOAD_WARN_THRESHOLD,
-        FAILED_REMOTE_OP_RETRIES,
-        "listing index_part files",
-        backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
+
+    let indices = download_retry(
+        || async { storage.list_files(Some(&index_prefix), None).await },
+        "list index_part files",
+        cancel,
     )
-    .await
-    .map_err(DownloadError::Other)?;
+    .await?;
 
     // General case logic for which index to use: the latest index whose generation
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
@@ -446,8 +434,6 @@ pub(crate) async fn download_initdb_tar_zst(
         "{INITDB_PATH}.download-{timeline_id}.{TEMP_FILE_SUFFIX}"
     ));
 
-    let cancel_inner = cancel.clone();
-
     let file = download_retry(
         || async {
             let file = OpenOptions::new()
@@ -460,18 +446,16 @@ pub(crate) async fn download_initdb_tar_zst(
                 .with_context(|| format!("tempfile creation {temp_path}"))
                 .map_err(DownloadError::Other)?;
 
-            let download = match download_cancellable(&cancel_inner, storage.download(&remote_path))
-                .await
+            let download = match download_cancellable(cancel, storage.download(&remote_path)).await
             {
                 Ok(dl) => dl,
                 Err(DownloadError::NotFound) => {
-                    download_cancellable(&cancel_inner, storage.download(&remote_preserved_path))
-                        .await?
+                    download_cancellable(cancel, storage.download(&remote_preserved_path)).await?
                 }
                 Err(other) => Err(other)?,
             };
             let mut download = tokio_util::io::StreamReader::new(download.download_stream);
-            let mut writer = tokio::io::BufWriter::with_capacity(8 * 1024, file);
+            let mut writer = tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, file);
 
             // TODO: this consumption of the response body should be subject to timeout + cancellation, but
             // not without thinking carefully about how to recover safely from cancelling a write to
@@ -510,12 +494,12 @@ pub(crate) async fn download_initdb_tar_zst(
 
 /// Helper function to handle retries for a download operation.
 ///
-/// Remote operations can fail due to rate limits (IAM, S3), spurious network
+/// Remote operations can fail due to rate limits (S3), spurious network
 /// problems, or other external reasons. Retry FAILED_DOWNLOAD_RETRIES times,
 /// with backoff.
 ///
 /// (See similar logic for uploads in `perform_upload_task`)
-async fn download_retry<T, O, F>(
+pub(super) async fn download_retry<T, O, F>(
     op: O,
     description: &str,
     cancel: &CancellationToken,
@@ -526,19 +510,21 @@ where
 {
     backoff::retry(
         op,
-        |e| matches!(e, DownloadError::BadInput(_) | DownloadError::NotFound),
+        DownloadError::is_permanent,
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
-        backoff::Cancel::new(cancel.clone(), || DownloadError::Cancelled),
+        cancel,
     )
     .await
+    .ok_or_else(|| DownloadError::Cancelled)
+    .and_then(|x| x)
 }
 
 async fn download_retry_forever<T, O, F>(
     op: O,
     description: &str,
-    cancel: CancellationToken,
+    cancel: &CancellationToken,
 ) -> Result<T, DownloadError>
 where
     O: FnMut() -> F,
@@ -546,11 +532,13 @@ where
 {
     backoff::retry(
         op,
-        |e| matches!(e, DownloadError::BadInput(_) | DownloadError::NotFound),
+        DownloadError::is_permanent,
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         u32::MAX,
         description,
-        backoff::Cancel::new(cancel, || DownloadError::Cancelled),
+        cancel,
     )
     .await
+    .ok_or_else(|| DownloadError::Cancelled)
+    .and_then(|x| x)
 }
