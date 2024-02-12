@@ -885,14 +885,16 @@ async fn tenant_detach_handler(
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(
-        conf,
-        tenant_shard_id,
-        detach_ignored.unwrap_or(false),
-        &state.deletion_queue_client,
-    )
-    .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
-    .await?;
+    state
+        .tenant_manager
+        .detach_tenant(
+            conf,
+            tenant_shard_id,
+            detach_ignored.unwrap_or(false),
+            &state.deletion_queue_client,
+        )
+        .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
+        .await?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1428,13 +1430,14 @@ async fn put_tenant_location_config_handler(
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
     if let LocationConfigMode::Detached = request_data.config.mode {
-        if let Err(e) =
-            mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
-                .instrument(info_span!("tenant_detach",
-                    tenant_id = %tenant_shard_id.tenant_id,
-                    shard_id = %tenant_shard_id.shard_slug()
-                ))
-                .await
+        if let Err(e) = state
+            .tenant_manager
+            .detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
+            .instrument(info_span!("tenant_detach",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug()
+            ))
+            .await
         {
             match e {
                 TenantStateError::SlotError(TenantSlotError::NotFound(_)) => {
