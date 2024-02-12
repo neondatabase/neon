@@ -150,7 +150,7 @@ impl TestAuth for Scram {
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
         let outcome = auth::AuthFlow::new(stream)
-            .begin(auth::Scram(&self.0))
+            .begin(auth::Scram(&self.0, &mut RequestMonitoring::test()))
             .await?
             .authenticate()
             .await?;

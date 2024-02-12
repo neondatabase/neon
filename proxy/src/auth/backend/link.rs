@@ -61,6 +61,8 @@ pub(super) async fn authenticate(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {
+    ctx.set_auth_method(crate::context::AuthMethod::Web);
+
     // registering waiter can fail if we get unlucky with rng.
     // just try again.
     let (psql_session_id, waiter) = loop {

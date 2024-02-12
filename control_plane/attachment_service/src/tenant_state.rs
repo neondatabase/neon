@@ -534,4 +534,18 @@ impl TenantState {
             seq: self.sequence,
         })
     }
+
+    // If we had any state at all referring to this node ID, drop it.  Does not
+    // attempt to reschedule.
+    pub(crate) fn deref_node(&mut self, node_id: NodeId) {
+        if self.intent.attached == Some(node_id) {
+            self.intent.attached = None;
+        }
+
+        self.intent.secondary.retain(|n| n != &node_id);
+
+        self.observed.locations.remove(&node_id);
+
+        debug_assert!(!self.intent.all_pageservers().contains(&node_id));
+    }
 }

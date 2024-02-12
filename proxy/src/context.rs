@@ -11,7 +11,7 @@ use crate::{
     console::messages::MetricsAuxInfo,
     error::ErrorKind,
     metrics::{LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND},
-    BranchId, EndpointId, ProjectId, RoleName,
+    BranchId, DbName, EndpointId, ProjectId, RoleName,
 };
 
 pub mod parquet;
@@ -34,15 +34,26 @@ pub struct RequestMonitoring {
     project: Option<ProjectId>,
     branch: Option<BranchId>,
     endpoint_id: Option<EndpointId>,
+    dbname: Option<DbName>,
     user: Option<RoleName>,
     application: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
+    pub(crate) auth_method: Option<AuthMethod>,
     success: bool,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
     sender: Option<mpsc::UnboundedSender<RequestMonitoring>>,
     pub latency_timer: LatencyTimer,
+}
+
+#[derive(Clone, Debug)]
+pub enum AuthMethod {
+    // aka link aka passwordless
+    Web,
+    ScramSha256,
+    ScramSha256Plus,
+    Cleartext,
 }
 
 impl RequestMonitoring {
@@ -62,9 +73,11 @@ impl RequestMonitoring {
             project: None,
             branch: None,
             endpoint_id: None,
+            dbname: None,
             user: None,
             application: None,
             error_kind: None,
+            auth_method: None,
             success: false,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
@@ -106,8 +119,16 @@ impl RequestMonitoring {
         self.application = app.or_else(|| self.application.clone());
     }
 
+    pub fn set_dbname(&mut self, dbname: DbName) {
+        self.dbname = Some(dbname);
+    }
+
     pub fn set_user(&mut self, user: RoleName) {
         self.user = Some(user);
+    }
+
+    pub fn set_auth_method(&mut self, auth_method: AuthMethod) {
+        self.auth_method = Some(auth_method);
     }
 
     pub fn set_error_kind(&mut self, kind: ErrorKind) {
