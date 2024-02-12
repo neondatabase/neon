@@ -548,22 +548,22 @@ impl Service {
             }
         });
 
-        let startup_reconcile_this = this.clone();
-        tokio::task::spawn(async move {
-            // Block the [`Service::startup_complete`] barrier until we're done
-            let _completion = startup_completion;
+        tokio::task::spawn({
+            let this = this.clone();
+            // We will block the [`Service::startup_complete`] barrier until [`Self::startup_reconcile`]
+            // is done.
+            let startup_completion = startup_completion.clone();
+            async move {
+                // Block shutdown until we're done (we must respect self.cancel)
+                let Ok(_gate) = this.gate.enter() else {
+                    return;
+                };
 
-            // Block shutdown until we're done (we must respect self.cancel)
-            if let Ok(_gate) = startup_reconcile_this.gate.enter() {
-                startup_reconcile_this.startup_reconcile().await
-            }
-        });
+                this.startup_reconcile().await;
 
-        let background_reconcile_this = this.clone();
-        tokio::task::spawn(async move {
-            // Block shutdown until we're done (we must respect self.cancel)
-            if let Ok(_gate) = background_reconcile_this.gate.enter() {
-                background_reconcile_this.background_reconcile().await
+                drop(startup_completion);
+
+                this.background_reconcile().await;
             }
         });
 
