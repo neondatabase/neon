@@ -1603,7 +1603,7 @@ impl TenantManager {
 
             // Since we will do a large number of small filesystem metadata operations, batch them into
             // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
-            let span = tracing::info_span!("link_layers", child=%child.shard_id);
+            let span = tracing::info_span!("link_layers", tenant_id=%child.tenant_id, shard_id=%child.shard_slug());
             let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                 let _e = span.entered();
                 for dir in create_dirs {
@@ -1645,8 +1645,9 @@ impl TenantManager {
             match jh.await {
                 Ok(Ok(())) => {
                     tracing::info!(
-                        count=parent_layers.len(),
-                        child=shard.shard_id,
+                        count = parent_layers.len(),
+                        tenant_id = %child.tenant_id,
+                        shard_id = %child.shard_slug(),
                         "Hard-linked layers into child shard",
                     );
                 }
