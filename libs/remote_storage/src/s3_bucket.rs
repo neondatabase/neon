@@ -46,10 +46,9 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
-    support::{Cancelled, PermitCarrying},
-    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    S3Config, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
+    error::Cancelled, support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError,
+    Listing, ListingMode, RemotePath, RemoteStorage, S3Config, TimeTravelError, TimeoutOrCancel,
+    MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;

@@ -27,12 +27,10 @@ use http_types::{StatusCode, Url};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::s3_bucket::RequestKind;
-use crate::support::Cancelled;
-use crate::TimeTravelError;
 use crate::{
-    AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath,
-    RemoteStorage, StorageMetadata, TimeoutOrCancel,
+    error::Cancelled, s3_bucket::RequestKind, AzureConfig, ConcurrencyLimiter, Download,
+    DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
+    TimeTravelError, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {

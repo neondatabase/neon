@@ -10,6 +10,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod azure_blob;
+mod error;
 mod local_fs;
 mod s3_bucket;
 mod simulate_failures;
@@ -41,7 +42,7 @@ pub use self::{
 };
 use s3_bucket::RequestKind;
 
-pub use support::TimeoutOrCancel;
+pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
@@ -304,93 +305,6 @@ impl Debug for Download {
             .finish()
     }
 }
-
-#[derive(Debug)]
-pub enum DownloadError {
-    /// Validation or other error happened due to user input.
-    BadInput(anyhow::Error),
-    /// The file was not found in the remote storage.
-    NotFound,
-    /// A cancellation token aborted the download, typically during
-    /// tenant detach or process shutdown.
-    Cancelled,
-    /// A timeout happened while executing the request. Possible reasons:
-    /// - stuck tcp connection
-    ///
-    /// Concurrency control is not timed within timeout.
-    Timeout,
-    /// The file was found in the remote storage, but the download failed.
-    Other(anyhow::Error),
-}
-
-impl std::fmt::Display for DownloadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DownloadError::BadInput(e) => {
-                write!(f, "Failed to download a remote file due to user input: {e}")
-            }
-            DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
-            DownloadError::Cancelled => write!(f, "Cancelled, shutting down"),
-            DownloadError::Timeout => write!(f, "timeout"),
-            DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
-        }
-    }
-}
-
-impl std::error::Error for DownloadError {}
-
-impl DownloadError {
-    /// Returns true if the error should not be retried with backoff
-    pub fn is_permanent(&self) -> bool {
-        use DownloadError::*;
-        match self {
-            BadInput(_) => true,
-            NotFound => true,
-            Cancelled => true,
-            Timeout => false,
-            Other(_) => false,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum TimeTravelError {
-    /// Validation or other error happened due to user input.
-    BadInput(anyhow::Error),
-    /// The used remote storage does not have time travel recovery implemented
-    Unimplemented,
-    /// The number of versions/deletion markers is above our limit.
-    TooManyVersions,
-    /// A cancellation token aborted the process, typically during
-    /// request closure or process shutdown.
-    Cancelled,
-    /// Other errors
-    Other(anyhow::Error),
-}
-
-impl std::fmt::Display for TimeTravelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TimeTravelError::BadInput(e) => {
-                write!(
-                    f,
-                    "Failed to time travel recover a prefix due to user input: {e}"
-                )
-            }
-            TimeTravelError::Unimplemented => write!(
-                f,
-                "time travel recovery is not implemented for the current storage backend"
-            ),
-            TimeTravelError::Cancelled => write!(f, "Cancelled, shutting down"),
-            TimeTravelError::TooManyVersions => {
-                write!(f, "Number of versions/delete markers above limit")
-            }
-            TimeTravelError::Other(e) => write!(f, "Failed to time travel recover a prefix: {e:?}"),
-        }
-    }
-}
-
-impl std::error::Error for TimeTravelError {}
 
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
