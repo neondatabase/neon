@@ -2471,7 +2471,7 @@ pub(crate) mod tenant_throttling {
     use once_cell::sync::Lazy;
     use pageserver_api::shard::TenantShardId;
 
-    use crate::tenant::throttle::DurationSum;
+    use crate::tenant::{self, throttle::Metric};
 
     static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
@@ -2502,18 +2502,20 @@ pub(crate) mod tenant_throttling {
 
         pub static WAIT_USECS_TIMELINE_GET: Lazy<metrics::IntCounter> =
             Lazy::new(|| WAIT_USECS.with_label_values(&[kinds::TIMELINE_GET]));
+
     }
 
     pub(crate) struct TimelineGet {
-        global: &'static IntCounter,
-        per_tenant: IntCounter,
+        wait_time_global: &'static IntCounter,
+        wait_time_per_tenant: IntCounter,
+
     }
 
     impl TimelineGet {
         pub fn new(tenant_shard_id: &TenantShardId) -> TimelineGet {
             TimelineGet {
-                global: &*global::WAIT_USECS_TIMELINE_GET,
-                per_tenant: WAIT_USECS
+                wait_time_global: &*global::WAIT_USECS_TIMELINE_GET,
+                wait_time_per_tenant: WAIT_USECS
                     .with_label_values(&[&tenant_shard_id.to_string(), kinds::TIMELINE_GET]),
             }
         }
@@ -2521,7 +2523,7 @@ pub(crate) mod tenant_throttling {
 
     impl Drop for TimelineGet {
         fn drop(&mut self) {
-            let mut metric = metrics::core::Metric::metric(&self.per_tenant);
+            let mut metric = metrics::core::Metric::metric(&self.wait_time_per_tenant);
             let labels = metric.take_label();
             let label_values = labels
                 .iter()
@@ -2532,14 +2534,20 @@ pub(crate) mod tenant_throttling {
         }
     }
 
-    impl DurationSum for TimelineGet {
-        fn add(&self, duration: std::time::Duration) {
-            let val = u64::try_from(duration.as_micros()).unwrap();
-            if val == 0 {
-                return;
+    impl Metric for TimelineGet {
+        fn observe(
+            &self,
+            tenant::throttle::Observation {
+                wait_time,
+                unthrottled_for,
+            }: &tenant::throttle::Observation,
+        ) {
+
+            {
+                let val = u64::try_from(wait_time.as_micros()).unwrap();
+                self.wait_time_per_tenant.inc_by(val);
+                self.wait_time_global.inc_by(val);
             }
-            self.per_tenant.inc_by(val);
-            self.global.inc_by(val);
         }
     }
 }

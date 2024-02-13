@@ -1,4 +1,9 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{
+    str::FromStr,
+    sync::Arc,
+    task::Poll,
+    time::{Duration, Instant},
+};
 
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
@@ -6,9 +11,10 @@ use tracing::error;
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
-pub struct Throttle<C: DurationSum> {
+pub struct Throttle<M: Metric> {
     inner: ArcSwap<Inner>,
-    wait_time_micros: C,
+    metric: M,
+    last_throttled_at: std::sync::Mutex<Option<Instant>>,
 }
 
 pub struct Inner {
@@ -18,18 +24,23 @@ pub struct Inner {
 
 pub type Config = pageserver_api::models::ThrottleConfig;
 
-pub trait DurationSum {
-    fn add(&self, duration: Duration);
+pub struct Observation {
+    pub wait_time: Duration,
+    pub unthrottled_for: bool,
+}
+pub trait Metric {
+    fn observe(&self, observation: &Observation);
 }
 
-impl<C> Throttle<C>
+impl<M> Throttle<M>
 where
-    C: DurationSum,
+    M: Metric,
 {
-    pub fn new(config: Config, metric: C) -> Self {
+    pub fn new(config: Config, metric: M) -> Self {
         Self {
             inner: ArcSwap::new(Arc::new(Self::new_inner(config))),
-            wait_time_micros: metric,
+            metric,
+            last_throttled_at: std::sync::Mutex::new(None),
         }
     }
     fn new_inner(config: Config) -> Inner {
@@ -78,10 +89,32 @@ where
             return;
         };
         let start = std::time::Instant::now();
-        Arc::clone(&inner.rate_limiter)
-            .acquire_owned(key_count)
-            .await;
-        let elapsed = start.elapsed();
-        self.wait_time_micros.add(elapsed);
+        let mut did_throttle = false;
+        let mut acquire_fut = Arc::clone(&inner.rate_limiter).acquire_owned(key_count);
+        let mut acquire_fut = std::pin::pin!(acquire_fut);
+        std::future::poll_fn(|cx| {
+            use std::future::Future;
+            use std::task::Poll;
+            let poll = acquire_fut.as_mut().poll(cx);
+            did_throttle = matches!(Poll::<()>::Pending, poll);
+            poll
+        })
+        .await;
+        let now = Instant::now();
+        let wait_time = now - start;
+        if did_throttle {
+            let unthrottled_for = self
+                .last_throttled_at
+                .lock()
+                .unwrap()
+                .replace(now)
+                .map(|prev| now - prev);
+            std::mem::forget(unthrottled_for);
+            let observation = Observation {
+                wait_time,
+                unthrottled_for: false,
+            };
+            self.metric.observe(&observation);
+        }
     }
 }
