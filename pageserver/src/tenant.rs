@@ -34,6 +34,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::backoff;
+use utils::circuit_breaker::CircuitBreaker;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::failpoint_support;
@@ -292,6 +293,10 @@ pub struct Tenant {
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
+
+    /// Track repeated failures to compact, so that we can back off.
+    /// Overhead of mutex is acceptable because compaction is done with a multi-second period.
+    compaction_circuit_breaker: std::sync::Mutex<CircuitBreaker>,
 
     /// If the tenant is in Activating state, notify this to encourage it
     /// to proceed to Active as soon as possible, rather than waiting for lazy
@@ -1936,6 +1941,11 @@ impl Tenant {
             timelines_to_compact
         };
 
+        // Before doing any I/O work, check our circuit breaker
+        if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
+            return Ok(());
+        }
+
         let mut total_physical = 0;
         for (timeline_id, timeline) in &timelines_to_compact {
             let timeline_result = timeline
@@ -1947,8 +1957,14 @@ impl Tenant {
                 total_physical += remote_client.get_remote_physical_size();
             }
 
+            if timeline_result.is_err() {
+                self.compaction_circuit_breaker.lock().unwrap().fail();
+            }
+
             timeline_result?;
         }
+
+        self.compaction_circuit_breaker.lock().unwrap().success();
 
         // Circuit breaker: if a timeline's statistics indicate a pathological storage issue, such
         // as extremely high write inflation, then we will stop ingesting data for that timeline.  This
@@ -2808,6 +2824,10 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
+            compaction_circuit_breaker: std::sync::Mutex::new(CircuitBreaker::new(
+                5,
+                Some(Duration::from_secs(3600)),
+            )),
             activate_now_sem: tokio::sync::Semaphore::new(0),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
