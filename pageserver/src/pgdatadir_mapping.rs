@@ -14,6 +14,7 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_i
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
+use enum_map::Enum;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
@@ -1624,7 +1625,7 @@ struct SlruSegmentDirectory {
     segments: HashSet<u32>,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, enum_map::Enum)]
 #[repr(u8)]
 pub(crate) enum DirectoryKind {
     Db,
@@ -1634,23 +1635,9 @@ pub(crate) enum DirectoryKind {
 }
 
 impl DirectoryKind {
-    pub(crate) const ALL_KINDS: [DirectoryKind; 6] = [
-        DirectoryKind::Db,
-        DirectoryKind::TwoPhase,
-        DirectoryKind::AuxFiles,
-        DirectoryKind::SlruSegment(SlruKind::Clog),
-        DirectoryKind::SlruSegment(SlruKind::MultiXactMembers),
-        DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets),
-    ];
+    pub(crate) const KINDS_NUM: usize = <DirectoryKind as Enum>::LENGTH;
     pub(crate) fn offset(&self) -> usize {
-        match self {
-            DirectoryKind::Db => 0,
-            DirectoryKind::TwoPhase => 1,
-            DirectoryKind::AuxFiles => 2,
-            DirectoryKind::SlruSegment(SlruKind::Clog) => 3,
-            DirectoryKind::SlruSegment(SlruKind::MultiXactMembers) => 4,
-            DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets) => 5,
-        }
+        self.into_usize()
     }
 }
 
