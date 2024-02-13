@@ -25,5 +25,5 @@ services:
       target: extension-regression-tests
       args:
         PG_VERSION: ${PG_VERSION:-v15}
-        TAG: latest
+        BUILD_TAG: ${BUILD_TAG:-latest}
     command: make extensions-test-all

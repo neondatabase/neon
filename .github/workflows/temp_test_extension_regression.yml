@@ -278,7 +278,7 @@ jobs:
 
   run-extension-regression-test:
     needs: [ check-permissions, tag ,build-buildtools-image , build-neon]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ ubuntu-latest ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # Raise locked memory limit for tokio-epoll-uring.
@@ -298,6 +298,6 @@ jobs:
     steps:
       - name: run test
         run: |
-          PG_VERSION=v16 docker-compose -f extensions_regression_tests/docker-compose.yml build
+          PG_VERSION=v15 docker-compose -f extensions_regression_tests/docker-compose.yml build
           PG_VERSION=v16 docker-compose -f extensions_regression_tests/docker-compose.yml run test2
   

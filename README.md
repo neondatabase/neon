@@ -29,14 +29,14 @@ See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more informati
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler \
-libcurl4-openssl-dev openssl python3-poetry lsof libicu-dev
+libcurl4-openssl-dev openssl python3-poetry lsof libicu-dev libipc-run-perl
 ```
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
   libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
   protobuf-devel libcurl-devel openssl poetry lsof libicu-devel libpq-devel python3-devel \
-  libffi-devel
+  libffi-devel libipc-run-perl
 ```
 * On Arch based systems, these packages are needed:
 ```bash
@@ -73,6 +73,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # from https://stackoverflow.com/questions/44654216/correct-way-to-install-psql-without-full-postgres-on-macos
 brew install libpq
 brew link --force libpq
+```
+4. Install Perl
+```
+# This will make sure we can run TAP test cases in mac
+curl -L http://xrl.us/installperlosx | bash
 ```
 
 #### Rustc version

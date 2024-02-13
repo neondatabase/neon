@@ -107,6 +107,8 @@ RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JS
     && make install \
     && rm -rf ../lcov.tar.gz
 
+
+
 # Switch to nonroot user
 USER nonroot:nonroot
 WORKDIR /home/nonroot
