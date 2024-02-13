@@ -3391,8 +3391,7 @@ impl Tenant {
                 let dest_path =
                     &remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &timeline_id);
 
-                // FIXME: backoff::retry
-                // FIXME: this seems out of place
+                // if this fails, it will get retried by retried control plane requests
                 storage
                     .copy_object(source_path, dest_path, &self.cancel)
                     .await
