@@ -1640,6 +1640,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "desim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "hex",
+ "parking_lot 0.12.1",
+ "rand 0.8.5",
+ "scopeguard",
+ "smallvec",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "diesel"
 version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4139,6 +4155,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smallvec",
  "smol_str",
  "socket2 0.5.5",
  "sync_wrapper",
@@ -4157,6 +4174,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-utils",
  "url",
+ "urlencoding",
  "utils",
  "uuid",
  "walkdir",
@@ -4839,6 +4857,7 @@ dependencies = [
  "clap",
  "const_format",
  "crc32c",
+ "desim",
  "fail",
  "fs2",
  "futures",
@@ -4854,6 +4873,7 @@ dependencies = [
  "postgres_backend",
  "postgres_ffi",
  "pq_proto",
+ "rand 0.8.5",
  "regex",
  "remote_storage",
  "reqwest",
@@ -4874,8 +4894,10 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utils",
+ "walproposer",
  "workspace_hack",
 ]
 
@@ -5752,7 +5774,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#d6a1c93442fb6b3a5bec490204961134e54925dc"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#868d2c42b5d54ca82fead6e8f2f233b69a540d3e"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6277,8 +6299,9 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#d6a1c93442fb6b3a5bec490204961134e54925dc"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#868d2c42b5d54ca82fead6e8f2f233b69a540d3e"
 dependencies = [
+ "bytes",
  "io-uring",
  "libc",
 ]

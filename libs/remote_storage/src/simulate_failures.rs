@@ -4,6 +4,7 @@
 use bytes::Bytes;
 use futures::stream::Stream;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Mutex;
 use std::time::SystemTime;
 use std::{collections::hash_map::Entry, sync::Arc};
@@ -113,20 +114,22 @@ impl RemoteStorage for UnreliableWrapper {
     async fn list_files(
         &self,
         folder: Option<&RemotePath>,
+        max_keys: Option<NonZeroU32>,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(folder.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner.list_files(folder).await
+        self.inner.list_files(folder, max_keys).await
     }
 
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
     ) -> Result<Listing, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner.list(prefix, mode).await
+        self.inner.list(prefix, mode, max_keys).await
     }
 
     async fn upload(

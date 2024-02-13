@@ -26,7 +26,6 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
         "test_logical_replication", config_lines=["log_statement=all"]
     )
 
-    log.info("postgres is running on 'test_logical_replication' branch")
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
@@ -315,7 +314,6 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     # Create branch ws.
     env.neon_cli.create_branch("ws", "main", tenant_id=tenant)
     ws_branch = env.endpoints.create_start("ws", tenant_id=tenant)
-    log.info("postgres is running on 'ws' branch")
 
     # Check that we can create slot with the same name
     ws_cur = ws_branch.connect().cursor()

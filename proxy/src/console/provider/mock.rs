@@ -176,9 +176,7 @@ impl super::Api for Api {
         _ctx: &mut RequestMonitoring,
         _user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        self.do_wake_compute()
-            .map_ok(CachedNodeInfo::new_uncached)
-            .await
+        self.do_wake_compute().map_ok(Cached::new_uncached).await
     }
 }
 

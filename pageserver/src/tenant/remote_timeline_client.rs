@@ -1151,7 +1151,7 @@ impl RemoteTimelineClient {
         let remaining = download_retry(
             || async {
                 self.storage_impl
-                    .list_files(Some(&timeline_storage_path))
+                    .list_files(Some(&timeline_storage_path), None)
                     .await
             },
             "list remaining files",
@@ -1699,23 +1699,6 @@ impl RemoteTimelineClient {
                 Ok(())
             }
         }
-    }
-
-    pub(crate) fn get_layers_metadata(
-        &self,
-        layers: Vec<LayerFileName>,
-    ) -> anyhow::Result<Vec<Option<LayerFileMetadata>>> {
-        let q = self.upload_queue.lock().unwrap();
-        let q = match &*q {
-            UploadQueue::Stopped(_) | UploadQueue::Uninitialized => {
-                anyhow::bail!("queue is in state {}", q.as_str())
-            }
-            UploadQueue::Initialized(inner) => inner,
-        };
-
-        let decorated = layers.into_iter().map(|l| q.latest_files.get(&l).cloned());
-
-        Ok(decorated.collect())
     }
 }
 

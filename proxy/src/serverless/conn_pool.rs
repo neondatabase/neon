@@ -3,7 +3,7 @@ use futures::{future::poll_fn, Future};
 use metrics::IntCounterPairGuard;
 use parking_lot::RwLock;
 use rand::Rng;
-use smol_str::SmolStr;
+use smallvec::SmallVec;
 use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use std::{
     fmt,
@@ -30,13 +30,11 @@ use tracing::{info, info_span, Instrument};
 
 use super::backend::HttpConnError;
 
-pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
-
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
     pub user_info: ComputeUserInfo,
     pub dbname: DbName,
-    pub password: SmolStr,
+    pub password: SmallVec<[u8; 16]>,
 }
 
 impl ConnInfo {
@@ -378,12 +376,13 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
                 return Ok(None);
             } else {
-                info!("pool: reusing connection '{conn_info}'");
-                client.session.send(ctx.session_id)?;
+                tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
                 tracing::Span::current().record(
                     "pid",
                     &tracing::field::display(client.inner.get_process_id()),
                 );
+                info!("pool: reusing connection '{conn_info}'");
+                client.session.send(ctx.session_id)?;
                 ctx.latency_timer.pool_hit();
                 ctx.latency_timer.success();
                 return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
@@ -576,7 +575,6 @@ pub struct Client<C: ClientInnerExt> {
 }
 
 pub struct Discard<'a, C: ClientInnerExt> {
-    conn_id: uuid::Uuid,
     conn_info: &'a ConnInfo,
     pool: &'a mut Weak<RwLock<EndpointConnPool<C>>>,
 }
@@ -602,14 +600,7 @@ impl<C: ClientInnerExt> Client<C> {
             span: _,
         } = self;
         let inner = inner.as_mut().expect("client inner should not be removed");
-        (
-            &mut inner.inner,
-            Discard {
-                pool,
-                conn_info,
-                conn_id: inner.conn_id,
-            },
-        )
+        (&mut inner.inner, Discard { pool, conn_info })
     }
 
     pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
@@ -624,13 +615,13 @@ impl<C: ClientInnerExt> Discard<'_, C> {
     pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
         let conn_info = &self.conn_info;
         if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!(conn_id = %self.conn_id, "pool: throwing away connection '{conn_info}' because connection is not idle")
+            info!("pool: throwing away connection '{conn_info}' because connection is not idle")
         }
     }
     pub fn discard(&mut self) {
         let conn_info = &self.conn_info;
         if std::mem::take(self.pool).strong_count() > 0 {
-            info!(conn_id = %self.conn_id, "pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
+            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
         }
     }
 }
@@ -731,7 +722,7 @@ mod tests {
                 options: Default::default(),
             },
             dbname: "dbname".into(),
-            password: "password".into(),
+            password: "password".as_bytes().into(),
         };
         let ep_pool =
             Arc::downgrade(&pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key()));
@@ -788,7 +779,7 @@ mod tests {
                 options: Default::default(),
             },
             dbname: "dbname".into(),
-            password: "password".into(),
+            password: "password".as_bytes().into(),
         };
         let ep_pool =
             Arc::downgrade(&pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key()));

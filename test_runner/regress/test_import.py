@@ -95,16 +95,6 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
             ".*InternalServerError.*Tenant .* not found.*",
             ".*InternalServerError.*Timeline .* not found.*",
             ".*InternalServerError.*Cannot delete timeline which has child timelines.*",
-            ".*ignored .* unexpected bytes after the tar archive.*",
-        ]
-    )
-
-    env.pageserver.allowed_errors.extend(
-        [
-            # FIXME: we should clean up pageserver to not print this
-            ".*exited with error: unexpected message type: CopyData.*",
-            # FIXME: Is this expected?
-            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
         ]
     )
 
@@ -142,12 +132,9 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     with pytest.raises(RuntimeError):
         import_tar(corrupt_base_tar, wal_tar)
 
-    # A tar with trailing garbage is currently accepted. It prints a warnings
-    # to the pageserver log, however. Check that.
-    import_tar(base_plus_garbage_tar, wal_tar)
-    assert env.pageserver.log_contains(
-        ".*WARN.*ignored .* unexpected bytes after the tar archive.*"
-    )
+    # Importing a tar with trailing garbage fails
+    with pytest.raises(RuntimeError):
+        import_tar(base_plus_garbage_tar, wal_tar)
 
     client = env.pageserver.http_client()
     timeline_delete_wait_completed(client, tenant, timeline)
@@ -171,11 +158,6 @@ def test_import_from_pageserver_small(
 ):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
-
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
 
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_small")
     endpoint = env.endpoints.create_start("test_import_from_pageserver_small")

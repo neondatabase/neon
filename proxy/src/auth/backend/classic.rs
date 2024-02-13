@@ -4,7 +4,7 @@ use crate::{
     compute,
     config::AuthenticationConfig,
     console::AuthSecret,
-    metrics::LatencyTimer,
+    context::RequestMonitoring,
     sasl,
     stream::{PqStream, Stream},
 };
@@ -12,12 +12,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
 pub(super) async fn authenticate(
+    ctx: &mut RequestMonitoring,
     creds: ComputeUserInfo,
     client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,
-    latency_timer: &mut LatencyTimer,
     secret: AuthSecret,
-) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
+) -> auth::Result<ComputeCredentials> {
     let flow = AuthFlow::new(client);
     let scram_keys = match secret {
         #[cfg(any(test, feature = "testing"))]
@@ -27,13 +27,11 @@ pub(super) async fn authenticate(
         }
         AuthSecret::Scram(secret) => {
             info!("auth endpoint chooses SCRAM");
-            let scram = auth::Scram(&secret);
+            let scram = auth::Scram(&secret, &mut *ctx);
 
             let auth_outcome = tokio::time::timeout(
                 config.scram_protocol_timeout,
                 async {
-                    // pause the timer while we communicate with the client
-                    let _paused = latency_timer.pause();
 
                     flow.begin(scram).await.map_err(|error| {
                         warn!(?error, "error sending scram acknowledgement");

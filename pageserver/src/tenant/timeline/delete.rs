@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
-use tracing::{debug, error, info, instrument, warn, Instrument, Span};
+use tracing::{debug, error, info, instrument, warn, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId};
 
 use crate::{
@@ -542,12 +542,7 @@ impl DeleteTimelineFlow {
                 };
                 Ok(())
             }
-            .instrument({
-                let span =
-                    tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),timeline_id=%timeline_id);
-                span.follows_from(Span::current());
-                span
-            }),
+            .instrument(tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),timeline_id=%timeline_id)),
         );
     }
 

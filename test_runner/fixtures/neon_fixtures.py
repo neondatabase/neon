@@ -23,7 +23,7 @@ from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
@@ -899,7 +899,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    S3Scrubber(self.test_output_dir, self).scan_metadata()
+                    S3Scrubber(self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -1400,7 +1400,6 @@ class AbstractNeonCli(abc.ABC):
 
         args = [bin_neon] + arguments
         log.info('Running command "{}"'.format(" ".join(args)))
-        log.info(f'Running in "{self.env.repo_dir}"')
 
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
@@ -2459,6 +2458,7 @@ def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
+# TODO make port an optional argument
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: Path, pg_bin: PgBin, port: int, init: bool = True):
         super().__init__(host="localhost", port=port, dbname="postgres")
@@ -2822,8 +2822,8 @@ class NeonProxy(PgProtocol):
 
     def http_query(self, query, args, **kwargs):
         # TODO maybe use default values if not provided
-        user = kwargs["user"]
-        password = kwargs["password"]
+        user = quote(kwargs["user"])
+        password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
@@ -3659,9 +3659,9 @@ class SafekeeperHttpClient(requests.Session):
 
 
 class S3Scrubber:
-    def __init__(self, log_dir: Path, env: NeonEnvBuilder):
+    def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
         self.env = env
-        self.log_dir = log_dir
+        self.log_dir = log_dir or env.test_output_dir
 
     def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
@@ -3682,7 +3682,7 @@ class S3Scrubber:
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(
-            self.log_dir,
+            self.env.test_output_dir,
             args,
             echo_stderr=True,
             echo_stdout=True,

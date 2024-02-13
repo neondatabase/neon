@@ -73,9 +73,6 @@ def test_remote_storage_backup_and_restore(
 
     env.pageserver.allowed_errors.extend(
         [
-            # FIXME: Is this expected?
-            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
-            ".*No timelines to attach received.*",
             ".*Failed to get local tenant state.*",
             # FIXME retry downloads without throwing errors
             ".*failed to load remote timeline.*",
