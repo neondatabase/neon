@@ -2476,28 +2476,52 @@ pub(crate) mod tenant_throttling {
     static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
             "pageserver_tenant_throttling_wait_usecs_sum",
-            "Sum of microseconds a given tenant spent waiting for the the throttle of a given kind.",
+            "Sum of microseconds a given tenant spent waiting for the throttle of a given kind.",
             &["tenant_id", "kind"]
         )
         .unwrap()
     });
 
+    mod kinds {
+        pub const TIMELINE_GET: &'static str = "timeline_get";
+    }
+
+    pub(super) mod global {
+        use super::*;
+
+        // NB: add these to preinitialize_metrics
+
+        static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+            register_int_counter_vec!(
+            "pageserver_tenant_throttling_wait_usecs_sum_global",
+            "Sum of microseconds that all tenants of this instance spent waiting for the throttle of a given kind.",
+            &["kind"]
+        )
+        .unwrap()
+        });
+
+        pub static WAIT_USECS_TIMELINE_GET: Lazy<metrics::IntCounter> =
+            Lazy::new(|| WAIT_USECS.with_label_values(&[kinds::TIMELINE_GET]));
+    }
+
     pub(crate) struct TimelineGet {
-        counter: IntCounter,
+        global: &'static IntCounter,
+        per_tenant: IntCounter,
     }
 
     impl TimelineGet {
         pub fn new(tenant_shard_id: &TenantShardId) -> TimelineGet {
             TimelineGet {
-                counter: WAIT_USECS
-                    .with_label_values(&[&tenant_shard_id.to_string(), "timeline_get"]),
+                global: &*global::WAIT_USECS_TIMELINE_GET,
+                per_tenant: WAIT_USECS
+                    .with_label_values(&[&tenant_shard_id.to_string(), kinds::TIMELINE_GET]),
             }
         }
     }
 
     impl Drop for TimelineGet {
         fn drop(&mut self) {
-            let mut metric = metrics::core::Metric::metric(&self.counter);
+            let mut metric = metrics::core::Metric::metric(&self.per_tenant);
             let labels = metric.take_label();
             let label_values = labels
                 .iter()
@@ -2510,8 +2534,12 @@ pub(crate) mod tenant_throttling {
 
     impl DurationSum for TimelineGet {
         fn add(&self, duration: std::time::Duration) {
-            self.counter
-                .inc_by(u64::try_from(duration.as_micros()).unwrap())
+            let val = u64::try_from(duration.as_micros()).unwrap();
+            if val == 0 {
+                return;
+            }
+            self.per_tenant.inc_by(val);
+            self.global.inc_by(val);
         }
     }
 }
@@ -2534,6 +2562,7 @@ pub fn preinitialize_metrics() {
         &WALRECEIVER_BROKER_UPDATES,
         &WALRECEIVER_CANDIDATES_ADDED,
         &WALRECEIVER_CANDIDATES_REMOVED,
+        &tenant_throttling::global::WAIT_USECS_TIMELINE_GET,
     ]
     .into_iter()
     .for_each(|c| {
