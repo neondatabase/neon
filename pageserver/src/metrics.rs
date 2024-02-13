@@ -602,6 +602,15 @@ pub(crate) mod initial_logical_size {
         });
 }
 
+static DIRECTORY_ENTRIES_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_directory_entries_count",
+        "Sum of the entries in pageserver-stored directory listings",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_tenant_states_count",
@@ -1809,6 +1818,7 @@ pub(crate) struct TimelineMetrics {
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
+    pub directory_entries_count_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
     pub evictions: IntCounter,
@@ -1876,6 +1886,9 @@ impl TimelineMetrics {
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+        let directory_entries_count_gauge = DIRECTORY_ENTRIES_COUNT
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
         let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -1902,6 +1915,7 @@ impl TimelineMetrics {
             last_record_gauge,
             resident_physical_size_gauge,
             current_logical_size_gauge,
+            directory_entries_count_gauge,
             num_persistent_files_created,
             persistent_bytes_written,
             evictions,

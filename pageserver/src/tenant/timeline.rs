@@ -34,17 +34,22 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::sync::gate::Gate;
 
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use std::{
+    array,
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    sync::atomic::AtomicU64,
+};
+use std::{
     cmp::{max, min, Ordering},
     ops::ControlFlow,
 };
 
+use crate::pgdatadir_mapping::DirectoryKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -257,6 +262,8 @@ pub struct Timeline {
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
     // in `crate::page_service` writes these metrics.
     pub(crate) query_metrics: crate::metrics::SmgrQueryTimePerTimeline,
+
+    directory_metrics: [AtomicU64; DirectoryKind::ALL_KINDS.len()],
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
@@ -1496,6 +1503,8 @@ impl Timeline {
                     &timeline_id,
                 ),
 
+                directory_metrics: array::from_fn(|_| AtomicU64::new(0)),
+
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
 
                 layer_flush_start_tx,
@@ -2262,6 +2271,18 @@ impl Timeline {
                 // forth between the initial size calculation task.
             }
         }
+    }
+
+    fn update_directory_entries_count(&self, kind: DirectoryKind, count: u64) {
+        self.directory_metrics[kind.offset()].store(count, AtomicOrdering::Relaxed);
+        let sum_of_entries = self
+            .directory_metrics
+            .iter()
+            .map(|v| v.load(AtomicOrdering::Relaxed))
+            .sum();
+        self.metrics
+            .directory_entries_count_gauge
+            .set(sum_of_entries);
     }
 
     async fn find_layer(&self, layer_file_name: &str) -> Option<Layer> {
@@ -4767,6 +4788,10 @@ impl<'a> TimelineWriter<'a> {
 
     pub(crate) fn update_current_logical_size(&self, delta: i64) {
         self.tl.update_current_logical_size(delta)
+    }
+
+    pub(crate) fn update_directory_entries_count(&self, kind: DirectoryKind, count: u64) {
+        self.tl.update_directory_entries_count(kind, count);
     }
 }
 

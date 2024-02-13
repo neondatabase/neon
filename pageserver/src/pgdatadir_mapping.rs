@@ -155,6 +155,7 @@ impl Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            pending_directory_entries: Vec::new(),
             lsn,
         }
     }
@@ -868,6 +869,7 @@ pub struct DatadirModification<'a> {
     pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
+    pending_directory_entries: Vec<(DirectoryKind, u64)>,
 }
 
 impl<'a> DatadirModification<'a> {
@@ -899,6 +901,8 @@ impl<'a> DatadirModification<'a> {
         let buf = DbDirectory::ser(&DbDirectory {
             dbdirs: HashMap::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::DbDirectory, 0));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
         // Create AuxFilesDirectory
@@ -907,16 +911,26 @@ impl<'a> DatadirModification<'a> {
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhaseDirectory, 0));
         self.put(TWOPHASEDIR_KEY, Value::Image(buf.into()));
 
         let buf: Bytes = SlruSegmentDirectory::ser(&SlruSegmentDirectory::default())?.into();
         let empty_dir = Value::Image(buf);
         self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegmentDirectory(SlruKind::Clog), 0));
         self.put(
             slru_dir_to_key(SlruKind::MultiXactMembers),
             empty_dir.clone(),
         );
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegmentDirectory(SlruKind::Clog), 0));
         self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
+        self.pending_directory_entries.push((
+            DirectoryKind::SlruSegmentDirectory(SlruKind::MultiXactOffsets),
+            0,
+        ));
 
         Ok(())
     }
@@ -1039,6 +1053,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.xids.insert(xid) {
             anyhow::bail!("twophase file for xid {} already exists", xid);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhaseDirectory, dir.xids.len() as u64));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1074,6 +1090,8 @@ impl<'a> DatadirModification<'a> {
         let mut dir = DbDirectory::des(&buf)?;
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
+            self.pending_directory_entries
+                .push((DirectoryKind::DbDirectory, dir.dbdirs.len() as u64));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         } else {
             warn!(
@@ -1111,6 +1129,8 @@ impl<'a> DatadirModification<'a> {
             // Didn't exist. Update dbdir
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
             let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
+            self.pending_directory_entries
+                .push((DirectoryKind::DbDirectory, dbdir.dbdirs.len() as u64));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // and create the RelDirectory
@@ -1251,6 +1271,10 @@ impl<'a> DatadirModification<'a> {
         if !dir.segments.insert(segno) {
             anyhow::bail!("slru segment {kind:?}/{segno} already exists");
         }
+        self.pending_directory_entries.push((
+            DirectoryKind::SlruSegmentDirectory(kind),
+            dir.segments.len() as u64,
+        ));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1295,6 +1319,10 @@ impl<'a> DatadirModification<'a> {
         if !dir.segments.remove(&segno) {
             warn!("slru segment {:?}/{} does not exist", kind, segno);
         }
+        self.pending_directory_entries.push((
+            DirectoryKind::SlruSegmentDirectory(kind),
+            dir.segments.len() as u64,
+        ));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1325,6 +1353,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.xids.remove(&xid) {
             warn!("twophase file for xid {} does not exist", xid);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhaseDirectory, dir.xids.len() as u64));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1340,6 +1370,8 @@ impl<'a> DatadirModification<'a> {
         let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
             files: HashMap::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFilesDirectory, 0));
         self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         Ok(())
     }
@@ -1366,6 +1398,9 @@ impl<'a> DatadirModification<'a> {
         } else {
             dir.files.insert(path, Bytes::copy_from_slice(content));
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFilesDirectory, dir.files.len() as u64));
+
         self.put(
             AUX_FILES_KEY,
             Value::Image(Bytes::from(
@@ -1427,6 +1462,10 @@ impl<'a> DatadirModification<'a> {
             self.pending_nblocks = 0;
         }
 
+        for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
+            writer.update_directory_entries_count(kind, count);
+        }
+
         Ok(())
     }
 
@@ -1462,6 +1501,10 @@ impl<'a> DatadirModification<'a> {
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
+        }
+
+        for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
+            writer.update_directory_entries_count(kind, count);
         }
 
         Ok(())
@@ -1586,6 +1629,36 @@ struct RelSizeEntry {
 struct SlruSegmentDirectory {
     // Set of SLRU segments that exist.
     segments: HashSet<u32>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub(crate) enum DirectoryKind {
+    DbDirectory = 0,
+    TwoPhaseDirectory,
+    AuxFilesDirectory,
+    SlruSegmentDirectory(SlruKind),
+}
+
+impl DirectoryKind {
+    pub(crate) const ALL_KINDS: [DirectoryKind; 6] = [
+        DirectoryKind::DbDirectory,
+        DirectoryKind::TwoPhaseDirectory,
+        DirectoryKind::AuxFilesDirectory,
+        DirectoryKind::SlruSegmentDirectory(SlruKind::Clog),
+        DirectoryKind::SlruSegmentDirectory(SlruKind::MultiXactMembers),
+        DirectoryKind::SlruSegmentDirectory(SlruKind::MultiXactOffsets),
+    ];
+    pub(crate) fn offset(&self) -> usize {
+        match self {
+            DirectoryKind::DbDirectory => 0,
+            DirectoryKind::TwoPhaseDirectory => 1,
+            DirectoryKind::AuxFilesDirectory => 2,
+            DirectoryKind::SlruSegmentDirectory(SlruKind::Clog) => 3,
+            DirectoryKind::SlruSegmentDirectory(SlruKind::MultiXactMembers) => 4,
+            DirectoryKind::SlruSegmentDirectory(SlruKind::MultiXactOffsets) => 5,
+        }
+    }
 }
 
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
