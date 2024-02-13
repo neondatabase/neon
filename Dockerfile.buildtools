@@ -48,6 +48,7 @@ RUN set -e \
         xz-utils \
         zlib1g-dev \
         zstd \
+        libipc-run-perl \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
