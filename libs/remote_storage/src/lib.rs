@@ -773,13 +773,19 @@ impl RemoteStorageConfig {
 
         let timeout = toml
             .get("timeout")
-            .map(|timeout| timeout.as_str())
-            .ok_or_else(|| anyhow::Error::msg("timeout was not a string"))?
             .map(|timeout| {
-                humantime::parse_duration(timeout)
-                    .map_err(|e| anyhow::Error::new(e).context("parse timeout"))
+                timeout
+                    .as_str()
+                    .ok_or_else(|| anyhow::Error::msg("timeout was not a string"))
             })
-            .transpose()?
+            .transpose()
+            .and_then(|timeout| {
+                timeout
+                    .map(humantime::parse_duration)
+                    .transpose()
+                    .map_err(anyhow::Error::new)
+            })
+            .context("parse timeout")?
             .unwrap_or(Self::DEFAULT_TIMEOUT);
 
         if timeout < Duration::from_secs(1) {
@@ -942,5 +948,25 @@ mod tests {
     fn rempte_path_cannot_be_created_from_absolute_ones() {
         let err = RemotePath::new(Utf8Path::new("/")).expect_err("Should fail on absolute paths");
         assert_eq!(err.to_string(), "Path \"/\" is not relative");
+    }
+
+    #[test]
+    fn parse_localfs_config_with_timeout() {
+        let input = "local_path = '.'
+timeout = '5s'";
+
+        let toml = input.parse::<toml_edit::Document>().unwrap();
+
+        let config = RemoteStorageConfig::from_toml(toml.as_item())
+            .unwrap()
+            .expect("it exists");
+
+        assert_eq!(
+            config,
+            RemoteStorageConfig {
+                storage: RemoteStorageKind::LocalFs(Utf8PathBuf::from(".")),
+                timeout: Duration::from_secs(5)
+            }
+        );
     }
 }
