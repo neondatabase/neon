@@ -870,7 +870,7 @@ pub struct DatadirModification<'a> {
     pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
-    pending_directory_entries: Vec<(DirectoryKind, u64)>,
+    pending_directory_entries: Vec<(DirectoryKind, usize)>,
 }
 
 impl<'a> DatadirModification<'a> {
@@ -1053,7 +1053,7 @@ impl<'a> DatadirModification<'a> {
             anyhow::bail!("twophase file for xid {} already exists", xid);
         }
         self.pending_directory_entries
-            .push((DirectoryKind::TwoPhase, dir.xids.len() as u64));
+            .push((DirectoryKind::TwoPhase, dir.xids.len()));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1090,7 +1090,7 @@ impl<'a> DatadirModification<'a> {
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
             self.pending_directory_entries
-                .push((DirectoryKind::Db, dir.dbdirs.len() as u64));
+                .push((DirectoryKind::Db, dir.dbdirs.len()));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         } else {
             warn!(
@@ -1129,7 +1129,7 @@ impl<'a> DatadirModification<'a> {
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
             let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
             self.pending_directory_entries
-                .push((DirectoryKind::Db, dbdir.dbdirs.len() as u64));
+                .push((DirectoryKind::Db, dbdir.dbdirs.len()));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // and create the RelDirectory
@@ -1146,7 +1146,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         self.pending_directory_entries
-            .push((DirectoryKind::Rel, rel_dir.rels.len() as u64));
+            .push((DirectoryKind::Rel, rel_dir.rels.len()));
 
         self.put(
             rel_dir_key,
@@ -1240,7 +1240,7 @@ impl<'a> DatadirModification<'a> {
         let mut dir = RelDirectory::des(&buf)?;
 
         self.pending_directory_entries
-            .push((DirectoryKind::Rel, dir.rels.len() as u64));
+            .push((DirectoryKind::Rel, dir.rels.len()));
 
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
             self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
@@ -1278,7 +1278,7 @@ impl<'a> DatadirModification<'a> {
             anyhow::bail!("slru segment {kind:?}/{segno} already exists");
         }
         self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(kind), dir.segments.len() as u64));
+            .push((DirectoryKind::SlruSegment(kind), dir.segments.len()));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1324,7 +1324,7 @@ impl<'a> DatadirModification<'a> {
             warn!("slru segment {:?}/{} does not exist", kind, segno);
         }
         self.pending_directory_entries
-            .push((DirectoryKind::SlruSegment(kind), dir.segments.len() as u64));
+            .push((DirectoryKind::SlruSegment(kind), dir.segments.len()));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1356,7 +1356,7 @@ impl<'a> DatadirModification<'a> {
             warn!("twophase file for xid {} does not exist", xid);
         }
         self.pending_directory_entries
-            .push((DirectoryKind::TwoPhase, dir.xids.len() as u64));
+            .push((DirectoryKind::TwoPhase, dir.xids.len()));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1401,7 +1401,7 @@ impl<'a> DatadirModification<'a> {
             dir.files.insert(path, Bytes::copy_from_slice(content));
         }
         self.pending_directory_entries
-            .push((DirectoryKind::AuxFiles, dir.files.len() as u64));
+            .push((DirectoryKind::AuxFiles, dir.files.len()));
 
         self.put(
             AUX_FILES_KEY,
@@ -1465,7 +1465,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
-            writer.update_directory_entries_count(kind, count);
+            writer.update_directory_entries_count(kind, count as u64);
         }
 
         Ok(())
@@ -1506,7 +1506,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
-            writer.update_directory_entries_count(kind, count);
+            writer.update_directory_entries_count(kind, count as u64);
         }
 
         Ok(())
