@@ -154,9 +154,7 @@ struct JoinOnDrop(Vec<tokio::task::JoinHandle<()>>);
 impl JoinOnDrop {
     /// Checks all the futures for panics.
     pub async fn join_all(self) {
-        for handle in self.0 {
-            handle.await.unwrap()
-        }
+        futures::future::try_join_all(self.0).await.unwrap();
     }
 }
 
