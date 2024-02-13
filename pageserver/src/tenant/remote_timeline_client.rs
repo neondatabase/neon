@@ -1009,7 +1009,7 @@ impl RemoteTimelineClient {
             &self.cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)?;
 
         // all good, disarm the guard and mark as success

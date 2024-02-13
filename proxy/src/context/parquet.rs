@@ -330,7 +330,7 @@ async fn upload_parquet(
         &cancel,
     )
     .await
-    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
     .context("request_data_upload")?;
 

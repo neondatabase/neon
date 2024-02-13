@@ -25,6 +25,7 @@ use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use remote_storage::TimeoutOrCancel;
 use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
@@ -3339,7 +3340,7 @@ impl Tenant {
             &self.cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)
     }
 
