@@ -1029,6 +1029,7 @@ impl<'a> DatadirModification<'a> {
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
             })?;
+            self.pending_directory_entries.push((DirectoryKind::Rel, 0));
             self.put(
                 rel_dir_to_key(spcnode, dbnode),
                 Value::Image(Bytes::from(buf)),
@@ -1143,6 +1144,10 @@ impl<'a> DatadirModification<'a> {
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
             return Err(RelationError::AlreadyExists);
         }
+
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, rel_dir.rels.len() as u64));
+
         self.put(
             rel_dir_key,
             Value::Image(Bytes::from(
@@ -1233,6 +1238,9 @@ impl<'a> DatadirModification<'a> {
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let buf = self.get(dir_key, ctx).await?;
         let mut dir = RelDirectory::des(&buf)?;
+
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, dir.rels.len() as u64));
 
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
             self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
@@ -1630,6 +1638,7 @@ struct SlruSegmentDirectory {
 pub(crate) enum DirectoryKind {
     Db,
     TwoPhase,
+    Rel,
     AuxFiles,
     SlruSegment(SlruKind),
 }
