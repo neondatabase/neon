@@ -293,7 +293,7 @@ jobs:
         run: |
           #temp install docker later add it to build tools
           #remove any old docker or docker deps
-          for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do sudo apt-get remove $pkg; done
+          for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do apt-get remove $pkg; done
           # Add Docker's official GPG key:
           apt-get update
           apt-get install ca-certificates curl
