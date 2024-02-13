@@ -491,11 +491,6 @@ impl RemoteStorage for S3Bucket {
 
         let mut continuation_token = None;
 
-        // TODO: REVIEW: does it really make sense to have an multiple request timeout? because our
-        // timeout is 120s then yes, but we are timing out a non-constant operation with a constant
-        // timeout.
-        let mut timeout = std::pin::pin!(tokio::time::sleep(self.timeout));
-
         loop {
             let started_at = start_measuring_requests(kind);
 
@@ -522,7 +517,7 @@ impl RemoteStorage for S3Bucket {
 
             let response = tokio::select! {
                 res = request => res,
-                _ = &mut timeout => return Err(DownloadError::Timeout),
+                _ = tokio::time::sleep(self.timeout) => return Err(DownloadError::Timeout),
                 _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
             };
 

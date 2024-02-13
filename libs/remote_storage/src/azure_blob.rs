@@ -380,9 +380,6 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Delete, cancel).await?;
 
         let op = async {
-            // FIXME: this should probably be per request
-            let mut timeout = std::pin::pin!(tokio::time::sleep(self.timeout));
-
             // TODO batch requests are also not supported by the SDK
             // https://github.com/Azure/azure-sdk-for-rust/issues/1068
             // https://github.com/Azure/azure-sdk-for-rust/issues/1249
@@ -393,7 +390,7 @@ impl RemoteStorage for AzureBlobStorage {
 
                 let res = tokio::select! {
                     res = request => res,
-                    _ = &mut timeout => return Err(TimeoutOrCancel::Timeout.into()),
+                    _ = tokio::time::sleep(self.timeout) => return Err(TimeoutOrCancel::Timeout.into()),
                 };
 
                 match res {
