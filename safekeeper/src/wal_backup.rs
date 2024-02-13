@@ -513,7 +513,6 @@ async fn backup_object(
 
     let cancel = CancellationToken::new();
 
-    // TODO: is there upper retry?
     storage
         .upload_storage_object(file, size, target_file, &cancel)
         .await
@@ -533,7 +532,6 @@ pub async fn read_object(
 
     let cancel = CancellationToken::new();
 
-    // FIXME: is there a retry in caller?
     let download = storage
         .download_storage_object(Some((offset, None)), file_path, &cancel)
         .await
@@ -629,7 +627,6 @@ pub async fn copy_s3_segments(
 
     let cancel = CancellationToken::new();
 
-    // FIXME: is there upper retry?
     let files = storage
         .list_files(Some(&remote_path), None, &cancel)
         .await?;
