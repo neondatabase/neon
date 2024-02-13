@@ -22,6 +22,44 @@ use super::{
     RateLimiterConfig,
 };
 
+pub struct RedisRateLimiter {
+    data: Vec<RateBucket>,
+    info: &'static [RateBucketInfo],
+}
+
+impl RedisRateLimiter {
+    pub fn new(info: &'static [RateBucketInfo]) -> Self {
+        Self {
+            data: vec![
+                RateBucket {
+                    start: Instant::now(),
+                    count: 0,
+                };
+                info.len()
+            ],
+            info,
+        }
+    }
+
+    /// Check that number of connections is below `max_rps` rps.
+    pub fn check(&mut self) -> bool {
+        let now = Instant::now();
+
+        let should_allow_request = self
+            .data
+            .iter_mut()
+            .zip(self.info)
+            .all(|(bucket, info)| bucket.should_allow_request(info, now));
+
+        if should_allow_request {
+            // only increment the bucket counts if the request will actually be accepted
+            self.data.iter_mut().for_each(RateBucket::inc);
+        }
+
+        should_allow_request
+    }
+}
+
 // Simple per-endpoint rate limiter.
 //
 // Check that number of connections to the endpoint is below `max_rps` rps.

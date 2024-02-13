@@ -133,6 +133,9 @@ struct ProxyCliArgs {
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
+    /// Redis rate limiter max number of requests per second.
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    redis_rps_limit: Vec<RateBucketInfo>,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
     #[clap(long, default_value_t = 100)]
     initial_limit: usize,
@@ -234,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
         Some(url) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
             url,
             args.region.clone(),
+            &config.redis_rps_limit,
         )?))),
         None => None,
     };
@@ -426,6 +430,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
     RateBucketInfo::validate(&mut endpoint_rps_limit)?;
+    let mut redis_rps_limit = args.redis_rps_limit.clone();
+    RateBucketInfo::validate(&mut redis_rps_limit)?;
 
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
@@ -437,6 +443,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
+        redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
         // TODO: add this argument
         region: args.region.clone(),
