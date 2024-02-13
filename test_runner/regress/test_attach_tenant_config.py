@@ -174,6 +174,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "pitr_interval": "1m",
         "lagging_wal_timeout": "23m",
         "lazy_slru_download": True,
+        "enforce_circuit_breakers": True,
         "max_lsn_wal_lag": 230000,
         "min_resident_size_override": 23,
         "trace_read_requests": True,

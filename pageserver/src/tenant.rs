@@ -1971,14 +1971,19 @@ impl Tenant {
                 && amplification > PATHOLOGICAL_AMPLIFICATION_FACTOR
             {
                 tracing::error!("Pathological storage amplification detected (synthetic size {synthetic_size}, physical size {total_physical}): shutting down ingest");
-                for (timeline_id, timeline) in timelines_to_compact {
-                    if tokio::time::timeout(Duration::from_secs(5), timeline.kill_wal_receiver())
+                if self.get_enforce_circuit_breakers() {
+                    for (timeline_id, timeline) in timelines_to_compact {
+                        if tokio::time::timeout(
+                            Duration::from_secs(5),
+                            timeline.kill_wal_receiver(),
+                        )
                         .await
                         .is_err()
-                    {
-                        tracing::error!(
-                            "Timed out shutting down WAL intest on timeline {timeline_id}"
-                        );
+                        {
+                            tracing::error!(
+                                "Timed out shutting down WAL intest on timeline {timeline_id}"
+                            );
+                        }
                     }
                 }
             }
@@ -2632,6 +2637,16 @@ impl Tenant {
         } else {
             Some(heatmap_period)
         }
+    }
+
+    pub(crate) fn get_enforce_circuit_breakers(&self) -> bool {
+        let tenant_conf = self
+            .tenant_conf
+            .read()
+            .unwrap()
+            .tenant_conf
+            .enforce_circuit_breakers;
+        tenant_conf.unwrap_or(self.conf.default_tenant_conf.enforce_circuit_breakers)
     }
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
@@ -4003,6 +4018,7 @@ pub(crate) mod harness {
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
+                enforce_circuit_breakers: Some(tenant_conf.enforce_circuit_breakers),
             }
         }
     }

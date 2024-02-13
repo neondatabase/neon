@@ -283,6 +283,7 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
+    pub enforce_circuit_breakers: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

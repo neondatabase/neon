@@ -49,6 +49,8 @@ pub mod defaults {
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
+
+    pub const DEFAULT_ENFORCE_CIRCUIT_BREAKERS: bool = false;
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -348,6 +350,10 @@ pub struct TenantConf {
 
     /// If true then SLRU segments are dowloaded on demand, if false SLRU segments are included in basebackup
     pub lazy_slru_download: bool,
+
+    /// If true, then the tenant will automatically shut off external APIs (e.g. wal ingest, page service) in
+    /// response to high failure rates that likely indicate a bug.
+    pub enforce_circuit_breakers: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -437,6 +443,10 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub lazy_slru_download: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub enforce_circuit_breakers: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -485,6 +495,9 @@ impl TenantConfOpt {
             lazy_slru_download: self
                 .lazy_slru_download
                 .unwrap_or(global_conf.lazy_slru_download),
+            enforce_circuit_breakers: self
+                .enforce_circuit_breakers
+                .unwrap_or(global_conf.enforce_circuit_breakers),
         }
     }
 }
@@ -524,6 +537,7 @@ impl Default for TenantConf {
             gc_feedback: false,
             heatmap_period: Duration::ZERO,
             lazy_slru_download: false,
+            enforce_circuit_breakers: false,
         }
     }
 }
@@ -596,6 +610,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             gc_feedback: value.gc_feedback,
             heatmap_period: value.heatmap_period.map(humantime),
             lazy_slru_download: value.lazy_slru_download,
+            enforce_circuit_breakers: value.enforce_circuit_breakers,
         }
     }
 }

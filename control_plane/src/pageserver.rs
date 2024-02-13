@@ -400,6 +400,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'lazy_slru_download' as bool")?,
+            enforce_circuit_breakers: settings
+                .remove("enforce_circuit_breakers")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'enforce_circuit_breakers' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -505,6 +510,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'lazy_slru_download' as bool")?,
+                enforce_circuit_breakers: settings
+                    .remove("enforce_circuit_breakers")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'enforce_circuit_breakers' as bool")?,
             }
         };
 
