@@ -14,8 +14,8 @@ ifeq ($(BUILD_TYPE),release)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
-	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
-	PG_CFLAGS = -O0 -g3 $(CFLAGS) --enable-tap-tests
+	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend --enable-tap-tests
+	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
