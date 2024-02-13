@@ -74,7 +74,14 @@ jobs:
           fi
         shell: bash
         id: build-tag
-
+  build-buildtools-image:
+    needs: [ check-permissions ]
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      dockerfile-path: Dockerfile.buildtools
+      image-name: build-tools
+    secrets: inherit
+    
   build-neon:
     needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
