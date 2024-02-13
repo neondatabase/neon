@@ -797,6 +797,10 @@ impl Timeline {
         self.metrics.resident_physical_size_get()
     }
 
+    pub(crate) fn get_directory_metrics(&self) -> [u64; DirectoryKind::KINDS_NUM] {
+        array::from_fn(|idx| self.directory_metrics[idx].load(AtomicOrdering::Relaxed))
+    }
+
     ///
     /// Wait until WAL has been received and processed up to this LSN.
     ///
