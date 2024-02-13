@@ -2287,6 +2287,8 @@ impl Timeline {
             .iter()
             .map(|v| v.load(AtomicOrdering::Relaxed))
             .sum();
+        // Set a high general threshold and a lower threshold for the auxiliary files,
+        // as we can have large numbers of relations in the db directory.
         const SUM_THRESHOLD: u64 = 5000;
         const AUX_THRESHOLD: u64 = 1000;
         if sum_of_entries >= SUM_THRESHOLD || aux_metric >= AUX_THRESHOLD {
