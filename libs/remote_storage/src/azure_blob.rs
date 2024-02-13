@@ -468,7 +468,11 @@ impl RemoteStorage for AzureBlobStorage {
         tokio::select! {
             res = op => res,
             _ = cancel.cancelled() => Err(anyhow::Error::new(TimeoutOrCancel::Cancel)),
-            _ = timeout => Err(anyhow::Error::new(TimeoutOrCancel::Timeout).context(format!("Timeout, last state: {copy_status:?}"))),
+            _ = timeout => {
+                let e = anyhow::Error::new(TimeoutOrCancel::Timeout);
+                let e = e.context(format!("Timeout, last status: {copy_status:?}"));
+                Err(e)
+            },
         }
     }
 
