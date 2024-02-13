@@ -1356,8 +1356,8 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let key = path.to_string();
-        let value = if content.is_empty() {
+        let file_path = path.to_string();
+        let content = if content.is_empty() {
             None
         } else {
             Some(Bytes::copy_from_slice(content))
@@ -1369,8 +1369,8 @@ impl<'a> DatadirModification<'a> {
             self.put(
                 AUX_FILES_KEY,
                 Value::WalRecord(NeonWalRecord::AuxFile {
-                    key: key.clone(),
-                    value: value.clone(),
+                    file_path: file_path,
+                    content: content,
                 }),
             );
         } else {
@@ -1381,8 +1381,8 @@ impl<'a> DatadirModification<'a> {
                     self.put(
                         AUX_FILES_KEY,
                         Value::WalRecord(NeonWalRecord::AuxFile {
-                            key: key.clone(),
-                            value: value.clone(),
+                            file_path: file_path,
+                            content: content,
                         }),
                     );
                 }
@@ -1404,7 +1404,7 @@ impl<'a> DatadirModification<'a> {
                     let mut dir = AuxFilesDirectory {
                         files: HashMap::new(),
                     };
-                    dir.upsert(key, value);
+                    dir.upsert(file_path, content);
                     self.put(
                         AUX_FILES_KEY,
                         Value::Image(Bytes::from(

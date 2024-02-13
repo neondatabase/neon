@@ -232,9 +232,9 @@ pub(crate) fn apply_in_neon(
                 LittleEndian::write_u32(&mut page[memberoff..memberoff + 4], member.xid);
             }
         }
-        NeonWalRecord::AuxFile { key, value } => {
+        NeonWalRecord::AuxFile { file_path, content } => {
             let mut dir = AuxFilesDirectory::des(page)?;
-            dir.upsert(key.clone(), value.clone());
+            dir.upsert(file_path.clone(), content.clone());
 
             page.clear();
             let mut writer = page.writer();
@@ -268,26 +268,26 @@ mod test {
         let deltas = vec![
             // Insert
             NeonWalRecord::AuxFile {
-                key: "one".to_string(),
-                value: Some(Bytes::from_static(b"content1")),
+                file_path: "one".to_string(),
+                content: Some(Bytes::from_static(b"content1")),
             },
             // Update
             NeonWalRecord::AuxFile {
-                key: "two".to_string(),
-                value: Some(Bytes::from_static(b"content99")),
+                file_path: "two".to_string(),
+                content: Some(Bytes::from_static(b"content99")),
             },
             // Delete
             NeonWalRecord::AuxFile {
-                key: "three".to_string(),
-                value: None,
+                file_path: "three".to_string(),
+                content: None,
             },
         ];
 
-        let key = AUX_FILES_KEY;
+        let file_path = AUX_FILES_KEY;
         let mut page = BytesMut::from_iter(base_image.into_iter());
 
         for record in deltas {
-            apply_in_neon(&record, key, &mut page)?;
+            apply_in_neon(&record, file_path, &mut page)?;
         }
 
         let reconstructed = AuxFilesDirectory::des(&page)?;
