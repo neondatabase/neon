@@ -284,7 +284,7 @@ mod test {
         ];
 
         let file_path = AUX_FILES_KEY;
-        let mut page = BytesMut::from_iter(base_image.into_iter());
+        let mut page = BytesMut::from_iter(base_image);
 
         for record in deltas {
             apply_in_neon(&record, file_path, &mut page)?;

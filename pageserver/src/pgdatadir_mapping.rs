@@ -1368,10 +1368,7 @@ impl<'a> DatadirModification<'a> {
 
             self.put(
                 AUX_FILES_KEY,
-                Value::WalRecord(NeonWalRecord::AuxFile {
-                    file_path: file_path,
-                    content: content,
-                }),
+                Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
             );
         } else {
             // Check if the AUX_FILES_KEY is initialized
@@ -1380,10 +1377,7 @@ impl<'a> DatadirModification<'a> {
                     // Key is already set, we may append a delta
                     self.put(
                         AUX_FILES_KEY,
-                        Value::WalRecord(NeonWalRecord::AuxFile {
-                            file_path: file_path,
-                            content: content,
-                        }),
+                        Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
                     );
                 }
                 Err(
