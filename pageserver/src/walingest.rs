@@ -346,7 +346,7 @@ impl WalIngest {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
                 if info == pg_constants::XLOG_LOGICAL_MESSAGE {
-                    let xlrec = XlLogicalMessage::decode(&mut buf);
+                    let xlrec = crate::walrecord::XlLogicalMessage::decode(&mut buf);
                     let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
                     let message = &buf[xlrec.prefix_size..xlrec.prefix_size + xlrec.message_size];
                     if prefix == "neon-test" {
