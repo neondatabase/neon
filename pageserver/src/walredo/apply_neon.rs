@@ -243,3 +243,61 @@ pub(crate) fn apply_in_neon(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod test {
+    use bytes::Bytes;
+    use pageserver_api::key::AUX_FILES_KEY;
+
+    use super::*;
+    use std::collections::HashMap;
+
+    use crate::{pgdatadir_mapping::AuxFilesDirectory, walrecord::NeonWalRecord};
+
+    /// Test [`apply_in_neon`]'s handling of NeonWalRecord::AuxFile
+    #[test]
+    fn apply_aux_file_deltas() -> anyhow::Result<()> {
+        let base_dir = AuxFilesDirectory {
+            files: HashMap::from([
+                ("two".to_string(), Bytes::from_static(b"content0")),
+                ("three".to_string(), Bytes::from_static(b"contentX")),
+            ]),
+        };
+        let base_image = AuxFilesDirectory::ser(&base_dir)?;
+
+        let deltas = vec![
+            // Insert
+            NeonWalRecord::AuxFile {
+                key: "one".to_string(),
+                value: Some(Bytes::from_static(b"content1")),
+            },
+            // Update
+            NeonWalRecord::AuxFile {
+                key: "two".to_string(),
+                value: Some(Bytes::from_static(b"content99")),
+            },
+            // Delete
+            NeonWalRecord::AuxFile {
+                key: "three".to_string(),
+                value: None,
+            },
+        ];
+
+        let key = AUX_FILES_KEY;
+        let mut page = BytesMut::from_iter(base_image.into_iter());
+
+        for record in deltas {
+            apply_in_neon(&record, key, &mut page)?;
+        }
+
+        let reconstructed = AuxFilesDirectory::des(&page)?;
+        let expect = HashMap::from([
+            ("one".to_string(), Bytes::from_static(b"content1")),
+            ("two".to_string(), Bytes::from_static(b"content99")),
+        ]);
+
+        assert_eq!(reconstructed.files, expect);
+
+        Ok(())
+    }
+}
