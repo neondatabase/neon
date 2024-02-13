@@ -312,8 +312,8 @@ impl Endpoint {
         // Load the 'neon' extension
         conf.append("shared_preload_libraries", "neon");
 
-		// It is only for testing, in real environment this GUC is passed by control plane
-		conf.append("neon.primary_is_running", "on");
+        // It is only for testing, in real environment this GUC is passed by control plane
+        conf.append("neon.primary_is_running", "on");
 
         conf.append_line("");
         // Replication-related configurations, such as WAL sending
