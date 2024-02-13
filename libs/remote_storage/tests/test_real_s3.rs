@@ -377,6 +377,7 @@ fn create_s3_client(
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
         }),
+        timeout: Duration::from_secs(120),
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,

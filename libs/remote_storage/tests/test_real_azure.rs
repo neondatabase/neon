@@ -1,9 +1,9 @@
-use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Context;
 use remote_storage::{
@@ -213,6 +213,7 @@ fn create_azure_client(
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
         }),
+        timeout: Duration::from_secs(120),
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,

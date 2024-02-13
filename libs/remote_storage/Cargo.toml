@@ -15,6 +15,7 @@ aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
 bytes.workspace = true
 camino.workspace = true
+humantime.workspace = true
 hyper = { workspace = true, features = ["stream"] }
 futures.workspace = true
 serde.workspace = true

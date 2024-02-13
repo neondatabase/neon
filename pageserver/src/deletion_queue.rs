@@ -868,6 +868,7 @@ mod test {
         let remote_fs_dir = harness.conf.workdir.join("remote_fs").canonicalize_utf8()?;
         let storage_config = RemoteStorageConfig {
             storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         };
         let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
 

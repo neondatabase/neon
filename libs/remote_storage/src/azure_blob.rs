@@ -39,10 +39,11 @@ pub struct AzureBlobStorage {
     prefix_in_container: Option<String>,
     max_keys_per_list_response: Option<NonZeroU32>,
     concurrency_limiter: ConcurrencyLimiter,
+    timeout: Duration,
 }
 
 impl AzureBlobStorage {
-    pub fn new(azure_config: &AzureConfig) -> Result<Self> {
+    pub fn new(azure_config: &AzureConfig, timeout: Duration) -> Result<Self> {
         debug!(
             "Creating azure remote storage for azure container {}",
             azure_config.container_name
@@ -79,6 +80,7 @@ impl AzureBlobStorage {
             prefix_in_container: azure_config.prefix_in_container.to_owned(),
             max_keys_per_list_response,
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
+            timeout,
         })
     }
 
@@ -121,14 +123,13 @@ impl AzureBlobStorage {
     async fn download_for_builder(
         &self,
         builder: GetBlobBuilder,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
 
         let _permit = self.permit(kind, cancel).await?;
 
-        let timeout = tokio::time::sleep(timeout);
+        let timeout = tokio::time::sleep(self.timeout);
 
         let mut etag = None;
         let mut last_modified = None;
@@ -213,7 +214,6 @@ impl RemoteStorage for AzureBlobStorage {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Listing, DownloadError> {
         let _permit = self.permit(RequestKind::List, cancel).await?;
@@ -250,7 +250,7 @@ impl RemoteStorage for AzureBlobStorage {
 
             let mut response = builder.into_stream();
             let mut res = Listing::default();
-            let mut timeout = std::pin::pin!(tokio::time::sleep(timeout));
+            let mut timeout = std::pin::pin!(tokio::time::sleep(self.timeout));
 
             let mut max_keys = max_keys.map(|mk| mk.get());
             while let Some(l) = tokio::select! {
@@ -298,7 +298,6 @@ impl RemoteStorage for AzureBlobStorage {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let _permit = self.permit(RequestKind::Put, cancel).await?;
@@ -320,7 +319,7 @@ impl RemoteStorage for AzureBlobStorage {
             }
 
             let fut = builder.into_future();
-            let fut = tokio::time::timeout(timeout, fut);
+            let fut = tokio::time::timeout(self.timeout, fut);
 
             match fut.await {
                 Ok(Ok(_response)) => Ok(()),
@@ -338,14 +337,13 @@ impl RemoteStorage for AzureBlobStorage {
     async fn download(
         &self,
         from: &RemotePath,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
         let builder = blob_client.get();
 
-        self.download_for_builder(builder, timeout, cancel).await
+        self.download_for_builder(builder, cancel).await
     }
 
     async fn download_byte_range(
@@ -353,7 +351,6 @@ impl RemoteStorage for AzureBlobStorage {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
@@ -367,29 +364,24 @@ impl RemoteStorage for AzureBlobStorage {
         };
         builder = builder.range(range);
 
-        self.download_for_builder(builder, timeout, cancel).await
+        self.download_for_builder(builder, cancel).await
     }
 
-    async fn delete(
-        &self,
-        path: &RemotePath,
-        timeout: Duration,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
-        self.delete_objects(std::array::from_ref(path), timeout, cancel)
+    async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
+        self.delete_objects(std::array::from_ref(path), cancel)
             .await
     }
 
     async fn delete_objects<'a>(
         &self,
         paths: &'a [RemotePath],
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let _permit = self.permit(RequestKind::Delete, cancel).await?;
 
         let op = async {
-            let mut timeout = std::pin::pin!(tokio::time::sleep(timeout));
+            // FIXME: this should probably be per request
+            let mut timeout = std::pin::pin!(tokio::time::sleep(self.timeout));
 
             // TODO batch requests are also not supported by the SDK
             // https://github.com/Azure/azure-sdk-for-rust/issues/1068
@@ -430,12 +422,11 @@ impl RemoteStorage for AzureBlobStorage {
         &self,
         from: &RemotePath,
         to: &RemotePath,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let _permit = self.permit(RequestKind::Copy, cancel).await?;
 
-        let timeout = tokio::time::sleep(timeout);
+        let timeout = tokio::time::sleep(self.timeout);
 
         let mut copy_status = None;
 

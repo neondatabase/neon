@@ -64,6 +64,7 @@ pub struct S3Bucket {
     prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,
     concurrency_limiter: ConcurrencyLimiter,
+    timeout: Duration,
 }
 
 struct GetObjectRequest {
@@ -73,7 +74,7 @@ struct GetObjectRequest {
 }
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
-    pub fn new(aws_config: &S3Config) -> anyhow::Result<Self> {
+    pub fn new(aws_config: &S3Config, timeout: Duration) -> anyhow::Result<Self> {
         tracing::debug!(
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
@@ -153,6 +154,7 @@ impl S3Bucket {
             max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
             concurrency_limiter: ConcurrencyLimiter::new(aws_config.concurrency_limit.get()),
+            timeout,
         })
     }
 
@@ -230,7 +232,6 @@ impl S3Bucket {
     async fn download_object(
         &self,
         request: GetObjectRequest,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
@@ -249,7 +250,7 @@ impl S3Bucket {
 
         let get_object = tokio::select! {
             res = get_object => res,
-            _ = tokio::time::sleep(timeout) => return Err(DownloadError::Timeout),
+            _ = tokio::time::sleep(self.timeout) => return Err(DownloadError::Timeout),
             _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
         };
 
@@ -283,7 +284,7 @@ impl S3Bucket {
 
         // even if we would have no timeout left, continue anyways. the caller can decide to ignore
         // the errors considering timeouts and cancellation.
-        let remaining = timeout.saturating_sub(started_at.elapsed());
+        let remaining = self.timeout.saturating_sub(started_at.elapsed());
 
         let metadata = object_output.metadata().cloned().map(StorageMetadata);
         let etag = object_output.e_tag;
@@ -308,27 +309,24 @@ impl S3Bucket {
     async fn delete_oids(
         &self,
         delete_objects: &[ObjectIdentifier],
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
 
         let permit = self.permit(kind, cancel).await?;
 
-        self.delete_oids0(&permit, delete_objects, timeout, cancel)
-            .await
+        self.delete_oids0(&permit, delete_objects, cancel).await
     }
 
     async fn delete_oids0(
         &self,
         _permit: &tokio::sync::SemaphorePermit<'_>,
         delete_objects: &[ObjectIdentifier],
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
         let mut cancel = std::pin::pin!(cancel.cancelled());
-        let mut timeout = std::pin::pin!(tokio::time::sleep(timeout));
+        let mut timeout = std::pin::pin!(tokio::time::sleep(self.timeout));
 
         for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
             let started_at = start_measuring_requests(kind);
@@ -467,7 +465,6 @@ impl RemoteStorage for S3Bucket {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError> {
         let kind = RequestKind::List;
@@ -497,7 +494,7 @@ impl RemoteStorage for S3Bucket {
         // TODO: REVIEW: does it really make sense to have an multiple request timeout? because our
         // timeout is 120s then yes, but we are timing out a non-constant operation with a constant
         // timeout.
-        let mut timeout = std::pin::pin!(tokio::time::sleep(timeout));
+        let mut timeout = std::pin::pin!(tokio::time::sleep(self.timeout));
 
         loop {
             let started_at = start_measuring_requests(kind);
@@ -582,7 +579,6 @@ impl RemoteStorage for S3Bucket {
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Put;
@@ -603,7 +599,7 @@ impl RemoteStorage for S3Bucket {
             .body(bytes_stream)
             .send();
 
-        let upload = tokio::time::timeout(timeout, upload);
+        let upload = tokio::time::timeout(self.timeout, upload);
 
         let res = tokio::select! {
             res = upload => res,
@@ -629,13 +625,12 @@ impl RemoteStorage for S3Bucket {
         &self,
         from: &RemotePath,
         to: &RemotePath,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Copy;
         let _permit = self.permit(kind, cancel).await?;
 
-        let timeout = tokio::time::sleep(timeout);
+        let timeout = tokio::time::sleep(self.timeout);
 
         let started_at = start_measuring_requests(kind);
 
@@ -673,7 +668,6 @@ impl RemoteStorage for S3Bucket {
     async fn download(
         &self,
         from: &RemotePath,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
@@ -684,7 +678,6 @@ impl RemoteStorage for S3Bucket {
                 key: self.relative_path_to_s3_object(from),
                 range: None,
             },
-            timeout,
             cancel,
         )
         .await
@@ -695,7 +688,6 @@ impl RemoteStorage for S3Bucket {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
@@ -712,7 +704,6 @@ impl RemoteStorage for S3Bucket {
                 key: self.relative_path_to_s3_object(from),
                 range,
             },
-            timeout,
             cancel,
         )
         .await
@@ -721,7 +712,6 @@ impl RemoteStorage for S3Bucket {
     async fn delete_objects<'a>(
         &self,
         paths: &'a [RemotePath],
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let mut delete_objects = Vec::with_capacity(paths.len());
@@ -733,17 +723,12 @@ impl RemoteStorage for S3Bucket {
             delete_objects.push(obj_id);
         }
 
-        self.delete_oids(&delete_objects, timeout, cancel).await
+        self.delete_oids(&delete_objects, cancel).await
     }
 
-    async fn delete(
-        &self,
-        path: &RemotePath,
-        timeout: Duration,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
+    async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
         let paths = std::array::from_ref(path);
-        self.delete_objects(paths, timeout, cancel).await
+        self.delete_objects(paths, cancel).await
     }
 
     async fn time_travel_recover(
@@ -955,7 +940,7 @@ impl RemoteStorage for S3Bucket {
                         .build()
                         .map_err(|e| TimeTravelError::Other(e.into()))?;
 
-                    self.delete_oids0(&permit, &[oid], Duration::from_secs(60), cancel)
+                    self.delete_oids0(&permit, &[oid], cancel)
                         .await
                         .map_err(|e| {
                             // delete_oid0 will use TimeoutOrCancel
@@ -1100,7 +1085,8 @@ mod tests {
                 concurrency_limit: NonZeroUsize::new(100).unwrap(),
                 max_keys_per_list_response: Some(5),
             };
-            let storage = S3Bucket::new(&config).expect("remote storage init");
+            let storage =
+                S3Bucket::new(&config, std::time::Duration::ZERO).expect("remote storage init");
             for (test_path_idx, test_path) in all_paths.iter().enumerate() {
                 let result = storage.relative_path_to_s3_object(test_path);
                 let expected = expected_outputs[prefix_idx][test_path_idx];

@@ -417,7 +417,8 @@ mod tests {
                     )
                     .unwrap(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
-                })
+                }),
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             })
         );
         assert_eq!(parquet_upload.parquet_upload_row_group_size, 100);
@@ -470,6 +471,7 @@ mod tests {
     ) -> Vec<(u64, usize, i64)> {
         let remote_storage_config = RemoteStorageConfig {
             storage: RemoteStorageKind::LocalFs(tmpdir.to_path_buf()),
+            timeout: std::time::Duration::from_secs(120),
         };
         let storage = GenericRemoteStorage::from_config(&remote_storage_config).unwrap();
 

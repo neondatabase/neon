@@ -94,42 +94,41 @@ impl UnreliableWrapper {
         &self,
         path: &RemotePath,
         attempt: bool,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         if attempt {
             self.attempt(RemoteOp::Delete(path.clone()))?;
         }
-        self.inner.delete(path, timeout, cancel).await
+        self.inner.delete(path, TIMEOUT, cancel).await
     }
 }
 
 // We never construct this, so the type is not important, just has to not be UnreliableWrapper and impl RemoteStorage.
 type VoidStorage = crate::LocalFs;
 
+const TIMEOUT: Duration = Duration::from_secs(120);
+
 impl RemoteStorage for UnreliableWrapper {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner.list_prefixes(prefix, timeout, cancel).await
+        self.inner.list_prefixes(prefix, TIMEOUT, cancel).await
     }
 
     async fn list_files(
         &self,
         folder: Option<&RemotePath>,
         max_keys: Option<NonZeroU32>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(folder.cloned()))
             .map_err(DownloadError::Other)?;
         self.inner
-            .list_files(folder, max_keys, timeout, cancel)
+            .list_files(folder, max_keys, TIMEOUT, cancel)
             .await
     }
 
@@ -138,13 +137,12 @@ impl RemoteStorage for UnreliableWrapper {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
         self.inner
-            .list(prefix, mode, max_keys, timeout, cancel)
+            .list(prefix, mode, max_keys, TIMEOUT, cancel)
             .await
     }
 
@@ -156,24 +154,22 @@ impl RemoteStorage for UnreliableWrapper {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::Upload(to.clone()))?;
         self.inner
-            .upload(data, data_size_bytes, to, metadata, timeout, cancel)
+            .upload(data, data_size_bytes, to, metadata, TIMEOUT, cancel)
             .await
     }
 
     async fn download(
         &self,
         from: &RemotePath,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         self.attempt(RemoteOp::Download(from.clone()))
             .map_err(DownloadError::Other)?;
-        self.inner.download(from, timeout, cancel).await
+        self.inner.download(from, TIMEOUT, cancel).await
     }
 
     async fn download_byte_range(
@@ -181,7 +177,6 @@ impl RemoteStorage for UnreliableWrapper {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // Note: We treat any download_byte_range as an "attempt" of the same
@@ -190,30 +185,24 @@ impl RemoteStorage for UnreliableWrapper {
         self.attempt(RemoteOp::Download(from.clone()))
             .map_err(DownloadError::Other)?;
         self.inner
-            .download_byte_range(from, start_inclusive, end_exclusive, timeout, cancel)
+            .download_byte_range(from, start_inclusive, end_exclusive, TIMEOUT, cancel)
             .await
     }
 
-    async fn delete(
-        &self,
-        path: &RemotePath,
-        timeout: Duration,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
-        self.delete_inner(path, true, timeout, cancel).await
+    async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
+        self.delete_inner(path, true, cancel).await
     }
 
     async fn delete_objects<'a>(
         &self,
         paths: &'a [RemotePath],
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::DeleteObjects(paths.to_vec()))?;
         let mut error_counter = 0;
         for path in paths {
             // Dont record attempt because it was already recorded above
-            if (self.delete_inner(path, false, timeout, cancel).await).is_err() {
+            if (self.delete_inner(path, false, cancel).await).is_err() {
                 error_counter += 1;
             }
         }
@@ -230,13 +219,12 @@ impl RemoteStorage for UnreliableWrapper {
         &self,
         from: &RemotePath,
         to: &RemotePath,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         // copy is equivalent to download + upload
         self.attempt(RemoteOp::Download(from.clone()))?;
         self.attempt(RemoteOp::Upload(to.clone()))?;
-        self.inner.copy_object(from, to, timeout, cancel).await
+        self.inner.copy_object(from, to, TIMEOUT, cancel).await
     }
 
     async fn time_travel_recover(

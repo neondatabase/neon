@@ -36,12 +36,13 @@ const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
 #[derive(Debug, Clone)]
 pub struct LocalFs {
     storage_root: Utf8PathBuf,
+    timeout: Duration,
 }
 
 impl LocalFs {
     /// Attempts to create local FS storage, along with its root directory.
     /// Storage root will be created (if does not exist) and transformed into an absolute path (if passed as relative).
-    pub fn new(mut storage_root: Utf8PathBuf) -> anyhow::Result<Self> {
+    pub fn new(mut storage_root: Utf8PathBuf, timeout: Duration) -> anyhow::Result<Self> {
         if !storage_root.exists() {
             std::fs::create_dir_all(&storage_root).with_context(|| {
                 format!("Failed to create all directories in the given root path {storage_root:?}")
@@ -53,7 +54,10 @@ impl LocalFs {
             })?;
         }
 
-        Ok(Self { storage_root })
+        Ok(Self {
+            storage_root,
+            timeout,
+        })
     }
 
     // mirrors S3Bucket::s3_object_to_relative_path
@@ -284,7 +288,6 @@ impl RemoteStorage for LocalFs {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError> {
         let op = async {
@@ -349,7 +352,7 @@ impl RemoteStorage for LocalFs {
         };
 
         let timeout = async {
-            tokio::time::sleep(timeout).await;
+            tokio::time::sleep(self.timeout).await;
             Err(DownloadError::Timeout)
         };
 
@@ -371,7 +374,6 @@ impl RemoteStorage for LocalFs {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let cancel = cancel.child_token();
@@ -382,7 +384,7 @@ impl RemoteStorage for LocalFs {
         // race the upload0 to the timeout; if it goes over, do a graceful shutdown
         let (res, timeout) = tokio::select! {
             res = &mut op => (res, false),
-            _ = tokio::time::sleep(timeout) => {
+            _ = tokio::time::sleep(self.timeout) => {
                 cancel.cancel();
                 (op.await, true)
             }
@@ -401,7 +403,6 @@ impl RemoteStorage for LocalFs {
     async fn download(
         &self,
         from: &RemotePath,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let target_path = from.with_base(&self.storage_root);
@@ -422,7 +423,7 @@ impl RemoteStorage for LocalFs {
                 .await
                 .map_err(DownloadError::Other)?;
 
-            let cancel_or_timeout = crate::support::cancel_or_timeout(timeout, cancel.clone());
+            let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
             let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
 
             Ok(Download {
@@ -441,7 +442,6 @@ impl RemoteStorage for LocalFs {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         if let Some(end_exclusive) = end_exclusive {
@@ -484,7 +484,7 @@ impl RemoteStorage for LocalFs {
             let source = source.take(end_exclusive.unwrap_or(len) - start_inclusive);
             let source = ReaderStream::new(source);
 
-            let cancel_or_timeout = crate::support::cancel_or_timeout(timeout, cancel.clone());
+            let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
             let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
 
             Ok(Download {
@@ -498,12 +498,7 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete(
-        &self,
-        path: &RemotePath,
-        _timeout: Duration,
-        _cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
+    async fn delete(&self, path: &RemotePath, _cancel: &CancellationToken) -> anyhow::Result<()> {
         let file_path = path.with_base(&self.storage_root);
         match fs::remove_file(&file_path).await {
             Ok(()) => Ok(()),
@@ -518,11 +513,10 @@ impl RemoteStorage for LocalFs {
     async fn delete_objects<'a>(
         &self,
         paths: &'a [RemotePath],
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         for path in paths {
-            self.delete(path, timeout, cancel).await?
+            self.delete(path, cancel).await?
         }
         Ok(())
     }
@@ -531,7 +525,6 @@ impl RemoteStorage for LocalFs {
         &self,
         from: &RemotePath,
         to: &RemotePath,
-        _timeout: Duration,
         _cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let from_path = from.with_base(&self.storage_root);
@@ -636,8 +629,6 @@ mod fs_tests {
     use futures_util::Stream;
     use std::{collections::HashMap, io::Write};
 
-    const TIMEOUT: Duration = Duration::from_secs(120);
-
     async fn read_and_check_metadata(
         storage: &LocalFs,
         remote_storage_path: &RemotePath,
@@ -645,7 +636,7 @@ mod fs_tests {
     ) -> anyhow::Result<String> {
         let cancel = CancellationToken::new();
         let download = storage
-            .download(remote_storage_path, TIMEOUT, &cancel)
+            .download(remote_storage_path, &cancel)
             .await
             .map_err(|e| anyhow::anyhow!("Download failed: {e}"))?;
         ensure!(
@@ -662,14 +653,14 @@ mod fs_tests {
     async fn upload_file() -> anyhow::Result<()> {
         let (storage, cancel) = create_storage()?;
 
-        let target_path_1 = upload_dummy_file(&storage, "upload_1", None, TIMEOUT, &cancel).await?;
+        let target_path_1 = upload_dummy_file(&storage, "upload_1", None, &cancel).await?;
         assert_eq!(
             storage.list_all().await?,
             vec![target_path_1.clone()],
             "Should list a single file after first upload"
         );
 
-        let target_path_2 = upload_dummy_file(&storage, "upload_2", None, TIMEOUT, &cancel).await?;
+        let target_path_2 = upload_dummy_file(&storage, "upload_2", None, &cancel).await?;
         assert_eq!(
             list_files_sorted(&storage).await?,
             vec![target_path_1.clone(), target_path_2.clone()],
@@ -690,37 +681,34 @@ mod fs_tests {
         // Check that you get an error if the size parameter doesn't match the actual
         // size of the stream.
         storage
-            .upload(content(), 0, &id, None, TIMEOUT, &cancel)
+            .upload(content(), 0, &id, None, &cancel)
             .await
             .expect_err("upload with zero size succeeded");
         storage
-            .upload(content(), 4, &id, None, TIMEOUT, &cancel)
+            .upload(content(), 4, &id, None, &cancel)
             .await
             .expect_err("upload with too short size succeeded");
         storage
-            .upload(content(), 6, &id, None, TIMEOUT, &cancel)
+            .upload(content(), 6, &id, None, &cancel)
             .await
             .expect_err("upload with too large size succeeded");
 
         // Correct size is 5, this should succeed.
-        storage
-            .upload(content(), 5, &id, None, TIMEOUT, &cancel)
-            .await?;
+        storage.upload(content(), 5, &id, None, &cancel).await?;
 
         Ok(())
     }
 
     fn create_storage() -> anyhow::Result<(LocalFs, CancellationToken)> {
         let storage_root = tempdir()?.path().to_path_buf();
-        LocalFs::new(storage_root).map(|s| (s, CancellationToken::new()))
+        LocalFs::new(storage_root, Duration::from_secs(120)).map(|s| (s, CancellationToken::new()))
     }
 
     #[tokio::test]
     async fn download_file() -> anyhow::Result<()> {
         let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target =
-            upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
 
         let contents = read_and_check_metadata(&storage, &upload_target, None).await?;
         assert_eq!(
@@ -730,7 +718,7 @@ mod fs_tests {
         );
 
         let non_existing_path = "somewhere/else";
-        match storage.download(&RemotePath::new(Utf8Path::new(non_existing_path))?, TIMEOUT, &cancel).await {
+        match storage.download(&RemotePath::new(Utf8Path::new(non_existing_path))?, &cancel).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -741,8 +729,7 @@ mod fs_tests {
     async fn download_file_range_positive() -> anyhow::Result<()> {
         let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target =
-            upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
 
         let full_range_download_contents =
             read_and_check_metadata(&storage, &upload_target, None).await?;
@@ -760,7 +747,6 @@ mod fs_tests {
                 &upload_target,
                 0,
                 Some(first_part_local.len() as u64),
-                TIMEOUT,
                 &cancel,
             )
             .await?;
@@ -780,7 +766,6 @@ mod fs_tests {
                 &upload_target,
                 first_part_local.len() as u64,
                 Some((first_part_local.len() + second_part_local.len()) as u64),
-                TIMEOUT,
                 &cancel,
             )
             .await?;
@@ -796,7 +781,7 @@ mod fs_tests {
         );
 
         let suffix_bytes = storage
-            .download_byte_range(&upload_target, 13, None, TIMEOUT, &cancel)
+            .download_byte_range(&upload_target, 13, None, &cancel)
             .await?
             .download_stream;
         let suffix_bytes = aggregate(suffix_bytes).await?;
@@ -804,7 +789,7 @@ mod fs_tests {
         assert_eq!(upload_name, suffix);
 
         let all_bytes = storage
-            .download_byte_range(&upload_target, 0, None, TIMEOUT, &cancel)
+            .download_byte_range(&upload_target, 0, None, &cancel)
             .await?
             .download_stream;
         let all_bytes = aggregate(all_bytes).await?;
@@ -818,8 +803,7 @@ mod fs_tests {
     async fn download_file_range_negative() -> anyhow::Result<()> {
         let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target =
-            upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
 
         let start = 1_000_000_000;
         let end = start + 1;
@@ -828,7 +812,6 @@ mod fs_tests {
                 &upload_target,
                 start,
                 Some(end), // exclusive end
-                TIMEOUT,
                 &cancel,
             )
             .await
@@ -846,7 +829,7 @@ mod fs_tests {
         let end = 234;
         assert!(start > end, "Should test an incorrect range");
         match storage
-            .download_byte_range(&upload_target, start, Some(end), TIMEOUT, &cancel)
+            .download_byte_range(&upload_target, start, Some(end), &cancel)
             .await
         {
             Ok(_) => panic!("Should not allow downloading wrong ranges"),
@@ -865,14 +848,13 @@ mod fs_tests {
     async fn delete_file() -> anyhow::Result<()> {
         let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target =
-            upload_dummy_file(&storage, upload_name, None, TIMEOUT, &cancel).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
 
-        storage.delete(&upload_target, TIMEOUT, &cancel).await?;
+        storage.delete(&upload_target, &cancel).await?;
         assert!(storage.list_all().await?.is_empty());
 
         storage
-            .delete(&upload_target, TIMEOUT, &cancel)
+            .delete(&upload_target, &cancel)
             .await
             .expect("Should allow deleting non-existing storage files");
 
@@ -887,14 +869,8 @@ mod fs_tests {
             ("one".to_string(), "1".to_string()),
             ("two".to_string(), "2".to_string()),
         ]));
-        let upload_target = upload_dummy_file(
-            &storage,
-            upload_name,
-            Some(metadata.clone()),
-            TIMEOUT,
-            &cancel,
-        )
-        .await?;
+        let upload_target =
+            upload_dummy_file(&storage, upload_name, Some(metadata.clone()), &cancel).await?;
 
         let full_range_download_contents =
             read_and_check_metadata(&storage, &upload_target, Some(&metadata)).await?;
@@ -912,7 +888,6 @@ mod fs_tests {
                 &upload_target,
                 0,
                 Some(first_part_local.len() as u64),
-                TIMEOUT,
                 &cancel,
             )
             .await?;
@@ -936,20 +911,18 @@ mod fs_tests {
     async fn list() -> anyhow::Result<()> {
         // No delimiter: should recursively list everything
         let (storage, cancel) = create_storage()?;
-        let child =
-            upload_dummy_file(&storage, "grandparent/parent/child", None, TIMEOUT, &cancel).await?;
-        let uncle =
-            upload_dummy_file(&storage, "grandparent/uncle", None, TIMEOUT, &cancel).await?;
+        let child = upload_dummy_file(&storage, "grandparent/parent/child", None, &cancel).await?;
+        let uncle = upload_dummy_file(&storage, "grandparent/uncle", None, &cancel).await?;
 
         let listing = storage
-            .list(None, ListingMode::NoDelimiter, None, TIMEOUT, &cancel)
+            .list(None, ListingMode::NoDelimiter, None, &cancel)
             .await?;
         assert!(listing.prefixes.is_empty());
         assert_eq!(listing.keys, [uncle.clone(), child.clone()].to_vec());
 
         // Delimiter: should only go one deep
         let listing = storage
-            .list(None, ListingMode::WithDelimiter, None, TIMEOUT, &cancel)
+            .list(None, ListingMode::WithDelimiter, None, &cancel)
             .await?;
 
         assert_eq!(
@@ -964,7 +937,6 @@ mod fs_tests {
                 Some(&RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()),
                 ListingMode::WithDelimiter,
                 None,
-                TIMEOUT,
                 &cancel,
             )
             .await?;
@@ -989,18 +961,10 @@ mod fs_tests {
             let len = body.len();
             let body =
                 futures::stream::once(futures::future::ready(std::io::Result::Ok(body.clone())));
-            storage
-                .upload(body, len, &path, None, TIMEOUT, &cancel)
-                .await?;
+            storage.upload(body, len, &path, None, &cancel).await?;
         }
 
-        let read = aggregate(
-            storage
-                .download(&path, TIMEOUT, &cancel)
-                .await?
-                .download_stream,
-        )
-        .await?;
+        let read = aggregate(storage.download(&path, &cancel).await?.download_stream).await?;
         assert_eq!(body, read);
 
         let shorter = Bytes::from_static(b"shorter body");
@@ -1008,18 +972,10 @@ mod fs_tests {
             let len = shorter.len();
             let body =
                 futures::stream::once(futures::future::ready(std::io::Result::Ok(shorter.clone())));
-            storage
-                .upload(body, len, &path, None, TIMEOUT, &cancel)
-                .await?;
+            storage.upload(body, len, &path, None, &cancel).await?;
         }
 
-        let read = aggregate(
-            storage
-                .download(&path, TIMEOUT, &cancel)
-                .await?
-                .download_stream,
-        )
-        .await?;
+        let read = aggregate(storage.download(&path, &cancel).await?.download_stream).await?;
         assert_eq!(shorter, read);
         Ok(())
     }
@@ -1038,7 +994,7 @@ mod fs_tests {
             let cancel = cancel.child_token();
             cancel.cancel();
             let e = storage
-                .upload(body, len, &path, None, TIMEOUT, &cancel)
+                .upload(body, len, &path, None, &cancel)
                 .await
                 .unwrap_err();
 
@@ -1049,18 +1005,10 @@ mod fs_tests {
             let len = body.len();
             let body =
                 futures::stream::once(futures::future::ready(std::io::Result::Ok(body.clone())));
-            storage
-                .upload(body, len, &path, None, TIMEOUT, &cancel)
-                .await?;
+            storage.upload(body, len, &path, None, &cancel).await?;
         }
 
-        let read = aggregate(
-            storage
-                .download(&path, TIMEOUT, &cancel)
-                .await?
-                .download_stream,
-        )
-        .await?;
+        let read = aggregate(storage.download(&path, &cancel).await?.download_stream).await?;
         assert_eq!(body, read);
 
         Ok(())
@@ -1070,7 +1018,6 @@ mod fs_tests {
         storage: &LocalFs,
         name: &str,
         metadata: Option<StorageMetadata>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<RemotePath> {
         let from_path = storage
@@ -1094,7 +1041,7 @@ mod fs_tests {
         let file = tokio_util::io::ReaderStream::new(file);
 
         storage
-            .upload(file, size, &relative_path, metadata, timeout, cancel)
+            .upload(file, size, &relative_path, metadata, cancel)
             .await?;
         Ok(relative_path)
     }

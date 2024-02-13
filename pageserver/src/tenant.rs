@@ -4033,6 +4033,7 @@ pub(crate) mod harness {
             std::fs::create_dir_all(&remote_fs_dir).unwrap();
             let config = RemoteStorageConfig {
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
             let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));
