@@ -4431,6 +4431,7 @@ dependencies = [
  "serde_json",
  "test-context",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "toml_edit",
  "tracing",

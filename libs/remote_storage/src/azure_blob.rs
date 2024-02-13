@@ -22,6 +22,7 @@ use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerCl
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use http_types::{StatusCode, Url};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -129,8 +130,6 @@ impl AzureBlobStorage {
 
         let _permit = self.permit(kind, cancel).await?;
 
-        let timeout = tokio::time::sleep(self.timeout);
-
         let mut etag = None;
         let mut last_modified = None;
         let mut metadata = HashMap::new();
@@ -138,10 +137,27 @@ impl AzureBlobStorage {
         // https://github.com/neondatabase/neon/issues/5563
 
         let download = async {
-            let mut response = builder.into_stream();
+            let response = builder
+                // convert to concrete Pageable
+                .into_stream()
+                // convert to TryStream
+                .into_stream()
+                .map_err(to_download_error);
+
+            // apply per request timeout
+            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+
+            // flatten
+            let response = response.map(|res| match res {
+                Ok(res) => res,
+                Err(_elapsed) => Err(DownloadError::Timeout),
+            });
+
+            let mut response = std::pin::pin!(response);
+
             let mut bufs = Vec::new();
             while let Some(part) = response.next().await {
-                let part = part.map_err(to_download_error)?;
+                let part = part?;
                 let etag_str: &str = part.blob.properties.etag.as_ref();
                 if etag.is_none() {
                     etag = Some(etag.unwrap_or_else(|| etag_str.to_owned()));
@@ -170,7 +186,6 @@ impl AzureBlobStorage {
         tokio::select! {
             bufs = download => bufs,
             _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-            _ = timeout => Err(DownloadError::Timeout),
         }
     }
 

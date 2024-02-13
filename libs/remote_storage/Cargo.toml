@@ -21,6 +21,7 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "fs", "io-util"] }
+tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["compat"] }
 toml_edit.workspace = true
 tracing.workspace = true
