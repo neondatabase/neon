@@ -349,7 +349,7 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
     .await
     .unwrap()?;
     info!("terminated Postges");
-    return Ok(());
+    Ok(())
 }
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
