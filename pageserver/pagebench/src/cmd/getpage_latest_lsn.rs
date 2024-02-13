@@ -1,10 +1,10 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use futures::future::join_all;
 use pageserver_api::key::{is_rel_block_key, key_to_rel_block, Key};
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::PagestreamGetPageRequest;
 
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
@@ -61,11 +61,15 @@ pub(crate) struct Args {
 #[derive(Debug, Default)]
 struct LiveStats {
     completed_requests: AtomicU64,
+    dropped_requests: AtomicU64,
 }
 
 impl LiveStats {
-    fn inc(&self) {
+    fn request_done(&self) {
         self.completed_requests.fetch_add(1, Ordering::Relaxed);
+    }
+    fn dropped(&self) {
+        self.dropped_requests.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -222,7 +226,10 @@ async fn main_impl(
 
     let num_client_tasks = args.num_clients.get() * timelines.len();
     let num_live_stats_dump = 1;
-    let num_work_sender_tasks = 1;
+    let num_work_sender_tasks = args
+        .per_target_rate_limit
+        .map(|_| num_client_tasks)
+        .unwrap_or(1);
     let num_main_impl = 1;
 
     let start_work_barrier = Arc::new(tokio::sync::Barrier::new(
@@ -238,10 +245,12 @@ async fn main_impl(
                 let start = std::time::Instant::now();
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let completed_requests = stats.completed_requests.swap(0, Ordering::Relaxed);
+                let dropped_requests = stats.dropped_requests.swap(0, Ordering::Relaxed);
                 let elapsed = start.elapsed();
                 info!(
-                    "RPS: {:.0}",
-                    completed_requests as f64 / elapsed.as_secs_f64()
+                    "RPS: {:.0}   DROPPED: {:.0}",
+                    completed_requests as f64 / elapsed.as_secs_f64(),
+                    dropped_requests as f64 / elapsed.as_secs_f64()
                 );
             }
         }
@@ -253,7 +262,7 @@ async fn main_impl(
     let mut tasks = Vec::new();
     for timeline in timelines.iter().cloned() {
         for num_client in 0..args.num_clients.get() {
-            let (sender, receiver) = tokio::sync::mpsc::channel(10); // TODO: not sure what the implications of this are
+            let (sender, receiver) = tokio::sync::mpsc::channel(1); // TODO: not sure what the implications of this are
             let worker_id = WorkerId {
                 timeline,
                 num_client,
@@ -273,6 +282,7 @@ async fn main_impl(
     let work_sender: Pin<Box<dyn Send + Future<Output = ()>>> = {
         let start_work_barrier = start_work_barrier.clone();
         let cancel = cancel.clone();
+        let live_stats = live_stats.clone();
         match args.per_target_rate_limit {
             None => Box::pin(async move {
                 let weights = rand::distributions::weighted::WeightedIndex::new(
@@ -304,17 +314,25 @@ async fn main_impl(
                         )
                     };
                     let sender = work_senders.get(&timeline).unwrap();
-                    // TODO: what if this blocks?
-                    if sender.send(req).await.is_err() {
-                        assert!(cancel.is_cancelled(), "client has gone away unexpectedly");
+                    match sender.try_send(req) {
+                        Ok(()) => (),
+                        Err(TrySendError::Full(_)) => {
+                            live_stats.dropped();
+                        }
+                        Err(TrySendError::Closed(_)) => {
+                            assert!(cancel.is_cancelled(), "client has gone away unexpectedly");
+                        }
                     }
                 }
             }),
             Some(rps_limit) => Box::pin(async move {
+                let start_work_barrier = start_work_barrier.clone();
                 let period = Duration::from_secs_f64(1.0 / (rps_limit as f64));
                 let make_task: &dyn Fn(WorkerId) -> Pin<Box<dyn Send + Future<Output = ()>>> =
                     &|worker_id| {
-                        let sender = work_senders.get(&worker_id).unwrap();
+                        let live_stats = live_stats.clone();
+                        let start_work_barrier = start_work_barrier.clone();
+                        let sender = work_senders.get(&worker_id).unwrap().clone();
                         let ranges: Vec<KeyRange> = all_ranges
                             .iter()
                             .filter(|r| r.timeline == worker_id.timeline)
@@ -327,6 +345,7 @@ async fn main_impl(
 
                         let cancel = cancel.clone();
                         Box::pin(async move {
+                            start_work_barrier.wait().await;
                             let mut ticker = tokio::time::interval(period);
                             ticker.set_missed_tick_behavior(
                                 /* TODO review this choice */
@@ -349,21 +368,30 @@ async fn main_impl(
                                         blkno: block_no,
                                     }
                                 };
-                                if sender.send(req).await.is_err() {
-                                    assert!(
-                                        cancel.is_cancelled(),
-                                        "client has gone away unexpectedly"
-                                    );
+                                match sender.try_send(req) {
+                                    Ok(()) => (),
+                                    Err(TrySendError::Full(_)) => {
+                                        live_stats.dropped();
+                                    }
+                                    Err(TrySendError::Closed(_)) => {
+                                        assert!(
+                                            cancel.is_cancelled(),
+                                            "client has gone away unexpectedly"
+                                        );
+                                    }
                                 }
                             }
                         })
                     };
 
-                let tasks: Vec<_> = work_senders.keys().map(|tl| make_task(*tl)).collect();
+                let mut tasks = JoinSet::new();
+                for tl in work_senders.keys() {
+                    tasks.spawn(make_task(*tl));
+                }
 
-                start_work_barrier.wait().await;
-
-                join_all(tasks).await;
+                while let Some(res) = tasks.join_next().await {
+                    res.unwrap();
+                }
             }),
         }
     };
@@ -439,7 +467,7 @@ async fn client(
                 .with_context(|| format!("getpage for {timeline}"))
                 .unwrap();
             let elapsed = start.elapsed();
-            live_stats.inc();
+            live_stats.request_done();
             STATS.with(|stats| {
                 stats.borrow().lock().unwrap().observe(elapsed).unwrap();
             });
