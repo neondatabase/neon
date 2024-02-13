@@ -131,27 +131,23 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         &mut self,
         src_buf: B,
     ) -> (B::Buf, Result<(), Error>) {
-        let src_buf_len = src_buf.bytes_init();
-        let (src_buf, res) = if src_buf_len > 0 {
-            let src_buf = src_buf.slice(0..src_buf_len);
-            let res = self.inner.write_all(&src_buf).await;
-            let src_buf = Slice::into_inner(src_buf);
-            (src_buf, res)
-        } else {
-            let res = self.inner.write_all(&[]).await;
-            (Slice::into_inner(src_buf.slice_full()), res)
+        let (src_buf, res) = self.inner.write_all(src_buf).await;
+        let nbytes = match res {
+            Ok(nbytes) => nbytes,
+            Err(e) => return (src_buf, Err(e)),
         };
-        if let Ok(()) = &res {
-            self.offset += src_buf_len as u64;
-        }
-        (src_buf, res)
+        self.offset += nbytes as u64;
+        (src_buf, Ok(()))
     }
 
     #[inline(always)]
     /// Flushes the internal buffer to the underlying `VirtualFile`.
     pub async fn flush_buffer(&mut self) -> Result<(), Error> {
-        self.inner.write_all(&self.buf).await?;
-        self.buf.clear();
+        let buf = std::mem::take(&mut self.buf);
+        let (mut buf, res) = self.inner.write_all(buf).await;
+        res?;
+        buf.clear();
+        self.buf = buf;
         Ok(())
     }
 
