@@ -45,7 +45,6 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use nix::sys::signal::{kill, Signal};
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use tracing::{error, info};
@@ -53,7 +52,7 @@ use url::Url;
 
 use compute_api::responses::ComputeStatus;
 
-use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec, PG_PID, SYNC_SAFEKEEPERS_PID};
+use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec, PG_PID, forward_termination_signal};
 use compute_tools::configurator::launch_configurator;
 use compute_tools::extension_server::get_pg_version;
 use compute_tools::http::api::launch_http_server;
@@ -363,7 +362,15 @@ fn main() -> Result<()> {
             .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
 
         info!("Postgres exited with code {}, shutting down", ecode);
-        exit_code = ecode.code()
+        exit_code = ecode.code();
+        let mut state = compute.state.lock().unwrap();
+        if state.status == ComputeStatus::TerminationPending {
+            // we were asked to terminate gracefully, don't exit to avoid restart
+            delay_exit = true
+        }
+        state.status = ComputeStatus::Terminated;
+        compute.state_changed.notify_all();
+        drop(state);
     }
 
     // Terminate the vm_monitor so it releases the file watcher on
@@ -523,16 +530,7 @@ fn cli() -> clap::Command {
 /// wait for termination which would be easy then.
 fn handle_exit_signal(sig: i32) {
     info!("received {sig} termination signal");
-    let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
-    if ss_pid != 0 {
-        let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
-        kill(ss_pid, Signal::SIGTERM).ok();
-    }
-    let pg_pid = PG_PID.load(Ordering::SeqCst);
-    if pg_pid != 0 {
-        let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
-        kill(pg_pid, Signal::SIGTERM).ok();
-    }
+    forward_termination_signal();
     exit(1);
 }
 
