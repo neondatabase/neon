@@ -24,23 +24,3 @@ select test_release_memory();   -- Release the remaining 15 MB
  test_release_memory 
 ---------------------
  
-(1 row)
-
-select test_consume_disk_space(20); -- Allocate 20 MB of disk space
- test_consume_disk_space 
--------------------------
- 
-(1 row)
-
-select test_release_disk_space(5);  -- Release 5 MB
- test_release_disk_space 
--------------------------
- 
-(1 row)
-
-select test_release_disk_space();   -- Release the remaining 15 MB
- test_release_disk_space 
--------------------------
- 
-(1 row)
-

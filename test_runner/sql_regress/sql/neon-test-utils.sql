@@ -9,7 +9,3 @@ select test_consume_cpu(1);
 select test_consume_memory(20); -- Allocate 20 MB
 select test_release_memory(5);  -- Release 5 MB
 select test_release_memory();   -- Release the remaining 15 MB
-
-select test_consume_disk_space(20); -- Allocate 20 MB of disk space
-select test_release_disk_space(5);  -- Release 5 MB
-select test_release_disk_space();   -- Release the remaining 15 MB

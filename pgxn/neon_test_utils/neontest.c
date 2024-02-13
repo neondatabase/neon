@@ -37,8 +37,6 @@ PG_FUNCTION_INFO_V1(test_consume_xids);
 PG_FUNCTION_INFO_V1(test_consume_cpu);
 PG_FUNCTION_INFO_V1(test_consume_memory);
 PG_FUNCTION_INFO_V1(test_release_memory);
-PG_FUNCTION_INFO_V1(test_consume_disk_space);
-PG_FUNCTION_INFO_V1(test_release_disk_space);
 PG_FUNCTION_INFO_V1(clear_buffer_cache);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
@@ -212,95 +210,6 @@ test_release_memory(PG_FUNCTION_ARGS)
 			pfree(chunk);
 			num_memory_chunks--;
 		}
-	}
-
-	PG_RETURN_VOID();
-}
-
-static File consume_file = -1;
-
-/*
- * test_consume_disk_space(megabytes int).
- *
- * Like test_consume_memory, but cretes temporary files adding up to given
- * size, instead of allocating memory.
- */
-Datum
-test_consume_disk_space(PG_FUNCTION_ARGS)
-{
-	int32		megabytes = PG_GETARG_INT32(0);
-	off_t		current_size;
-	off_t		desired_size;
-	char	   *zerobuf;
-
-	if (consume_file == -1)
-	{
-		consume_file = OpenTemporaryFile(true);
-		current_size = 0;
-	}
-	else
-		current_size = FileSize(consume_file);
-
-	desired_size = current_size + (off_t) megabytes * 1024 * 1024;
-	zerobuf = palloc0(1024 * 1024);
-
-	while (current_size < desired_size)
-	{
-		int			bytes_written;
-
-		bytes_written = FileWrite(consume_file, zerobuf,
-								  Min(desired_size - current_size, 1024 * 1024),
-								  current_size, PG_WAIT_EXTENSION);
-		if (bytes_written < 0)
-			elog(ERROR, "could not extend temporary file: %m");
-		current_size += bytes_written;
-
-		CHECK_FOR_INTERRUPTS();
-	}
-	pfree(zerobuf);
-
-	PG_RETURN_VOID();
-}
-
-/*
- * test_release_disk_space(megabytes int). NULL releases all
- */
-Datum
-test_release_disk_space(PG_FUNCTION_ARGS)
-{
-	TimestampTz start;
-
-	if (PG_ARGISNULL(0))
-	{
-		if (consume_file != -1)
-		{
-			FileClose(consume_file);
-			consume_file = -1;
-		}
-	}
-	else
-	{
-		int32		megabytes_to_release = PG_GETARG_INT32(0);
-		off_t		current_size;
-		off_t		desired_size;
-
-		if (consume_file == -1)
-		{
-			elog(WARNING, "no extra disk space is consumed at the moment");
-			PG_RETURN_VOID();
-		}
-		current_size = FileSize(consume_file);
-
-		if ((int64) megabytes_to_release * 1024 * 1024 > current_size)
-		{
-			elog(WARNING, "only %lld MB of disk space is currently consumed, releasing it all", (long long) current_size / (1024 * 1024));
-			desired_size = 0;
-		}
-		else
-		{
-			desired_size = current_size - (int64) megabytes_to_release * 1024 * 1024;
-		}
-		FileTruncate(consume_file, desired_size, PG_WAIT_EXTENSION);
 	}
 
 	PG_RETURN_VOID();
