@@ -155,6 +155,7 @@ impl Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            pending_aux_files: false,
             lsn,
         }
     }
@@ -868,6 +869,11 @@ pub struct DatadirModification<'a> {
     pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
+
+    // Whether we already wrote any aux file changes in this modification.  If true,
+    // [`Self::put_file`] may assume that it is safe to emit a delta rather than checking
+    // if AUX_FILES_KEY is already set.
+    pending_aux_files: bool,
 }
 
 impl<'a> DatadirModification<'a> {
@@ -1350,28 +1356,67 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
-            Ok(buf) => AuxFilesDirectory::des(&buf)?,
-            Err(e) => {
-                // This is expected: historical databases do not have the key.
-                debug!("Failed to get info about AUX files: {}", e);
-                AuxFilesDirectory {
-                    files: HashMap::new(),
-                }
-            }
-        };
-        let path = path.to_string();
-        if content.is_empty() {
-            dir.files.remove(&path);
+        let key = path.to_string();
+        let value = if content.is_empty() {
+            None
         } else {
-            dir.files.insert(path, Bytes::copy_from_slice(content));
+            Some(Bytes::copy_from_slice(content))
+        };
+
+        if self.pending_aux_files {
+            // We already updated aux files in `self`: emit a delta and update our latest value
+
+            self.put(
+                AUX_FILES_KEY,
+                Value::WalRecord(NeonWalRecord::AuxFile {
+                    key: key.clone(),
+                    value: value.clone(),
+                }),
+            );
+        } else {
+            // Check if the AUX_FILES_KEY is initialized
+            match self.get(AUX_FILES_KEY, ctx).await {
+                Ok(_) => {
+                    // Key is already set, we may append a delta
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::WalRecord(NeonWalRecord::AuxFile {
+                            key: key.clone(),
+                            value: value.clone(),
+                        }),
+                    );
+                }
+                Err(
+                    e @ (PageReconstructError::AncestorStopping(_)
+                    | PageReconstructError::Cancelled
+                    | PageReconstructError::AncestorLsnTimeout(_)),
+                ) => {
+                    // Important that we do not interpret a shutdown error as "not found" and thereby
+                    // reset the map.
+                    return Err(e.into());
+                }
+                // FIXME: PageReconstructError doesn't have an explicit variant for key-not-found, so
+                // we are assuming that all _other_ possible errors represents a missing key.  If some
+                // other error occurs, we may incorrectly reset the map of aux files.
+                Err(PageReconstructError::Other(_) | PageReconstructError::WalRedo(_)) => {
+                    // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                    let mut dir = AuxFilesDirectory {
+                        files: HashMap::new(),
+                    };
+                    dir.upsert(key, value);
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::Image(Bytes::from(
+                            AuxFilesDirectory::ser(&dir).context("serialize")?,
+                        )),
+                    );
+                }
+            };
         }
-        self.put(
-            AUX_FILES_KEY,
-            Value::Image(Bytes::from(
-                AuxFilesDirectory::ser(&dir).context("serialize")?,
-            )),
-        );
+
+        self.pending_aux_files = true;
+
         Ok(())
     }
 
@@ -1573,8 +1618,18 @@ struct RelDirectory {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct AuxFilesDirectory {
-    files: HashMap<String, Bytes>,
+pub(crate) struct AuxFilesDirectory {
+    pub(crate) files: HashMap<String, Bytes>,
+}
+
+impl AuxFilesDirectory {
+    pub(crate) fn upsert(&mut self, key: String, value: Option<Bytes>) {
+        if let Some(value) = value {
+            self.files.insert(key, value);
+        } else {
+            self.files.remove(&key);
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

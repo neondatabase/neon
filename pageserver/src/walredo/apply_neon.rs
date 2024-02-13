@@ -1,7 +1,8 @@
+use crate::pgdatadir_mapping::AuxFilesDirectory;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use pageserver_api::key::{key_to_rel_block, key_to_slru_block, Key};
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
@@ -12,6 +13,7 @@ use postgres_ffi::v14::nonrelfile_utils::{
 };
 use postgres_ffi::BLCKSZ;
 use tracing::*;
+use utils::bin_ser::BeSer;
 
 /// Can this request be served by neon redo functions
 /// or we need to pass it to wal-redo postgres process?
@@ -229,6 +231,14 @@ pub(crate) fn apply_in_neon(
                 LittleEndian::write_u32(&mut page[flagsoff..flagsoff + 4], flagsval);
                 LittleEndian::write_u32(&mut page[memberoff..memberoff + 4], member.xid);
             }
+        }
+        NeonWalRecord::AuxFile { key, value } => {
+            let mut dir = AuxFilesDirectory::des(page)?;
+            dir.upsert(key.clone(), value.clone());
+
+            page.clear();
+            let mut writer = page.writer();
+            dir.ser_into(&mut writer)?;
         }
     }
     Ok(())
