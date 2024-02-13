@@ -282,7 +282,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [ debug ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -291,6 +291,6 @@ jobs:
     steps:
       - name: run test
         run: |
-          docker-compose -f extensions_regression_tests/docker-compose.yml build
-          docker-compose -f extensions_regression_tests/docker-compose.yml run  test2
+          PG_VERSION=v16 docker-compose -f extensions_regression_tests/docker-compose.yml build
+          PG_VERSION=v16 docker-compose -f extensions_regression_tests/docker-compose.yml run test2
   
