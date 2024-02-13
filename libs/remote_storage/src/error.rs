@@ -37,11 +37,8 @@ impl DownloadError {
     pub fn is_permanent(&self) -> bool {
         use DownloadError::*;
         match self {
-            BadInput(_) => true,
-            NotFound => true,
-            Cancelled => true,
-            Timeout => false,
-            Other(_) => false,
+            BadInput(_) | NotFound | Cancelled => true,
+            Timeout | Other(_) => false,
         }
     }
 }
