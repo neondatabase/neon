@@ -119,11 +119,6 @@ pub fn generate_pg_control(
     // Generate new pg_control needed for bootstrap
     checkpoint.redo = normalize_lsn(lsn, WAL_SEGMENT_SIZE).0;
 
-    //reset some fields we don't want to preserve
-    //TODO Check this.
-    //We may need to determine the value from twophase data.
-    checkpoint.oldestActiveXid = 0;
-
     //save new values in pg_control
     pg_control.checkPoint = 0;
     pg_control.checkPointCopy = checkpoint;

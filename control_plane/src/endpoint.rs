@@ -295,6 +295,7 @@ impl Endpoint {
         conf.append("wal_log_hints", "off");
         conf.append("max_replication_slots", "10");
         conf.append("hot_standby", "on");
+        conf.append("hot_standby_feedback", "on");
         conf.append("shared_buffers", "1MB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
@@ -310,6 +311,9 @@ impl Endpoint {
 
         // Load the 'neon' extension
         conf.append("shared_preload_libraries", "neon");
+
+		// It is only for testing, in real environment this GUC is passed by control plane
+		conf.append("neon.primary_is_running", "on");
 
         conf.append_line("");
         // Replication-related configurations, such as WAL sending
