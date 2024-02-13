@@ -1958,6 +1958,7 @@ impl Drop for TimelineMetrics {
                 RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         }
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = DIRECTORY_ENTRIES_COUNT.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         let _ =
             NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
