@@ -263,16 +263,21 @@ impl RemoteStorage for AzureBlobStorage {
                 builder = builder.max_results(MaxResults::new(limit));
             }
 
-            let mut response = builder.into_stream();
+            let response = builder.into_stream();
+            let response = response.into_stream().map_err(to_download_error);
+            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+            let response = response.map(|res| match res {
+                Ok(res) => res,
+                Err(_elapsed) => Err(DownloadError::Timeout),
+            });
+
+            let mut response = std::pin::pin!(response);
+
             let mut res = Listing::default();
-            let mut timeout = std::pin::pin!(tokio::time::sleep(self.timeout));
 
             let mut max_keys = max_keys.map(|mk| mk.get());
-            while let Some(l) = tokio::select! {
-                next = response.next() => next,
-                _ = &mut timeout => return Err(DownloadError::Timeout),
-            } {
-                let entry = l.map_err(to_download_error)?;
+            while let Some(entry) = response.next().await {
+                let entry = entry?;
                 let prefix_iter = entry
                     .blobs
                     .prefixes()
