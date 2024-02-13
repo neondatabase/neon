@@ -10,7 +10,7 @@ use crate::{
     tenant::{
         config::AttachmentMode,
         mgr::TenantManager,
-        remote_timeline_client::{remote_heatmap_path, UPLOAD_TIMEOUT},
+        remote_timeline_client::remote_heatmap_path,
         span::debug_assert_current_span_has_tenant_id,
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
         Tenant,
@@ -416,7 +416,7 @@ async fn upload_tenant_heatmap(
         || async {
             let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
             remote_storage
-                .upload_storage_object(bytes, size, &path, UPLOAD_TIMEOUT, cancel)
+                .upload_storage_object(bytes, size, &path, cancel)
                 .await
         },
         TimeoutOrCancel::caused_by_cancel,

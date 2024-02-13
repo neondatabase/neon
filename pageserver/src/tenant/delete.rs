@@ -19,9 +19,7 @@ use crate::{
 
 use super::{
     mgr::{GetTenantError, TenantSlotError, TenantSlotUpsertError, TenantsMap},
-    remote_timeline_client::{
-        DELETION_TIMEOUT, FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD,
-    },
+    remote_timeline_client::{FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD},
     span,
     timeline::delete::DeleteTimelineFlow,
     tree_sort_timelines, DeleteTimelineError, Tenant, TenantPreload,
@@ -78,8 +76,6 @@ async fn create_remote_delete_mark(
     tenant_shard_id: &TenantShardId,
     cancel: &CancellationToken,
 ) -> Result<(), DeleteTenantError> {
-    use crate::tenant::remote_timeline_client::UPLOAD_TIMEOUT;
-
     let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
 
     let data: &[u8] = &[];
@@ -88,7 +84,7 @@ async fn create_remote_delete_mark(
             let data = bytes::Bytes::from_static(data);
             let stream = futures::stream::once(futures::future::ready(Ok(data)));
             remote_storage
-                .upload(stream, 0, &remote_mark_path, None, UPLOAD_TIMEOUT, cancel)
+                .upload(stream, 0, &remote_mark_path, None, cancel)
                 .await
         },
         TimeoutOrCancel::caused_by_cancel,
@@ -188,7 +184,7 @@ async fn remove_tenant_remote_delete_mark(
     if let Some(remote_storage) = remote_storage {
         let path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
         backoff::retry(
-            || async { remote_storage.delete(&path, DELETION_TIMEOUT, cancel).await },
+            || async { remote_storage.delete(&path, cancel).await },
             TimeoutOrCancel::caused_by_cancel,
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,

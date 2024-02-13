@@ -2,7 +2,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use remote_storage::RemotePath;
 use std::sync::Arc;
-use std::{collections::HashSet, num::NonZeroU32, time::Duration};
+use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -12,8 +12,6 @@ use crate::common::{download_to_vec, upload_stream, wrap_stream};
 use super::{
     MaybeEnabledStorage, MaybeEnabledStorageWithSimpleTestBlobs, MaybeEnabledStorageWithTestBlobs,
 };
-
-const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Tests that S3 client can list all prefixes, even if the response come paginated and requires multiple S3 queries.
 /// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified.
@@ -56,7 +54,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     let base_prefix = RemotePath::new(Utf8Path::new(ctx.enabled.base_prefix))
         .context("common_prefix construction")?;
     let root_remote_prefixes = test_client
-        .list_prefixes(None, TIMEOUT, &cancel)
+        .list_prefixes(None, &cancel)
         .await
         .context("client list root prefixes failure")?
         .into_iter()
@@ -67,7 +65,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     );
 
     let nested_remote_prefixes = test_client
-        .list_prefixes(Some(&base_prefix), TIMEOUT, &cancel)
+        .list_prefixes(Some(&base_prefix), &cancel)
         .await
         .context("client list nested prefixes failure")?
         .into_iter()
@@ -109,7 +107,7 @@ async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> a
     let base_prefix =
         RemotePath::new(Utf8Path::new("folder1")).context("common_prefix construction")?;
     let root_files = test_client
-        .list_files(None, None, TIMEOUT, &cancel)
+        .list_files(None, None, &cancel)
         .await
         .context("client list root files failure")?
         .into_iter()
@@ -123,13 +121,13 @@ async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> a
     // Test that max_keys limit works. In total there are about 21 files (see
     // upload_simple_remote_data call in test_real_s3.rs).
     let limited_root_files = test_client
-        .list_files(None, Some(NonZeroU32::new(2).unwrap()), TIMEOUT, &cancel)
+        .list_files(None, Some(NonZeroU32::new(2).unwrap()), &cancel)
         .await
         .context("client list root files failure")?;
     assert_eq!(limited_root_files.len(), 2);
 
     let nested_remote_files = test_client
-        .list_files(Some(&base_prefix), None, TIMEOUT, &cancel)
+        .list_files(Some(&base_prefix), None, &cancel)
         .await
         .context("client list nested files failure")?
         .into_iter()
@@ -164,7 +162,7 @@ async fn delete_non_exising_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Resu
     .with_context(|| "RemotePath conversion")?;
 
     ctx.client
-        .delete(&path, TIMEOUT, &cancel)
+        .delete(&path, &cancel)
         .await
         .expect("should succeed");
 
@@ -191,31 +189,21 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
         .with_context(|| "RemotePath conversion")?;
 
     let (data, len) = upload_stream("remote blob data1".as_bytes().into());
-    ctx.client
-        .upload(data, len, &path1, None, TIMEOUT, &cancel)
-        .await?;
+    ctx.client.upload(data, len, &path1, None, &cancel).await?;
 
     let (data, len) = upload_stream("remote blob data2".as_bytes().into());
-    ctx.client
-        .upload(data, len, &path2, None, TIMEOUT, &cancel)
-        .await?;
+    ctx.client.upload(data, len, &path2, None, &cancel).await?;
 
     let (data, len) = upload_stream("remote blob data3".as_bytes().into());
-    ctx.client
-        .upload(data, len, &path3, None, TIMEOUT, &cancel)
-        .await?;
+    ctx.client.upload(data, len, &path3, None, &cancel).await?;
 
-    ctx.client
-        .delete_objects(&[path1, path2], TIMEOUT, &cancel)
-        .await?;
+    ctx.client.delete_objects(&[path1, path2], &cancel).await?;
 
-    let prefixes = ctx.client.list_prefixes(None, TIMEOUT, &cancel).await?;
+    let prefixes = ctx.client.list_prefixes(None, &cancel).await?;
 
     assert_eq!(prefixes.len(), 1);
 
-    ctx.client
-        .delete_objects(&[path3], TIMEOUT, &cancel)
-        .await?;
+    ctx.client.delete_objects(&[path3], &cancel).await?;
 
     Ok(())
 }
@@ -236,19 +224,17 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
 
     let (data, len) = wrap_stream(orig.clone());
 
-    ctx.client
-        .upload(data, len, &path, None, TIMEOUT, &cancel)
-        .await?;
+    ctx.client.upload(data, len, &path, None, &cancel).await?;
 
     // Normal download request
-    let dl = ctx.client.download(&path, TIMEOUT, &cancel).await?;
+    let dl = ctx.client.download(&path, &cancel).await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     // Full range (end specified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 0, Some(len as u64), TIMEOUT, &cancel)
+        .download_byte_range(&path, 0, Some(len as u64), &cancel)
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
@@ -256,7 +242,7 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // partial range (end specified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 4, Some(10), TIMEOUT, &cancel)
+        .download_byte_range(&path, 4, Some(10), &cancel)
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..10]);
@@ -264,7 +250,7 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // partial range (end beyond real end)
     let dl = ctx
         .client
-        .download_byte_range(&path, 8, Some(len as u64 * 100), TIMEOUT, &cancel)
+        .download_byte_range(&path, 8, Some(len as u64 * 100), &cancel)
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[8..]);
@@ -272,7 +258,7 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // Partial range (end unspecified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 4, None, TIMEOUT, &cancel)
+        .download_byte_range(&path, 4, None, &cancel)
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..]);
@@ -280,14 +266,14 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // Full range (end unspecified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 0, None, TIMEOUT, &cancel)
+        .download_byte_range(&path, 0, None, &cancel)
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     debug!("Cleanup: deleting file at path {path:?}");
     ctx.client
-        .delete(&path, TIMEOUT, &cancel)
+        .delete(&path, &cancel)
         .await
         .with_context(|| format!("{path:?} removal"))?;
 
@@ -316,22 +302,18 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
 
     let (data, len) = wrap_stream(orig.clone());
 
-    ctx.client
-        .upload(data, len, &path, None, TIMEOUT, &cancel)
-        .await?;
+    ctx.client.upload(data, len, &path, None, &cancel).await?;
 
     // Normal download request
-    ctx.client
-        .copy_object(&path, &path_dest, TIMEOUT, &cancel)
-        .await?;
+    ctx.client.copy_object(&path, &path_dest, &cancel).await?;
 
-    let dl = ctx.client.download(&path_dest, TIMEOUT, &cancel).await?;
+    let dl = ctx.client.download(&path_dest, &cancel).await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     debug!("Cleanup: deleting file at path {path:?}");
     ctx.client
-        .delete_objects(&[path.clone(), path_dest.clone()], TIMEOUT, &cancel)
+        .delete_objects(&[path.clone(), path_dest.clone()], &cancel)
         .await
         .with_context(|| format!("{path:?} removal"))?;
 

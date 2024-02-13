@@ -409,7 +409,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Listing, DownloadError> {
         match self {
@@ -429,7 +428,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         &self,
         folder: Option<&RemotePath>,
         max_keys: Option<NonZeroU32>,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
@@ -446,7 +444,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     pub async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
@@ -464,7 +461,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         match self {
@@ -478,7 +474,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     pub async fn download(
         &self,
         from: &RemotePath,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match self {
@@ -494,7 +489,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match self {
@@ -521,7 +515,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     pub async fn delete(
         &self,
         path: &RemotePath,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         match self {
@@ -536,7 +529,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     pub async fn delete_objects(
         &self,
         paths: &[RemotePath],
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         match self {
@@ -552,7 +544,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         &self,
         from: &RemotePath,
         to: &RemotePath,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         match self {
@@ -628,10 +619,9 @@ impl GenericRemoteStorage {
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
-        _timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        self.upload(from, from_size_bytes, to, None, _timeout, cancel)
+        self.upload(from, from_size_bytes, to, None, cancel)
             .await
             .with_context(|| {
                 format!("Failed to upload data of length {from_size_bytes} to storage path {to:?}")
@@ -644,15 +634,11 @@ impl GenericRemoteStorage {
         &self,
         byte_range: Option<(u64, Option<u64>)>,
         from: &RemotePath,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match byte_range {
-            Some((start, end)) => {
-                self.download_byte_range(from, start, end, timeout, cancel)
-                    .await
-            }
-            None => self.download(from, timeout, cancel).await,
+            Some((start, end)) => self.download_byte_range(from, start, end, cancel).await,
+            None => self.download(from, cancel).await,
         }
     }
 }

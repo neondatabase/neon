@@ -14,7 +14,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 static LOGGING_DONE: OnceCell<()> = OnceCell::new();
-pub(crate) const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) fn upload_stream(
     content: std::borrow::Cow<'static, [u8]>,
@@ -76,7 +75,7 @@ pub(crate) async fn upload_simple_remote_data(
 
             let (data, len) = upload_stream(format!("remote blob data {i}").into_bytes().into());
             task_client
-                .upload(data, len, &blob_path, None, TIMEOUT, &cancel)
+                .upload(data, len, &blob_path, None, &cancel)
                 .await?;
 
             Ok::<_, anyhow::Error>(blob_path)
@@ -123,7 +122,7 @@ pub(crate) async fn cleanup(
         delete_tasks.spawn(async move {
             debug!("Deleting remote item at path {object_to_delete:?}");
             task_client
-                .delete(&object_to_delete, TIMEOUT, &cancel)
+                .delete(&object_to_delete, &cancel)
                 .await
                 .with_context(|| format!("{object_to_delete:?} removal"))
         });
@@ -167,7 +166,7 @@ pub(crate) async fn upload_remote_data(
             let (data, data_len) =
                 upload_stream(format!("remote blob data {i}").into_bytes().into());
             task_client
-                .upload(data, data_len, &blob_path, None, TIMEOUT, &cancel)
+                .upload(data, data_len, &blob_path, None, &cancel)
                 .await?;
 
             Ok::<_, anyhow::Error>((blob_prefix, blob_path))

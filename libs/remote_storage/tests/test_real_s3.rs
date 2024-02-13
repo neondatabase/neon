@@ -23,9 +23,7 @@ mod common;
 #[path = "common/tests.rs"]
 mod tests_s3;
 
-use common::{
-    cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, TIMEOUT,
-};
+use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data};
 use utils::backoff;
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
@@ -72,10 +70,9 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     async fn list_files(
         client: &Arc<GenericRemoteStorage>,
-        timeout: Duration,
         cancel: &CancellationToken,
     ) -> anyhow::Result<HashSet<RemotePath>> {
-        Ok(retry(|| client.list_files(None, None, timeout, cancel))
+        Ok(retry(|| client.list_files(None, None, cancel))
             .await
             .context("list root files failure")?
             .into_iter()
@@ -95,11 +92,11 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream("remote blob data1".as_bytes().into());
-        ctx.client.upload(data, len, &path1, None, TIMEOUT, &cancel)
+        ctx.client.upload(data, len, &path1, None, &cancel)
     })
     .await?;
 
-    let t0_files = list_files(&ctx.client, TIMEOUT, &cancel).await?;
+    let t0_files = list_files(&ctx.client, &cancel).await?;
     let t0 = time_point().await;
     println!("at t0: {t0_files:?}");
 
@@ -107,17 +104,17 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream(old_data.as_bytes().into());
-        ctx.client.upload(data, len, &path2, None, TIMEOUT, &cancel)
+        ctx.client.upload(data, len, &path2, None, &cancel)
     })
     .await?;
 
-    let t1_files = list_files(&ctx.client, TIMEOUT, &cancel).await?;
+    let t1_files = list_files(&ctx.client, &cancel).await?;
     let t1 = time_point().await;
     println!("at t1: {t1_files:?}");
 
     // A little check to ensure that our clock is not too far off from the S3 clock
     {
-        let dl = retry(|| ctx.client.download(&path2, TIMEOUT, &cancel)).await?;
+        let dl = retry(|| ctx.client.download(&path2, &cancel)).await?;
         let last_modified = dl.last_modified.unwrap();
         let half_wt = WAIT_TIME.mul_f32(0.5);
         let t0_hwt = t0 + half_wt;
@@ -130,7 +127,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream("remote blob data3".as_bytes().into());
-        ctx.client.upload(data, len, &path3, None, TIMEOUT, &cancel)
+        ctx.client.upload(data, len, &path3, None, &cancel)
     })
     .await?;
 
@@ -138,12 +135,12 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream(new_data.as_bytes().into());
-        ctx.client.upload(data, len, &path2, None, TIMEOUT, &cancel)
+        ctx.client.upload(data, len, &path2, None, &cancel)
     })
     .await?;
 
-    retry(|| ctx.client.delete(&path1, TIMEOUT, &cancel)).await?;
-    let t2_files = list_files(&ctx.client, TIMEOUT, &cancel).await?;
+    retry(|| ctx.client.delete(&path1, &cancel)).await?;
+    let t2_files = list_files(&ctx.client, &cancel).await?;
     let t2 = time_point().await;
     println!("at t2: {t2_files:?}");
 
@@ -152,11 +149,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     ctx.client
         .time_travel_recover(None, t2, t_final, &cancel)
         .await?;
-    let t2_files_recovered = list_files(&ctx.client, TIMEOUT, &cancel).await?;
+    let t2_files_recovered = list_files(&ctx.client, &cancel).await?;
     println!("after recovery to t2: {t2_files_recovered:?}");
     assert_eq!(t2_files, t2_files_recovered);
-    let path2_recovered_t2 =
-        download_to_vec(ctx.client.download(&path2, TIMEOUT, &cancel).await?).await?;
+    let path2_recovered_t2 = download_to_vec(ctx.client.download(&path2, &cancel).await?).await?;
     assert_eq!(path2_recovered_t2, new_data.as_bytes());
 
     // after recovery to t1: path1 is back, path2 has the old content
@@ -164,11 +160,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     ctx.client
         .time_travel_recover(None, t1, t_final, &cancel)
         .await?;
-    let t1_files_recovered = list_files(&ctx.client, TIMEOUT, &cancel).await?;
+    let t1_files_recovered = list_files(&ctx.client, &cancel).await?;
     println!("after recovery to t1: {t1_files_recovered:?}");
     assert_eq!(t1_files, t1_files_recovered);
-    let path2_recovered_t1 =
-        download_to_vec(ctx.client.download(&path2, TIMEOUT, &cancel).await?).await?;
+    let path2_recovered_t1 = download_to_vec(ctx.client.download(&path2, &cancel).await?).await?;
     assert_eq!(path2_recovered_t1, old_data.as_bytes());
 
     // after recovery to t0: everything is gone except for path1
@@ -176,14 +171,14 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     ctx.client
         .time_travel_recover(None, t0, t_final, &cancel)
         .await?;
-    let t0_files_recovered = list_files(&ctx.client, TIMEOUT, &cancel).await?;
+    let t0_files_recovered = list_files(&ctx.client, &cancel).await?;
     println!("after recovery to t0: {t0_files_recovered:?}");
     assert_eq!(t0_files, t0_files_recovered);
 
     // cleanup
 
     let paths = &[path1, path2, path3];
-    retry(|| ctx.client.delete_objects(paths, TIMEOUT, &cancel)).await?;
+    retry(|| ctx.client.delete_objects(paths, &cancel)).await?;
 
     Ok(())
 }

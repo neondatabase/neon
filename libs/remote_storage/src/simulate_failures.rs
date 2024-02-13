@@ -6,7 +6,7 @@ use futures::stream::Stream;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use std::{collections::hash_map::Entry, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -99,14 +99,12 @@ impl UnreliableWrapper {
         if attempt {
             self.attempt(RemoteOp::Delete(path.clone()))?;
         }
-        self.inner.delete(path, TIMEOUT, cancel).await
+        self.inner.delete(path, cancel).await
     }
 }
 
 // We never construct this, so the type is not important, just has to not be UnreliableWrapper and impl RemoteStorage.
 type VoidStorage = crate::LocalFs;
-
-const TIMEOUT: Duration = Duration::from_secs(120);
 
 impl RemoteStorage for UnreliableWrapper {
     async fn list_prefixes(
@@ -116,7 +114,7 @@ impl RemoteStorage for UnreliableWrapper {
     ) -> Result<Vec<RemotePath>, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner.list_prefixes(prefix, TIMEOUT, cancel).await
+        self.inner.list_prefixes(prefix, cancel).await
     }
 
     async fn list_files(
@@ -127,9 +125,7 @@ impl RemoteStorage for UnreliableWrapper {
     ) -> Result<Vec<RemotePath>, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(folder.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner
-            .list_files(folder, max_keys, TIMEOUT, cancel)
-            .await
+        self.inner.list_files(folder, max_keys, cancel).await
     }
 
     async fn list(
@@ -141,9 +137,7 @@ impl RemoteStorage for UnreliableWrapper {
     ) -> Result<Listing, DownloadError> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner
-            .list(prefix, mode, max_keys, TIMEOUT, cancel)
-            .await
+        self.inner.list(prefix, mode, max_keys, cancel).await
     }
 
     async fn upload(
@@ -158,7 +152,7 @@ impl RemoteStorage for UnreliableWrapper {
     ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::Upload(to.clone()))?;
         self.inner
-            .upload(data, data_size_bytes, to, metadata, TIMEOUT, cancel)
+            .upload(data, data_size_bytes, to, metadata, cancel)
             .await
     }
 
@@ -169,7 +163,7 @@ impl RemoteStorage for UnreliableWrapper {
     ) -> Result<Download, DownloadError> {
         self.attempt(RemoteOp::Download(from.clone()))
             .map_err(DownloadError::Other)?;
-        self.inner.download(from, TIMEOUT, cancel).await
+        self.inner.download(from, cancel).await
     }
 
     async fn download_byte_range(
@@ -185,7 +179,7 @@ impl RemoteStorage for UnreliableWrapper {
         self.attempt(RemoteOp::Download(from.clone()))
             .map_err(DownloadError::Other)?;
         self.inner
-            .download_byte_range(from, start_inclusive, end_exclusive, TIMEOUT, cancel)
+            .download_byte_range(from, start_inclusive, end_exclusive, cancel)
             .await
     }
 
@@ -224,7 +218,7 @@ impl RemoteStorage for UnreliableWrapper {
         // copy is equivalent to download + upload
         self.attempt(RemoteOp::Download(from.clone()))?;
         self.attempt(RemoteOp::Upload(to.clone()))?;
-        self.inner.copy_object(from, to, TIMEOUT, cancel).await
+        self.inner.copy_object(from, to, cancel).await
     }
 
     async fn time_travel_recover(

@@ -200,7 +200,6 @@ use utils::backoff::{
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use std::ops::DerefMut;
@@ -261,13 +260,6 @@ pub(crate) const INITDB_PRESERVED_PATH: &str = "initdb-preserved.tar.zst";
 
 /// Default buffer size when interfacing with [`tokio::fs::File`].
 pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
-
-/// This timeout is intended to deal with hangs in lower layers, e.g. stuck TCP flows.  It is not
-/// intended to be snappy enough for prompt shutdown, as we have a CancellationToken for that.
-pub(crate) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-pub(crate) const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-pub(crate) const DELETION_TIMEOUT: Duration = Duration::from_secs(120);
-pub(crate) const COPY_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
@@ -1118,12 +1110,7 @@ impl RemoteTimelineClient {
         let remaining = download_retry(
             || async {
                 self.storage_impl
-                    .list_files(
-                        Some(&timeline_storage_path),
-                        None,
-                        DOWNLOAD_TIMEOUT,
-                        &cancel,
-                    )
+                    .list_files(Some(&timeline_storage_path), None, &cancel)
                     .await
             },
             "list remaining files",

@@ -18,9 +18,7 @@ use utils::{backoff, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::remote_timeline_client::{
-    remote_layer_path, remote_timelines_path, DOWNLOAD_TIMEOUT,
-};
+use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::Generation;
 use crate::virtual_file::on_fatal_io_error;
@@ -84,7 +82,7 @@ pub async fn download_layer_file<'a>(
                 .map_err(DownloadError::Other)?;
 
             let download = storage
-                .download(&remote_path, DOWNLOAD_TIMEOUT, cancel)
+                .download(&remote_path, cancel)
                 .await
                 .with_context(|| {
                     format!(
@@ -203,7 +201,6 @@ pub async fn list_remote_timelines(
                 Some(&remote_path),
                 ListingMode::WithDelimiter,
                 None,
-                DOWNLOAD_TIMEOUT,
                 &cancel,
             )
         },
@@ -247,9 +244,7 @@ async fn do_download_index_part(
 
     let index_part_bytes = download_retry_forever(
         || async {
-            let download = storage
-                .download(&remote_path, DOWNLOAD_TIMEOUT, cancel)
-                .await?;
+            let download = storage.download(&remote_path, cancel).await?;
 
             let mut bytes = Vec::new();
 
@@ -356,11 +351,7 @@ pub(super) async fn download_index_part(
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
 
     let indices = download_retry(
-        || async {
-            storage
-                .list_files(Some(&index_prefix), None, DOWNLOAD_TIMEOUT, cancel)
-                .await
-        },
+        || async { storage.list_files(Some(&index_prefix), None, cancel).await },
         "list index_part files",
         cancel,
     )
@@ -433,15 +424,10 @@ pub(crate) async fn download_initdb_tar_zst(
                 .with_context(|| format!("tempfile creation {temp_path}"))
                 .map_err(DownloadError::Other)?;
 
-            let download = match storage
-                .download(&remote_path, DOWNLOAD_TIMEOUT, cancel)
-                .await
-            {
+            let download = match storage.download(&remote_path, cancel).await {
                 Ok(dl) => dl,
                 Err(DownloadError::NotFound) => {
-                    storage
-                        .download(&remote_preserved_path, DOWNLOAD_TIMEOUT, cancel)
-                        .await?
+                    storage.download(&remote_preserved_path, cancel).await?
                 }
                 Err(other) => Err(other)?,
             };

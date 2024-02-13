@@ -11,7 +11,7 @@ use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
 
-use super::{Generation, COPY_TIMEOUT};
+use super::Generation;
 use crate::{
     config::PageServerConf,
     tenant::remote_timeline_client::{
@@ -54,7 +54,6 @@ pub(crate) async fn upload_index_part<'a>(
             futures::stream::once(futures::future::ready(Ok(index_part_bytes))),
             index_part_size,
             &remote_path,
-            super::UPLOAD_TIMEOUT,
             cancel,
         )
         .await
@@ -116,14 +115,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
     storage
-        .upload(
-            reader,
-            fs_size,
-            &storage_path,
-            None,
-            super::UPLOAD_TIMEOUT,
-            cancel,
-        )
+        .upload(reader, fs_size, &storage_path, None, cancel)
         .await
         .with_context(|| format!("upload layer from local path '{source_path}'"))
 }
@@ -146,13 +138,7 @@ pub(crate) async fn upload_initdb_dir(
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
     storage
-        .upload_storage_object(
-            file,
-            size as usize,
-            &remote_path,
-            super::UPLOAD_TIMEOUT,
-            cancel,
-        )
+        .upload_storage_object(file, size as usize, &remote_path, cancel)
         .await
         .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
 }
@@ -166,7 +152,7 @@ pub(crate) async fn preserve_initdb_archive(
     let source_path = remote_initdb_archive_path(tenant_id, timeline_id);
     let dest_path = remote_initdb_preserved_archive_path(tenant_id, timeline_id);
     storage
-        .copy_object(&source_path, &dest_path, COPY_TIMEOUT, cancel)
+        .copy_object(&source_path, &dest_path, cancel)
         .await
         .with_context(|| format!("backing up initdb archive for '{tenant_id} / {timeline_id}'"))
 }

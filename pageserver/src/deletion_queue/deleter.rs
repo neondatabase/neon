@@ -16,7 +16,7 @@ use tracing::info;
 use tracing::warn;
 use utils::backoff;
 
-use crate::{metrics, tenant::remote_timeline_client::DELETION_TIMEOUT};
+use crate::metrics;
 
 use super::DeletionQueueError;
 use super::FlushOp;
@@ -73,7 +73,7 @@ impl Deleter {
                 });
 
                 self.remote_storage
-                    .delete_objects(&self.accumulator, DELETION_TIMEOUT, &self.cancel)
+                    .delete_objects(&self.accumulator, &self.cancel)
                     .await
             },
             TimeoutOrCancel::caused_by_cancel,

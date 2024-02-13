@@ -512,11 +512,10 @@ async fn backup_object(
     let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
 
     let cancel = CancellationToken::new();
-    let timeout = std::time::Duration::from_secs(120);
 
     // TODO: is there upper retry?
     storage
-        .upload_storage_object(file, size, target_file, timeout, &cancel)
+        .upload_storage_object(file, size, target_file, &cancel)
         .await
 }
 
@@ -532,12 +531,11 @@ pub async fn read_object(
 
     info!("segment download about to start from remote path {file_path:?} at offset {offset}");
 
-    let timeout = Duration::from_secs(120);
     let cancel = CancellationToken::new();
 
     // FIXME: is there a retry in caller?
     let download = storage
-        .download_storage_object(Some((offset, None)), file_path, timeout, &cancel)
+        .download_storage_object(Some((offset, None)), file_path, &cancel)
         .await
         .with_context(|| {
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")
@@ -570,7 +568,6 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     // We don't currently have http requests timeout cancellation, but if/once
     // we have listing should get streaming interface to make progress.
 
-    let timeout = Duration::from_secs(120);
     let cancel = CancellationToken::new(); // not really used
     backoff::retry(
         || async {
@@ -579,7 +576,7 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
             // I'm not sure deleting while iterating is expected in s3.
             loop {
                 let files = storage
-                    .list_files(Some(&remote_path), Some(batch_size), timeout, &cancel)
+                    .list_files(Some(&remote_path), Some(batch_size), &cancel)
                     .await?;
                 if files.is_empty() {
                     return Ok(()); // done
@@ -592,7 +589,7 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
                     files.first().unwrap().object_name().unwrap_or(""),
                     files.last().unwrap().object_name().unwrap_or("")
                 );
-                storage.delete_objects(&files, timeout, &cancel).await?;
+                storage.delete_objects(&files, &cancel).await?;
             }
         },
         // consider TimeoutOrCancel::caused_by_cancel when using cancellation
@@ -630,12 +627,11 @@ pub async fn copy_s3_segments(
 
     let remote_path = RemotePath::new(&relative_dst_path)?;
 
-    let timeout = Duration::from_secs(120);
     let cancel = CancellationToken::new();
 
     // FIXME: is there upper retry?
     let files = storage
-        .list_files(Some(&remote_path), None, timeout, &cancel)
+        .list_files(Some(&remote_path), None, &cancel)
         .await?;
 
     let uploaded_segments = &files
@@ -665,7 +661,7 @@ pub async fn copy_s3_segments(
         let from = RemotePath::new(&relative_src_path.join(&segment_name))?;
         let to = RemotePath::new(&relative_dst_path.join(&segment_name))?;
 
-        storage.copy_object(&from, &to, timeout, &cancel).await?;
+        storage.copy_object(&from, &to, &cancel).await?;
     }
 
     info!(

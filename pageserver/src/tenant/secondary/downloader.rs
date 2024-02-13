@@ -34,9 +34,7 @@ use super::{
 
 use crate::tenant::{
     mgr::TenantManager,
-    remote_timeline_client::{
-        download::download_layer_file, remote_heatmap_path, DOWNLOAD_TIMEOUT,
-    },
+    remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
 };
 
 use chrono::format::{DelayedFormat, StrftimeItems};
@@ -531,7 +529,7 @@ impl<'a> TenantDownloader<'a> {
             || async {
                 let download = self
                     .remote_storage
-                    .download(&heatmap_path, DOWNLOAD_TIMEOUT, cancel)
+                    .download(&heatmap_path, cancel)
                     .await
                     .map_err(UpdateError::from)?;
                 let mut heatmap_bytes = Vec::new();

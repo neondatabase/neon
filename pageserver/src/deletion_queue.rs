@@ -1175,8 +1175,6 @@ pub(crate) mod mock {
         cancel: CancellationToken,
     }
 
-    const TIMEOUT: Duration = Duration::from_secs(120);
-
     impl ConsumerState {
         async fn consume(&mut self, remote_storage: &GenericRemoteStorage) -> usize {
             let mut executed = 0;
@@ -1188,7 +1186,7 @@ pub(crate) mod mock {
                 match msg {
                     DeleterMessage::Delete(objects) => {
                         for path in objects {
-                            match remote_storage.delete(&path, TIMEOUT, &self.cancel).await {
+                            match remote_storage.delete(&path, &self.cancel).await {
                                 Ok(_) => {
                                     debug!("Deleted {path}");
                                 }
@@ -1221,7 +1219,7 @@ pub(crate) mod mock {
 
                         for path in objects {
                             info!("Executing deletion {path}");
-                            match remote_storage.delete(&path, TIMEOUT, &self.cancel).await {
+                            match remote_storage.delete(&path, &self.cancel).await {
                                 Ok(_) => {
                                     debug!("Deleted {path}");
                                 }
