@@ -14,6 +14,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use futures::stream::StreamExt;
 use itertools::Itertools;
+use once_cell::sync::Lazy;
 use pageserver_api::{
     keyspace::{key_range_size, KeySpaceAccum},
     models::{
@@ -2295,6 +2296,8 @@ impl Timeline {
             self.metrics
                 .directory_entries_count_gauge
                 .set(sum_of_entries);
+        } else if let Some(metric) = Lazy::get(&self.metrics.directory_entries_count_gauge) {
+            metric.set(sum_of_entries);
         }
     }
 
