@@ -50,3 +50,10 @@ def pytest_generate_tests(metafunc: Metafunc):
     # And do not change test name for default `pageserver_virtual_file_io_engine=std-fs` to keep tests statistics
     if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in ("", "std-fs"):
         metafunc.parametrize("pageserver_virtual_file_io_engine", [io_engine])
+
+    # For performance tests, parametrize also by platform
+    if (
+        "test_runner/performance" in metafunc.definition._nodeid
+        and (platform := os.getenv("PLATFORM")) is not None
+    ):
+        metafunc.parametrize("platform", [platform.lower()])
