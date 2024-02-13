@@ -61,15 +61,15 @@ pub(crate) struct Args {
 #[derive(Debug, Default)]
 struct LiveStats {
     completed_requests: AtomicU64,
-    dropped_requests: AtomicU64,
+    missed: AtomicU64,
 }
 
 impl LiveStats {
     fn request_done(&self) {
         self.completed_requests.fetch_add(1, Ordering::Relaxed);
     }
-    fn dropped(&self) {
-        self.dropped_requests.fetch_add(1, Ordering::Relaxed);
+    fn missed(&self, n: u64) {
+        self.missed.fetch_add(n, Ordering::Relaxed);
     }
 }
 
@@ -245,12 +245,12 @@ async fn main_impl(
                 let start = std::time::Instant::now();
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let completed_requests = stats.completed_requests.swap(0, Ordering::Relaxed);
-                let dropped_requests = stats.dropped_requests.swap(0, Ordering::Relaxed);
+                let missed = stats.missed.swap(0, Ordering::Relaxed);
                 let elapsed = start.elapsed();
                 info!(
-                    "RPS: {:.0}   DROPPED: {:.0}",
+                    "RPS: {:.0}   MISSED: {:.0}",
                     completed_requests as f64 / elapsed.as_secs_f64(),
-                    dropped_requests as f64 / elapsed.as_secs_f64()
+                    missed as f64 / elapsed.as_secs_f64()
                 );
             }
         }
@@ -317,7 +317,7 @@ async fn main_impl(
                     match sender.try_send(req) {
                         Ok(()) => (),
                         Err(TrySendError::Full(_)) => {
-                            live_stats.dropped();
+                            todo!()
                         }
                         Err(TrySendError::Closed(_)) => {
                             assert!(cancel.is_cancelled(), "client has gone away unexpectedly");
@@ -345,14 +345,40 @@ async fn main_impl(
 
                         let cancel = cancel.clone();
                         Box::pin(async move {
+                            let client = pageserver_client::page_service::Client::new(
+                                args.page_service_connstring.clone(),
+                            )
+                            .await
+                            .unwrap();
+                            let mut client = client
+                                .pagestream(
+                                    worker_id.timeline.tenant_id,
+                                    worker_id.timeline.timeline_id,
+                                )
+                                .await
+                                .unwrap();
+
                             start_work_barrier.wait().await;
-                            let mut ticker = tokio::time::interval(period);
-                            ticker.set_missed_tick_behavior(
-                                /* TODO review this choice */
-                                tokio::time::MissedTickBehavior::Burst,
-                            );
+                            let client_start = Instant::now();
+                            let mut ticks_processed = 0;
                             while !cancel.is_cancelled() {
-                                ticker.tick().await;
+                                // account for dropped ticks
+                                {
+                                    let periods_passed_until_now = usize::try_from(
+                                        (Instant::now() - client_start).as_micros()
+                                            / period.as_micros(),
+                                    )
+                                    .unwrap();
+
+                                    if periods_passed_until_now > ticks_processed {
+                                        live_stats.missed(
+                                            (periods_passed_until_now - ticks_processed) as u64,
+                                        );
+                                    }
+                                    ticks_processed = periods_passed_until_now;
+                                }
+
+                                let start = Instant::now();
                                 let req = {
                                     let mut rng = rand::thread_rng();
                                     let r = &ranges[weights.sample(&mut rng)];
@@ -368,18 +394,25 @@ async fn main_impl(
                                         blkno: block_no,
                                     }
                                 };
-                                match sender.try_send(req) {
-                                    Ok(()) => (),
-                                    Err(TrySendError::Full(_)) => {
-                                        live_stats.dropped();
-                                    }
-                                    Err(TrySendError::Closed(_)) => {
-                                        assert!(
-                                            cancel.is_cancelled(),
-                                            "client has gone away unexpectedly"
-                                        );
-                                    }
-                                }
+                                client.getpage(req).await.unwrap();
+                                let end = Instant::now();
+                                live_stats.request_done();
+                                ticks_processed += 1;
+                                STATS.with(|stats| {
+                                    stats
+                                        .borrow()
+                                        .lock()
+                                        .unwrap()
+                                        .observe(end.duration_since(start))
+                                        .unwrap();
+                                });
+
+                                let next_at = client_start
+                                    + Duration::from_micros(
+                                        (ticks_processed) as u64
+                                            * u64::try_from(period.as_micros()).unwrap(),
+                                    );
+                                tokio::time::sleep_until(next_at.into()).await;
                             }
                         })
                     };
