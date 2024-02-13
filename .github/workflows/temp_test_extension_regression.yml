@@ -74,19 +74,12 @@ jobs:
           fi
         shell: bash
         id: build-tag
-  build-buildtools-image:
-    needs: [ check-permissions ]
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      dockerfile-path: Dockerfile.buildtools
-      image-name: build-tools
-    secrets: inherit
 
   build-neon:
-    needs: [ check-permissions, tag, build-buildtools-image ]
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:7893045808
       # Raise locked memory limit for tokio-epoll-uring.
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
@@ -277,10 +270,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   run-extension-regression-test:
-    needs: [ check-permissions, tag ,build-buildtools-image , build-neon]
-    runs-on: [ ubuntu-latest ]
+    needs: [ check-permissions, tag , build-neon]
+    runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:7893045808
       # Raise locked memory limit for tokio-epoll-uring.
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
@@ -298,6 +291,26 @@ jobs:
     steps:
       - name: run test
         run: |
-          PG_VERSION=v15 docker-compose -f extensions_regression_tests/docker-compose.yml build
-          PG_VERSION=v16 docker-compose -f extensions_regression_tests/docker-compose.yml run test2
+          #temp install docker later add it to build tools
+          #remove any old docker or docker deps
+          for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do sudo apt-get remove $pkg; done
+          # Add Docker's official GPG key:
+          apt-get update
+          apt-get install ca-certificates curl
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+  
+          # Add the repository to Apt sources:
+          echo \
+            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
+            $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+            tee /etc/apt/sources.list.d/docker.list > /dev/null
+          apt-get update
+          
+          apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          
+          
+          PG_VERSION=v15 docker compose -f extensions_regression_tests/docker-compose.yml build
+          PG_VERSION=v16 docker compose -f extensions_regression_tests/docker-compose.yml run test2
   
