@@ -218,7 +218,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> anyhow::Result<()>;
 
-    /// Streams the remote storage entry contents into the buffered writer given.
+    /// Streams the remote storage entry contents.
     ///
     /// The returned download stream will obey initial timeout and cancellation signal by erroring
     /// on whichever happens first. Only one of the reasons will fail the stream, which is usually
