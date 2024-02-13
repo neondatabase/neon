@@ -2279,14 +2279,21 @@ impl Timeline {
 
     fn update_directory_entries_count(&self, kind: DirectoryKind, count: u64) {
         self.directory_metrics[kind.offset()].store(count, AtomicOrdering::Relaxed);
+        let aux_metric =
+            self.directory_metrics[DirectoryKind::AuxFiles.offset()].load(AtomicOrdering::Relaxed);
+
         let sum_of_entries = self
             .directory_metrics
             .iter()
             .map(|v| v.load(AtomicOrdering::Relaxed))
             .sum();
-        self.metrics
-            .directory_entries_count_gauge
-            .set(sum_of_entries);
+        const SUM_THRESHOLD: u64 = 5000;
+        const AUX_THRESHOLD: u64 = 1000;
+        if sum_of_entries >= SUM_THRESHOLD || aux_metric >= AUX_THRESHOLD {
+            self.metrics
+                .directory_entries_count_gauge
+                .set(sum_of_entries);
+        }
     }
 
     async fn find_layer(&self, layer_file_name: &str) -> Option<Layer> {
