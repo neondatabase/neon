@@ -2466,6 +2466,55 @@ pub mod tokio_epoll_uring {
     }
 }
 
+pub(crate) mod tenant_throttling {
+    use metrics::{register_int_counter_vec, IntCounter};
+    use once_cell::sync::Lazy;
+    use pageserver_api::shard::TenantShardId;
+
+    static WAIT_TIME: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_wait_time",
+            "Seconds spent waiting for throttle",
+            &["tenant_id", "kind"]
+        )
+        .unwrap()
+    });
+
+    pub(crate) struct TimelineGet {
+        wait_time: IntCounter,
+    }
+
+    impl TimelineGet {
+        pub fn new(tenant_shard_id: &TenantShardId) -> TimelineGet {
+            TimelineGet {
+                wait_time: WAIT_TIME
+                    .with_label_values(&[&tenant_shard_id.to_string(), "timeline_get"]),
+            }
+        }
+    }
+
+    impl Drop for TimelineGet {
+        fn drop(&mut self) {
+            let mut metric = metrics::core::Metric::metric(&self.wait_time);
+            let labels = metric.take_label();
+            let label_values = labels
+                .iter()
+                .map(|label_pair| label_pair.get_value())
+                .collect::<Vec<_>>();
+            let res = WAIT_TIME.remove_label_values(&label_values);
+            debug_assert!(res.is_ok(), "too easy to misuse this API");
+        }
+    }
+
+    impl std::ops::Deref for TimelineGet {
+        type Target = IntCounter;
+
+        fn deref(&self) -> &Self::Target {
+            &self.wait_time
+        }
+    }
+}
+
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //

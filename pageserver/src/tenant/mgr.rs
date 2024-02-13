@@ -1464,7 +1464,7 @@ impl TenantManager {
                     attach_mode: AttachmentMode::Single,
                 }),
                 shard: child_shard_identity,
-                tenant_conf: parent_tenant_conf,
+                tenant_conf: parent_tenant_conf.clone(),
             };
 
             self.upsert_location(

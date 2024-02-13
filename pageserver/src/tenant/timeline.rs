@@ -157,7 +157,7 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
     pub deletion_queue_client: DeletionQueueClient,
-    pub timeline_get_rate_limiter: Arc<crate::tenant::throttle::Throttle>,
+    pub timeline_get_rate_limiter: Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
 }
 
 pub struct Timeline {
@@ -349,7 +349,7 @@ pub struct Timeline {
     gc_lock: tokio::sync::Mutex<()>,
 
     /// Inherited from [`Tenant::timeline_get_rate_limiter`] on construction on construction on construction on construction
-    timeline_get_rate_limiter: Arc<crate::tenant::throttle::Throttle>,
+    timeline_get_rate_limiter: Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
 }
 
 pub struct WalReceiverInfo {
@@ -610,7 +610,7 @@ impl Timeline {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
 
-        let _rate_limiter_permit = self.timeline_get_rate_limiter.throttle(ctx).await;
+        self.timeline_get_rate_limiter.throttle(ctx, 1).await;
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
@@ -710,6 +710,8 @@ impl Timeline {
         if key_count > Timeline::MAX_GET_VECTORED_KEYS {
             return Err(GetVectoredError::Oversized(key_count));
         }
+
+        self.timeline_get_rate_limiter.throttle(ctx, key_count as usize).await;
 
         let _timer = crate::metrics::GET_VECTORED_LATENCY
             .for_task_kind(ctx.task_kind())
