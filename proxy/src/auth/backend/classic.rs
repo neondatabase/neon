@@ -17,7 +17,7 @@ pub(super) async fn authenticate(
     client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,
     secret: AuthSecret,
-) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
+) -> auth::Result<ComputeCredentials> {
     let flow = AuthFlow::new(client);
     let scram_keys = match secret {
         #[cfg(any(test, feature = "testing"))]

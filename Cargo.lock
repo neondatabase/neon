@@ -1640,6 +1640,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "desim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "hex",
+ "parking_lot 0.12.1",
+ "rand 0.8.5",
+ "scopeguard",
+ "smallvec",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "diesel"
 version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4828,6 +4844,7 @@ dependencies = [
  "clap",
  "const_format",
  "crc32c",
+ "desim",
  "fail",
  "fs2",
  "futures",
@@ -4843,6 +4860,7 @@ dependencies = [
  "postgres_backend",
  "postgres_ffi",
  "pq_proto",
+ "rand 0.8.5",
  "regex",
  "remote_storage",
  "reqwest",
@@ -4863,8 +4881,10 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utils",
+ "walproposer",
  "workspace_hack",
 ]
 
