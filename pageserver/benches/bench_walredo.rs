@@ -39,7 +39,7 @@ fn redo_scenarios(c: &mut Criterion) {
             .build()
             .unwrap();
         tracing::info!("executing first");
-        short().execute(rt.handle(), &manager).unwrap();
+        rt.block_on(short().execute(&manager)).unwrap();
         tracing::info!("first executed");
     }
 
@@ -77,21 +77,22 @@ fn redo_scenarios(c: &mut Criterion) {
 /// Sets up `threads` number of requesters to `request_redo`, with the given input.
 fn add_multithreaded_walredo_requesters(
     b: &mut criterion::Bencher,
-    threads: u32,
+    threads: usize,
     manager: &Arc<PostgresRedoManager>,
     input_factory: fn() -> Request,
 ) {
     assert_ne!(threads, 0);
 
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()
+        .unwrap();
+
     if threads == 1 {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let handle = rt.handle();
         b.iter_batched_ref(
             || Some(input_factory()),
-            |input| execute_all(input.take(), handle, manager),
+            |input| rt.block_on(execute_all(input.take(), manager)),
             criterion::BatchSize::PerIteration,
         );
     } else {
@@ -103,36 +104,27 @@ fn add_multithreaded_walredo_requesters(
 
         let jhs = (0..threads)
             .map(|_| {
-                std::thread::spawn({
-                    let manager = manager.clone();
-                    let barrier = barrier.clone();
-                    let work_rx = work_rx.clone();
-                    move || {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .unwrap();
-                        let handle = rt.handle();
-                        loop {
-                            // queue up and wait if we want to go another round
-                            if work_rx.lock().unwrap().recv().is_err() {
-                                break;
-                            }
-
-                            let input = Some(input_factory());
-
-                            barrier.wait();
-
-                            execute_all(input, handle, &manager).unwrap();
-
-                            barrier.wait();
+                let manager = manager.clone();
+                let barrier = barrier.clone();
+                let work_rx = work_rx.clone();
+                rt.spawn(async move {
+                    loop {
+                        // queue up and wait if we want to go another round
+                        if work_rx.lock().unwrap().recv().is_err() {
+                            break;
                         }
+
+                        let input = Some(input_factory());
+
+                        barrier.wait();
+
+                        execute_all(input, &manager).await.unwrap();
+
+                        barrier.wait();
                     }
                 })
             })
             .collect::<Vec<_>>();
-
-        let _jhs = JoinOnDrop(jhs);
 
         b.iter_batched(
             || {
@@ -151,37 +143,37 @@ fn add_multithreaded_walredo_requesters(
         );
 
         drop(work_tx);
+
+        let jhs = JoinOnDrop(jhs);
+        rt.block_on(jhs.join_all());
     }
 }
 
-struct JoinOnDrop(Vec<std::thread::JoinHandle<()>>);
+struct JoinOnDrop(Vec<tokio::task::JoinHandle<()>>);
 
-impl Drop for JoinOnDrop {
-    // it's not really needless because we want join all then check for panicks
-    #[allow(clippy::needless_collect)]
-    fn drop(&mut self) {
-        // first join all
-        let results = self.0.drain(..).map(|jh| jh.join()).collect::<Vec<_>>();
-        // then check the results; panicking here is not great, but it does get the message across
-        // to the user, and sets an exit value.
-        results.into_iter().try_for_each(|res| res).unwrap();
+impl JoinOnDrop {
+    /// Checks all the futures for panics.
+    pub async fn join_all(self) {
+        for handle in self.0 {
+            handle.await.unwrap()
+        }
     }
 }
 
-fn execute_all<I>(
-    input: I,
-    handle: &tokio::runtime::Handle,
-    manager: &PostgresRedoManager,
-) -> anyhow::Result<()>
+async fn execute_all<I>(input: I, manager: &PostgresRedoManager) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = Request>,
 {
     // just fire all requests as fast as possible
-    input.into_iter().try_for_each(|req| {
-        let page = req.execute(handle, manager)?;
+    let futs = input.into_iter().map(|req| async move {
+        let page = req.execute(manager).await?;
         assert_eq!(page.remaining(), 8192);
         anyhow::Ok(())
-    })
+    });
+
+    futures::future::try_join_all(futs).await?;
+
+    Ok(())
 }
 
 criterion_group!(benches, redo_scenarios);
@@ -493,11 +485,7 @@ struct Request {
 }
 
 impl Request {
-    fn execute(
-        self,
-        rt: &tokio::runtime::Handle,
-        manager: &PostgresRedoManager,
-    ) -> anyhow::Result<Bytes> {
+    async fn execute(self, manager: &PostgresRedoManager) -> anyhow::Result<Bytes> {
         let Request {
             key,
             lsn,
@@ -506,6 +494,8 @@ impl Request {
             pg_version,
         } = self;
 
-        rt.block_on(manager.request_redo(key, lsn, base_img, records, pg_version))
+        manager
+            .request_redo(key, lsn, base_img, records, pg_version)
+            .await
     }
 }
