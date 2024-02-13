@@ -3914,6 +3914,7 @@ pub(crate) mod harness {
     use utils::lsn::Lsn;
 
     use crate::deletion_queue::mock::MockDeletionQueue;
+    use crate::walredo::apply_neon;
     use crate::{
         config::PageServerConf, repository::Key, tenant::Tenant, walrecord::NeonWalRecord,
     };
@@ -4173,20 +4174,34 @@ pub(crate) mod harness {
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
         ) -> anyhow::Result<Bytes> {
-            let s = format!(
-                "redo for {} to get to {}, with {} and {} records",
-                key,
-                lsn,
-                if base_img.is_some() {
-                    "base image"
-                } else {
-                    "no base image"
-                },
-                records.len()
-            );
-            println!("{s}");
+            let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
 
-            Ok(TEST_IMG(&s))
+            if records_neon {
+                // For Neon wal records, we can decode without spawning postgres, so do so.
+                let base_img = base_img.expect("Neon WAL redo requires base image").1;
+                let mut page = BytesMut::new();
+                page.extend_from_slice(&base_img);
+                for (_record_lsn, record) in records {
+                    apply_neon::apply_in_neon(&record, key, &mut page)?;
+                }
+                Ok(page.freeze())
+            } else {
+                // We never spawn a postgres walredo process in unit tests: just log what we might have done.
+                let s = format!(
+                    "redo for {} to get to {}, with {} and {} records",
+                    key,
+                    lsn,
+                    if base_img.is_some() {
+                        "base image"
+                    } else {
+                        "no base image"
+                    },
+                    records.len()
+                );
+                println!("{s}");
+
+                Ok(TEST_IMG(&s))
+            }
         }
     }
 }
