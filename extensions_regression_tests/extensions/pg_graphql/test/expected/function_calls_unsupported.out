@@ -1,0 +1,418 @@
+begin;
+    -- functions in this file are not supported yet
+    create table account(
+        id serial primary key,
+        email varchar(255) not null
+    );
+    insert into public.account(email)
+    values
+        ('aardvark@x.com'),
+        ('bat@x.com'),
+        ('cat@x.com');
+    -- functions which return a record
+    create function returns_record()
+        returns record language sql stable
+    as $$ select id, email from account; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            returnsRecord {
+                id
+                email
+                nodeId
+                __typename
+            }
+        }
+    $$));
+                              jsonb_pretty                              
+------------------------------------------------------------------------
+ {                                                                     +
+     "data": null,                                                     +
+     "errors": [                                                       +
+         {                                                             +
+             "message": "Unknown field \"returnsRecord\" on type Query"+
+         }                                                             +
+     ]                                                                 +
+ }
+(1 row)
+
+    -- functions which accept a table tuple type
+    create function accepts_table_tuple_type(rec public.account)
+        returns int
+        immutable
+        language sql
+    as $$
+        select 1;
+    $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            acceptsTableTupleType
+        }
+    $$));
+                                  jsonb_pretty                                  
+--------------------------------------------------------------------------------
+ {                                                                             +
+     "data": null,                                                             +
+     "errors": [                                                               +
+         {                                                                     +
+             "message": "Unknown field \"acceptsTableTupleType\" on type Query"+
+         }                                                                     +
+     ]                                                                         +
+ }
+(1 row)
+
+    -- overloaded functions
+    create function an_overloaded_function()
+        returns int language sql stable
+    as $$ select 1; $$;
+    create function an_overloaded_function(a int)
+        returns int language sql stable
+    as $$ select 2; $$;
+    create function an_overloaded_function(a text)
+        returns int language sql stable
+    as $$ select 2; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            anOverloadedFunction
+        }
+    $$));
+                                 jsonb_pretty                                  
+-------------------------------------------------------------------------------
+ {                                                                            +
+     "data": null,                                                            +
+     "errors": [                                                              +
+         {                                                                    +
+             "message": "Unknown field \"anOverloadedFunction\" on type Query"+
+         }                                                                    +
+     ]                                                                        +
+ }
+(1 row)
+
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            anOverloadedFunction (a: 1)
+        }
+    $$));
+                                 jsonb_pretty                                  
+-------------------------------------------------------------------------------
+ {                                                                            +
+     "data": null,                                                            +
+     "errors": [                                                              +
+         {                                                                    +
+             "message": "Unknown field \"anOverloadedFunction\" on type Query"+
+         }                                                                    +
+     ]                                                                        +
+ }
+(1 row)
+
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            anOverloadedFunction (a: "some text")
+        }
+    $$));
+                                 jsonb_pretty                                  
+-------------------------------------------------------------------------------
+ {                                                                            +
+     "data": null,                                                            +
+     "errors": [                                                              +
+         {                                                                    +
+             "message": "Unknown field \"anOverloadedFunction\" on type Query"+
+         }                                                                    +
+     ]                                                                        +
+ }
+(1 row)
+
+    -- functions without arg names
+    create function no_arg_name(int)
+        returns int language sql immutable
+    as $$ select 42; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            noArgName
+        }
+    $$));
+                            jsonb_pretty                            
+--------------------------------------------------------------------
+ {                                                                 +
+     "data": null,                                                 +
+     "errors": [                                                   +
+         {                                                         +
+             "message": "Unknown field \"noArgName\" on type Query"+
+         }                                                         +
+     ]                                                             +
+ }
+(1 row)
+
+    -- variadic functions
+    create function variadic_func(variadic int[])
+        returns int language sql immutable
+    as $$ select 42; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            variadicFunc
+        }
+    $$));
+                             jsonb_pretty                              
+-----------------------------------------------------------------------
+ {                                                                    +
+     "data": null,                                                    +
+     "errors": [                                                      +
+         {                                                            +
+             "message": "Unknown field \"variadicFunc\" on type Query"+
+         }                                                            +
+     ]                                                                +
+ }
+(1 row)
+
+    -- functions returning void
+    create function void_returning_func(variadic int[])
+        returns void language sql immutable
+    as $$ $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            voidReturningFunc
+        }
+    $$));
+                                jsonb_pretty                                
+----------------------------------------------------------------------------
+ {                                                                         +
+     "data": null,                                                         +
+     "errors": [                                                           +
+         {                                                                 +
+             "message": "Unknown field \"voidReturningFunc\" on type Query"+
+         }                                                                 +
+     ]                                                                     +
+ }
+(1 row)
+
+    -- functions with a default value
+    create function func_with_a_default_int(a int default 42)
+        returns int language sql immutable
+    as $$ select a; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            funcWithADefaultInt
+        }
+    $$));
+                                 jsonb_pretty                                 
+------------------------------------------------------------------------------
+ {                                                                           +
+     "data": null,                                                           +
+     "errors": [                                                             +
+         {                                                                   +
+             "message": "Unknown field \"funcWithADefaultInt\" on type Query"+
+         }                                                                   +
+     ]                                                                       +
+ }
+(1 row)
+
+    create function func_with_a_default_null_text(a text default null)
+        returns text language sql immutable
+    as $$ select a; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            funcWithADefaultNullText
+        }
+    $$));
+                                   jsonb_pretty                                    
+-----------------------------------------------------------------------------------
+ {                                                                                +
+     "data": null,                                                                +
+     "errors": [                                                                  +
+         {                                                                        +
+             "message": "Unknown field \"funcWithADefaultNullText\" on type Query"+
+         }                                                                        +
+     ]                                                                            +
+ }
+(1 row)
+
+    create function func_accepting_array(a int[])
+        returns int language sql immutable
+    as $$ select 0; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            funcAcceptingArray(a: [1, 2, 3])
+        }
+    $$));
+                                jsonb_pretty                                 
+-----------------------------------------------------------------------------
+ {                                                                          +
+     "data": null,                                                          +
+     "errors": [                                                            +
+         {                                                                  +
+             "message": "Unknown field \"funcAcceptingArray\" on type Query"+
+         }                                                                  +
+     ]                                                                      +
+ }
+(1 row)
+
+    create function func_returning_array()
+        returns int[] language sql immutable
+    as $$ select array[1, 2, 3]; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            funcReturningArray
+        }
+    $$));
+                                jsonb_pretty                                 
+-----------------------------------------------------------------------------
+ {                                                                          +
+     "data": null,                                                          +
+     "errors": [                                                            +
+         {                                                                  +
+             "message": "Unknown field \"funcReturningArray\" on type Query"+
+         }                                                                  +
+     ]                                                                      +
+ }
+(1 row)
+
+    -- function returning type not on search path
+    create schema dev;
+    create table dev.book(
+        id int primary key
+    );
+    insert into dev.book values (1);
+    create function "returnsBook"()
+        returns dev.book
+        stable
+        language sql
+    as $$
+        select db from dev.book db limit 1;
+    $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            returnsBook
+        }
+    $$));
+                             jsonb_pretty                             
+----------------------------------------------------------------------
+ {                                                                   +
+     "data": null,                                                   +
+     "errors": [                                                     +
+         {                                                           +
+             "message": "Unknown field \"returnsBook\" on type Query"+
+         }                                                           +
+     ]                                                               +
+ }
+(1 row)
+
+    -- function accepting type not on search path
+    create type dev.invisible as enum ('ONLY');
+    create function "badInputArg"(val dev.invisible)
+        returns int
+        stable
+        language sql
+    as $$
+        select 1;
+    $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            badInputArg
+        }
+    $$));
+                             jsonb_pretty                             
+----------------------------------------------------------------------
+ {                                                                   +
+     "data": null,                                                   +
+     "errors": [                                                     +
+         {                                                           +
+             "message": "Unknown field \"badInputArg\" on type Query"+
+         }                                                           +
+     ]                                                               +
+ }
+(1 row)
+
+    select jsonb_pretty(graphql.resolve($$
+    query IntrospectionQuery {
+        __schema {
+            queryType {
+                fields {
+                    name
+                    description
+                    type {
+                        kind
+                    }
+                    args {
+                        name
+                        type {
+                            name
+                        }
+                    }
+                }
+            }
+        }
+    } $$));
+                                  jsonb_pretty                                   
+---------------------------------------------------------------------------------
+ {                                                                              +
+     "data": {                                                                  +
+         "__schema": {                                                          +
+             "queryType": {                                                     +
+                 "fields": [                                                    +
+                     {                                                          +
+                         "args": [                                              +
+                             {                                                  +
+                                 "name": "first",                               +
+                                 "type": {                                      +
+                                     "name": "Int"                              +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "last",                                +
+                                 "type": {                                      +
+                                     "name": "Int"                              +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "before",                              +
+                                 "type": {                                      +
+                                     "name": "Cursor"                           +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "after",                               +
+                                 "type": {                                      +
+                                     "name": "Cursor"                           +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "filter",                              +
+                                 "type": {                                      +
+                                     "name": "AccountFilter"                    +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "orderBy",                             +
+                                 "type": {                                      +
+                                     "name": null                               +
+                                 }                                              +
+                             }                                                  +
+                         ],                                                     +
+                         "name": "accountCollection",                           +
+                         "type": {                                              +
+                             "kind": "OBJECT"                                   +
+                         },                                                     +
+                         "description": "A pagable collection of type `Account`"+
+                     },                                                         +
+                     {                                                          +
+                         "args": [                                              +
+                             {                                                  +
+                                 "name": "nodeId",                              +
+                                 "type": {                                      +
+                                     "name": null                               +
+                                 }                                              +
+                             }                                                  +
+                         ],                                                     +
+                         "name": "node",                                        +
+                         "type": {                                              +
+                             "kind": "INTERFACE"                                +
+                         },                                                     +
+                         "description": "Retrieve a record by its `ID`"         +
+                     }                                                          +
+                 ]                                                              +
+             }                                                                  +
+         }                                                                      +
+     }                                                                          +
+ }
+(1 row)
+
+rollback;

@@ -1,0 +1,83 @@
+begin;
+    create table blog_post(
+        id bigserial primary key,
+        title text not null,
+        parent_id bigint references blog_post(id)
+    );
+    comment on table blog_post is e'@graphql({"totalCount": {"enabled": true}})';
+    select graphql.resolve($$
+    mutation {
+      insertIntoBlogPostCollection(objects: [{
+        title: "hello"
+        parentId: "1"
+      }]) {
+        affectedCount
+        records {
+          id
+          parentId
+        }
+      }
+    }
+    $$);
+                                                   resolve                                                   
+-------------------------------------------------------------------------------------------------------------
+ {"data": {"insertIntoBlogPostCollection": {"records": [{"id": "1", "parentId": "1"}], "affectedCount": 1}}}
+(1 row)
+
+    select graphql.resolve($$
+    mutation {
+      updateBlogPostCollection(set: {
+        title: "xx"
+      }) {
+        affectedCount
+        records {
+          id
+          parentId
+        }
+      }
+    }
+    $$);
+                                                 resolve                                                 
+---------------------------------------------------------------------------------------------------------
+ {"data": {"updateBlogPostCollection": {"records": [{"id": "1", "parentId": "1"}], "affectedCount": 1}}}
+(1 row)
+
+    select graphql.resolve($$
+    {
+      blogPostCollection {
+        totalCount
+        edges {
+          node {
+            id
+            parentId
+            parent {
+              id
+              parentId
+            }
+          }
+        }
+      }
+    }
+    $$);
+                                                                    resolve                                                                     
+------------------------------------------------------------------------------------------------------------------------------------------------
+ {"data": {"blogPostCollection": {"edges": [{"node": {"id": "1", "parent": {"id": "1", "parentId": "1"}, "parentId": "1"}}], "totalCount": 1}}}
+(1 row)
+
+    select graphql.resolve($$
+    mutation {
+      deleteFromBlogPostCollection {
+        affectedCount
+        records {
+          id
+          parentId
+        }
+      }
+    }
+    $$);
+                                                   resolve                                                   
+-------------------------------------------------------------------------------------------------------------
+ {"data": {"deleteFromBlogPostCollection": {"records": [{"id": "1", "parentId": "1"}], "affectedCount": 1}}}
+(1 row)
+
+rollback;

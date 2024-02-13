@@ -1,0 +1,370 @@
+begin;
+    create table book(
+        id int primary key,
+        is_verified bool
+    );
+    insert into public.book(id, is_verified)
+    values
+        (1, true);
+    savepoint a;
+    -- Should be skipped
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              bookCollection {
+                edges {
+                  node {
+                    id
+                    isVerified @skip( if: true )
+                  }
+                }
+              }
+            }
+        $$)
+    );
+          jsonb_pretty           
+---------------------------------
+ {                              +
+     "data": {                  +
+         "bookCollection": {    +
+             "edges": [         +
+                 {              +
+                     "node": {  +
+                         "id": 1+
+                     }          +
+                 }              +
+             ]                  +
+         }                      +
+     }                          +
+ }
+(1 row)
+
+    -- Should not be skipped
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              bookCollection {
+                edges {
+                  node {
+                    id
+                    isVerified @skip( if: false )
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                jsonb_pretty                
+--------------------------------------------
+ {                                         +
+     "data": {                             +
+         "bookCollection": {               +
+             "edges": [                    +
+                 {                         +
+                     "node": {             +
+                         "id": 1,          +
+                         "isVerified": true+
+                     }                     +
+                 }                         +
+             ]                             +
+         }                                 +
+     }                                     +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            query XXX($should_skip: Boolean! ){
+              bookCollection{
+                edges {
+                  node {
+                    id
+                    isVerified @skip(if: $should_skip)
+                  }
+                }
+              }
+            }
+          $$,
+          '{"should_skip": true}'
+        )
+    );
+          jsonb_pretty           
+---------------------------------
+ {                              +
+     "data": {                  +
+         "bookCollection": {    +
+             "edges": [         +
+                 {              +
+                     "node": {  +
+                         "id": 1+
+                     }          +
+                 }              +
+             ]                  +
+         }                      +
+     }                          +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            query XXX($should_skip: Boolean! ){
+              bookCollection{
+                edges {
+                  node {
+                    id
+                    isVerified @skip(if: $should_skip)
+                  }
+                }
+              }
+            }
+          $$,
+          '{"should_skip": false}'
+        )
+    );
+                jsonb_pretty                
+--------------------------------------------
+ {                                         +
+     "data": {                             +
+         "bookCollection": {               +
+             "edges": [                    +
+                 {                         +
+                     "node": {             +
+                         "id": 1,          +
+                         "isVerified": true+
+                     }                     +
+                 }                         +
+             ]                             +
+         }                                 +
+     }                                     +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            query XXX($should_skip: Boolean! ){
+              bookCollection{
+                edges {
+                  node {
+                    id
+                    isVerified @skip(if: $should_skip)
+                  }
+                }
+              }
+            }
+          $$,
+          '{}'
+        )
+    );
+                               jsonb_pretty                               
+--------------------------------------------------------------------------
+ {                                                                       +
+     "data": null,                                                       +
+     "errors": [                                                         +
+         {                                                               +
+             "message": "Value for \"if\" in @skip directive is required"+
+         }                                                               +
+     ]                                                                   +
+ }
+(1 row)
+
+    -- Should not be skipped
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              bookCollection {
+                edges {
+                  node {
+                    id
+                    isVerified @include( if: true )
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                jsonb_pretty                
+--------------------------------------------
+ {                                         +
+     "data": {                             +
+         "bookCollection": {               +
+             "edges": [                    +
+                 {                         +
+                     "node": {             +
+                         "id": 1,          +
+                         "isVerified": true+
+                     }                     +
+                 }                         +
+             ]                             +
+         }                                 +
+     }                                     +
+ }
+(1 row)
+
+    -- Should be skipped
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              bookCollection {
+                edges {
+                  node {
+                    id
+                    isVerified @include( if: false )
+                  }
+                }
+              }
+            }
+        $$)
+    );
+          jsonb_pretty           
+---------------------------------
+ {                              +
+     "data": {                  +
+         "bookCollection": {    +
+             "edges": [         +
+                 {              +
+                     "node": {  +
+                         "id": 1+
+                     }          +
+                 }              +
+             ]                  +
+         }                      +
+     }                          +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            query XXX($should_include: Boolean! ){
+              bookCollection{
+                edges {
+                  node {
+                    id
+                    isVerified @include(if: $should_include)
+                  }
+                }
+              }
+            }
+          $$,
+          '{"should_include": true}'
+        )
+    );
+                jsonb_pretty                
+--------------------------------------------
+ {                                         +
+     "data": {                             +
+         "bookCollection": {               +
+             "edges": [                    +
+                 {                         +
+                     "node": {             +
+                         "id": 1,          +
+                         "isVerified": true+
+                     }                     +
+                 }                         +
+             ]                             +
+         }                                 +
+     }                                     +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            query XXX($should_include: Boolean! ){
+              bookCollection{
+                edges {
+                  node {
+                    id
+                    isVerified @include(if: $should_include)
+                  }
+                }
+              }
+            }
+          $$,
+          '{"should_include": false}'
+        )
+    );
+          jsonb_pretty           
+---------------------------------
+ {                              +
+     "data": {                  +
+         "bookCollection": {    +
+             "edges": [         +
+                 {              +
+                     "node": {  +
+                         "id": 1+
+                     }          +
+                 }              +
+             ]                  +
+         }                      +
+     }                          +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            query XXX($should_include: Boolean! ){
+              bookCollection{
+                edges {
+                  node {
+                    id
+                    isVerified @include(if: $should_include)
+                  }
+                }
+              }
+            }
+          $$,
+          '{}'
+        )
+    );
+                                jsonb_pretty                                 
+-----------------------------------------------------------------------------
+ {                                                                          +
+     "data": null,                                                          +
+     "errors": [                                                            +
+         {                                                                  +
+             "message": "Value for \"if\" in @include directive is required"+
+         }                                                                  +
+     ]                                                                      +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              bookCollection {
+                edges {
+                  node {
+                    id
+                    verif1: isVerified @skip( if: true ) @include( if: true )
+                    verif2: isVerified @skip( if: true ) @include( if: false)
+                    verif3: isVerified @skip( if: false ) @include( if: true)
+                    verif4: isVerified @skip( if: false ) @include( if: false)
+                    verif5: isVerified @include( if: true ) @skip( if: true )
+                    verif6: isVerified @include( if: true ) @skip( if: false)
+                    verif7: isVerified @include( if: false ) @skip( if: true)
+                    verif8: isVerified @include( if: false ) @skip( if: false)
+                  }
+                }
+              }
+            }
+        $$)
+    );
+              jsonb_pretty               
+-----------------------------------------
+ {                                      +
+     "data": {                          +
+         "bookCollection": {            +
+             "edges": [                 +
+                 {                      +
+                     "node": {          +
+                         "id": 1,       +
+                         "verif3": true,+
+                         "verif6": true +
+                     }                  +
+                 }                      +
+             ]                          +
+         }                              +
+     }                                  +
+ }
+(1 row)
+
+rollback;

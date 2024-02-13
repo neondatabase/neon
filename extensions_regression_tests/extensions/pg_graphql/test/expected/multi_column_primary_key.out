@@ -1,0 +1,193 @@
+begin;
+    create table person(
+        id int primary key,
+        name text
+    );
+    create table address(
+        id int primary key,
+        city text
+    );
+    create table person_at_address(
+        person_id int not null references person (id),
+        address_id int not null references address (id),
+        primary key (person_id, address_id)
+    );
+    insert into public.person(id, name)
+    values
+        (1, 'foo'),
+        (2, 'bar'),
+        (3, 'baz');
+    insert into public.address(id, city)
+    values
+        (4, 'Chicago'),
+        (5, 'Atlanta'),
+        (6, 'Portland');
+    insert into public.person_at_address(person_id, address_id)
+    values
+        (1, 4),
+        (2, 4),
+        (3, 6);
+    savepoint a;
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              personAtAddressCollection {
+                edges {
+                  cursor
+                  node {
+                    nodeId
+                    personId
+                    addressId
+                    person {
+                      name
+                    }
+                    address {
+                      city
+                    }
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                                       jsonb_pretty                                        
+-------------------------------------------------------------------------------------------
+ {                                                                                        +
+     "data": {                                                                            +
+         "personAtAddressCollection": {                                                   +
+             "edges": [                                                                   +
+                 {                                                                        +
+                     "node": {                                                            +
+                         "nodeId": "WyJwdWJsaWMiLCAicGVyc29uX2F0X2FkZHJlc3MiLCAxLCA0XQ==",+
+                         "person": {                                                      +
+                             "name": "foo"                                                +
+                         },                                                               +
+                         "address": {                                                     +
+                             "city": "Chicago"                                            +
+                         },                                                               +
+                         "personId": 1,                                                   +
+                         "addressId": 4                                                   +
+                     },                                                                   +
+                     "cursor": "WzEsIDRd"                                                 +
+                 },                                                                       +
+                 {                                                                        +
+                     "node": {                                                            +
+                         "nodeId": "WyJwdWJsaWMiLCAicGVyc29uX2F0X2FkZHJlc3MiLCAyLCA0XQ==",+
+                         "person": {                                                      +
+                             "name": "bar"                                                +
+                         },                                                               +
+                         "address": {                                                     +
+                             "city": "Chicago"                                            +
+                         },                                                               +
+                         "personId": 2,                                                   +
+                         "addressId": 4                                                   +
+                     },                                                                   +
+                     "cursor": "WzIsIDRd"                                                 +
+                 },                                                                       +
+                 {                                                                        +
+                     "node": {                                                            +
+                         "nodeId": "WyJwdWJsaWMiLCAicGVyc29uX2F0X2FkZHJlc3MiLCAzLCA2XQ==",+
+                         "person": {                                                      +
+                             "name": "baz"                                                +
+                         },                                                               +
+                         "address": {                                                     +
+                             "city": "Portland"                                           +
+                         },                                                               +
+                         "personId": 3,                                                   +
+                         "addressId": 6                                                   +
+                     },                                                                   +
+                     "cursor": "WzMsIDZd"                                                 +
+                 }                                                                        +
+             ]                                                                            +
+         }                                                                                +
+     }                                                                                    +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              personAtAddressCollection(
+                first: 1,
+                after: "WzEsIDRd"
+            ) {
+                edges {
+                  node {
+                    personId
+                    addressId
+                    nodeId
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                                       jsonb_pretty                                        
+-------------------------------------------------------------------------------------------
+ {                                                                                        +
+     "data": {                                                                            +
+         "personAtAddressCollection": {                                                   +
+             "edges": [                                                                   +
+                 {                                                                        +
+                     "node": {                                                            +
+                         "nodeId": "WyJwdWJsaWMiLCAicGVyc29uX2F0X2FkZHJlc3MiLCAyLCA0XQ==",+
+                         "personId": 2,                                                   +
+                         "addressId": 4                                                   +
+                     }                                                                    +
+                 }                                                                        +
+             ]                                                                            +
+         }                                                                                +
+     }                                                                                    +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              node(nodeId: "WyJwdWJsaWMiLCAicGVyc29uX2F0X2FkZHJlc3MiLCAxLCA0XQ==") {
+                nodeId
+                ... on PersonAtAddress {
+                  nodeId
+                  personId
+                  person {
+                    name
+                    personAtAddressCollection {
+                      edges {
+                        node {
+                          addressId
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                                 jsonb_pretty                                  
+-------------------------------------------------------------------------------
+ {                                                                            +
+     "data": {                                                                +
+         "node": {                                                            +
+             "nodeId": "WyJwdWJsaWMiLCAicGVyc29uX2F0X2FkZHJlc3MiLCAxLCA0XQ==",+
+             "person": {                                                      +
+                 "name": "foo",                                               +
+                 "personAtAddressCollection": {                               +
+                     "edges": [                                               +
+                         {                                                    +
+                             "node": {                                        +
+                                 "addressId": 4                               +
+                             }                                                +
+                         }                                                    +
+                     ]                                                        +
+                 }                                                            +
+             },                                                               +
+             "personId": 1                                                    +
+         }                                                                    +
+     }                                                                        +
+ }
+(1 row)
+
+rollback;

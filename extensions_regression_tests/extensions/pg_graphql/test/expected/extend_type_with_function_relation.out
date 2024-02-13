@@ -1,0 +1,506 @@
+begin;
+    create table account(
+        id serial primary key,
+        email varchar(255) not null
+    );
+    insert into account(email) values ('foo'), ('bar'), ('baz');
+    create table blog(
+        id serial primary key,
+        name varchar(255) not null
+    );
+    insert into blog(name)
+    select
+        'blog ' || x
+    from
+        generate_series(1, 5) y(x);
+    create function public.many_blogs(public.account)
+        returns setof public.blog
+        language sql
+        as
+    $$
+        select * from public.blog where id between $1.id * 4 - 4 and $1.id * 4;
+    $$;
+    -- To Many
+    select jsonb_pretty(
+        graphql.resolve($$
+
+        fragment TypeRef on __Type {
+          kind
+          name
+          ofType {
+            kind
+            name
+          }
+        }
+
+        {
+          __type(name: "Account") {
+            fields {
+              name
+              type {
+                ...TypeRef
+              }
+            }
+          }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "__type": {                              +
+             "fields": [                          +
+                 {                                +
+                     "name": "nodeId",            +
+                     "type": {                    +
+                         "kind": "NON_NULL",      +
+                         "name": null,            +
+                         "ofType": {              +
+                             "kind": "SCALAR",    +
+                             "name": "ID"         +
+                         }                        +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "id",                +
+                     "type": {                    +
+                         "kind": "NON_NULL",      +
+                         "name": null,            +
+                         "ofType": {              +
+                             "kind": "SCALAR",    +
+                             "name": "Int"        +
+                         }                        +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "email",             +
+                     "type": {                    +
+                         "kind": "NON_NULL",      +
+                         "name": null,            +
+                         "ofType": {              +
+                             "kind": "SCALAR",    +
+                             "name": "String"     +
+                         }                        +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "manyBlogs",         +
+                     "type": {                    +
+                         "kind": "OBJECT",        +
+                         "name": "BlogConnection",+
+                         "ofType": null           +
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection {
+                edges {
+                  node {
+                    id
+                    manyBlogs(first: 2) {
+                      pageInfo {
+                        hasNextPage
+                      }
+                      edges {
+                        node {
+                          id
+                          name
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                       jsonb_pretty                       
+----------------------------------------------------------
+ {                                                       +
+     "data": {                                           +
+         "accountCollection": {                          +
+             "edges": [                                  +
+                 {                                       +
+                     "node": {                           +
+                         "id": 1,                        +
+                         "manyBlogs": {                  +
+                             "edges": [                  +
+                                 {                       +
+                                     "node": {           +
+                                         "id": 1,        +
+                                         "name": "blog 1"+
+                                     }                   +
+                                 },                      +
+                                 {                       +
+                                     "node": {           +
+                                         "id": 2,        +
+                                         "name": "blog 2"+
+                                     }                   +
+                                 }                       +
+                             ],                          +
+                             "pageInfo": {               +
+                                 "hasNextPage": true     +
+                             }                           +
+                         }                               +
+                     }                                   +
+                 },                                      +
+                 {                                       +
+                     "node": {                           +
+                         "id": 2,                        +
+                         "manyBlogs": {                  +
+                             "edges": [                  +
+                                 {                       +
+                                     "node": {           +
+                                         "id": 4,        +
+                                         "name": "blog 4"+
+                                     }                   +
+                                 },                      +
+                                 {                       +
+                                     "node": {           +
+                                         "id": 5,        +
+                                         "name": "blog 5"+
+                                     }                   +
+                                 }                       +
+                             ],                          +
+                             "pageInfo": {               +
+                                 "hasNextPage": false    +
+                             }                           +
+                         }                               +
+                     }                                   +
+                 },                                      +
+                 {                                       +
+                     "node": {                           +
+                         "id": 3,                        +
+                         "manyBlogs": {                  +
+                             "edges": [                  +
+                             ],                          +
+                             "pageInfo": {               +
+                                 "hasNextPage": false    +
+                             }                           +
+                         }                               +
+                     }                                   +
+                 }                                       +
+             ]                                           +
+         }                                               +
+     }                                                   +
+ }
+(1 row)
+
+    -- To One (function returns single value)
+    savepoint a;
+    create function public.one_account(public.blog)
+        returns public.account
+        language sql
+        as
+    $$
+        select * from public.account where id = $1.id - 2;
+    $$;
+    select jsonb_pretty(
+        graphql.resolve($$
+
+        fragment TypeRef on __Type {
+          kind
+          name
+          ofType {
+            kind
+            name
+          }
+        }
+
+        {
+          __type(name: "Blog") {
+            fields {
+              name
+              type {
+                ...TypeRef
+              }
+            }
+          }
+        }
+        $$)
+    );
+                 jsonb_pretty                  
+-----------------------------------------------
+ {                                            +
+     "data": {                                +
+         "__type": {                          +
+             "fields": [                      +
+                 {                            +
+                     "name": "nodeId",        +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "kind": "SCALAR",+
+                             "name": "ID"     +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "id",            +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "kind": "SCALAR",+
+                             "name": "Int"    +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "name",          +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "kind": "SCALAR",+
+                             "name": "String" +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "oneAccount",    +
+                     "type": {                +
+                         "kind": "OBJECT",    +
+                         "name": "Account",   +
+                         "ofType": null       +
+                     }                        +
+                 }                            +
+             ]                                +
+         }                                    +
+     }                                        +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              blogCollection(first: 3) {
+                edges {
+                  node {
+                    id
+                    oneAccount {
+                      id
+                      email
+                    }
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                jsonb_pretty                
+--------------------------------------------
+ {                                         +
+     "data": {                             +
+         "blogCollection": {               +
+             "edges": [                    +
+                 {                         +
+                     "node": {             +
+                         "id": 1,          +
+                         "oneAccount": null+
+                     }                     +
+                 },                        +
+                 {                         +
+                     "node": {             +
+                         "id": 2,          +
+                         "oneAccount": null+
+                     }                     +
+                 },                        +
+                 {                         +
+                     "node": {             +
+                         "id": 3,          +
+                         "oneAccount": {   +
+                             "id": 1,      +
+                             "email": "foo"+
+                         }                 +
+                     }                     +
+                 }                         +
+             ]                             +
+         }                                 +
+     }                                     +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    -- To One (function returns set of <> rows 1)
+    create or replace function public.one_account(public.blog)
+        returns setof public.account rows 1
+        language sql
+        as
+    $$
+        select * from public.account where id = $1.id - 2;
+    $$;
+    select jsonb_pretty(
+        graphql.resolve($$
+
+        fragment TypeRef on __Type {
+          kind
+          name
+          ofType {
+            kind
+            name
+          }
+        }
+
+        {
+          __type(name: "Blog") {
+            fields {
+              name
+              type {
+                ...TypeRef
+              }
+            }
+          }
+        }
+        $$)
+    );
+                 jsonb_pretty                  
+-----------------------------------------------
+ {                                            +
+     "data": {                                +
+         "__type": {                          +
+             "fields": [                      +
+                 {                            +
+                     "name": "nodeId",        +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "kind": "SCALAR",+
+                             "name": "ID"     +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "id",            +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "kind": "SCALAR",+
+                             "name": "Int"    +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "name",          +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "kind": "SCALAR",+
+                             "name": "String" +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "oneAccount",    +
+                     "type": {                +
+                         "kind": "OBJECT",    +
+                         "name": "Account",   +
+                         "ofType": null       +
+                     }                        +
+                 }                            +
+             ]                                +
+         }                                    +
+     }                                        +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              blogCollection(first: 3) {
+                edges {
+                  node {
+                    id
+                    oneAccount {
+                      id
+                      email
+                    }
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                jsonb_pretty                
+--------------------------------------------
+ {                                         +
+     "data": {                             +
+         "blogCollection": {               +
+             "edges": [                    +
+                 {                         +
+                     "node": {             +
+                         "id": 1,          +
+                         "oneAccount": null+
+                     }                     +
+                 },                        +
+                 {                         +
+                     "node": {             +
+                         "id": 2,          +
+                         "oneAccount": null+
+                     }                     +
+                 },                        +
+                 {                         +
+                     "node": {             +
+                         "id": 3,          +
+                         "oneAccount": {   +
+                             "id": 1,      +
+                             "email": "foo"+
+                         }                 +
+                     }                     +
+                 }                         +
+             ]                             +
+         }                                 +
+     }                                     +
+ }
+(1 row)
+
+    -- Confirm name overrides work
+    comment on function public.one_account(public.blog) is E'@graphql({"name": "acctOverride"})';
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Blog") {
+            fields {
+              name
+            }
+          }
+        }
+        $$)
+    );
+                jsonb_pretty                
+--------------------------------------------
+ {                                         +
+     "data": {                             +
+         "__type": {                       +
+             "fields": [                   +
+                 {                         +
+                     "name": "nodeId"      +
+                 },                        +
+                 {                         +
+                     "name": "id"          +
+                 },                        +
+                 {                         +
+                     "name": "name"        +
+                 },                        +
+                 {                         +
+                     "name": "acctOverride"+
+                 }                         +
+             ]                             +
+         }                                 +
+     }                                     +
+ }
+(1 row)
+
+rollback;

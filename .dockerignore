@@ -26,3 +26,4 @@
 !trace/
 !vendor/postgres-*/
 !workspace_hack/
+!extensions_regression_tests/

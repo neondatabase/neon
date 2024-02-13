@@ -1,0 +1,34 @@
+begin;
+    create table blog_post(
+        id int primary key,
+        title text not null
+    );
+    select graphql.resolve($$
+        mutation {
+          ...blogPosts_insert
+        }
+
+        fragment blogPosts_insert on Mutation {
+          insertIntoBlogPostCollection(objects: [
+            { id: 1, title: "foo" }
+          ]) {
+            affectedCount
+            records {
+              id
+              title
+            }
+          }
+        }
+    $$);
+                                                 resolve                                                  
+----------------------------------------------------------------------------------------------------------
+ {"data": {"insertIntoBlogPostCollection": {"records": [{"id": 1, "title": "foo"}], "affectedCount": 1}}}
+(1 row)
+
+    select * from blog_post;
+ id | title 
+----+-------
+  1 | foo
+(1 row)
+
+rollback;

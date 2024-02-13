@@ -1,0 +1,146 @@
+begin;
+    create table account(
+        id serial primary key,
+        email varchar(255) not null,
+        priority int
+    );
+    savepoint a;
+    -- Scenario: Two Mutations, both are vaild
+    select jsonb_pretty(graphql.resolve($$
+    mutation {
+      firstInsert: insertIntoAccountCollection(objects: [
+        { email: "foo@barsley.com", priority: 1 }
+      ]) {
+        affectedCount
+        records {
+          id
+          email
+        }
+      }
+
+      secondInsert: insertIntoAccountCollection(objects: [
+        { email: "bar@foosworth.com" }
+      ]) {
+        affectedCount
+        records {
+          id
+          email
+        }
+      }
+    }
+    $$));
+                   jsonb_pretty                   
+--------------------------------------------------
+ {                                               +
+     "data": {                                   +
+         "firstInsert": {                        +
+             "records": [                        +
+                 {                               +
+                     "id": 1,                    +
+                     "email": "foo@barsley.com"  +
+                 }                               +
+             ],                                  +
+             "affectedCount": 1                  +
+         },                                      +
+         "secondInsert": {                       +
+             "records": [                        +
+                 {                               +
+                     "id": 2,                    +
+                     "email": "bar@foosworth.com"+
+                 }                               +
+             ],                                  +
+             "affectedCount": 1                  +
+         }                                       +
+     }                                           +
+ }
+(1 row)
+
+    select * from account;
+ id |       email       | priority 
+----+-------------------+----------
+  1 | foo@barsley.com   |        1
+  2 | bar@foosworth.com |         
+(2 rows)
+
+    rollback to savepoint a;
+    -- Scenario: Two Mutations, first one fails. Expect total rollback
+    select jsonb_pretty(graphql.resolve($$
+    mutation {
+      firstInsert: insertIntoAccountCollection(objects: [
+        { email: "foo@barsley.com", invalidKey: 1 }
+      ]) {
+        records {
+          id
+          email
+        }
+      }
+
+      secondInsert: insertIntoAccountCollection(objects: [
+        { email: "bar@foosworth.com" }
+      ]) {
+        records {
+          id
+          email
+        }
+      }
+    }
+    $$));
+                                          jsonb_pretty                                           
+-------------------------------------------------------------------------------------------------
+ {                                                                                              +
+     "data": null,                                                                              +
+     "errors": [                                                                                +
+         {                                                                                      +
+             "message": "Input for type AccountInsertInput contains extra keys [\"invalidKey\"]"+
+         }                                                                                      +
+     ]                                                                                          +
+ }
+(1 row)
+
+    select * from account;
+ id | email | priority 
+----+-------+----------
+(0 rows)
+
+    rollback to savepoint a;
+    -- Scenario: Two Mutations, second one fails. Expect total rollback
+    select jsonb_pretty(graphql.resolve($$
+    mutation {
+      secondInsert: insertIntoAccountCollection(objects: [
+        { email: "bar@foosworth.com" }
+      ]) {
+        records {
+          id
+          email
+        }
+      }
+
+    firstInsert: insertIntoAccountCollection(objects: [
+        { email: "foo@barsley.com", invalidKey: 1 }
+      ]) {
+        records {
+          id
+          email
+        }
+      }
+    }
+    $$));
+                                          jsonb_pretty                                           
+-------------------------------------------------------------------------------------------------
+ {                                                                                              +
+     "data": null,                                                                              +
+     "errors": [                                                                                +
+         {                                                                                      +
+             "message": "Input for type AccountInsertInput contains extra keys [\"invalidKey\"]"+
+         }                                                                                      +
+     ]                                                                                          +
+ }
+(1 row)
+
+    select * from account;
+ id | email | priority 
+----+-------+----------
+(0 rows)
+
+    rollback to savepoint a;
+rollback

@@ -1,0 +1,230 @@
+begin;
+    create table account(
+        id int primary key,
+        is_verified bool
+    );
+    insert into account(id) select generate_series(1, 10);
+    -- Forward pagination
+    -- hasPreviousPage is false, hasNextPage is true
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          accountCollection(first: 3) {
+            pageInfo {
+              hasNextPage
+              hasPreviousPage
+              startCursor
+              endCursor
+            }
+            edges {
+              cursor
+              node {
+                id
+              }
+            }
+          }
+        }
+        $$)
+    );
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "accountCollection": {          +
+             "edges": [                  +
+                 {                       +
+                     "node": {           +
+                         "id": 1         +
+                     },                  +
+                     "cursor": "WzFd"    +
+                 },                      +
+                 {                       +
+                     "node": {           +
+                         "id": 2         +
+                     },                  +
+                     "cursor": "WzJd"    +
+                 },                      +
+                 {                       +
+                     "node": {           +
+                         "id": 3         +
+                     },                  +
+                     "cursor": "WzNd"    +
+                 }                       +
+             ],                          +
+             "pageInfo": {               +
+                 "endCursor": "WzNd",    +
+                 "hasNextPage": true,    +
+                 "startCursor": "WzFd",  +
+                 "hasPreviousPage": false+
+             }                           +
+         }                               +
+     }                                   +
+ }
+(1 row)
+
+    -- hasPreviousPage is true, hasNextPage is true
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          accountCollection(first: 3, after: "WzNd" ) {
+            pageInfo {
+              hasNextPage
+              hasPreviousPage
+              startCursor
+              endCursor
+            }
+            edges {
+              cursor
+              node {
+                id
+              }
+            }
+          }
+        }
+        $$)
+    );
+              jsonb_pretty               
+-----------------------------------------
+ {                                      +
+     "data": {                          +
+         "accountCollection": {         +
+             "edges": [                 +
+                 {                      +
+                     "node": {          +
+                         "id": 4        +
+                     },                 +
+                     "cursor": "WzRd"   +
+                 },                     +
+                 {                      +
+                     "node": {          +
+                         "id": 5        +
+                     },                 +
+                     "cursor": "WzVd"   +
+                 },                     +
+                 {                      +
+                     "node": {          +
+                         "id": 6        +
+                     },                 +
+                     "cursor": "WzZd"   +
+                 }                      +
+             ],                         +
+             "pageInfo": {              +
+                 "endCursor": "WzZd",   +
+                 "hasNextPage": true,   +
+                 "startCursor": "WzRd", +
+                 "hasPreviousPage": true+
+             }                          +
+         }                              +
+     }                                  +
+ }
+(1 row)
+
+    -- hasPreviousPage is false, hasNextPage is true
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          accountCollection(last: 3, before: "WzRd" ) {
+            pageInfo {
+              hasNextPage
+              hasPreviousPage
+              startCursor
+              endCursor
+            }
+            edges {
+              cursor
+              node {
+                id
+              }
+            }
+          }
+        }
+        $$)
+    );
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "accountCollection": {          +
+             "edges": [                  +
+                 {                       +
+                     "node": {           +
+                         "id": 1         +
+                     },                  +
+                     "cursor": "WzFd"    +
+                 },                      +
+                 {                       +
+                     "node": {           +
+                         "id": 2         +
+                     },                  +
+                     "cursor": "WzJd"    +
+                 },                      +
+                 {                       +
+                     "node": {           +
+                         "id": 3         +
+                     },                  +
+                     "cursor": "WzNd"    +
+                 }                       +
+             ],                          +
+             "pageInfo": {               +
+                 "endCursor": "WzNd",    +
+                 "hasNextPage": true,    +
+                 "startCursor": "WzFd",  +
+                 "hasPreviousPage": false+
+             }                           +
+         }                               +
+     }                                   +
+ }
+(1 row)
+
+    -- hasPreviousPage is true, hasNextPage is true
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          accountCollection(last: 2, before: "WzRd" ) {
+            pageInfo {
+              hasNextPage
+              hasPreviousPage
+              startCursor
+              endCursor
+            }
+            edges {
+              cursor
+              node {
+                id
+              }
+            }
+          }
+        }
+        $$)
+    );
+              jsonb_pretty               
+-----------------------------------------
+ {                                      +
+     "data": {                          +
+         "accountCollection": {         +
+             "edges": [                 +
+                 {                      +
+                     "node": {          +
+                         "id": 2        +
+                     },                 +
+                     "cursor": "WzJd"   +
+                 },                     +
+                 {                      +
+                     "node": {          +
+                         "id": 3        +
+                     },                 +
+                     "cursor": "WzNd"   +
+                 }                      +
+             ],                         +
+             "pageInfo": {              +
+                 "endCursor": "WzNd",   +
+                 "hasNextPage": true,   +
+                 "startCursor": "WzJd", +
+                 "hasPreviousPage": true+
+             }                          +
+         }                              +
+     }                                  +
+ }
+(1 row)
+
+rollback;

@@ -1,0 +1,173 @@
+begin;
+    savepoint a;
+    create table "@xyz"( id int primary key);
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              __schema {
+                types {
+                  name
+                }
+              }
+            }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "__schema": {                            +
+             "types": [                           +
+                 {                                +
+                     "name": "BigFloat"           +
+                 },                               +
+                 {                                +
+                     "name": "BigFloatFilter"     +
+                 },                               +
+                 {                                +
+                     "name": "BigInt"             +
+                 },                               +
+                 {                                +
+                     "name": "BigIntFilter"       +
+                 },                               +
+                 {                                +
+                     "name": "Boolean"            +
+                 },                               +
+                 {                                +
+                     "name": "BooleanFilter"      +
+                 },                               +
+                 {                                +
+                     "name": "Cursor"             +
+                 },                               +
+                 {                                +
+                     "name": "Date"               +
+                 },                               +
+                 {                                +
+                     "name": "DateFilter"         +
+                 },                               +
+                 {                                +
+                     "name": "Datetime"           +
+                 },                               +
+                 {                                +
+                     "name": "DatetimeFilter"     +
+                 },                               +
+                 {                                +
+                     "name": "FilterIs"           +
+                 },                               +
+                 {                                +
+                     "name": "Float"              +
+                 },                               +
+                 {                                +
+                     "name": "FloatFilter"        +
+                 },                               +
+                 {                                +
+                     "name": "ID"                 +
+                 },                               +
+                 {                                +
+                     "name": "IDFilter"           +
+                 },                               +
+                 {                                +
+                     "name": "Int"                +
+                 },                               +
+                 {                                +
+                     "name": "IntFilter"          +
+                 },                               +
+                 {                                +
+                     "name": "JSON"               +
+                 },                               +
+                 {                                +
+                     "name": "Node"               +
+                 },                               +
+                 {                                +
+                     "name": "Opaque"             +
+                 },                               +
+                 {                                +
+                     "name": "OpaqueFilter"       +
+                 },                               +
+                 {                                +
+                     "name": "OrderByDirection"   +
+                 },                               +
+                 {                                +
+                     "name": "PageInfo"           +
+                 },                               +
+                 {                                +
+                     "name": "Query"              +
+                 },                               +
+                 {                                +
+                     "name": "String"             +
+                 },                               +
+                 {                                +
+                     "name": "StringFilter"       +
+                 },                               +
+                 {                                +
+                     "name": "Time"               +
+                 },                               +
+                 {                                +
+                     "name": "TimeFilter"         +
+                 },                               +
+                 {                                +
+                     "name": "UUID"               +
+                 },                               +
+                 {                                +
+                     "name": "UUIDFilter"         +
+                 },                               +
+                 {                                +
+                     "name": "__Directive"        +
+                 },                               +
+                 {                                +
+                     "name": "__DirectiveLocation"+
+                 },                               +
+                 {                                +
+                     "name": "__EnumValue"        +
+                 },                               +
+                 {                                +
+                     "name": "__Field"            +
+                 },                               +
+                 {                                +
+                     "name": "__InputValue"       +
+                 },                               +
+                 {                                +
+                     "name": "__Schema"           +
+                 },                               +
+                 {                                +
+                     "name": "__Type"             +
+                 },                               +
+                 {                                +
+                     "name": "__TypeKind"         +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    create table xyz( "! q" int primary key);
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              __type(name: "Xyz") {
+                fields {
+                  name
+                }
+              }
+            }
+        $$)
+    );
+             jsonb_pretty             
+--------------------------------------
+ {                                   +
+     "data": {                       +
+         "__type": {                 +
+             "fields": [             +
+                 {                   +
+                     "name": "nodeId"+
+                 }                   +
+             ]                       +
+         }                           +
+     }                               +
+ }
+(1 row)
+
+    rollback to savepoint a;
+rollback;

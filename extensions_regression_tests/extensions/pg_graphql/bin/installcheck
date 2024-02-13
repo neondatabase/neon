@@ -1,0 +1,55 @@
+#! /bin/bash
+
+########
+# Vars #
+########
+TMPDIR="$(mktemp -d)"
+export PGDATA="$TMPDIR"
+export PGHOST="$TMPDIR"
+export PGUSER=postgres
+export PGDATABASE=postgres
+export PGTZ=UTC
+export PG_COLOR=auto
+
+# PATH=~/.pgrx/15.1/pgrx-install/bin/:$PATH
+
+####################
+# Ensure Clean Env #
+####################
+# Stop the server (if running)
+trap 'pg_ctl stop -m i' sigint sigterm exit
+# Remove temporary data dir
+rm -rf "$TMPDIR"
+
+##############
+# Initialize #
+##############
+# Initialize: setting PGUSER as the owner
+initdb --no-locale --encoding=UTF8 --nosync -U "$PGUSER"
+# Start the server
+pg_ctl start -o "-F -c listen_addresses=\"\" -c log_min_messages=WARNING -k $PGDATA"
+# Create the test db
+createdb contrib_regression
+
+#########
+# Tests #
+#########
+TESTDIR="test"
+PGXS=$(dirname `pg_config --pgxs`)
+REGRESS="${PGXS}/../test/regress/pg_regress"
+
+# Test names can be passed as parameters to this script.
+# If any test names are passed run only those tests.
+# Otherwise run all tests.
+if [ "$#" -ne 0 ]
+then
+    TESTS=$@
+else
+    TESTS=$(ls ${TESTDIR}/sql | sed -e 's/\..*$//' | sort )
+fi
+
+# Execute the test fixtures
+psql -v ON_ERROR_STOP=1 -f test/fixtures.sql -d contrib_regression
+
+# Run tests
+${REGRESS} --use-existing --dbname=contrib_regression --inputdir=${TESTDIR} ${TESTS}

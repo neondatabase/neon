@@ -1,0 +1,42 @@
+begin;
+    create table public.account(
+        id int primary key
+    );
+
+    -- appears in pg_catalog as returning a set of int
+    create function public._computed(rec public.account)
+        returns table ( id int )
+        immutable
+        strict
+        language sql
+    as $$
+        select 2 as id;
+    $$;
+
+    -- appears in pg_catalog as returning a set of pseudotype "record"
+    create function public._computed2(rec public.account)
+        returns table ( id int, name text )
+        immutable
+        strict
+        language sql
+    as $$
+        select 2 as id, 'abc' as name;
+    $$;
+
+    insert into account(id) values (1);
+
+    -- neither computed nor computed2 should be present
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Account") {
+            kind
+            fields {
+                name
+            }
+          }
+        }
+        $$)
+    );
+
+rollback;

@@ -1,0 +1,183 @@
+begin;
+    create table account(
+        id int primary key
+    );
+    insert into account(id)
+    select * from generate_series(1, 40);
+    -- Requested 50, expect 30
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          accountCollection(first: 50) {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
+        $$)
+    );
+           jsonb_pretty           
+----------------------------------
+ {                               +
+     "data": {                   +
+         "accountCollection": {  +
+             "edges": [          +
+                 {               +
+                     "node": {   +
+                         "id": 1 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 2 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 3 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 4 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 5 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 6 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 7 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 8 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 9 +
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 10+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 11+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 12+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 13+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 14+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 15+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 16+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 17+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 18+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 19+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 20+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 21+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 22+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 23+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 24+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 25+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 26+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 27+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 28+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 29+
+                     }           +
+                 },              +
+                 {               +
+                     "node": {   +
+                         "id": 30+
+                     }           +
+                 }               +
+             ]                   +
+         }                       +
+     }                           +
+ }
+(1 row)
+
+rollback;

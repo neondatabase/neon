@@ -1,0 +1,6 @@
+select graphql.resolve($$
+{ { {
+    shouldFail
+  }
+}
+$$);

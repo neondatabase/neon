@@ -1,0 +1,198 @@
+begin;
+    /*
+        Composite and array types are not currently supported as inputs
+        - confirm composites are not allowed anywhere
+        - confirm arrays are not allowed as input
+    */
+    create type complex as (r int, i int);
+    create table something(
+        id serial primary key,
+        name varchar(255) not null,
+        tags text[],
+        comps complex,
+        js json,
+        jsb jsonb
+    );
+    -- Inflection on, Overrides: off
+    comment on schema public is e'@graphql({"inflect_names": true})';
+    select jsonb_pretty(
+        jsonb_path_query(
+            graphql.resolve($$
+                {
+                  __schema {
+                    types {
+                      name
+                      fields {
+                        name
+                      }
+                      inputFields {
+                        name
+                      }
+                    }
+                  }
+                }
+            $$),
+            '$.data.__schema.types[*] ? (@.name starts with "Something")'
+        )
+    );
+              jsonb_pretty              
+----------------------------------------
+ {                                     +
+     "name": "Something",              +
+     "fields": [                       +
+         {                             +
+             "name": "nodeId"          +
+         },                            +
+         {                             +
+             "name": "id"              +
+         },                            +
+         {                             +
+             "name": "name"            +
+         },                            +
+         {                             +
+             "name": "tags"            +
+         },                            +
+         {                             +
+             "name": "js"              +
+         },                            +
+         {                             +
+             "name": "jsb"             +
+         }                             +
+     ],                                +
+     "inputFields": null               +
+ }
+ {                                     +
+     "name": "SomethingConnection",    +
+     "fields": [                       +
+         {                             +
+             "name": "edges"           +
+         },                            +
+         {                             +
+             "name": "pageInfo"        +
+         }                             +
+     ],                                +
+     "inputFields": null               +
+ }
+ {                                     +
+     "name": "SomethingDeleteResponse",+
+     "fields": [                       +
+         {                             +
+             "name": "affectedCount"   +
+         },                            +
+         {                             +
+             "name": "records"         +
+         }                             +
+     ],                                +
+     "inputFields": null               +
+ }
+ {                                     +
+     "name": "SomethingEdge",          +
+     "fields": [                       +
+         {                             +
+             "name": "cursor"          +
+         },                            +
+         {                             +
+             "name": "node"            +
+         }                             +
+     ],                                +
+     "inputFields": null               +
+ }
+ {                                     +
+     "name": "SomethingFilter",        +
+     "fields": null,                   +
+     "inputFields": [                  +
+         {                             +
+             "name": "id"              +
+         },                            +
+         {                             +
+             "name": "name"            +
+         },                            +
+         {                             +
+             "name": "nodeId"          +
+         },                            +
+         {                             +
+             "name": "and"             +
+         },                            +
+         {                             +
+             "name": "or"              +
+         },                            +
+         {                             +
+             "name": "not"             +
+         }                             +
+     ]                                 +
+ }
+ {                                     +
+     "name": "SomethingInsertInput",   +
+     "fields": null,                   +
+     "inputFields": [                  +
+         {                             +
+             "name": "name"            +
+         },                            +
+         {                             +
+             "name": "tags"            +
+         },                            +
+         {                             +
+             "name": "js"              +
+         },                            +
+         {                             +
+             "name": "jsb"             +
+         }                             +
+     ]                                 +
+ }
+ {                                     +
+     "name": "SomethingInsertResponse",+
+     "fields": [                       +
+         {                             +
+             "name": "affectedCount"   +
+         },                            +
+         {                             +
+             "name": "records"         +
+         }                             +
+     ],                                +
+     "inputFields": null               +
+ }
+ {                                     +
+     "name": "SomethingOrderBy",       +
+     "fields": null,                   +
+     "inputFields": [                  +
+         {                             +
+             "name": "id"              +
+         },                            +
+         {                             +
+             "name": "name"            +
+         }                             +
+     ]                                 +
+ }
+ {                                     +
+     "name": "SomethingUpdateInput",   +
+     "fields": null,                   +
+     "inputFields": [                  +
+         {                             +
+             "name": "name"            +
+         },                            +
+         {                             +
+             "name": "tags"            +
+         },                            +
+         {                             +
+             "name": "js"              +
+         },                            +
+         {                             +
+             "name": "jsb"             +
+         }                             +
+     ]                                 +
+ }
+ {                                     +
+     "name": "SomethingUpdateResponse",+
+     "fields": [                       +
+         {                             +
+             "name": "affectedCount"   +
+         },                            +
+         {                             +
+             "name": "records"         +
+         }                             +
+     ],                                +
+     "inputFields": null               +
+ }
+(10 rows)
+
+rollback;

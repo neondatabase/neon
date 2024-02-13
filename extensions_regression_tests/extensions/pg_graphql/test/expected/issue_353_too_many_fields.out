@@ -1,0 +1,336 @@
+begin;
+    create table many_fields(
+        id int primary key,
+        field1 int,
+        field2 int,
+        field3 int,
+        field4 int,
+        field5 int,
+        field6 int,
+        field7 int,
+        field8 int,
+        field9 int,
+        field10 int,
+        field11 int,
+        field12 int,
+        field13 int,
+        field14 int,
+        field15 int,
+        field16 int,
+        field17 int,
+        field18 int,
+        field19 int,
+        field20 int,
+        field21 int,
+        field22 int,
+        field23 int,
+        field24 int,
+        field25 int,
+        field26 int,
+        field27 int,
+        field28 int,
+        field29 int,
+        field30 int,
+        field31 int,
+        field32 int,
+        field33 int,
+        field34 int,
+        field35 int,
+        field36 int,
+        field37 int,
+        field38 int,
+        field39 int,
+        field40 int,
+        field41 int,
+        field42 int,
+        field43 int,
+        field44 int,
+        field45 int,
+        field46 int,
+        field47 int,
+        field48 int,
+        field49 int,
+        field50 int,
+        field51 int,
+        field52 int,
+        field53 int,
+        field54 int,
+        field55 int,
+        field56 int,
+        field57 int,
+        field58 int,
+        field59 int,
+        field60 int,
+        field61 int,
+        field62 int,
+        field63 int,
+        field64 int,
+        field65 int,
+        field66 int,
+        field67 int,
+        field68 int,
+        field69 int,
+        field70 int,
+        field71 int,
+        field72 int,
+        field73 int,
+        field74 int,
+        field75 int,
+        field76 int,
+        field77 int,
+        field78 int,
+        field79 int,
+        field80 int,
+        field81 int,
+        field82 int,
+        field83 int,
+        field84 int,
+        field85 int,
+        field86 int,
+        field87 int,
+        field88 int,
+        field89 int,
+        field90 int,
+        field91 int,
+        field92 int,
+        field93 int,
+        field94 int,
+        field95 int,
+        field96 int,
+        field97 int,
+        field98 int,
+        field99 int,
+        field100 int
+    );
+    insert into many_fields(id) values (1);
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              manyFieldsCollection {
+                edges {
+                  node {
+                    id
+                    field1
+                    field2
+                    field3
+                    field4
+                    field5
+                    field6
+                    field7
+                    field8
+                    field9
+                    field10
+                    field11
+                    field12
+                    field13
+                    field14
+                    field15
+                    field16
+                    field17
+                    field18
+                    field19
+                    field20
+                    field21
+                    field22
+                    field23
+                    field24
+                    field25
+                    field26
+                    field27
+                    field28
+                    field29
+                    field30
+                    field31
+                    field32
+                    field33
+                    field34
+                    field35
+                    field36
+                    field37
+                    field38
+                    field39
+                    field40
+                    field41
+                    field42
+                    field43
+                    field44
+                    field45
+                    field46
+                    field47
+                    field48
+                    field49
+                    field50
+                    field51
+                    field52
+                    field53
+                    field54
+                    field55
+                    field56
+                    field57
+                    field58
+                    field59
+                    field60
+                    field61
+                    field62
+                    field63
+                    field64
+                    field65
+                    field66
+                    field67
+                    field68
+                    field69
+                    field70
+                    field71
+                    field72
+                    field73
+                    field74
+                    field75
+                    field76
+                    field77
+                    field78
+                    field79
+                    field80
+                    field81
+                    field82
+                    field83
+                    field84
+                    field85
+                    field86
+                    field87
+                    field88
+                    field89
+                    field90
+                    field91
+                    field92
+                    field93
+                    field94
+                    field95
+                    field96
+                    field97
+                    field98
+                    field99
+                    field100
+                  }
+                }
+              }
+            }
+        $$)
+    );
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "manyFieldsCollection": {       +
+             "edges": [                  +
+                 {                       +
+                     "node": {           +
+                         "id": 1,        +
+                         "field1": null, +
+                         "field2": null, +
+                         "field3": null, +
+                         "field4": null, +
+                         "field5": null, +
+                         "field6": null, +
+                         "field7": null, +
+                         "field8": null, +
+                         "field9": null, +
+                         "field10": null,+
+                         "field11": null,+
+                         "field12": null,+
+                         "field13": null,+
+                         "field14": null,+
+                         "field15": null,+
+                         "field16": null,+
+                         "field17": null,+
+                         "field18": null,+
+                         "field19": null,+
+                         "field20": null,+
+                         "field21": null,+
+                         "field22": null,+
+                         "field23": null,+
+                         "field24": null,+
+                         "field25": null,+
+                         "field26": null,+
+                         "field27": null,+
+                         "field28": null,+
+                         "field29": null,+
+                         "field30": null,+
+                         "field31": null,+
+                         "field32": null,+
+                         "field33": null,+
+                         "field34": null,+
+                         "field35": null,+
+                         "field36": null,+
+                         "field37": null,+
+                         "field38": null,+
+                         "field39": null,+
+                         "field40": null,+
+                         "field41": null,+
+                         "field42": null,+
+                         "field43": null,+
+                         "field44": null,+
+                         "field45": null,+
+                         "field46": null,+
+                         "field47": null,+
+                         "field48": null,+
+                         "field49": null,+
+                         "field50": null,+
+                         "field51": null,+
+                         "field52": null,+
+                         "field53": null,+
+                         "field54": null,+
+                         "field55": null,+
+                         "field56": null,+
+                         "field57": null,+
+                         "field58": null,+
+                         "field59": null,+
+                         "field60": null,+
+                         "field61": null,+
+                         "field62": null,+
+                         "field63": null,+
+                         "field64": null,+
+                         "field65": null,+
+                         "field66": null,+
+                         "field67": null,+
+                         "field68": null,+
+                         "field69": null,+
+                         "field70": null,+
+                         "field71": null,+
+                         "field72": null,+
+                         "field73": null,+
+                         "field74": null,+
+                         "field75": null,+
+                         "field76": null,+
+                         "field77": null,+
+                         "field78": null,+
+                         "field79": null,+
+                         "field80": null,+
+                         "field81": null,+
+                         "field82": null,+
+                         "field83": null,+
+                         "field84": null,+
+                         "field85": null,+
+                         "field86": null,+
+                         "field87": null,+
+                         "field88": null,+
+                         "field89": null,+
+                         "field90": null,+
+                         "field91": null,+
+                         "field92": null,+
+                         "field93": null,+
+                         "field94": null,+
+                         "field95": null,+
+                         "field96": null,+
+                         "field97": null,+
+                         "field98": null,+
+                         "field99": null,+
+                         "field100": null+
+                     }                   +
+                 }                       +
+             ]                           +
+         }                               +
+     }                                   +
+ }
+(1 row)
+
+rollback;

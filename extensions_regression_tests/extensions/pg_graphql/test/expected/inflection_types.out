@@ -1,0 +1,128 @@
+begin;
+    create table blog_post(
+        id int primary key,
+        author_id int
+    );
+    savepoint a;
+    -- Inflection off, Overrides: off
+    comment on schema public is e'@graphql({"inflect_names": false})';
+    select jsonb_pretty(
+        jsonb_path_query(
+            graphql.resolve($$
+                query IntrospectionQuery {
+                  __schema {
+                    types {
+                      name
+                    }
+                  }
+                }
+            $$),
+            '$.data.__schema.types[*].name ? (@ starts with "blog")'
+        )
+    );
+       jsonb_pretty        
+---------------------------
+ "blog_post"
+ "blog_postConnection"
+ "blog_postDeleteResponse"
+ "blog_postEdge"
+ "blog_postFilter"
+ "blog_postInsertInput"
+ "blog_postInsertResponse"
+ "blog_postOrderBy"
+ "blog_postUpdateInput"
+ "blog_postUpdateResponse"
+(10 rows)
+
+    -- Inflection off, Overrides: on
+    comment on table blog_post is e'@graphql({"name": "BlogZZZ"})';
+    select jsonb_pretty(
+        jsonb_path_query(
+            graphql.resolve($$
+                query IntrospectionQuery {
+                  __schema {
+                    types {
+                      name
+                    }
+                  }
+                }
+            $$),
+            '$.data.__schema.types[*].name ? (@ starts with "Blog")'
+        )
+    );
+      jsonb_pretty       
+-------------------------
+ "BlogZZZ"
+ "BlogZZZConnection"
+ "BlogZZZDeleteResponse"
+ "BlogZZZEdge"
+ "BlogZZZFilter"
+ "BlogZZZInsertInput"
+ "BlogZZZInsertResponse"
+ "BlogZZZOrderBy"
+ "BlogZZZUpdateInput"
+ "BlogZZZUpdateResponse"
+(10 rows)
+
+    rollback to savepoint a;
+    -- Inflection on, Overrides: off
+    comment on schema public is e'@graphql({"inflect_names": true})';
+    select jsonb_pretty(
+        jsonb_path_query(
+            graphql.resolve($$
+                query IntrospectionQuery {
+                  __schema {
+                    types {
+                      name
+                    }
+                  }
+                }
+            $$),
+            '$.data.__schema.types[*].name ? (@ starts with "Blog")'
+        )
+    );
+       jsonb_pretty       
+--------------------------
+ "BlogPost"
+ "BlogPostConnection"
+ "BlogPostDeleteResponse"
+ "BlogPostEdge"
+ "BlogPostFilter"
+ "BlogPostInsertInput"
+ "BlogPostInsertResponse"
+ "BlogPostOrderBy"
+ "BlogPostUpdateInput"
+ "BlogPostUpdateResponse"
+(10 rows)
+
+    -- Inflection on, Overrides: on
+    comment on table blog_post is e'@graphql({"name": "BlogZZZ"})';
+    select jsonb_pretty(
+        jsonb_path_query(
+            graphql.resolve($$
+                query IntrospectionQuery {
+                  __schema {
+                    types {
+                      name
+                    }
+                  }
+                }
+            $$),
+            '$.data.__schema.types[*].name ? (@ starts with "Blog")'
+        )
+    );
+      jsonb_pretty       
+-------------------------
+ "BlogZZZ"
+ "BlogZZZConnection"
+ "BlogZZZDeleteResponse"
+ "BlogZZZEdge"
+ "BlogZZZFilter"
+ "BlogZZZInsertInput"
+ "BlogZZZInsertResponse"
+ "BlogZZZOrderBy"
+ "BlogZZZUpdateInput"
+ "BlogZZZUpdateResponse"
+(10 rows)
+
+rollback;

@@ -1,0 +1,42 @@
+ARG PG_VERSION
+ARG REPOSITORY=neondatabase
+ARG IMAGE=build-tools
+ARG TAG=pinned
+
+
+FROM $REPOSITORY/compute-node-$PG_VERSION:$TAG AS pg-with-extensions
+
+FROM $REPOSITORY/$IMAGE:pinned AS extensions_regression_tests
+COPY --from=pg-with-extensions /usr/local /usr/local
+#########################################################################################
+# install build deps
+# This is used to run tap and make tests
+#########################################################################################
+USER root
+RUN apt update &&  \
+    apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
+    zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd
+
+#########################################################################################
+# Install "rust extensions"
+# This is used to run `pgrx` tests
+#########################################################################################
+RUN apt-get update && \
+    apt-get install -y curl libclang-dev cmake
+
+ENV HOME=/home/postgres
+ENV PATH="/home/postgres/.cargo/bin:/usr/local/bin/:$PATH"
+WORKDIR /home/postgres
+ARG PG_VERSION
+
+#RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+#    chmod +x rustup-init && \
+#    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
+#    rm rustup-init && \
+#    cargo install --locked --version 0.10.2 cargo-pgrx && \
+#    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/bin/pg_config'
+
+COPY extensions_regression_tests extensions_regression_tests
+#RUN make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/bin/pg_config
+WORKDIR /home/postgres/extensions_regression_tests

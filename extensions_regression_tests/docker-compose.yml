@@ -1,0 +1,29 @@
+version: '3'
+services:
+
+#  test:
+#    container_name: pg_extensions_regression_test
+#    working_dir: /home/postgres/extensions_regression_tests
+#    environment:
+#      - AWS_PROFILE=dev
+#      - AWS_REGION=eu-central-1
+#    build:
+#        context: ../.
+#        dockerfile: Dockerfile.extension-regression-test
+#        target: extensions_regression_tests
+#        args:
+#          PG_VERSION: ${PG_VERSION:-v16}
+#          TAG: latest
+#    command: make extensions-test-all
+#
+  test2:
+    container_name: pg_extensions_regression_test2
+    working_dir: /home/nonroot/extensions_regression_tests
+    build:
+      context: ../.
+      dockerfile: Dockerfile.compute-node
+      target: extension-regression-tests
+      args:
+        PG_VERSION: ${PG_VERSION:-v15}
+        TAG: latest
+    command: make extensions-test-all

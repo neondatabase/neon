@@ -843,6 +843,39 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 
 #########################################################################################
 #
+# Layer "extension-regression-tests"
+# run regression test of extensions
+#
+#########################################################################################
+FROM neon-pg-ext-build as extension-regression-tests
+ARG PG_VERSION
+
+COPY --from=neon-pg-ext-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN apt-get update && \
+    apt-get install -y curl libclang-dev cmake && \
+    useradd -ms /bin/bash nonroot -b /home
+
+ENV HOME=/home/nonroot
+ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
+USER nonroot
+WORKDIR /home/nonroot
+ARG PG_VERSION
+
+RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
+    rm rustup-init && \
+    cargo install --locked --version 0.10.2 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+
+COPY extensions_regression_tests extensions_regression_tests
+USER root
+RUN chmod -R 777 extensions_regression_tests
+USER nonroot
+
+#########################################################################################
+#
 # Compile and run the Neon-specific `compute_ctl` binary
 #
 #########################################################################################

@@ -1,0 +1,18 @@
+begin;
+    create table account(
+        id int primary key
+    );
+    select graphql.resolve($$
+    {
+      accountCollection {
+        dneField
+        totalCount
+      }
+    }
+    $$);
+                                resolve                                 
+------------------------------------------------------------------------
+ {"data": null, "errors": [{"message": "unknown field in connection"}]}
+(1 row)
+
+rollback;

@@ -1,0 +1,14 @@
+begin;
+    select graphql.resolve($$
+    {
+      account {
+        id
+      }
+    }
+    $$);
+                                      resolve                                       
+------------------------------------------------------------------------------------
+ {"data": null, "errors": [{"message": "Unknown field \"account\" on type Query"}]}
+(1 row)
+
+rollback;

@@ -1,0 +1,212 @@
+begin;
+    create table account(
+        id serial primary key,
+        email varchar(255) not null
+    );
+    -- Execute first op
+    select jsonb_pretty(
+        graphql.resolve(
+            query := $$
+                mutation insertAccount {
+                  insertIntoAccountCollection(
+                    objects: [
+                      {
+                        email: "adsf"
+                      }
+                    ]) {
+                    records {
+                      id
+                     }
+                  }
+                }
+
+                mutation deleteAccount {
+                  deleteFromAccountCollection(
+                    filter: {id: {eq: 10}}) {
+                    affectedCount
+                    records {
+                      id
+                    }
+                  }
+                }
+            $$,
+            "operationName" := 'insertAccount'
+        )
+    );
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "insertIntoAccountCollection": {+
+             "records": [                +
+                 {                       +
+                     "id": 1             +
+                 }                       +
+             ]                           +
+         }                               +
+     }                                   +
+ }
+(1 row)
+
+    -- Execute second op
+    select jsonb_pretty(
+        graphql.resolve(
+            query := $$
+                mutation insertAccount {
+                  insertIntoAccountCollection(
+                    objects: [
+                      {
+                        email: "adsf"
+                      }
+                    ]) {
+                    records {
+                      id
+                     }
+                  }
+                }
+
+                mutation deleteAccount {
+                  deleteFromAccountCollection(
+                    filter: {id: {eq: 1}}) {
+                    affectedCount
+                    records {
+                      id
+                    }
+                  }
+                }
+            $$,
+            "operationName" := 'deleteAccount'
+        )
+    );
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "deleteFromAccountCollection": {+
+             "records": [                +
+                 {                       +
+                     "id": 1             +
+                 }                       +
+             ],                          +
+             "affectedCount": 1          +
+         }                               +
+     }                                   +
+ }
+(1 row)
+
+    -- operationName not required for query with 1 operation
+    select jsonb_pretty(
+        graphql.resolve(
+            query := $$
+                mutation insertAccount {
+                  insertIntoAccountCollection(
+                    objects: [
+                      {
+                        email: "adsf"
+                      }
+                    ]) {
+                    records {
+                      id
+                     }
+                  }
+                }
+            $$
+        )
+    );
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "insertIntoAccountCollection": {+
+             "records": [                +
+                 {                       +
+                     "id": 2             +
+                 }                       +
+             ]                           +
+         }                               +
+     }                                   +
+ }
+(1 row)
+
+    -- Fail to pass an operation name
+    select jsonb_pretty(
+        graphql.resolve(
+            query := $$
+                mutation insertAccount {
+                  insertIntoAccountCollection(
+                    objects: [
+                      {
+                        email: "adsf"
+                      }
+                    ]) {
+                    records {
+                      id
+                     }
+                  }
+                }
+
+                mutation deleteAccount {
+                  deleteFromAccountCollection(
+                    filter: {id: {eq: 10}}) {
+                    affectedCount
+                    records {
+                      id
+                    }
+                  }
+                }
+            $$
+        )
+    );
+                 jsonb_pretty                 
+----------------------------------------------
+ {                                           +
+     "errors": [                             +
+         {                                   +
+             "message": "Operation not found"+
+         }                                   +
+     ]                                       +
+ }
+(1 row)
+
+    -- Pass invalid operation name
+    select jsonb_pretty(
+        graphql.resolve(
+            "operationName" := 'invalidName',
+            query := $$
+                mutation insertAccount {
+                  insertIntoAccountCollection(
+                    objects: [
+                      {
+                        email: "adsf"
+                      }
+                    ]) {
+                    records {
+                      id
+                     }
+                  }
+                }
+
+                mutation deleteAccount {
+                  deleteFromAccountCollection(
+                    filter: {id: {eq: 10}}) {
+                    affectedCount
+                    records {
+                      id
+                    }
+                  }
+                }
+            $$
+        )
+    );
+                 jsonb_pretty                 
+----------------------------------------------
+ {                                           +
+     "errors": [                             +
+         {                                   +
+             "message": "Operation not found"+
+         }                                   +
+     ]                                       +
+ }
+(1 row)
+
+rollback;

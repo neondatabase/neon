@@ -1,0 +1,9 @@
+select graphql.resolve(
+    query:='query ABC { anon }
+            query ABC { other }'
+)
+                           resolve                           
+-------------------------------------------------------------
+ {"errors": [{"message": "Operation names must be unique"}]}
+(1 row)
+

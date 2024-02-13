@@ -1,0 +1,26 @@
+CREATE TABLE t (val vector(3));
+CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (m = 1);
+ERROR:  value 1 out of bounds for option "m"
+DETAIL:  Valid values are between "2" and "100".
+CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (m = 101);
+ERROR:  value 101 out of bounds for option "m"
+DETAIL:  Valid values are between "2" and "100".
+CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (ef_construction = 3);
+ERROR:  value 3 out of bounds for option "ef_construction"
+DETAIL:  Valid values are between "4" and "1000".
+CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (ef_construction = 1001);
+ERROR:  value 1001 out of bounds for option "ef_construction"
+DETAIL:  Valid values are between "4" and "1000".
+CREATE INDEX ON t USING hnsw (val vector_l2_ops) WITH (m = 16, ef_construction = 31);
+ERROR:  ef_construction must be greater than or equal to 2 * m
+SHOW hnsw.ef_search;
+ hnsw.ef_search 
+----------------
+ 40
+(1 row)
+
+SET hnsw.ef_search = 0;
+ERROR:  0 is outside the valid range for parameter "hnsw.ef_search" (1 .. 1000)
+SET hnsw.ef_search = 1001;
+ERROR:  1001 is outside the valid range for parameter "hnsw.ef_search" (1 .. 1000)
+DROP TABLE t;

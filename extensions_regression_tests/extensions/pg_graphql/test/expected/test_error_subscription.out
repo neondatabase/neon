@@ -1,0 +1,8 @@
+select graphql.resolve(
+    query:='subscription Abc { anon }'
+)
+                           resolve                            
+--------------------------------------------------------------
+ {"errors": [{"message": "Subscriptions are not supported"}]}
+(1 row)
+

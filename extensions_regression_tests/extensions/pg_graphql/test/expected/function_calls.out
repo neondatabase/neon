@@ -1,0 +1,1943 @@
+begin;
+    savepoint a;
+    -- Only volatilve functions appear on the mutation object
+    create function add_smallints(a smallint, b smallint)
+        returns smallint language sql volatile
+    as $$ select a + b; $$;
+    comment on function add_smallints is e'@graphql({"description": "adds two smallints"})';
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            addSmallints(a: 1, b: 2)
+        }
+    $$));
+       jsonb_pretty        
+---------------------------
+ {                        +
+     "data": {            +
+         "addSmallints": 3+
+     }                    +
+ }
+(1 row)
+
+    create function add_ints(a int, b int)
+        returns int language sql volatile
+    as $$ select a + b; $$;
+    comment on function add_ints is e'@graphql({"name": "intsAdd"})';
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            intsAdd(a: 2, b: 3)
+        }
+    $$));
+     jsonb_pretty     
+----------------------
+ {                   +
+     "data": {       +
+         "intsAdd": 5+
+     }               +
+ }
+(1 row)
+
+    comment on schema public is e'@graphql({"inflect_names": false})';
+    create function add_bigints(a bigint, b bigint)
+        returns bigint language sql volatile
+    as $$ select a + b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            add_bigints(a: 3, b: 4)
+        }
+    $$));
+        jsonb_pretty        
+----------------------------
+ {                         +
+     "data": {             +
+         "add_bigints": "7"+
+     }                     +
+ }
+(1 row)
+
+    comment on schema public is e'@graphql({"inflect_names": true})';
+    create function add_reals(a real, b real)
+        returns real language sql volatile
+    as $$ select a + b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            addReals(a: 4.5, b: 5.6)
+        }
+    $$));
+       jsonb_pretty       
+--------------------------
+ {                       +
+     "data": {           +
+         "addReals": 10.1+
+     }                   +
+ }
+(1 row)
+
+    create function add_doubles(a double precision, b double precision)
+        returns double precision language sql volatile
+    as $$ select a + b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            addDoubles(a: 7.8, b: 9.1)
+        }
+    $$));
+        jsonb_pretty        
+----------------------------
+ {                         +
+     "data": {             +
+         "addDoubles": 16.9+
+     }                     +
+ }
+(1 row)
+
+    create function add_numerics(a numeric, b numeric)
+        returns numeric language sql volatile
+    as $$ select a + b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            addNumerics(a: "11.12", b: "13.14")
+        }
+    $$));
+          jsonb_pretty          
+--------------------------------
+ {                             +
+     "data": {                 +
+         "addNumerics": "24.26"+
+     }                         +
+ }
+(1 row)
+
+    create function and_bools(a bool, b bool)
+        returns bool language sql volatile
+    as $$ select a and b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            andBools(a: true, b: false)
+        }
+    $$));
+       jsonb_pretty        
+---------------------------
+ {                        +
+     "data": {            +
+         "andBools": false+
+     }                    +
+ }
+(1 row)
+
+    create function uuid_identity(input uuid)
+        returns uuid language sql volatile
+    as $$ select input; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            uuidIdentity(input: "d3ef3a8c-2c72-11ee-b094-776acede7221")
+        }
+    $$));
+                          jsonb_pretty                          
+----------------------------------------------------------------
+ {                                                             +
+     "data": {                                                 +
+         "uuidIdentity": "d3ef3a8c-2c72-11ee-b094-776acede7221"+
+     }                                                         +
+ }
+(1 row)
+
+    create function concat_text(a text, b text)
+        returns text language sql volatile
+    as $$ select a || b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            concatText(a: "Hello ", b: "World")
+        }
+    $$));
+            jsonb_pretty             
+-------------------------------------
+ {                                  +
+     "data": {                      +
+         "concatText": "Hello World"+
+     }                              +
+ }
+(1 row)
+
+    create function next_day(d date)
+        returns date language sql volatile
+    as $$ select d + interval '1 day'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            nextDay(d: "2023-07-28")
+        }
+    $$));
+          jsonb_pretty           
+---------------------------------
+ {                              +
+     "data": {                  +
+         "nextDay": "2023-07-29"+
+     }                          +
+ }
+(1 row)
+
+    create function next_hour(t time)
+        returns time language sql volatile
+    as $$ select t + interval '1 hour'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            nextHour(t: "10:20")
+        }
+    $$));
+          jsonb_pretty          
+--------------------------------
+ {                             +
+     "data": {                 +
+         "nextHour": "11:20:00"+
+     }                         +
+ }
+(1 row)
+
+    set time zone 'Asia/Kolkata'; -- same as IST
+    create function next_hour_with_timezone(t time with time zone)
+        returns time with time zone language sql volatile
+    as $$ select t + interval '1 hour'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            nextHourWithTimezone(t: "10:20+05:30")
+        }
+    $$));
+                   jsonb_pretty                   
+--------------------------------------------------
+ {                                               +
+     "data": {                                   +
+         "nextHourWithTimezone": "11:20:00+05:30"+
+     }                                           +
+ }
+(1 row)
+
+    create function next_minute(t timestamp)
+        returns timestamp language sql volatile
+    as $$ select t + interval '1 minute'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            nextMinute(t: "2023-07-28 12:39:05")
+        }
+    $$));
+                jsonb_pretty                 
+---------------------------------------------
+ {                                          +
+     "data": {                              +
+         "nextMinute": "2023-07-28T12:40:05"+
+     }                                      +
+ }
+(1 row)
+
+    create function next_minute_with_timezone(t timestamptz)
+        returns timestamptz language sql volatile
+    as $$ select t + interval '1 minute'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            nextMinuteWithTimezone(t: "2023-07-28 12:39:05+05:30")
+        }
+    $$));
+                         jsonb_pretty                          
+---------------------------------------------------------------
+ {                                                            +
+     "data": {                                                +
+         "nextMinuteWithTimezone": "2023-07-28T12:40:05+05:30"+
+     }                                                        +
+ }
+(1 row)
+
+    create function get_json_obj(input json, key text)
+        returns json language sql volatile
+    as $$ select input -> key; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            getJsonObj(input: "{\"a\": {\"b\": \"foo\"}}", key: "a")
+        }
+    $$));
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "getJsonObj": "{\"b\": \"foo\"}"+
+     }                                   +
+ }
+(1 row)
+
+    create function get_jsonb_obj(input jsonb, key text)
+        returns jsonb language sql volatile
+    as $$ select input -> key; $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            getJsonbObj(input: "{\"a\": {\"b\": \"foo\"}}", key: "a")
+        }
+    $$));
+               jsonb_pretty                
+-------------------------------------------
+ {                                        +
+     "data": {                            +
+         "getJsonbObj": "{\"b\": \"foo\"}"+
+     }                                    +
+ }
+(1 row)
+
+    create function concat_chars(a char(2), b char(3))
+        returns char(5) language sql volatile
+    as $$ select (a::char(2) || b::char(3))::char(5); $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            concatChars(a: "He", b: "llo")
+        }
+    $$));
+          jsonb_pretty          
+--------------------------------
+ {                             +
+     "data": {                 +
+         "concatChars": "Hello"+
+     }                         +
+ }
+(1 row)
+
+    create function concat_varchars(a varchar(2), b varchar(3))
+        returns varchar(5) language sql volatile
+    as $$ select (a::varchar(2) || b::varchar(3))::varchar(5); $$;
+    select jsonb_pretty(graphql.resolve($$
+        mutation {
+            concatVarchars(a: "He", b: "llo")
+        }
+    $$));
+           jsonb_pretty            
+-----------------------------------
+ {                                +
+     "data": {                    +
+         "concatVarchars": "Hello"+
+     }                            +
+ }
+(1 row)
+
+    select jsonb_pretty(graphql.resolve($$
+    query IntrospectionQuery {
+        __schema {
+            mutationType {
+                fields {
+                    name
+                    description
+                    type {
+                        kind
+                    }
+                    args {
+                        name
+                        type {
+                            name
+                        }
+                    }
+                }
+            }
+        }
+    } $$));
+                        jsonb_pretty                         
+-------------------------------------------------------------
+ {                                                          +
+     "data": {                                              +
+         "__schema": {                                      +
+             "mutationType": {                              +
+                 "fields": [                                +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "BigInt"       +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "BigInt"       +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "addBigints",              +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "Float"        +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "Float"        +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "addDoubles",              +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "BigFloat"     +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "BigFloat"     +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "addNumerics",             +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "Float"        +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "Float"        +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "addReals",                +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "Int"          +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "Int"          +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "addSmallints",            +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": "adds two smallints"+
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "Boolean"      +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "Boolean"      +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "andBools",                +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "String"       +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "String"       +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "concatChars",             +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "String"       +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "String"       +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "concatText",              +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "String"       +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "String"       +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "concatVarchars",          +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "input",           +
+                                 "type": {                  +
+                                     "name": "JSON"         +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "key",             +
+                                 "type": {                  +
+                                     "name": "String"       +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "getJsonObj",              +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "input",           +
+                                 "type": {                  +
+                                     "name": "JSON"         +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "key",             +
+                                 "type": {                  +
+                                     "name": "String"       +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "getJsonbObj",             +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "a",               +
+                                 "type": {                  +
+                                     "name": "Int"          +
+                                 }                          +
+                             },                             +
+                             {                              +
+                                 "name": "b",               +
+                                 "type": {                  +
+                                     "name": "Int"          +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "intsAdd",                 +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "d",               +
+                                 "type": {                  +
+                                     "name": "Date"         +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "nextDay",                 +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "t",               +
+                                 "type": {                  +
+                                     "name": "Time"         +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "nextHour",                +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "t",               +
+                                 "type": {                  +
+                                     "name": "Opaque"       +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "nextHourWithTimezone",    +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "t",               +
+                                 "type": {                  +
+                                     "name": "Datetime"     +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "nextMinute",              +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "t",               +
+                                 "type": {                  +
+                                     "name": "Datetime"     +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "nextMinuteWithTimezone",  +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     },                                     +
+                     {                                      +
+                         "args": [                          +
+                             {                              +
+                                 "name": "input",           +
+                                 "type": {                  +
+                                     "name": "UUID"         +
+                                 }                          +
+                             }                              +
+                         ],                                 +
+                         "name": "uuidIdentity",            +
+                         "type": {                          +
+                             "kind": "SCALAR"               +
+                         },                                 +
+                         "description": null                +
+                     }                                      +
+                 ]                                          +
+             }                                              +
+         }                                                  +
+     }                                                      +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    -- Only stable and immutable functions appear on the query object
+    create function add_smallints(a smallint, b smallint)
+        returns smallint language sql stable
+    as $$ select a + b; $$;
+    comment on function add_smallints is e'@graphql({"description": "returns a + b"})';
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            addSmallints(a: 1, b: 2)
+        }
+    $$));
+       jsonb_pretty        
+---------------------------
+ {                        +
+     "data": {            +
+         "addSmallints": 3+
+     }                    +
+ }
+(1 row)
+
+    create function add_ints(a int, b int)
+        returns int language sql immutable
+    as $$ select a + b; $$;
+    comment on function add_ints is e'@graphql({"name": "intsAdd"})';
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            intsAdd(a: 2, b: 3)
+        }
+    $$));
+     jsonb_pretty     
+----------------------
+ {                   +
+     "data": {       +
+         "intsAdd": 5+
+     }               +
+ }
+(1 row)
+
+    create function add_bigints(a bigint, b bigint)
+        returns bigint language sql stable
+    as $$ select a + b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            addBigints(a: 3, b: 4)
+        }
+    $$));
+       jsonb_pretty        
+---------------------------
+ {                        +
+     "data": {            +
+         "addBigints": "7"+
+     }                    +
+ }
+(1 row)
+
+    create function add_reals(a real, b real)
+        returns real language sql immutable
+    as $$ select a + b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            addReals(a: 4.5, b: 5.6)
+        }
+    $$));
+       jsonb_pretty       
+--------------------------
+ {                       +
+     "data": {           +
+         "addReals": 10.1+
+     }                   +
+ }
+(1 row)
+
+    create function add_doubles(a double precision, b double precision)
+        returns double precision language sql stable
+    as $$ select a + b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            addDoubles(a: 7.8, b: 9.1)
+        }
+    $$));
+        jsonb_pretty        
+----------------------------
+ {                         +
+     "data": {             +
+         "addDoubles": 16.9+
+     }                     +
+ }
+(1 row)
+
+    create function add_numerics(a numeric, b numeric)
+        returns numeric language sql immutable
+    as $$ select a + b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            addNumerics(a: "11.12", b: "13.14")
+        }
+    $$));
+          jsonb_pretty          
+--------------------------------
+ {                             +
+     "data": {                 +
+         "addNumerics": "24.26"+
+     }                         +
+ }
+(1 row)
+
+    create function and_bools(a bool, b bool)
+        returns bool language sql stable
+    as $$ select a and b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            andBools(a: true, b: false)
+        }
+    $$));
+       jsonb_pretty        
+---------------------------
+ {                        +
+     "data": {            +
+         "andBools": false+
+     }                    +
+ }
+(1 row)
+
+    create function uuid_identity(input uuid)
+        returns uuid language sql immutable
+    as $$ select input; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            uuidIdentity(input: "d3ef3a8c-2c72-11ee-b094-776acede7221")
+        }
+    $$));
+                          jsonb_pretty                          
+----------------------------------------------------------------
+ {                                                             +
+     "data": {                                                 +
+         "uuidIdentity": "d3ef3a8c-2c72-11ee-b094-776acede7221"+
+     }                                                         +
+ }
+(1 row)
+
+    create function concat_text(a text, b text)
+        returns text language sql stable
+    as $$ select a || b; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            concatText(a: "Hello ", b: "World")
+        }
+    $$));
+            jsonb_pretty             
+-------------------------------------
+ {                                  +
+     "data": {                      +
+         "concatText": "Hello World"+
+     }                              +
+ }
+(1 row)
+
+    create function next_day(d date)
+        returns date language sql immutable
+    as $$ select d + interval '1 day'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            nextDay(d: "2023-07-28")
+        }
+    $$));
+          jsonb_pretty           
+---------------------------------
+ {                              +
+     "data": {                  +
+         "nextDay": "2023-07-29"+
+     }                          +
+ }
+(1 row)
+
+    create function next_hour(t time)
+        returns time language sql stable
+    as $$ select t + interval '1 hour'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            nextHour(t: "10:20")
+        }
+    $$));
+          jsonb_pretty          
+--------------------------------
+ {                             +
+     "data": {                 +
+         "nextHour": "11:20:00"+
+     }                         +
+ }
+(1 row)
+
+    set time zone 'Asia/Kolkata'; -- same as IST
+    create function next_hour_with_timezone(t time with time zone)
+        returns time with time zone language sql immutable
+    as $$ select t + interval '1 hour'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            nextHourWithTimezone(t: "10:20+05:30")
+        }
+    $$));
+                   jsonb_pretty                   
+--------------------------------------------------
+ {                                               +
+     "data": {                                   +
+         "nextHourWithTimezone": "11:20:00+05:30"+
+     }                                           +
+ }
+(1 row)
+
+    create function next_minute(t timestamp)
+        returns timestamp language sql stable
+    as $$ select t + interval '1 minute'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            nextMinute(t: "2023-07-28 12:39:05")
+        }
+    $$));
+                jsonb_pretty                 
+---------------------------------------------
+ {                                          +
+     "data": {                              +
+         "nextMinute": "2023-07-28T12:40:05"+
+     }                                      +
+ }
+(1 row)
+
+    create function next_minute_with_timezone(t timestamptz)
+        returns timestamptz language sql immutable
+    as $$ select t + interval '1 minute'; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            nextMinuteWithTimezone(t: "2023-07-28 12:39:05+05:30")
+        }
+    $$));
+                         jsonb_pretty                          
+---------------------------------------------------------------
+ {                                                            +
+     "data": {                                                +
+         "nextMinuteWithTimezone": "2023-07-28T12:40:05+05:30"+
+     }                                                        +
+ }
+(1 row)
+
+    create function get_json_obj(input json, key text)
+        returns json language sql stable
+    as $$ select input -> key; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            getJsonObj(input: "{\"a\": {\"b\": \"foo\"}}", key: "a")
+        }
+    $$));
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "getJsonObj": "{\"b\": \"foo\"}"+
+     }                                   +
+ }
+(1 row)
+
+    create function get_jsonb_obj(input jsonb, key text)
+        returns jsonb language sql immutable
+    as $$ select input -> key; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            getJsonbObj(input: "{\"a\": {\"b\": \"foo\"}}", key: "a")
+        }
+    $$));
+               jsonb_pretty                
+-------------------------------------------
+ {                                        +
+     "data": {                            +
+         "getJsonbObj": "{\"b\": \"foo\"}"+
+     }                                    +
+ }
+(1 row)
+
+    create function concat_chars(a char(2), b char(3))
+        returns char(5) language sql stable
+    as $$ select (a::char(2) || b::char(3))::char(5); $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            concatChars(a: "He", b: "llo")
+        }
+    $$));
+          jsonb_pretty          
+--------------------------------
+ {                             +
+     "data": {                 +
+         "concatChars": "Hello"+
+     }                         +
+ }
+(1 row)
+
+    create function concat_varchars(a varchar(2), b varchar(3))
+        returns varchar(5) language sql immutable
+    as $$ select (a::varchar(2) || b::varchar(3))::varchar(5); $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            concatVarchars(a: "He", b: "llo")
+        }
+    $$));
+           jsonb_pretty            
+-----------------------------------
+ {                                +
+     "data": {                    +
+         "concatVarchars": "Hello"+
+     }                            +
+ }
+(1 row)
+
+    select jsonb_pretty(graphql.resolve($$
+    query IntrospectionQuery {
+        __schema {
+            queryType {
+                fields {
+                    name
+                    description
+                    type {
+                        kind
+                    }
+                    args {
+                        name
+                        type {
+                            name
+                        }
+                    }
+                }
+            }
+        }
+    } $$));
+                              jsonb_pretty                              
+------------------------------------------------------------------------
+ {                                                                     +
+     "data": {                                                         +
+         "__schema": {                                                 +
+             "queryType": {                                            +
+                 "fields": [                                           +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "BigInt"                  +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "BigInt"                  +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "addBigints",                         +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "Float"                   +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "Float"                   +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "addDoubles",                         +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "BigFloat"                +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "BigFloat"                +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "addNumerics",                        +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "Float"                   +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "Float"                   +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "addReals",                           +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "Int"                     +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "Int"                     +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "addSmallints",                       +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": "returns a + b"                +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "Boolean"                 +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "Boolean"                 +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "andBools",                           +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "String"                  +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "String"                  +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "concatChars",                        +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "String"                  +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "String"                  +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "concatText",                         +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "String"                  +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "String"                  +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "concatVarchars",                     +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "input",                      +
+                                 "type": {                             +
+                                     "name": "JSON"                    +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "key",                        +
+                                 "type": {                             +
+                                     "name": "String"                  +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "getJsonObj",                         +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "input",                      +
+                                 "type": {                             +
+                                     "name": "JSON"                    +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "key",                        +
+                                 "type": {                             +
+                                     "name": "String"                  +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "getJsonbObj",                        +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "a",                          +
+                                 "type": {                             +
+                                     "name": "Int"                     +
+                                 }                                     +
+                             },                                        +
+                             {                                         +
+                                 "name": "b",                          +
+                                 "type": {                             +
+                                     "name": "Int"                     +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "intsAdd",                            +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "d",                          +
+                                 "type": {                             +
+                                     "name": "Date"                    +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "nextDay",                            +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "t",                          +
+                                 "type": {                             +
+                                     "name": "Time"                    +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "nextHour",                           +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "t",                          +
+                                 "type": {                             +
+                                     "name": "Opaque"                  +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "nextHourWithTimezone",               +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "t",                          +
+                                 "type": {                             +
+                                     "name": "Datetime"                +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "nextMinute",                         +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "t",                          +
+                                 "type": {                             +
+                                     "name": "Datetime"                +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "nextMinuteWithTimezone",             +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "nodeId",                     +
+                                 "type": {                             +
+                                     "name": null                      +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "node",                               +
+                         "type": {                                     +
+                             "kind": "INTERFACE"                       +
+                         },                                            +
+                         "description": "Retrieve a record by its `ID`"+
+                     },                                                +
+                     {                                                 +
+                         "args": [                                     +
+                             {                                         +
+                                 "name": "input",                      +
+                                 "type": {                             +
+                                     "name": "UUID"                    +
+                                 }                                     +
+                             }                                         +
+                         ],                                            +
+                         "name": "uuidIdentity",                       +
+                         "type": {                                     +
+                             "kind": "SCALAR"                          +
+                         },                                            +
+                         "description": null                           +
+                     }                                                 +
+                 ]                                                     +
+             }                                                         +
+         }                                                             +
+     }                                                                 +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    create table account(
+        id serial primary key,
+        email varchar(255) not null
+    );
+    create function returns_account()
+        returns account language sql stable
+    as $$ select id, email from account; $$;
+    insert into account(email)
+    values
+        ('aardvark@x.com'),
+        ('bat@x.com'),
+        ('cat@x.com');
+    comment on table account is e'@graphql({"totalCount": {"enabled": true}})';
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            returnsAccount {
+                id
+                email
+                nodeId
+                __typename
+            }
+        }
+    $$));
+                       jsonb_pretty                        
+-----------------------------------------------------------
+ {                                                        +
+     "data": {                                            +
+         "returnsAccount": {                              +
+             "id": 1,                                     +
+             "email": "aardvark@x.com",                   +
+             "nodeId": "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDFd",+
+             "__typename": "Account"                      +
+         }                                                +
+     }                                                    +
+ }
+(1 row)
+
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            returnsAccount {
+                email
+                nodeId
+            }
+        }
+    $$));
+                       jsonb_pretty                       
+----------------------------------------------------------
+ {                                                       +
+     "data": {                                           +
+         "returnsAccount": {                             +
+             "email": "aardvark@x.com",                  +
+             "nodeId": "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDFd"+
+         }                                               +
+     }                                                   +
+ }
+(1 row)
+
+    comment on schema public is e'@graphql({"inflect_names": false})';
+    create function returns_account_with_id(id_to_search int)
+        returns account language sql stable
+    as $$ select id, email from account where id = id_to_search; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            returns_account_with_id(id_to_search: 1) {
+                email
+            }
+        }
+    $$));
+             jsonb_pretty              
+---------------------------------------
+ {                                    +
+     "data": {                        +
+         "returns_account_with_id": { +
+             "email": "aardvark@x.com"+
+         }                            +
+     }                                +
+ }
+(1 row)
+
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            returns_account_with_id(id_to_search: 42) { # search a non-existent id
+                id
+                email
+                nodeId
+            }
+        }
+    $$));
+              jsonb_pretty               
+-----------------------------------------
+ {                                      +
+     "data": {                          +
+         "returns_account_with_id": null+
+     }                                  +
+ }
+(1 row)
+
+    comment on schema public is e'@graphql({"inflect_names": true})';
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            returnsAccountWithId(idToSearch: 1) {
+                email
+            }
+        }
+    $$));
+             jsonb_pretty              
+---------------------------------------
+ {                                    +
+     "data": {                        +
+         "returnsAccountWithId": {    +
+             "email": "aardvark@x.com"+
+         }                            +
+     }                                +
+ }
+(1 row)
+
+    create function returns_setof_account(top int)
+        returns setof account language sql stable
+    as $$ select id, email from account limit top; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            returnsSetofAccount(top: 2, last: 1) {
+                pageInfo {
+                    startCursor
+                    endCursor
+                    hasNextPage
+                    hasPreviousPage
+                }
+                edges {
+                    cursor
+                    node {
+                        nodeId
+                        id
+                        email
+                        __typename
+                    }
+                    __typename
+                }
+                totalCount
+                __typename
+            }
+        }
+    $$));
+                             jsonb_pretty                              
+-----------------------------------------------------------------------
+ {                                                                    +
+     "data": {                                                        +
+         "returnsSetofAccount": {                                     +
+             "edges": [                                               +
+                 {                                                    +
+                     "node": {                                        +
+                         "id": 2,                                     +
+                         "email": "bat@x.com",                        +
+                         "nodeId": "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDJd",+
+                         "__typename": "Account"                      +
+                     },                                               +
+                     "cursor": "WzJd",                                +
+                     "__typename": "AccountEdge"                      +
+                 }                                                    +
+             ],                                                       +
+             "pageInfo": {                                            +
+                 "endCursor": "WzJd",                                 +
+                 "hasNextPage": false,                                +
+                 "startCursor": "WzJd",                               +
+                 "hasPreviousPage": true                              +
+             },                                                       +
+             "__typename": "AccountConnection",                       +
+             "totalCount": 2                                          +
+         }                                                            +
+     }                                                                +
+ }
+(1 row)
+
+    -- functions with args named `first`, `last`, `before`, `after`, `filter`, or `orderBy` are not exposed
+    create function arg_named_first(first int)
+        returns setof account language sql stable
+    as $$ select id, email from account; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            argNamedFirst {
+                __typename
+            }
+        }
+    $$));
+                              jsonb_pretty                              
+------------------------------------------------------------------------
+ {                                                                     +
+     "data": null,                                                     +
+     "errors": [                                                       +
+         {                                                             +
+             "message": "Unknown field \"argNamedFirst\" on type Query"+
+         }                                                             +
+     ]                                                                 +
+ }
+(1 row)
+
+    create function arg_named_last(last int)
+        returns setof account language sql stable
+    as $$ select id, email from account; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            argNamedLast {
+                __typename
+            }
+        }
+    $$));
+                             jsonb_pretty                              
+-----------------------------------------------------------------------
+ {                                                                    +
+     "data": null,                                                    +
+     "errors": [                                                      +
+         {                                                            +
+             "message": "Unknown field \"argNamedLast\" on type Query"+
+         }                                                            +
+     ]                                                                +
+ }
+(1 row)
+
+    create function arg_named_before(before int)
+        returns setof account language sql stable
+    as $$ select id, email from account; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            argNamedBefore {
+                __typename
+            }
+        }
+    $$));
+                              jsonb_pretty                               
+-------------------------------------------------------------------------
+ {                                                                      +
+     "data": null,                                                      +
+     "errors": [                                                        +
+         {                                                              +
+             "message": "Unknown field \"argNamedBefore\" on type Query"+
+         }                                                              +
+     ]                                                                  +
+ }
+(1 row)
+
+    create function arg_named_after(after int)
+        returns setof account language sql stable
+    as $$ select id, email from account; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            argNamedAfter {
+                __typename
+            }
+        }
+    $$));
+                              jsonb_pretty                              
+------------------------------------------------------------------------
+ {                                                                     +
+     "data": null,                                                     +
+     "errors": [                                                       +
+         {                                                             +
+             "message": "Unknown field \"argNamedAfter\" on type Query"+
+         }                                                             +
+     ]                                                                 +
+ }
+(1 row)
+
+    create function arg_named_filter(filter int)
+        returns setof account language sql stable
+    as $$ select id, email from account; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            argNamedFilter {
+                __typename
+            }
+        }
+    $$));
+                              jsonb_pretty                               
+-------------------------------------------------------------------------
+ {                                                                      +
+     "data": null,                                                      +
+     "errors": [                                                        +
+         {                                                              +
+             "message": "Unknown field \"argNamedFilter\" on type Query"+
+         }                                                              +
+     ]                                                                  +
+ }
+(1 row)
+
+    create function "arg_named_orderBy"("orderBy" int)
+        returns setof account language sql stable
+    as $$ select id, email from account; $$;
+    select jsonb_pretty(graphql.resolve($$
+        query {
+            argNamedOrderBy {
+                __typename
+            }
+        }
+    $$));
+                               jsonb_pretty                               
+--------------------------------------------------------------------------
+ {                                                                       +
+     "data": null,                                                       +
+     "errors": [                                                         +
+         {                                                               +
+             "message": "Unknown field \"argNamedOrderBy\" on type Query"+
+         }                                                               +
+     ]                                                                   +
+ }
+(1 row)
+
+    select jsonb_pretty(graphql.resolve($$
+    query IntrospectionQuery {
+        __schema {
+            queryType {
+                fields {
+                    name
+                    description
+                    type {
+                        kind
+                    }
+                    args {
+                        name
+                        type {
+                            name
+                        }
+                    }
+                }
+            }
+        }
+    } $$));
+                                  jsonb_pretty                                   
+---------------------------------------------------------------------------------
+ {                                                                              +
+     "data": {                                                                  +
+         "__schema": {                                                          +
+             "queryType": {                                                     +
+                 "fields": [                                                    +
+                     {                                                          +
+                         "args": [                                              +
+                             {                                                  +
+                                 "name": "first",                               +
+                                 "type": {                                      +
+                                     "name": "Int"                              +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "last",                                +
+                                 "type": {                                      +
+                                     "name": "Int"                              +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "before",                              +
+                                 "type": {                                      +
+                                     "name": "Cursor"                           +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "after",                               +
+                                 "type": {                                      +
+                                     "name": "Cursor"                           +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "filter",                              +
+                                 "type": {                                      +
+                                     "name": "AccountFilter"                    +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "orderBy",                             +
+                                 "type": {                                      +
+                                     "name": null                               +
+                                 }                                              +
+                             }                                                  +
+                         ],                                                     +
+                         "name": "accountCollection",                           +
+                         "type": {                                              +
+                             "kind": "OBJECT"                                   +
+                         },                                                     +
+                         "description": "A pagable collection of type `Account`"+
+                     },                                                         +
+                     {                                                          +
+                         "args": [                                              +
+                             {                                                  +
+                                 "name": "nodeId",                              +
+                                 "type": {                                      +
+                                     "name": null                               +
+                                 }                                              +
+                             }                                                  +
+                         ],                                                     +
+                         "name": "node",                                        +
+                         "type": {                                              +
+                             "kind": "INTERFACE"                                +
+                         },                                                     +
+                         "description": "Retrieve a record by its `ID`"         +
+                     },                                                         +
+                     {                                                          +
+                         "args": [                                              +
+                         ],                                                     +
+                         "name": "returnsAccount",                              +
+                         "type": {                                              +
+                             "kind": "OBJECT"                                   +
+                         },                                                     +
+                         "description": null                                    +
+                     },                                                         +
+                     {                                                          +
+                         "args": [                                              +
+                             {                                                  +
+                                 "name": "idToSearch",                          +
+                                 "type": {                                      +
+                                     "name": "Int"                              +
+                                 }                                              +
+                             }                                                  +
+                         ],                                                     +
+                         "name": "returnsAccountWithId",                        +
+                         "type": {                                              +
+                             "kind": "OBJECT"                                   +
+                         },                                                     +
+                         "description": null                                    +
+                     },                                                         +
+                     {                                                          +
+                         "args": [                                              +
+                             {                                                  +
+                                 "name": "top",                                 +
+                                 "type": {                                      +
+                                     "name": "Int"                              +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "first",                               +
+                                 "type": {                                      +
+                                     "name": "Int"                              +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "last",                                +
+                                 "type": {                                      +
+                                     "name": "Int"                              +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "before",                              +
+                                 "type": {                                      +
+                                     "name": "Cursor"                           +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "after",                               +
+                                 "type": {                                      +
+                                     "name": "Cursor"                           +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "filter",                              +
+                                 "type": {                                      +
+                                     "name": "AccountFilter"                    +
+                                 }                                              +
+                             },                                                 +
+                             {                                                  +
+                                 "name": "orderBy",                             +
+                                 "type": {                                      +
+                                     "name": null                               +
+                                 }                                              +
+                             }                                                  +
+                         ],                                                     +
+                         "name": "returnsSetofAccount",                         +
+                         "type": {                                              +
+                             "kind": "OBJECT"                                   +
+                         },                                                     +
+                         "description": null                                    +
+                     }                                                          +
+                 ]                                                              +
+             }                                                                  +
+         }                                                                      +
+     }                                                                          +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    -- Confirm that internal functions on the supabase default search_path
+    -- are excluded from GraphQL API
+    create schema if not exists auth;
+    create schema if not exists extensions;
+    create schema if not exists graphql_public;
+    -- functions in the counter_example schema should be visible
+    create schema if not exists counter_example;
+    -- Create a function in each excluded schema to confirm it isn't visible
+    create function graphql.should_be_invisible_one()
+        returns smallint language sql immutable
+    as $$ select 10; $$;
+    create function graphql_public.should_be_invisible_two()
+        returns smallint language sql immutable
+    as $$ select 10; $$;
+    create function auth.should_be_invisible_three()
+        returns smallint language sql immutable
+    as $$ select 10; $$;
+    create function extensions.should_be_invisible_four()
+        returns smallint language sql immutable
+    as $$ select 10; $$;
+    -- Create a function in counter_example which should be visible to
+    -- preclude the posibility of some other error preventing the above schemas
+    -- from being visible
+    create function counter_example.visible()
+        returns smallint language sql immutable
+    as $$ select 10; $$;
+    -- Set search path to include all supabase system schemas + the counter example
+    set search_path = public, graphql, graphql_public, auth, extensions, counter_example;
+    -- Show all fields available on the QueryType. Only the function "visible" should be seen
+    -- in the output
+    select jsonb_pretty(
+        graphql.resolve($$
+            query IntrospectionQuery {
+              __schema {
+                queryType {
+                  name
+                  fields {
+                    name
+                  }
+                }
+                mutationType {
+                  name
+                  fields {
+                    name
+                  }
+                }
+              }
+            }
+        $$)
+    );
+               jsonb_pretty                
+-------------------------------------------
+ {                                        +
+     "data": {                            +
+         "__schema": {                    +
+             "queryType": {               +
+                 "name": "Query",         +
+                 "fields": [              +
+                     {                    +
+                         "name": "node"   +
+                     },                   +
+                     {                    +
+                         "name": "visible"+
+                     }                    +
+                 ]                        +
+             },                           +
+             "mutationType": null         +
+         }                                +
+     }                                    +
+ }
+(1 row)
+
+    set search_path to default;
+rollback;

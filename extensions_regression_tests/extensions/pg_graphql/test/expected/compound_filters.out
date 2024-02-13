@@ -1,0 +1,1217 @@
+begin;
+    CREATE TYPE plan AS ENUM ('free', 'pro', 'enterprise');
+    create table account(
+        id serial primary key,
+        email varchar(255) not null,
+        plan plan not null
+    );
+    insert into public.account(email, plan)
+    values
+        ('aardvark@x.com', 'free'),
+        ('bat@x.com', 'pro'),
+        ('cat@x.com', 'enterprise'),
+        ('dog@x.com', 'free'),
+        ('elephant@x.com', 'pro');
+    savepoint a;
+    -- `and` filter zero expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {and: []}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 2,                 +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 4,                 +
+                         "email": "dog@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `and` filter one expression
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {and: [{id: {eq: 1}}]}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `and` filter two expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {and: [{id: {eq: 1}}, {email: {eq: "aardvark@x.com"}}]}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `and` filter three expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {and: [{id: {eq: 1}}, {email: {eq: "aardvark@x.com"}}, {plan: {eq: "free"}}]}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `or` filter zero expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {or: []}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 2,                 +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 4,                 +
+                         "email": "dog@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `or` filter one expression
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {or: [{id: {eq: 1}}]}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `or` filter two expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {or: [{id: {eq: 3}}, {email: {eq: "elephant@x.com"}}]}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `or` filter three expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {or: [{id: {eq: 1}}, {email: {eq: "bat@x.com"}}, {plan: {eq: "enterprise"}}]}) {
+                edges {
+                    node {
+                        id
+                        email
+                        plan
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "plan": "free",          +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 2,                 +
+                         "plan": "pro",           +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "plan": "enterprise",    +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `not` filter zero expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {not: {}}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 2,                 +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 4,                 +
+                         "email": "dog@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `not` filter one expression
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {not: {id: {eq: 3}}}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 2,                 +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 4,                 +
+                         "email": "dog@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- multiple expressions inside a `not` filter are implicitly `and`ed together
+    -- `not` filter two expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {not: {id: {eq: 1}, email: {eq: "aardvark@x.com"}}}) {
+                edges {
+                    node {
+                        id
+                        email
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 2,                 +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 4,                 +
+                         "email": "dog@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- multiple expressions inside a `not` filter are implicitly `and`ed together
+    -- `not` filter three expressions
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(filter: {not: {id: {eq: 1}, email: {eq: "aardvark@x.com"}, plan: {eq: "free"}}}) {
+                edges {
+                    node {
+                        id
+                        email
+                        plan
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 2,                 +
+                         "plan": "pro",           +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "plan": "enterprise",    +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 4,                 +
+                         "plan": "free",          +
+                         "email": "dog@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "plan": "pro",           +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `and` filter (explicit) nested inside `or`
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(
+                filter: {
+                    or: [
+                        { id: { eq: 3 } }
+                        { id: { eq: 5 } }
+                        { and: [{ id: { eq: 1 } }, { email: { eq: "aardvark@x.com" } }] } # explicit and
+                    ]
+                }
+            ) {
+                edges {
+                node {
+                    id
+                    email
+                }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `and` filter (implicit) nested inside `or`
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(
+                filter: {
+                    or: [
+                        { id: { eq: 3 } }
+                        { id: { eq: 5 } }
+                        { id: { eq: 1 }, email: { eq: "aardvark@x.com" } } # implicit and
+                    ]
+                }
+            ) {
+                edges {
+                node {
+                    id
+                    email
+                }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 5,                 +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- `or` filter nested inside and
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(
+                filter: {
+                    and: [
+                        { id: { gt: 0 } }
+                        { id: { lt: 4 } }
+                        { or: [{email: { eq: "bat@x.com" }}, {email: { eq: "cat@x.com" }}] }
+                    ]
+                }
+            ) {
+                edges {
+                node {
+                    id
+                    email
+                }
+                }
+            }
+        }
+        $$)
+    );
+                 jsonb_pretty                 
+----------------------------------------------
+ {                                           +
+     "data": {                               +
+         "accountCollection": {              +
+             "edges": [                      +
+                 {                           +
+                     "node": {               +
+                         "id": 2,            +
+                         "email": "bat@x.com"+
+                     }                       +
+                 },                          +
+                 {                           +
+                     "node": {               +
+                         "id": 3,            +
+                         "email": "cat@x.com"+
+                     }                       +
+                 }                           +
+             ]                               +
+         }                                   +
+     }                                       +
+ }
+(1 row)
+
+    -- `not` filter nested inside `or` which is nested inside `and`
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            accountCollection(
+                filter: {
+                    and: [
+                        { id: { gt: 0 } }
+                        { id: { lt: 4 } }
+                        { or: [{not: {email: { eq: "bat@x.com" }}}, {email: { eq: "cat@x.com" }}] }
+                    ]
+                }
+            ) {
+                edges {
+                node {
+                    id
+                    email
+                }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "accountCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 3,                 +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    -- update by compound filters
+    select graphql.resolve($$
+        mutation {
+            updateAccountCollection(
+                set: {
+                    email: "new@email.com"
+                }
+                filter: {
+                    or: [
+                        { id: { eq: 3 } }
+                        { id: { eq: 5 } }
+                        { and: [{ id: { eq: 1 } }, { email: { eq: "aardvark@x.com" } }] }
+                    ]
+                }
+                atMost: 5
+            ) {
+                records { id, email }
+            }
+        }
+        $$
+    );
+                                                                               resolve                                                                               
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"data": {"updateAccountCollection": {"records": [{"id": 1, "email": "new@email.com"}, {"id": 3, "email": "new@email.com"}, {"id": 5, "email": "new@email.com"}]}}}
+(1 row)
+
+    rollback to savepoint a;
+    -- delete by compound filters
+    select graphql.resolve($$
+        mutation {
+            deleteFromAccountCollection(
+                filter: {
+                    or: [
+                        { id: { eq: 3 } }
+                        { id: { eq: 5 } }
+                        { id: { eq: 1 }, email: { eq: "aardvark@x.com" } }
+                    ]
+                }
+                atMost: 5
+            ) {
+                records { id }
+            }
+        }
+        $$
+    );
+                                          resolve                                          
+-------------------------------------------------------------------------------------------
+ {"data": {"deleteFromAccountCollection": {"records": [{"id": 1}, {"id": 3}, {"id": 5}]}}}
+(1 row)
+
+    rollback to savepoint a;
+    -- columns named `and`, `or` and `not`, all compound filters will be disabled
+    comment on schema public is e'@graphql({"inflect_names": false})';
+    create table clashes(
+        "and" serial primary key,
+        "or" varchar(255) not null,
+        "not" plan not null
+    );
+    insert into public.clashes("or", "not")
+    values
+        ('aardvark@x.com', 'free'),
+        ('bat@x.com', 'pro'),
+        ('cat@x.com', 'enterprise'),
+        ('dog@x.com', 'free'),
+        ('elephant@x.com', 'pro');
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            clashesCollection(filter: {and: {eq: 1}, or: {eq: "aardvark@x.com"}, not: {eq: "free"}}) {
+                edges {
+                    node {
+                        and
+                        or
+                        not
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                  jsonb_pretty                   
+-------------------------------------------------
+ {                                              +
+     "data": {                                  +
+         "clashesCollection": {                 +
+             "edges": [                         +
+                 {                              +
+                     "node": {                  +
+                         "or": "aardvark@x.com",+
+                         "and": 1,              +
+                         "not": "free"          +
+                     }                          +
+                 }                              +
+             ]                                  +
+         }                                      +
+     }                                          +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    -- column named `and`. `and` compound filter will be disabled, others should work
+    comment on schema public is e'@graphql({"inflect_names": false})';
+    create table clashes(
+        "and" serial primary key,
+        email varchar(255) not null,
+        plan plan not null
+    );
+    insert into public.clashes(email, plan)
+    values
+        ('aardvark@x.com', 'free'),
+        ('bat@x.com', 'pro'),
+        ('cat@x.com', 'enterprise'),
+        ('dog@x.com', 'free'),
+        ('elephant@x.com', 'pro');
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            clashesCollection(
+                filter: {
+                    or: [
+                        { and: { eq: 3 } }
+                        { and: { eq: 5 } }
+                        { and: { eq: 2 }, not: { email: { eq: "aardvark@x.com" }} }
+                    ]
+                }
+            ) {
+                edges {
+                    node {
+                        and
+                        email
+                        plan
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "clashesCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "and": 2,                +
+                         "plan": "pro",           +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "and": 3,                +
+                         "plan": "enterprise",    +
+                         "email": "cat@x.com"     +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "and": 5,                +
+                         "plan": "pro",           +
+                         "email": "elephant@x.com"+
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    -- column named `or`. `or` compound filter will be disabled, others should work
+    comment on schema public is e'@graphql({"inflect_names": false})';
+    create table clashes(
+        id serial primary key,
+        "or" varchar(255) not null,
+        plan plan not null
+    );
+    insert into public.clashes("or", plan)
+    values
+        ('aardvark@x.com', 'free'),
+        ('bat@x.com', 'pro'),
+        ('cat@x.com', 'enterprise'),
+        ('dog@x.com', 'free'),
+        ('elephant@x.com', 'pro');
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            clashesCollection(
+                filter: {
+                    and: [ {not: {id: { eq: 2 }}}, { or: { neq: "aardvark@x.com" }}]
+                }
+            ) {
+                edges {
+                    node {
+                        id
+                        or
+                        plan
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                  jsonb_pretty                   
+-------------------------------------------------
+ {                                              +
+     "data": {                                  +
+         "clashesCollection": {                 +
+             "edges": [                         +
+                 {                              +
+                     "node": {                  +
+                         "id": 3,               +
+                         "or": "cat@x.com",     +
+                         "plan": "enterprise"   +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "node": {                  +
+                         "id": 4,               +
+                         "or": "dog@x.com",     +
+                         "plan": "free"         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "node": {                  +
+                         "id": 5,               +
+                         "or": "elephant@x.com",+
+                         "plan": "pro"          +
+                     }                          +
+                 }                              +
+             ]                                  +
+         }                                      +
+     }                                          +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    -- column named `not`. `not` compound filter will be disabled, others should work
+    comment on schema public is e'@graphql({"inflect_names": false})';
+    create table clashes(
+        id serial primary key,
+        email varchar(255) not null,
+        "not" plan not null
+    );
+    insert into public.clashes(email, "not")
+    values
+        ('aardvark@x.com', 'free'),
+        ('bat@x.com', 'pro'),
+        ('cat@x.com', 'enterprise'),
+        ('dog@x.com', 'free'),
+        ('elephant@x.com', 'pro');
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+            clashesCollection(
+                filter: {
+                    or: [
+                        {id: {eq: 1}}
+                        {not: {eq: "pro"}, and: [{id: {eq: 2}}, {email: {eq: "bat@x.com"}}]}
+                    ]
+                }
+            ) {
+                edges {
+                    node {
+                        id
+                        email
+                        not
+                    }
+                }
+            }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "clashesCollection": {                   +
+             "edges": [                           +
+                 {                                +
+                     "node": {                    +
+                         "id": 1,                 +
+                         "not": "free",           +
+                         "email": "aardvark@x.com"+
+                     }                            +
+                 },                               +
+                 {                                +
+                     "node": {                    +
+                         "id": 2,                 +
+                         "not": "pro",            +
+                         "email": "bat@x.com"     +
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+    rollback to savepoint a;
+    -- column named `and` updates the entity's <Entity>Filter introspection schema's type
+    comment on schema public is e'@graphql({"inflect_names": false})';
+    create table clashes(
+        id serial primary key,
+        email varchar(255) not null
+    );
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "clashesFilter") {
+            kind
+            inputFields {
+              name
+              type {
+                kind
+                name
+              }
+            }
+          }
+        }
+        $$)
+    );
+                  jsonb_pretty                   
+-------------------------------------------------
+ {                                              +
+     "data": {                                  +
+         "__type": {                            +
+             "kind": "INPUT_OBJECT",            +
+             "inputFields": [                   +
+                 {                              +
+                     "name": "id",              +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "IntFilter"    +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "email",           +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "StringFilter" +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "nodeId",          +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "IDFilter"     +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "and",             +
+                     "type": {                  +
+                         "kind": "LIST",        +
+                         "name": null           +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "or",              +
+                     "type": {                  +
+                         "kind": "LIST",        +
+                         "name": null           +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "not",             +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "clashesFilter"+
+                     }                          +
+                 }                              +
+             ]                                  +
+         }                                      +
+     }                                          +
+ }
+(1 row)
+
+    alter table clashes add column "and" int;
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "clashesFilter") {
+            kind
+            inputFields {
+              name
+              type {
+                kind
+                name
+              }
+            }
+          }
+        }
+        $$)
+    );
+                  jsonb_pretty                   
+-------------------------------------------------
+ {                                              +
+     "data": {                                  +
+         "__type": {                            +
+             "kind": "INPUT_OBJECT",            +
+             "inputFields": [                   +
+                 {                              +
+                     "name": "id",              +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "IntFilter"    +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "email",           +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "StringFilter" +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "and",             +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "IntFilter"    +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "nodeId",          +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "IDFilter"     +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "or",              +
+                     "type": {                  +
+                         "kind": "LIST",        +
+                         "name": null           +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "not",             +
+                     "type": {                  +
+                         "kind": "INPUT_OBJECT",+
+                         "name": "clashesFilter"+
+                     }                          +
+                 }                              +
+             ]                                  +
+         }                                      +
+     }                                          +
+ }
+(1 row)
+
+rollback;

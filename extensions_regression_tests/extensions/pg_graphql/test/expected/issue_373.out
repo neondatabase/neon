@@ -1,0 +1,97 @@
+begin;
+    create table "Account"(
+      id serial primary key,
+      name text not null
+    );
+    create table "EmailAddress"(
+      id serial primary key,
+      "accountId" int not null references "Account"(id),
+      "isPrimary" bool not null,
+      address text not null
+    );
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "EmailAddress") {
+            kind
+            fields {
+                name type { kind name ofType { name }  }
+            }
+          }
+        }
+        $$)
+    );
+                 jsonb_pretty                  
+-----------------------------------------------
+ {                                            +
+     "data": {                                +
+         "__type": {                          +
+             "kind": "OBJECT",                +
+             "fields": [                      +
+                 {                            +
+                     "name": "nodeId",        +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "ID"     +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "id",            +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "Int"    +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "accountId",     +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "Int"    +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "isPrimary",     +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "Boolean"+
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "address",       +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "String" +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "account",       +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "Account"+
+                         }                    +
+                     }                        +
+                 }                            +
+             ]                                +
+         }                                    +
+     }                                        +
+ }
+(1 row)
+
+rollback;

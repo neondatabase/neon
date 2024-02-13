@@ -1,0 +1,59 @@
+SELECT ARRAY[1,2,3]::vector;
+  array  
+---------
+ [1,2,3]
+(1 row)
+
+SELECT ARRAY[1.0,2.0,3.0]::vector;
+  array  
+---------
+ [1,2,3]
+(1 row)
+
+SELECT ARRAY[1,2,3]::float4[]::vector;
+  array  
+---------
+ [1,2,3]
+(1 row)
+
+SELECT ARRAY[1,2,3]::float8[]::vector;
+  array  
+---------
+ [1,2,3]
+(1 row)
+
+SELECT ARRAY[1,2,3]::numeric[]::vector;
+  array  
+---------
+ [1,2,3]
+(1 row)
+
+SELECT '{NULL}'::real[]::vector;
+ERROR:  array must not contain nulls
+SELECT '{NaN}'::real[]::vector;
+ERROR:  NaN not allowed in vector
+SELECT '{Infinity}'::real[]::vector;
+ERROR:  infinite value not allowed in vector
+SELECT '{-Infinity}'::real[]::vector;
+ERROR:  infinite value not allowed in vector
+SELECT '{}'::real[]::vector;
+ERROR:  vector must have at least 1 dimension
+SELECT '{{1}}'::real[]::vector;
+ERROR:  array must be 1-D
+SELECT '[1,2,3]'::vector::real[];
+ float4  
+---------
+ {1,2,3}
+(1 row)
+
+SELECT array_agg(n)::vector FROM generate_series(1, 16001) n;
+ERROR:  vector cannot have more than 16000 dimensions
+SELECT array_to_vector(array_agg(n), 16001, false) FROM generate_series(1, 16001) n;
+ERROR:  vector cannot have more than 16000 dimensions
+-- ensure no error
+SELECT ARRAY[1,2,3] = ARRAY[1,2,3];
+ ?column? 
+----------
+ t
+(1 row)
+

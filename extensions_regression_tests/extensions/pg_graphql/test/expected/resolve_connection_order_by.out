@@ -1,0 +1,1115 @@
+begin;
+    create table account(
+        _id serial primary key,
+        id int,
+        "spiritAnimal" text
+    );
+    insert into public.account(id, "spiritAnimal")
+    values
+        (1, 'bat'),
+        (2, 'aardvark'),
+        (3, 'aardvark'),
+        (null, 'cat');
+    -- Single sort
+    -- AscNullsFirst
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(orderBy: [{id: AscNullsFirst}]) {
+                edges {
+                  node {
+                    id
+                  }
+                }
+              }
+            }
+        $$)
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- AscNullsLast
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(orderBy: [{id: AscNullsLast}]) {
+                edges {
+                  node {
+                    id
+                  }
+                }
+              }
+            }
+        $$)
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- DescNullsFirst
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(orderBy: [{id: DescNullsFirst}]) {
+                edges {
+                  node {
+                    id
+                  }
+                }
+              }
+            }
+        $$)
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- DescNullsLast
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(orderBy: [{id: DescNullsLast}]) {
+                edges {
+                  node {
+                    id
+                  }
+                }
+              }
+            }
+        $$)
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable: AscNullsFirst
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: OrderByDirection)
+           {
+             accountCollection(orderBy: [{id: $direction}]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": "AscNullsFirst"}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable: AscNullsLast
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: OrderByDirection)
+           {
+             accountCollection(orderBy: [{id: $direction}]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": "AscNullsLast"}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable: DescNullsFirst
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: OrderByDirection)
+           {
+             accountCollection(orderBy: [{id: $direction}]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": "DescNullsFirst"}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable: DescNullsLast
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: OrderByDirection)
+           {
+             accountCollection(orderBy: [{id: $direction}]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": "DescNullsLast"}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable: Invalid
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: OrderByDirection)
+           {
+             accountCollection(orderBy: [{id: $direction}]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": "InvalidChoice"}'
+      )
+    );
+                           jsonb_pretty                           
+------------------------------------------------------------------
+ {                                                               +
+     "data": null,                                               +
+     "errors": [                                                 +
+         {                                                       +
+             "message": "Invalid input for OrderByDirection type"+
+         }                                                       +
+     ]                                                           +
+ }
+(1 row)
+
+    -- Variable: Missing
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: OrderByDirection)
+           {
+             accountCollection(orderBy: [{id: $direction}]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Whole Param: AscNullsFirst
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: [AccountOrderBy])
+           {
+             accountCollection(orderBy: $direction) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": [{"id": "AscNullsFirst"}]}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Whole Param: AscNullsLast
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: [AccountOrderBy])
+           {
+             accountCollection(orderBy: $direction) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": [{"id": "AscNullsLast"}]}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Whole Param: DescNullsFirst
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: [AccountOrderBy])
+           {
+             accountCollection(orderBy: $direction) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": [{"id": "DescNullsFirst"}]}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Whole Param: DescullsLast
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: [AccountOrderBy])
+           {
+             accountCollection(orderBy: $direction) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": [{"id": "DescNullsLast"}]}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Whole Param: null defaults to primary key asc
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: [AccountOrderBy])
+           {
+             accountCollection(orderBy: $direction) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": null}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Whole Param: Single elem coerced to list
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: [AccountOrderBy])
+           {
+             accountCollection(orderBy: $direction) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": {"id": "DescNullsLast"}}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Single elem  coerced to list
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(orderBy: {id: DescNullsLast}) {
+                edges {
+                  node {
+                    id
+                  }
+                }
+              }
+            }
+        $$)
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Whole Param: empty list defaults to primary key asc
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($direction: [AccountOrderBy])
+           {
+             accountCollection(orderBy: $direction) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"direction": []}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Entry: {"id": "AscNullsFirst"}
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($ent: AccountOrderBy!)
+           {
+             accountCollection(orderBy: [$ent]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"ent": {"id": "AscNullsFirst"}}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Entry: {"id": "AscNullsLast"}
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($ent: AccountOrderBy!)
+           {
+             accountCollection(orderBy: [$ent]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"ent": {"id": "AscNullsLast"}}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Entry: {"id": "DescNullsFirst"}
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($ent: AccountOrderBy!)
+           {
+             accountCollection(orderBy: [$ent]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"ent": {"id": "DescNullsFirst"}}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Entry: {"id": "DescNullsLast"}
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($ent: AccountOrderBy!)
+           {
+             accountCollection(orderBy: [$ent]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"ent": {"id": "DescNullsLast"}}'
+      )
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "accountCollection": {    +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": 3   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 2   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": 1   +
+                     }             +
+                 },                +
+                 {                 +
+                     "node": {     +
+                         "id": null+
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Variable Entry: Invalid Missing
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($ent: AccountOrderBy!)
+           {
+             accountCollection(orderBy: [$ent]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{}'
+      )
+    );
+                      jsonb_pretty                       
+---------------------------------------------------------
+ {                                                      +
+     "data": null,                                      +
+     "errors": [                                        +
+         {                                              +
+             "message": "Invalid input for NonNull type"+
+         }                                              +
+     ]                                                  +
+ }
+(1 row)
+
+    -- Variable Entry: Invalid List
+    select jsonb_pretty(
+        graphql.resolve($$
+           query AccountsOrdered($ent: AccountOrderBy!)
+           {
+             accountCollection(orderBy: [$ent]) {
+               edges {
+                 node{
+                   id
+                 }
+               }
+             }
+           }
+        $$,
+        variables:= '{"ent": "[]"}'
+      )
+    );
+                          jsonb_pretty                          
+----------------------------------------------------------------
+ {                                                             +
+     "data": null,                                             +
+     "errors": [                                               +
+         {                                                     +
+             "message": "Invalid input for AccountOrderBy type"+
+         }                                                     +
+     ]                                                         +
+ }
+(1 row)
+
+rollback;
