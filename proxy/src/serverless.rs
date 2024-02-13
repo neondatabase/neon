@@ -24,7 +24,7 @@ use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
-use crate::{cancellation::CancelMap, config::ProxyConfig};
+use crate::{cancellation::CancellationHandler, config::ProxyConfig};
 use futures::StreamExt;
 use hyper::{
     server::{
@@ -50,6 +50,7 @@ pub async fn task_main(
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    cancellation_handler: Arc<CancellationHandler>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
@@ -115,7 +116,7 @@ pub async fn task_main(
             let backend = backend.clone();
             let ws_connections = ws_connections.clone();
             let endpoint_rate_limiter = endpoint_rate_limiter.clone();
-
+            let cancellation_handler = cancellation_handler.clone();
             async move {
                 let peer_addr = match client_addr {
                     Some(addr) => addr,
@@ -127,9 +128,9 @@ pub async fn task_main(
                         let backend = backend.clone();
                         let ws_connections = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
+                        let cancellation_handler = cancellation_handler.clone();
 
                         async move {
-                            let cancel_map = Arc::new(CancelMap::default());
                             let session_id = uuid::Uuid::new_v4();
 
                             request_handler(
@@ -137,7 +138,7 @@ pub async fn task_main(
                                 config,
                                 backend,
                                 ws_connections,
-                                cancel_map,
+                                cancellation_handler,
                                 session_id,
                                 peer_addr.ip(),
                                 endpoint_rate_limiter,
@@ -205,7 +206,7 @@ async fn request_handler(
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
-    cancel_map: Arc<CancelMap>,
+    cancellation_handler: Arc<CancellationHandler>,
     session_id: uuid::Uuid,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -232,7 +233,7 @@ async fn request_handler(
                     config,
                     ctx,
                     websocket,
-                    cancel_map,
+                    cancellation_handler,
                     host,
                     endpoint_rate_limiter,
                 )
