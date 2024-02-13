@@ -2471,23 +2471,25 @@ pub(crate) mod tenant_throttling {
     use once_cell::sync::Lazy;
     use pageserver_api::shard::TenantShardId;
 
-    static WAIT_TIME: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+    use crate::tenant::throttle::DurationSum;
+
+    static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
         register_int_counter_vec!(
-            "pageserver_tenant_throttling_wait_time",
-            "Seconds spent waiting for throttle",
+            "pageserver_tenant_throttling_wait_usecs_sum",
+            "Sum of microseconds a given tenant spent waiting for the the throttle of a given kind.",
             &["tenant_id", "kind"]
         )
         .unwrap()
     });
 
     pub(crate) struct TimelineGet {
-        wait_time: IntCounter,
+        counter: IntCounter,
     }
 
     impl TimelineGet {
         pub fn new(tenant_shard_id: &TenantShardId) -> TimelineGet {
             TimelineGet {
-                wait_time: WAIT_TIME
+                counter: WAIT_USECS
                     .with_label_values(&[&tenant_shard_id.to_string(), "timeline_get"]),
             }
         }
@@ -2495,22 +2497,21 @@ pub(crate) mod tenant_throttling {
 
     impl Drop for TimelineGet {
         fn drop(&mut self) {
-            let mut metric = metrics::core::Metric::metric(&self.wait_time);
+            let mut metric = metrics::core::Metric::metric(&self.counter);
             let labels = metric.take_label();
             let label_values = labels
                 .iter()
                 .map(|label_pair| label_pair.get_value())
                 .collect::<Vec<_>>();
-            let res = WAIT_TIME.remove_label_values(&label_values);
+            let res = WAIT_USECS.remove_label_values(&label_values);
             debug_assert!(res.is_ok(), "too easy to misuse this API");
         }
     }
 
-    impl std::ops::Deref for TimelineGet {
-        type Target = IntCounter;
-
-        fn deref(&self) -> &Self::Target {
-            &self.wait_time
+    impl DurationSum for TimelineGet {
+        fn add(&self, duration: std::time::Duration) {
+            self.counter
+                .inc_by(u64::try_from(duration.as_micros()).unwrap())
         }
     }
 }

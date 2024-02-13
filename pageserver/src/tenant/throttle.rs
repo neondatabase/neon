@@ -1,4 +1,4 @@
-use std::{ops::Deref, str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
@@ -6,9 +6,9 @@ use tracing::error;
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
-pub struct Throttle<M> {
+pub struct Throttle<C: DurationSum> {
     inner: ArcSwap<Inner>,
-    wait_time_micros: M,
+    wait_time_micros: C,
 }
 
 pub struct Inner {
@@ -18,11 +18,15 @@ pub struct Inner {
 
 pub type Config = pageserver_api::models::ThrottleConfig;
 
-impl<M> Throttle<M>
+pub trait DurationSum {
+    fn add(&self, duration: Duration);
+}
+
+impl<C> Throttle<C>
 where
-    M: Deref<Target = metrics::IntCounter>,
+    C: DurationSum,
 {
-    pub fn new(config: Config, metric: M) -> Self {
+    pub fn new(config: Config, metric: C) -> Self {
         Self {
             inner: ArcSwap::new(Arc::new(Self::new_inner(config))),
             wait_time_micros: metric,
@@ -78,7 +82,6 @@ where
             .acquire_owned(key_count)
             .await;
         let elapsed = start.elapsed();
-        self.wait_time_micros
-            .inc_by(u64::try_from(elapsed.as_micros()).unwrap());
+        self.wait_time_micros.add(elapsed);
     }
 }

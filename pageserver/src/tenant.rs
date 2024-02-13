@@ -169,7 +169,7 @@ pub(crate) mod timeline;
 
 pub mod size;
 
-mod throttle;
+pub(crate) mod throttle;
 
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
