@@ -2277,7 +2277,7 @@ impl Timeline {
         }
     }
 
-    fn update_directory_entries_count(&self, kind: DirectoryKind, count: u64) {
+    pub(crate) fn update_directory_entries_count(&self, kind: DirectoryKind, count: u64) {
         self.directory_metrics[kind.offset()].store(count, AtomicOrdering::Relaxed);
         let aux_metric =
             self.directory_metrics[DirectoryKind::AuxFiles.offset()].load(AtomicOrdering::Relaxed);
@@ -4801,10 +4801,6 @@ impl<'a> TimelineWriter<'a> {
 
     pub(crate) fn update_current_logical_size(&self, delta: i64) {
         self.tl.update_current_logical_size(delta)
-    }
-
-    pub(crate) fn update_directory_entries_count(&self, kind: DirectoryKind, count: u64) {
-        self.tl.update_directory_entries_count(kind, count);
     }
 }
 
