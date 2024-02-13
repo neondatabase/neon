@@ -1818,7 +1818,7 @@ pub(crate) struct TimelineMetrics {
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
-    pub directory_entries_count_gauge: UIntGauge,
+    pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
     pub evictions: IntCounter,
@@ -1828,12 +1828,12 @@ pub(crate) struct TimelineMetrics {
 impl TimelineMetrics {
     pub fn new(
         tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
+        timeline_id_raw: &TimelineId,
         evictions_with_low_residence_duration_builder: EvictionsWithLowResidenceDurationBuilder,
     ) -> Self {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_id = format!("{}", tenant_shard_id.shard_slug());
-        let timeline_id = timeline_id.to_string();
+        let timeline_id = timeline_id_raw.to_string();
         let flush_time_histo = StorageTimeMetrics::new(
             StorageTimeOperation::LayerFlush,
             &tenant_id,
@@ -1886,9 +1886,22 @@ impl TimelineMetrics {
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
-        let directory_entries_count_gauge = DIRECTORY_ENTRIES_COUNT
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
+        // TODO use impl Trait syntax here once we have ability to use it: https://github.com/rust-lang/rust/issues/63065
+        let directory_entries_count_gauge_closure = {
+            let tenant_shard_id = *tenant_shard_id;
+            let timeline_id_raw = *timeline_id_raw;
+            move || {
+                let tenant_id = tenant_shard_id.tenant_id.to_string();
+                let shard_id = format!("{}", tenant_shard_id.shard_slug());
+                let timeline_id = timeline_id_raw.to_string();
+                let gauge: UIntGauge = DIRECTORY_ENTRIES_COUNT
+                    .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+                    .unwrap();
+                gauge
+            }
+        };
+        let directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>> =
+            Lazy::new(Box::new(directory_entries_count_gauge_closure));
         let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -1958,7 +1971,9 @@ impl Drop for TimelineMetrics {
                 RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         }
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
-        let _ = DIRECTORY_ENTRIES_COUNT.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        if let Some(metric) = Lazy::get(&DIRECTORY_ENTRIES_COUNT) {
+            let _ = metric.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        }
         let _ =
             NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
