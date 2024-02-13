@@ -408,14 +408,11 @@ impl RemoteStorage for AzureBlobStorage {
 
                 let request = blob_client.delete().into_future();
 
-                let res = tokio::select! {
-                    res = request => res,
-                    _ = tokio::time::sleep(self.timeout) => return Err(TimeoutOrCancel::Timeout.into()),
-                };
+                let res = tokio::time::timeout(self.timeout, request).await;
 
                 match res {
-                    Ok(_response) => continue,
-                    Err(e) => {
+                    Ok(Ok(_response)) => continue,
+                    Ok(Err(e)) => {
                         if let Some(http_err) = e.as_http_error() {
                             if http_err.status() == StatusCode::NotFound {
                                 continue;
@@ -423,6 +420,7 @@ impl RemoteStorage for AzureBlobStorage {
                         }
                         return Err(e.into());
                     }
+                    Err(_elapsed) => return Err(TimeoutOrCancel::Timeout.into()),
                 }
             }
 
