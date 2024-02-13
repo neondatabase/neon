@@ -309,24 +309,22 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
         .unwrap()
 }
 
-async fn handle_terminate_request(
-    compute: &Arc<ComputeNode>,
-) -> Result<(), (String, StatusCode)> {
+async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (String, StatusCode)> {
     {
-    let mut state = compute.state.lock().unwrap();
-    if state.status == ComputeStatus::Terminated {
-        return Ok(());
-    }
-    if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
-        let msg = format!(
-            "invalid compute status for termination request: {:?}",
-            state.status.clone()
-        );
-        return Err((msg, StatusCode::PRECONDITION_FAILED));
-    }
-    state.status = ComputeStatus::TerminationPending;
-    compute.state_changed.notify_all();
-    drop(state);
+        let mut state = compute.state.lock().unwrap();
+        if state.status == ComputeStatus::Terminated {
+            return Ok(());
+        }
+        if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
+            let msg = format!(
+                "invalid compute status for termination request: {:?}",
+                state.status.clone()
+            );
+            return Err((msg, StatusCode::PRECONDITION_FAILED));
+        }
+        state.status = ComputeStatus::TerminationPending;
+        compute.state_changed.notify_all();
+        drop(state);
     }
     forward_termination_signal();
     info!("sent signal and notified waiters");
@@ -337,19 +335,19 @@ async fn handle_terminate_request(
     // is waiting for compute to finish configuration.
     let c = compute.clone();
     task::spawn_blocking(move || {
-            let mut state = c.state.lock().unwrap();
-            while state.status != ComputeStatus::Terminated {
-                state = c.state_changed.wait(state).unwrap();
-                info!(
-                    "waiting for compute to become Terminated, current status: {:?}",
-                    state.status
-                );
-            }
+        let mut state = c.state.lock().unwrap();
+        while state.status != ComputeStatus::Terminated {
+            state = c.state_changed.wait(state).unwrap();
+            info!(
+                "waiting for compute to become Terminated, current status: {:?}",
+                state.status
+            );
+        }
 
-            Ok(())
-        })
-        .await
-        .unwrap()?;
+        Ok(())
+    })
+    .await
+    .unwrap()?;
     info!("terminated Postges");
     return Ok(());
 }

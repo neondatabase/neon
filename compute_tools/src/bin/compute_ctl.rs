@@ -52,7 +52,9 @@ use url::Url;
 
 use compute_api::responses::ComputeStatus;
 
-use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec, PG_PID, forward_termination_signal};
+use compute_tools::compute::{
+    forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
+};
 use compute_tools::configurator::launch_configurator;
 use compute_tools::extension_server::get_pg_version;
 use compute_tools::http::api::launch_http_server;
