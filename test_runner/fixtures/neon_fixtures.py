@@ -3104,6 +3104,8 @@ class Endpoint(PgProtocol):
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
+
+        config_lines = ["neon.primary_is_running=on"] + config_lines
         self.config(config_lines)
 
         return self

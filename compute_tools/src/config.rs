@@ -85,11 +85,9 @@ pub fn write_postgres_conf(
 
             // Inform the replica about the primary state
             // Default is 'false'
-            writeln!(
-                file,
-                "neon.primary_is_running={}",
-                spec.primary_is_running.unwrap_or(false)
-            )?;
+            if let Some(primary_is_running) = spec.primary_is_running {
+                writeln!(file, "neon.primary_is_running={}", primary_is_running)?;
+            }
         }
     }
 
