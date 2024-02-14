@@ -422,6 +422,7 @@ async fn build_timeline_info_common(
             tenant::timeline::logical_size::Accuracy::Approximate => false,
             tenant::timeline::logical_size::Accuracy::Exact => true,
         },
+        directory_entries_counts: timeline.get_directory_metrics().to_vec(),
         current_physical_size,
         current_logical_size_non_incremental: None,
         timeline_dir_layer_file_size_sum: None,
