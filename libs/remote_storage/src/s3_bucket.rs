@@ -307,18 +307,6 @@ impl S3Bucket {
 
     async fn delete_oids(
         &self,
-        delete_objects: &[ObjectIdentifier],
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
-        let kind = RequestKind::Delete;
-
-        let permit = self.permit(kind, cancel).await?;
-
-        self.delete_oids0(&permit, delete_objects, cancel).await
-    }
-
-    async fn delete_oids0(
-        &self,
         _permit: &tokio::sync::SemaphorePermit<'_>,
         delete_objects: &[ObjectIdentifier],
         cancel: &CancellationToken,
@@ -707,6 +695,8 @@ impl RemoteStorage for S3Bucket {
         paths: &'a [RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
+        let kind = RequestKind::Delete;
+        let permit = self.permit(kind, cancel).await?;
         let mut delete_objects = Vec::with_capacity(paths.len());
         for path in paths {
             let obj_id = ObjectIdentifier::builder()
@@ -716,7 +706,7 @@ impl RemoteStorage for S3Bucket {
             delete_objects.push(obj_id);
         }
 
-        self.delete_oids(&delete_objects, cancel).await
+        self.delete_oids(&permit, &delete_objects, cancel).await
     }
 
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {
@@ -933,7 +923,7 @@ impl RemoteStorage for S3Bucket {
                         .build()
                         .map_err(|e| TimeTravelError::Other(e.into()))?;
 
-                    self.delete_oids0(&permit, &[oid], cancel)
+                    self.delete_oids(&permit, &[oid], cancel)
                         .await
                         .map_err(|e| {
                             // delete_oid0 will use TimeoutOrCancel
