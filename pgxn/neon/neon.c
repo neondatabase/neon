@@ -291,7 +291,7 @@ _PG_init(void)
 
 	DefineCustomBoolVariable(
 		"neon.primary_is_running",
-		"For replica it is true, if primary is running, false otherwise",
+		"true if the primary was running at replica startup. false otherwise",
 		NULL,
 		&primary_is_running,
 		false,
