@@ -21,9 +21,9 @@ services:
     working_dir: /home/nonroot/extensions_regression_tests
     build:
       context: ../.
-      dockerfile: Dockerfile.compute-node
+      dockerfile: Dockerfile.compute-node1
       target: extension-regression-tests
       args:
         PG_VERSION: ${PG_VERSION:-v15}
-        BUILD_TAG: ${BUILD_TAG:-latest}
+        TAG: ${TAG:-latest}
     command: make extensions-test-all

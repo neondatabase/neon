@@ -201,7 +201,6 @@ ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
-ARG PG_VERSION
 
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
