@@ -76,7 +76,7 @@ jobs:
         id: build-tag
 
   run-extension-regression-test:
-    needs: [ check-permissions, tag , build-neon]
+    needs: [ check-permissions, tag ]
     runs-on: ubuntu-latest
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:7893045808
