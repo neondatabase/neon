@@ -29,7 +29,7 @@ pub trait UserFacingError: ReportableError {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     /// Wrong password, unknown endpoint, protocol violation, etc...
     User,
@@ -88,5 +88,15 @@ pub trait ReportableError: fmt::Display + Send + 'static {
 impl ReportableError for tokio::time::error::Elapsed {
     fn get_error_kind(&self) -> ErrorKind {
         ErrorKind::RateLimit
+    }
+}
+
+impl ReportableError for tokio_postgres::error::Error {
+    fn get_error_kind(&self) -> ErrorKind {
+        if self.as_db_error().is_some() {
+            ErrorKind::Postgres
+        } else {
+            ErrorKind::Compute
+        }
     }
 }

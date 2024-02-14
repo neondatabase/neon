@@ -20,7 +20,7 @@ pub async fn authenticate_cleartext(
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     secret: AuthSecret,
-) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
+) -> auth::Result<ComputeCredentials> {
     warn!("cleartext auth flow override is enabled, proceeding");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
@@ -51,7 +51,7 @@ pub async fn password_hack_no_authentication(
     ctx: &mut RequestMonitoring,
     info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
-) -> auth::Result<ComputeCredentials<Vec<u8>>> {
+) -> auth::Result<ComputeCredentials> {
     warn!("project not specified, resorting to the password hack auth flow");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
@@ -73,6 +73,6 @@ pub async fn password_hack_no_authentication(
             options: info.options,
             endpoint: payload.endpoint,
         },
-        keys: payload.password,
+        keys: ComputeCredentialKeys::Password(payload.password),
     })
 }

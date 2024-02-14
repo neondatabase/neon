@@ -893,37 +893,14 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
         # in its heatmap
         ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    # Configure the secondary pageserver to have a phony small disk size
-    ps_secondary.stop()
     total_size, _, _ = env.timelines_du(ps_secondary)
-    blocksize = 512
-    total_blocks = (total_size + (blocksize - 1)) // blocksize
+    evict_bytes = total_size // 3
 
-    min_avail_bytes = total_size // 3
-
-    env.pageserver_start_with_disk_usage_eviction(
-        ps_secondary,
-        period="1s",
-        max_usage_pct=100,
-        min_avail_bytes=min_avail_bytes,
-        mock_behavior={
-            "type": "Success",
-            "blocksize": blocksize,
-            "total_blocks": total_blocks,
-            # Only count layer files towards used bytes in the mock_statvfs.
-            # This avoids accounting for metadata files & tenant conf in the tests.
-            "name_filter": ".*__.*",
-        },
-        eviction_order=EvictionOrder.ABSOLUTE_ORDER,
-    )
-
-    def relieved_log_message():
-        assert ps_secondary.log_contains(".*disk usage pressure relieved")
-
-    wait_until(10, 1, relieved_log_message)
+    response = ps_secondary.http_client().disk_usage_eviction_run({"evict_bytes": evict_bytes})
+    log.info(f"{response}")
 
     post_eviction_total_size, _, _ = env.timelines_du(ps_secondary)
 
     assert (
-        total_size - post_eviction_total_size >= min_avail_bytes
-    ), "we requested at least min_avail_bytes worth of free space"
+        total_size - post_eviction_total_size >= evict_bytes
+    ), "we requested at least evict_bytes worth of free space"

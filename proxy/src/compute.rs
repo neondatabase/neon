@@ -1,7 +1,7 @@
 use crate::{
     auth::parse_endpoint_param,
     cancellation::CancelClosure,
-    console::errors::WakeComputeError,
+    console::{errors::WakeComputeError, messages::MetricsAuxInfo},
     context::RequestMonitoring,
     error::{ReportableError, UserFacingError},
     metrics::NUM_DB_CONNECTIONS_GAUGE,
@@ -93,7 +93,7 @@ impl ConnCfg {
     }
 
     /// Reuse password or auth keys from the other config.
-    pub fn reuse_password(&mut self, other: &Self) {
+    pub fn reuse_password(&mut self, other: Self) {
         if let Some(password) = other.get_password() {
             self.password(password);
         }
@@ -253,6 +253,8 @@ pub struct PostgresConnection {
     pub params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
     pub cancel_closure: CancelClosure,
+    /// Labels for proxy's metrics.
+    pub aux: MetricsAuxInfo,
 
     _guage: IntCounterPairGuard,
 }
@@ -263,6 +265,7 @@ impl ConnCfg {
         &self,
         ctx: &mut RequestMonitoring,
         allow_self_signed_compute: bool,
+        aux: MetricsAuxInfo,
         timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
@@ -297,6 +300,7 @@ impl ConnCfg {
             stream,
             params,
             cancel_closure,
+            aux,
             _guage: NUM_DB_CONNECTIONS_GAUGE
                 .with_label_values(&[ctx.protocol])
                 .guard(),

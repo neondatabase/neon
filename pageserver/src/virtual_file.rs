@@ -19,7 +19,7 @@ use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut};
+use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
@@ -588,23 +588,36 @@ impl VirtualFile {
         Ok(())
     }
 
-    pub async fn write_all(&mut self, mut buf: &[u8]) -> Result<(), Error> {
+    /// Writes `buf.slice(0..buf.bytes_init())`.
+    /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
+    /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
+    /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
+    pub async fn write_all<B: BoundedBuf>(&mut self, buf: B) -> (B::Buf, Result<usize, Error>) {
+        let nbytes = buf.bytes_init();
+        if nbytes == 0 {
+            return (Slice::into_inner(buf.slice_full()), Ok(0));
+        }
+        let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
-            match self.write(buf).await {
+            // TODO: push `Slice` further down
+            match self.write(&buf).await {
                 Ok(0) => {
-                    return Err(Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return (
+                        Slice::into_inner(buf),
+                        Err(Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        )),
+                    );
                 }
                 Ok(n) => {
-                    buf = &buf[n..];
+                    buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(e) => return (Slice::into_inner(buf), Err(e)),
             }
         }
-        Ok(())
+        (Slice::into_inner(buf), Ok(nbytes))
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
@@ -1049,10 +1062,19 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
+        async fn write_all<B: BoundedBuf>(&mut self, buf: B) -> Result<(), Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.write_all(buf).await,
-                MaybeVirtualFile::File(file) => file.write_all(buf),
+                MaybeVirtualFile::VirtualFile(file) => {
+                    let (_buf, res) = file.write_all(buf).await;
+                    res.map(|_| ())
+                }
+                MaybeVirtualFile::File(file) => {
+                    let buf_len = buf.bytes_init();
+                    if buf_len == 0 {
+                        return Ok(());
+                    }
+                    file.write_all(&buf.slice(0..buf_len))
+                }
             }
         }
 
@@ -1127,7 +1149,7 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_a.write_all(b"foobar").await?;
+        file_a.write_all(b"foobar".to_vec()).await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string().await.unwrap_err();
@@ -1136,7 +1158,7 @@ mod tests {
         let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar").await.unwrap_err();
+        let _ = file_a.write_all(b"bar".to_vec()).await.unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string().await?);

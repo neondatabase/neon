@@ -22,6 +22,7 @@ use crate::bindings::WalProposerExecStatusType;
 use crate::bindings::WalproposerShmemState;
 use crate::bindings::XLogRecPtr;
 use crate::walproposer::ApiImpl;
+use crate::walproposer::StreamingCallback;
 use crate::walproposer::WaitResult;
 
 extern "C" fn get_shmem_state(wp: *mut WalProposer) -> *mut WalproposerShmemState {
@@ -36,7 +37,8 @@ extern "C" fn start_streaming(wp: *mut WalProposer, startpos: XLogRecPtr) {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).start_streaming(startpos)
+        let callback = StreamingCallback::new(wp);
+        (*api).start_streaming(startpos, &callback);
     }
 }
 
@@ -134,19 +136,18 @@ extern "C" fn conn_async_read(
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        let (res, result) = (*api).conn_async_read(&mut (*sk));
 
         // This function has guarantee that returned buf will be valid until
         // the next call. So we can store a Vec in each Safekeeper and reuse
         // it on the next call.
         let mut inbuf = take_vec_u8(&mut (*sk).inbuf).unwrap_or_default();
-
         inbuf.clear();
-        inbuf.extend_from_slice(res);
+
+        let result = (*api).conn_async_read(&mut (*sk), &mut inbuf);
 
         // Put a Vec back to sk->inbuf and return data ptr.
+        *amount = inbuf.len() as i32;
         *buf = store_vec_u8(&mut (*sk).inbuf, inbuf);
-        *amount = res.len() as i32;
 
         result
     }
@@ -182,6 +183,10 @@ extern "C" fn recovery_download(wp: *mut WalProposer, sk: *mut Safekeeper) -> bo
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
+
+        // currently `recovery_download` is always called right after election
+        (*api).after_election(&mut (*wp));
+
         (*api).recovery_download(&mut (*wp), &mut (*sk))
     }
 }
@@ -277,7 +282,8 @@ extern "C" fn wait_event_set(
             }
             WaitResult::Timeout => {
                 *event_sk = std::ptr::null_mut();
-                *events = crate::bindings::WL_TIMEOUT;
+                // WaitEventSetWait returns 0 for timeout.
+                *events = 0;
                 0
             }
             WaitResult::Network(sk, event_mask) => {
@@ -340,7 +346,7 @@ extern "C" fn log_internal(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Level {
     Debug5,
     Debug4,
