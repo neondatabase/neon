@@ -116,6 +116,9 @@ pub struct SharedState {
     /// when tli is inactive instead of having this flag.
     active: bool,
     last_removed_segno: XLogSegNo,
+    /// True if local and remote deletion has been done, allows to skip visiting
+    /// s3 on retries.
+    fully_deleted: bool,
 }
 
 impl SharedState {
@@ -155,6 +158,7 @@ impl SharedState {
             wal_backup_active: false,
             active: false,
             last_removed_segno: 0,
+            fully_deleted: false,
         })
     }
 
@@ -174,6 +178,7 @@ impl SharedState {
             wal_backup_active: false,
             active: false,
             last_removed_segno: 0,
+            fully_deleted: false,
         })
     }
 
@@ -482,6 +487,10 @@ impl Timeline {
         shared_state: &mut MutexGuard<'_, SharedState>,
         only_local: bool,
     ) -> Result<(bool, bool)> {
+        if shared_state.fully_deleted {
+            return Ok((false, false));
+        };
+
         let was_active = shared_state.active;
         self.cancel(shared_state);
 
@@ -496,6 +505,9 @@ impl Timeline {
             wal_backup::delete_timeline(&self.ttid).await?;
         }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
+        if !only_local {
+            shared_state.fully_deleted = true;
+        }
         Ok((dir_existed, was_active))
     }
 
