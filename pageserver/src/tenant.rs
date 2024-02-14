@@ -310,8 +310,9 @@ pub struct Tenant {
     // trying to use a Tenant which is shutting down.
     pub(crate) gate: Gate,
 
-    pub(crate) timeline_get_rate_limiter:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    pub(crate) timeline_get_rate_limiter: Arc<
+        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
+    >,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -2783,7 +2784,7 @@ impl Tenant {
             gate: Gate::default(),
             timeline_get_rate_limiter: Arc::new(crate::tenant::throttle::Throttle::new(
                 Tenant::get_timeline_get_rate_limit_config(conf, &attached_conf.tenant_conf),
-                crate::metrics::tenant_throttling::TimelineGet::new(&tenant_shard_id),
+                &crate::metrics::tenant_throttling::TIMELINE_GET,
             )),
             tenant_conf: Arc::new(RwLock::new(attached_conf)),
         }

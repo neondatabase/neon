@@ -1,7 +1,7 @@
 use std::{
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -16,12 +16,18 @@ use crate::{context::RequestContext, task_mgr::TaskKind};
 pub struct Throttle<M: Metric> {
     inner: ArcSwap<Inner>,
     metric: M,
-    throttled: AtomicBool,
+    /// will be turned into [`ResetWasThrottledResult`]
+    count_accounted: AtomicU64,
+    /// will be turned into [`ResetWasThrottledResult`]
+    count_throttled: AtomicU64,
+    /// will be turned into [`ResetWasThrottledResult`]
+    sum_throttled_usecs: AtomicU64,
 }
 
 pub struct Inner {
     task_kinds: EnumSet<TaskKind>,
     rate_limiter: Arc<leaky_bucket::RateLimiter>,
+    config: Config,
 }
 
 pub type Config = pageserver_api::models::ThrottleConfig;
@@ -30,13 +36,18 @@ pub struct Observation {
     pub wait_time: Duration,
 }
 pub trait Metric {
-    fn observe(&self, observation: &Observation);
+    fn observe_throttling(&self, observation: &Observation);
 }
 
-/// See [`Throttle::reset_was_throttled`].
-pub enum ResetWasThrottledResult {
-    WasNotThrottled,
-    WasThrottled,
+/// See [`Throttle::reset_stats`].
+pub struct Stats {
+    // Number of requests that were subject to throttling, i.e., requests of the configured [`Config::task_kinds`].
+    pub count_accounted: u64,
+    // Subset of the `accounted` requests that were actually throttled.
+    // Note that the numbers are stored as two independent atomics, so, there might be a slight drift.
+    pub count_throttled: u64,
+    // Sum of microseconds that throttled requests spent waiting for throttling.
+    pub sum_throttled_usecs: u64,
 }
 
 impl<M> Throttle<M>
@@ -47,7 +58,9 @@ where
         Self {
             inner: ArcSwap::new(Arc::new(Self::new_inner(config))),
             metric,
-            throttled: AtomicBool::new(false),
+            count_accounted: AtomicU64::new(0),
+            count_throttled: AtomicU64::new(0),
+            sum_throttled_usecs: AtomicU64::new(0),
         }
     }
     fn new_inner(config: Config) -> Inner {
@@ -58,7 +71,7 @@ where
             interval_refill,
             max,
             fair,
-        } = config;
+        } = &config;
         let task_kinds: EnumSet<TaskKind> = task_kinds
             .into_iter()
             .filter_map(|s| match TaskKind::from_str(&s) {
@@ -77,13 +90,14 @@ where
             task_kinds,
             rate_limiter: Arc::new(
                 leaky_bucket::RateLimiter::builder()
-                    .initial(initial)
+                    .initial(*initial)
                     .interval(Duration::from_millis(interval_millis.get()))
                     .refill(interval_refill.get())
-                    .max(max)
-                    .fair(fair)
+                    .max(*max)
+                    .fair(*fair)
                     .build(),
             ),
+            config,
         }
     }
     pub fn reconfigure(&self, config: Config) {
@@ -93,11 +107,20 @@ where
     /// The [`Throttle`] keeps an internal flag that is true if there was ever any actual throttling.
     /// This method allows retrieving & resetting that flag.
     /// Useful for periodic reporting.
-    pub fn reset_was_throttled(&self) -> ResetWasThrottledResult {
-        match self.throttled.swap(false, Ordering::Relaxed) {
-            false => ResetWasThrottledResult::WasNotThrottled,
-            true => ResetWasThrottledResult::WasThrottled,
+    pub fn reset_stats(&self) -> Stats {
+        let count_accounted = self.count_accounted.swap(0, Ordering::Relaxed);
+        let count_throttled = self.count_throttled.swap(0, Ordering::Relaxed);
+        let sum_throttled_usecs = self.sum_throttled_usecs.swap(0, Ordering::Relaxed);
+        Stats {
+            count_accounted,
+            count_throttled,
+            sum_throttled_usecs,
         }
+    }
+
+    /// See [`Config::steady_rps`].
+    pub fn steady_rps(&self) -> f64 {
+        self.inner.load().config.steady_rps()
     }
 
     pub async fn throttle(&self, ctx: &RequestContext, key_count: usize) {
@@ -116,12 +139,15 @@ where
             poll
         })
         .await;
+        self.count_accounted.fetch_add(1, Ordering::Relaxed);
         if did_throttle {
-            self.throttled.swap(true, Ordering::Relaxed);
+            self.count_throttled.fetch_add(1, Ordering::Relaxed);
             let now = Instant::now();
             let wait_time = now - start;
+            self.sum_throttled_usecs
+                .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
             let observation = Observation { wait_time };
-            self.metric.observe(&observation);
+            self.metric.observe_throttling(&observation);
         }
     }
 }

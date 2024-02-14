@@ -158,8 +158,9 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
     pub deletion_queue_client: DeletionQueueClient,
-    pub timeline_get_rate_limiter:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    pub timeline_get_rate_limiter: Arc<
+        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
+    >,
 }
 
 pub struct Timeline {
@@ -351,8 +352,9 @@ pub struct Timeline {
     gc_lock: tokio::sync::Mutex<()>,
 
     /// Inherited from [`Tenant::timeline_get_rate_limiter`] on construction on construction on construction on construction
-    timeline_get_rate_limiter:
-        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
+    timeline_get_rate_limiter: Arc<
+        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
+    >,
 }
 
 pub struct WalReceiverInfo {

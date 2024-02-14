@@ -2469,78 +2469,49 @@ pub mod tokio_epoll_uring {
 pub(crate) mod tenant_throttling {
     use metrics::{register_int_counter_vec, IntCounter};
     use once_cell::sync::Lazy;
-    use pageserver_api::shard::TenantShardId;
 
     use crate::tenant::{self, throttle::Metric};
 
-    static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_tenant_throttling_wait_usecs_sum",
-            "Sum of microseconds a given tenant spent waiting for the throttle of a given kind.",
-            &["tenant_id", "kind"]
-        )
-        .unwrap()
-    });
-
-    mod kinds {
-        pub const TIMELINE_GET: &'static str = "timeline_get";
+    pub(crate) struct TimelineGet {
+        wait_time: IntCounter,
+        count: IntCounter,
     }
 
-    pub(super) mod global {
-        use super::*;
-
-        // NB: add these to preinitialize_metrics
-
+    pub(crate) static TIMELINE_GET: Lazy<TimelineGet> = Lazy::new(|| {
         static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
             register_int_counter_vec!(
             "pageserver_tenant_throttling_wait_usecs_sum_global",
-            "Sum of microseconds that all tenants of this instance spent waiting for the throttle of a given kind.",
+            "Sum of microseconds that tenants spent waiting for a tenant throttle of a given kind.",
             &["kind"]
         )
-        .unwrap()
+            .unwrap()
         });
 
-        pub static WAIT_USECS_TIMELINE_GET: Lazy<metrics::IntCounter> =
-            Lazy::new(|| WAIT_USECS.with_label_values(&[kinds::TIMELINE_GET]));
-    }
+        static WAIT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+            register_int_counter_vec!(
+                "pageserver_tenant_throttling_count_global",
+                "Count of tenant throttlings, by kind of throttle.",
+                &["kind"]
+            )
+            .unwrap()
+        });
 
-    pub(crate) struct TimelineGet {
-        wait_time_global: &'static IntCounter,
-        wait_time_per_tenant: IntCounter,
-    }
-
-    impl TimelineGet {
-        pub fn new(tenant_shard_id: &TenantShardId) -> TimelineGet {
-            TimelineGet {
-                wait_time_global: &*global::WAIT_USECS_TIMELINE_GET,
-                wait_time_per_tenant: WAIT_USECS
-                    .with_label_values(&[&tenant_shard_id.to_string(), kinds::TIMELINE_GET]),
-            }
+        let kind = "timeline_get";
+        TimelineGet {
+            wait_time: WAIT_USECS.with_label_values(&[kind]),
+            count: WAIT_COUNT.with_label_values(&[kind]),
         }
-    }
+    });
 
-    impl Drop for TimelineGet {
-        fn drop(&mut self) {
-            let mut metric = metrics::core::Metric::metric(&self.wait_time_per_tenant);
-            let labels = metric.take_label();
-            let label_values = labels
-                .iter()
-                .map(|label_pair| label_pair.get_value())
-                .collect::<Vec<_>>();
-            let res = WAIT_USECS.remove_label_values(&label_values);
-            debug_assert!(res.is_ok(), "too easy to misuse this API");
-        }
-    }
-
-    impl Metric for TimelineGet {
+    impl Metric for &'static TimelineGet {
         #[inline(always)]
-        fn observe(
+        fn observe_throttling(
             &self,
             tenant::throttle::Observation { wait_time }: &tenant::throttle::Observation,
         ) {
             let val = u64::try_from(wait_time.as_micros()).unwrap();
-            self.wait_time_per_tenant.inc_by(val);
-            self.wait_time_global.inc_by(val);
+            self.wait_time.inc_by(val);
+            self.count.inc();
         }
     }
 }
@@ -2563,7 +2534,6 @@ pub fn preinitialize_metrics() {
         &WALRECEIVER_BROKER_UPDATES,
         &WALRECEIVER_CANDIDATES_ADDED,
         &WALRECEIVER_CANDIDATES_REMOVED,
-        &tenant_throttling::global::WAIT_USECS_TIMELINE_GET,
     ]
     .into_iter()
     .for_each(|c| {
@@ -2607,4 +2577,5 @@ pub fn preinitialize_metrics() {
 
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
+    Lazy::force(&tenant_throttling::TIMELINE_GET);
 }

@@ -331,6 +331,10 @@ impl ThrottleConfig {
             fair: true,
         }
     }
+    /// The requests per second allowed  by the given config.
+    pub fn steady_rps(&self) -> f64 {
+        (self.interval_refill.get() as f64) / (self.interval_millis.get() as f64) / 1e3
+    }
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which

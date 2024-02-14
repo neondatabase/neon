@@ -9,7 +9,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
-use crate::tenant::throttle::ResetWasThrottledResult;
+use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
 use tokio_util::sync::CancellationToken;
@@ -211,13 +211,20 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             info_span!(parent: None, "timeline_get_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
                 let now = Instant::now();
                 let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
-                match tenant.timeline_get_rate_limiter.reset_was_throttled() {
-                    ResetWasThrottledResult::WasNotThrottled => {}
-                    ResetWasThrottledResult::WasThrottled => {
-                        let delta = now - prev;
-                        warn!(n=%format_args!("{:.3}", delta.as_secs_f64()), "shard was throttled in the last n seconds")
-                    }
+                let Stats { count_accounted, count_throttled, sum_throttled_usecs } = tenant.timeline_get_rate_limiter.reset_stats();
+                if count_throttled == 0 {
+                    return;
                 }
+                let allowed_rps = tenant.timeline_get_rate_limiter.steady_rps();
+                let delta = now - prev;
+                warn!(
+                    n_seconds=%format_args!("{:.3}",
+                    delta.as_secs_f64()),
+                    count_accounted,
+                    count_throttled,
+                    sum_throttled_usecs,
+                    allowed_rps=%format_args!("{allowed_rps:.0}"),
+                    "shard was throttled in the last n_seconds")
             });
 
             // Sleep
