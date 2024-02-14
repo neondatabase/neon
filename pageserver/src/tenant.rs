@@ -4358,7 +4358,6 @@ mod tests {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
-        #[allow(non_snake_case)]
         {
             let writer = tline.writer().await;
             // Create a relation on the timeline
