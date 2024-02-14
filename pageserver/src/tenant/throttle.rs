@@ -1,7 +1,9 @@
 use std::{
     str::FromStr,
-    sync::Arc,
-    task::Poll,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -14,7 +16,7 @@ use crate::{context::RequestContext, task_mgr::TaskKind};
 pub struct Throttle<M: Metric> {
     inner: ArcSwap<Inner>,
     metric: M,
-    last_throttled_at: std::sync::Mutex<Option<Instant>>,
+    throttled: AtomicBool,
 }
 
 pub struct Inner {
@@ -26,10 +28,15 @@ pub type Config = pageserver_api::models::ThrottleConfig;
 
 pub struct Observation {
     pub wait_time: Duration,
-    pub unthrottled_for: bool,
 }
 pub trait Metric {
     fn observe(&self, observation: &Observation);
+}
+
+/// See [`Throttle::reset_was_throttled`].
+pub enum ResetWasThrottledResult {
+    WasNotThrottled,
+    WasThrottled,
 }
 
 impl<M> Throttle<M>
@@ -40,7 +47,7 @@ where
         Self {
             inner: ArcSwap::new(Arc::new(Self::new_inner(config))),
             metric,
-            last_throttled_at: std::sync::Mutex::new(None),
+            throttled: AtomicBool::new(false),
         }
     }
     fn new_inner(config: Config) -> Inner {
@@ -83,6 +90,16 @@ where
         self.inner.store(Arc::new(Self::new_inner(config)));
     }
 
+    /// The [`Throttle`] keeps an internal flag that is true if there was ever any actual throttling.
+    /// This method allows retrieving & resetting that flag.
+    /// Useful for periodic reporting.
+    pub fn reset_was_throttled(&self) -> ResetWasThrottledResult {
+        match self.throttled.swap(false, Ordering::Relaxed) {
+            false => ResetWasThrottledResult::WasNotThrottled,
+            true => ResetWasThrottledResult::WasThrottled,
+        }
+    }
+
     pub async fn throttle(&self, ctx: &RequestContext, key_count: usize) {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
         if !inner.task_kinds.contains(ctx.task_kind()) {
@@ -94,26 +111,16 @@ where
         let mut acquire_fut = std::pin::pin!(acquire_fut);
         std::future::poll_fn(|cx| {
             use std::future::Future;
-            use std::task::Poll;
             let poll = acquire_fut.as_mut().poll(cx);
-            did_throttle = matches!(Poll::<()>::Pending, poll);
+            did_throttle = did_throttle || poll.is_pending();
             poll
         })
         .await;
-        let now = Instant::now();
-        let wait_time = now - start;
         if did_throttle {
-            let unthrottled_for = self
-                .last_throttled_at
-                .lock()
-                .unwrap()
-                .replace(now)
-                .map(|prev| now - prev);
-            std::mem::forget(unthrottled_for);
-            let observation = Observation {
-                wait_time,
-                unthrottled_for: false,
-            };
+            self.throttled.swap(true, Ordering::Relaxed);
+            let now = Instant::now();
+            let wait_time = now - start;
+            let observation = Observation { wait_time };
             self.metric.observe(&observation);
         }
     }

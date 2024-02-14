@@ -2502,13 +2502,11 @@ pub(crate) mod tenant_throttling {
 
         pub static WAIT_USECS_TIMELINE_GET: Lazy<metrics::IntCounter> =
             Lazy::new(|| WAIT_USECS.with_label_values(&[kinds::TIMELINE_GET]));
-
     }
 
     pub(crate) struct TimelineGet {
         wait_time_global: &'static IntCounter,
         wait_time_per_tenant: IntCounter,
-
     }
 
     impl TimelineGet {
@@ -2535,19 +2533,14 @@ pub(crate) mod tenant_throttling {
     }
 
     impl Metric for TimelineGet {
+        #[inline(always)]
         fn observe(
             &self,
-            tenant::throttle::Observation {
-                wait_time,
-                unthrottled_for,
-            }: &tenant::throttle::Observation,
+            tenant::throttle::Observation { wait_time }: &tenant::throttle::Observation,
         ) {
-
-            {
-                let val = u64::try_from(wait_time.as_micros()).unwrap();
-                self.wait_time_per_tenant.inc_by(val);
-                self.wait_time_global.inc_by(val);
-            }
+            let val = u64::try_from(wait_time.as_micros()).unwrap();
+            self.wait_time_per_tenant.inc_by(val);
+            self.wait_time_global.inc_by(val);
         }
     }
 }
