@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::BufRead;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -633,6 +633,48 @@ impl ComputeNode {
 
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
+
+        // Place pg_dynshmem under /dev/shm. This allows us to use
+        // 'dynamic_shared_memory_type = mmap' so that the files are placed in
+        // /dev/shm, similar to how 'dynamic_shared_memory_type = posix' works.
+        //
+        // Why on earth don't we just stick to the 'posix' default, you might
+        // ask.  It turns out that making large allocations with 'posix' doesn't
+        // work very well with autoscaling. The behavior we want is that:
+        //
+        // 1. You can make large DSM allocations, larger than the current RAM
+        //    size of the VM, without errors
+        //
+        // 2. If the allocated memory is really used, the VM is scaled up
+        //    automatically to accommodate that
+        //
+        // We try to make that possible by having swap in the VM. But with the
+        // default 'posix' DSM implementation, we fail step 1, even when there's
+        // plenty of swap available. PostgreSQL uses posix_fallocate() to create
+        // the shmem segment, which is really just a file in /dev/shm in Linux,
+        // but posix_fallocate() on tmpfs returns ENOMEM if the size is larger
+        // than available RAM.
+        //
+        // Using 'dynamic_shared_memory_type = mmap' works around that, because
+        // the Postgres 'mmap' DSM implementation doesn't use
+        // posix_fallocate(). Instead, it uses repeated calls to write(2) to
+        // fill the file with zeros. It's weird that that differs between
+        // 'posix' and 'mmap', but we take advantage of it. When the file is
+        // filled slowly with write(2), the kernel allows it to grow larger, as
+        // long as there's swap available.
+        //
+        // In short, using 'dynamic_shared_memory_type = mmap' allows us one DSM
+        // segment to be larger than currently available RAM. But because we
+        // don't want to store it on a real file, which the kernel would try to
+        // flush to disk, so symlink pg_dynshm to /dev/shm.
+        //
+        // We don't set 'dynamic_shared_memory_type = mmap' here, we let the
+        // control plane control that option. If 'mmap' is not used, this
+        // symlink doesn't affect anything.
+        //
+        // See https://github.com/neondatabase/autoscaling/issues/800
+        std::fs::remove_dir(pgdata_path.join("pg_dynshmem"))?;
+        symlink("/dev/shm/", pgdata_path.join("pg_dynshmem"))?;
 
         match spec.mode {
             ComputeMode::Primary => {}

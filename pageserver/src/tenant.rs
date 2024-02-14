@@ -2880,7 +2880,7 @@ impl Tenant {
         let config_path = config_path.to_owned();
         tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
-                let conf_content = conf_content.as_bytes();
+                let conf_content = conf_content.into_bytes();
                 VirtualFile::crashsafe_overwrite(&config_path, &temp_path, conf_content)
                     .await
                     .with_context(|| {
@@ -2917,7 +2917,7 @@ impl Tenant {
         let target_config_path = target_config_path.to_owned();
         tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
-                let conf_content = conf_content.as_bytes();
+                let conf_content = conf_content.into_bytes();
                 VirtualFile::crashsafe_overwrite(&target_config_path, &temp_path, conf_content)
                     .await
                     .with_context(|| {
