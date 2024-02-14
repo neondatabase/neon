@@ -1552,6 +1552,8 @@ impl TenantManager {
         parent_shard: &Tenant,
         child_shards: Vec<TenantShardId>,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let parent_path = self.conf.tenant_path(parent_shard.get_tenant_shard_id());
         let (parent_timelines, parent_layers) = {
             let mut parent_layers = Vec::new();
@@ -1648,7 +1650,7 @@ impl TenantManager {
 
         match jh.await {
             Ok(Ok(layer_count)) => {
-                tracing::info!("Linked {layer_count} layers into child shards");
+                tracing::info!(count = layer_count, "Hard-linked layers into child shards");
             }
             Ok(Err(e)) => {
                 // This is an optimization, so we tolerate failure.
