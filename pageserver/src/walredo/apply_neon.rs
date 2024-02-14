@@ -1,7 +1,8 @@
+use crate::pgdatadir_mapping::AuxFilesDirectory;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use pageserver_api::key::{key_to_rel_block, key_to_slru_block, Key};
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
@@ -12,6 +13,7 @@ use postgres_ffi::v14::nonrelfile_utils::{
 };
 use postgres_ffi::BLCKSZ;
 use tracing::*;
+use utils::bin_ser::BeSer;
 
 /// Can this request be served by neon redo functions
 /// or we need to pass it to wal-redo postgres process?
@@ -230,6 +232,72 @@ pub(crate) fn apply_in_neon(
                 LittleEndian::write_u32(&mut page[memberoff..memberoff + 4], member.xid);
             }
         }
+        NeonWalRecord::AuxFile { file_path, content } => {
+            let mut dir = AuxFilesDirectory::des(page)?;
+            dir.upsert(file_path.clone(), content.clone());
+
+            page.clear();
+            let mut writer = page.writer();
+            dir.ser_into(&mut writer)?;
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use bytes::Bytes;
+    use pageserver_api::key::AUX_FILES_KEY;
+
+    use super::*;
+    use std::collections::HashMap;
+
+    use crate::{pgdatadir_mapping::AuxFilesDirectory, walrecord::NeonWalRecord};
+
+    /// Test [`apply_in_neon`]'s handling of NeonWalRecord::AuxFile
+    #[test]
+    fn apply_aux_file_deltas() -> anyhow::Result<()> {
+        let base_dir = AuxFilesDirectory {
+            files: HashMap::from([
+                ("two".to_string(), Bytes::from_static(b"content0")),
+                ("three".to_string(), Bytes::from_static(b"contentX")),
+            ]),
+        };
+        let base_image = AuxFilesDirectory::ser(&base_dir)?;
+
+        let deltas = vec![
+            // Insert
+            NeonWalRecord::AuxFile {
+                file_path: "one".to_string(),
+                content: Some(Bytes::from_static(b"content1")),
+            },
+            // Update
+            NeonWalRecord::AuxFile {
+                file_path: "two".to_string(),
+                content: Some(Bytes::from_static(b"content99")),
+            },
+            // Delete
+            NeonWalRecord::AuxFile {
+                file_path: "three".to_string(),
+                content: None,
+            },
+        ];
+
+        let file_path = AUX_FILES_KEY;
+        let mut page = BytesMut::from_iter(base_image);
+
+        for record in deltas {
+            apply_in_neon(&record, file_path, &mut page)?;
+        }
+
+        let reconstructed = AuxFilesDirectory::des(&page)?;
+        let expect = HashMap::from([
+            ("one".to_string(), Bytes::from_static(b"content1")),
+            ("two".to_string(), Bytes::from_static(b"content99")),
+        ]);
+
+        assert_eq!(reconstructed.files, expect);
+
+        Ok(())
+    }
 }
