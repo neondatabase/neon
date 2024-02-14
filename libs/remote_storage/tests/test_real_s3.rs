@@ -441,27 +441,31 @@ async fn download_is_timeouted(ctx: &mut MaybeEnabledStorage) {
 
     tokio::time::sleep(timeout).await;
 
-    let started_at = std::time::Instant::now();
-    let next = stream
-        .next()
-        .await
-        .expect("stream should not have ended yet");
+    {
+        let started_at = std::time::Instant::now();
+        let next = stream
+            .next()
+            .await
+            .expect("stream should not have ended yet");
 
-    tracing::info!(
-        next.is_err = next.is_err(),
-        elapsed_ms = started_at.elapsed().as_millis(),
-        "received item after timeout"
-    );
+        tracing::info!(
+            next.is_err = next.is_err(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "received item after timeout"
+        );
 
-    let e = next.expect_err("expected an error, but got a chunk?");
+        let e = next.expect_err("expected an error, but got a chunk?");
 
-    let inner = e.get_ref().expect("std::io::Error::inner should be set");
-    assert!(
-        inner
-            .downcast_ref::<DownloadError>()
-            .is_some_and(|e| matches!(e, DownloadError::Timeout)),
-        "{inner:?}"
-    );
+        let inner = e.get_ref().expect("std::io::Error::inner should be set");
+        assert!(
+            inner
+                .downcast_ref::<DownloadError>()
+                .is_some_and(|e| matches!(e, DownloadError::Timeout)),
+            "{inner:?}"
+        );
+    }
+
+    ctx.configure_request_timeout(RemoteStorageConfig::DEFAULT_TIMEOUT);
 
     ctx.client.delete_objects(&[path], &cancel).await.unwrap()
 }
@@ -482,39 +486,43 @@ async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
 
     let len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
 
-    let mut stream = ctx
-        .client
-        .download(&path, &cancel)
-        .await
-        .expect("download succeeds")
-        .download_stream;
+    {
+        let mut stream = ctx
+            .client
+            .download(&path, &cancel)
+            .await
+            .expect("download succeeds")
+            .download_stream;
 
-    let first = stream
-        .next()
-        .await
-        .expect("should have the first blob")
-        .expect("should have succeeded");
+        let first = stream
+            .next()
+            .await
+            .expect("should have the first blob")
+            .expect("should have succeeded");
 
-    tracing::info!(len = first.len(), "downloaded first chunk");
+        tracing::info!(len = first.len(), "downloaded first chunk");
 
-    assert!(
-        first.len() < len,
-        "uploaded file is too small, we downloaded all on first chunk"
-    );
+        assert!(
+            first.len() < len,
+            "uploaded file is too small, we downloaded all on first chunk"
+        );
 
-    cancel.cancel();
+        cancel.cancel();
 
-    let next = stream.next().await.expect("stream should have more");
+        let next = stream.next().await.expect("stream should have more");
 
-    let e = next.expect_err("expected an error, but got a chunk?");
+        let e = next.expect_err("expected an error, but got a chunk?");
 
-    let inner = e.get_ref().expect("std::io::Error::inner should be set");
-    assert!(
-        inner
-            .downcast_ref::<DownloadError>()
-            .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
-        "{inner:?}"
-    );
+        let inner = e.get_ref().expect("std::io::Error::inner should be set");
+        assert!(
+            inner
+                .downcast_ref::<DownloadError>()
+                .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
+            "{inner:?}"
+        );
+    }
+
+    let cancel = CancellationToken::new();
 
     ctx.client.delete_objects(&[path], &cancel).await.unwrap();
 }
