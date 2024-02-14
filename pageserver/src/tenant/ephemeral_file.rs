@@ -186,8 +186,7 @@ impl EphemeralFile {
                                         let buf: &mut [u8] = write_guard.deref_mut();
                                         debug_assert_eq!(buf.len(), PAGE_SZ);
                                         buf.copy_from_slice(
-                                            self
-                                                .ephemeral_file
+                                            self.ephemeral_file
                                                 .mutable_tail
                                                 .as_deref()
                                                 .expect("IO is not ongoing"),
