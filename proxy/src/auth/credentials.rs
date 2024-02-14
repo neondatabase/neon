@@ -99,6 +99,9 @@ impl ComputeUserInfoMaybeEndpoint {
         // record the values if we have them
         ctx.set_application(params.get("application_name").map(SmolStr::from));
         ctx.set_user(user.clone());
+        if let Some(dbname) = params.get("database") {
+            ctx.set_dbname(dbname.into());
+        }
 
         // Project name might be passed via PG's command-line options.
         let endpoint_option = params

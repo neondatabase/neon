@@ -1,5 +1,5 @@
 use crate::{
-    cancellation::CancelMap,
+    cancellation::CancellationHandler,
     config::ProxyConfig,
     context::RequestMonitoring,
     error::{io_error, ReportableError},
@@ -133,7 +133,7 @@ pub async fn serve_websocket(
     config: &'static ProxyConfig,
     mut ctx: RequestMonitoring,
     websocket: HyperWebsocket,
-    cancel_map: Arc<CancelMap>,
+    cancellation_handler: Arc<CancellationHandler>,
     hostname: Option<String>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
@@ -141,7 +141,7 @@ pub async fn serve_websocket(
     let res = handle_client(
         config,
         &mut ctx,
-        cancel_map,
+        cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,

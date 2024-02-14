@@ -239,12 +239,7 @@ impl Timeline {
                     }
                 };
 
-                let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
-                    // We only use this fallback if there's an implementation error.
-                    // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%hist_layer, "last_activity returns None, using SystemTime::now");
-                    SystemTime::now()
-                });
+                let last_activity_ts = hist_layer.access_stats().latest_activity_or_now();
 
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,

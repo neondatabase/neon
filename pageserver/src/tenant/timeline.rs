@@ -12,7 +12,9 @@ use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::stream::StreamExt;
 use itertools::Itertools;
+use once_cell::sync::Lazy;
 use pageserver_api::{
     keyspace::{key_range_size, KeySpaceAccum},
     models::{
@@ -33,17 +35,22 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::sync::gate::Gate;
 
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use std::{
+    array,
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    sync::atomic::AtomicU64,
+};
+use std::{
     cmp::{max, min, Ordering},
     ops::ControlFlow,
 };
 
+use crate::pgdatadir_mapping::DirectoryKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -105,7 +112,7 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
+use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
@@ -256,6 +263,8 @@ pub struct Timeline {
     // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
     // in `crate::page_service` writes these metrics.
     pub(crate) query_metrics: crate::metrics::SmgrQueryTimePerTimeline,
+
+    directory_metrics: [AtomicU64; DirectoryKind::KINDS_NUM],
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
@@ -787,6 +796,10 @@ impl Timeline {
 
     pub(crate) fn resident_physical_size(&self) -> u64 {
         self.metrics.resident_physical_size_get()
+    }
+
+    pub(crate) fn get_directory_metrics(&self) -> [u64; DirectoryKind::KINDS_NUM] {
+        array::from_fn(|idx| self.directory_metrics[idx].load(AtomicOrdering::Relaxed))
     }
 
     ///
@@ -1458,7 +1471,7 @@ impl Timeline {
                 generation,
                 shard_identity,
                 pg_version,
-                layers: Arc::new(tokio::sync::RwLock::new(LayerManager::create())),
+                layers: Default::default(),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
@@ -1494,6 +1507,8 @@ impl Timeline {
                     &tenant_shard_id,
                     &timeline_id,
                 ),
+
+                directory_metrics: array::from_fn(|_| AtomicU64::new(0)),
 
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
 
@@ -2263,6 +2278,29 @@ impl Timeline {
         }
     }
 
+    pub(crate) fn update_directory_entries_count(&self, kind: DirectoryKind, count: u64) {
+        self.directory_metrics[kind.offset()].store(count, AtomicOrdering::Relaxed);
+        let aux_metric =
+            self.directory_metrics[DirectoryKind::AuxFiles.offset()].load(AtomicOrdering::Relaxed);
+
+        let sum_of_entries = self
+            .directory_metrics
+            .iter()
+            .map(|v| v.load(AtomicOrdering::Relaxed))
+            .sum();
+        // Set a high general threshold and a lower threshold for the auxiliary files,
+        // as we can have large numbers of relations in the db directory.
+        const SUM_THRESHOLD: u64 = 5000;
+        const AUX_THRESHOLD: u64 = 1000;
+        if sum_of_entries >= SUM_THRESHOLD || aux_metric >= AUX_THRESHOLD {
+            self.metrics
+                .directory_entries_count_gauge
+                .set(sum_of_entries);
+        } else if let Some(metric) = Lazy::get(&self.metrics.directory_entries_count_gauge) {
+            metric.set(sum_of_entries);
+        }
+    }
+
     async fn find_layer(&self, layer_file_name: &str) -> Option<Layer> {
         let guard = self.layers.read().await;
         for historic_layer in guard.layer_map().iter_historic_layers() {
@@ -2283,45 +2321,28 @@ impl Timeline {
     /// should treat this as a cue to simply skip doing any heatmap uploading
     /// for this timeline.
     pub(crate) async fn generate_heatmap(&self) -> Option<HeatMapTimeline> {
-        let eviction_info = self.get_local_layers_for_disk_usage_eviction().await;
+        // no point in heatmaps without remote client
+        let _remote_client = self.remote_client.as_ref()?;
 
-        let remote_client = match &self.remote_client {
-            Some(c) => c,
-            None => return None,
-        };
+        if !self.is_active() {
+            return None;
+        }
 
-        let layer_file_names = eviction_info
-            .resident_layers
-            .iter()
-            .map(|l| l.layer.get_name())
-            .collect::<Vec<_>>();
+        let guard = self.layers.read().await;
 
-        let decorated = match remote_client.get_layers_metadata(layer_file_names) {
-            Ok(d) => d,
-            Err(_) => {
-                // Getting metadata only fails on Timeline in bad state.
-                return None;
-            }
-        };
+        let resident = guard.resident_layers().map(|layer| {
+            let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
-        let heatmap_layers = std::iter::zip(
-            eviction_info.resident_layers.into_iter(),
-            decorated.into_iter(),
-        )
-        .filter_map(|(layer, remote_info)| {
-            remote_info.map(|remote_info| {
-                HeatMapLayer::new(
-                    layer.layer.get_name(),
-                    IndexLayerMetadata::from(remote_info),
-                    layer.last_activity_ts,
-                )
-            })
+            HeatMapLayer::new(
+                layer.layer_desc().filename(),
+                layer.metadata().into(),
+                last_activity_ts,
+            )
         });
 
-        Some(HeatMapTimeline::new(
-            self.timeline_id,
-            heatmap_layers.collect(),
-        ))
+        let layers = resident.collect().await;
+
+        Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
 }
 
@@ -3328,7 +3349,7 @@ impl Timeline {
                                     }
                                 };
 
-                                image_layer_writer.put_image(img_key, &img).await?;
+                                image_layer_writer.put_image(img_key, img).await?;
                             }
                         }
 
@@ -4662,41 +4683,24 @@ impl Timeline {
     /// Returns non-remote layers for eviction.
     pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
         let guard = self.layers.read().await;
-        let layers = guard.layer_map();
-
         let mut max_layer_size: Option<u64> = None;
-        let mut resident_layers = Vec::new();
 
-        for l in layers.iter_historic_layers() {
-            let file_size = l.file_size();
-            max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
+        let resident_layers = guard
+            .resident_layers()
+            .map(|layer| {
+                let file_size = layer.layer_desc().file_size;
+                max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-            let l = guard.get_from_desc(&l);
+                let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
-            let l = match l.keep_resident().await {
-                Ok(Some(l)) => l,
-                Ok(None) => continue,
-                Err(e) => {
-                    // these should not happen, but we cannot make them statically impossible right
-                    // now.
-                    tracing::warn!(layer=%l, "failed to keep the layer resident: {e:#}");
-                    continue;
+                EvictionCandidate {
+                    layer: layer.into(),
+                    last_activity_ts,
+                    relative_last_activity: finite_f32::FiniteF32::ZERO,
                 }
-            };
-
-            let last_activity_ts = l.access_stats().latest_activity().unwrap_or_else(|| {
-                // We only use this fallback if there's an implementation error.
-                // `latest_activity` already does rate-limited warn!() log.
-                debug!(layer=%l, "last_activity returns None, using SystemTime::now");
-                SystemTime::now()
-            });
-
-            resident_layers.push(EvictionCandidate {
-                layer: l.drop_eviction_guard().into(),
-                last_activity_ts,
-                relative_last_activity: finite_f32::FiniteF32::ZERO,
-            });
-        }
+            })
+            .collect()
+            .await;
 
         DiskUsageEvictionInfo {
             max_layer_size,

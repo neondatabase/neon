@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   actionlint:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

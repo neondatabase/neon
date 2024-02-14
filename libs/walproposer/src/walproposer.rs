@@ -1,13 +1,13 @@
 use std::ffi::CString;
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use utils::id::TenantTimelineId;
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     api_bindings::{create_api, take_vec_u8, Level},
     bindings::{
-        NeonWALReadResult, Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate,
-        WalProposerFree, WalProposerStart,
+        NeonWALReadResult, Safekeeper, WalProposer, WalProposerBroadcast, WalProposerConfig,
+        WalProposerCreate, WalProposerFree, WalProposerPoll, WalProposerStart,
     },
 };
 
@@ -16,11 +16,11 @@ use crate::{
 ///
 /// Refer to `pgxn/neon/walproposer.h` for documentation.
 pub trait ApiImpl {
-    fn get_shmem_state(&self) -> &mut crate::bindings::WalproposerShmemState {
+    fn get_shmem_state(&self) -> *mut crate::bindings::WalproposerShmemState {
         todo!()
     }
 
-    fn start_streaming(&self, _startpos: u64) {
+    fn start_streaming(&self, _startpos: u64, _callback: &StreamingCallback) {
         todo!()
     }
 
@@ -70,7 +70,11 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn conn_async_read(&self, _sk: &mut Safekeeper) -> (&[u8], crate::bindings::PGAsyncReadResult) {
+    fn conn_async_read(
+        &self,
+        _sk: &mut Safekeeper,
+        _vec: &mut Vec<u8>,
+    ) -> crate::bindings::PGAsyncReadResult {
         todo!()
     }
 
@@ -151,12 +155,14 @@ pub trait ApiImpl {
     }
 }
 
+#[derive(Debug)]
 pub enum WaitResult {
     Latch,
     Timeout,
     Network(*mut Safekeeper, u32),
 }
 
+#[derive(Clone)]
 pub struct Config {
     /// Tenant and timeline id
     pub ttid: TenantTimelineId,
@@ -239,6 +245,24 @@ impl Drop for Wrapper {
 
             WalProposerFree(self.wp);
         }
+    }
+}
+
+pub struct StreamingCallback {
+    wp: *mut WalProposer,
+}
+
+impl StreamingCallback {
+    pub fn new(wp: *mut WalProposer) -> StreamingCallback {
+        StreamingCallback { wp }
+    }
+
+    pub fn broadcast(&self, startpos: Lsn, endpos: Lsn) {
+        unsafe { WalProposerBroadcast(self.wp, startpos.0, endpos.0) }
+    }
+
+    pub fn poll(&self) {
+        unsafe { WalProposerPoll(self.wp) }
     }
 }
 
@@ -344,14 +368,13 @@ mod tests {
         fn conn_async_read(
             &self,
             _: &mut crate::bindings::Safekeeper,
-        ) -> (&[u8], crate::bindings::PGAsyncReadResult) {
+            vec: &mut Vec<u8>,
+        ) -> crate::bindings::PGAsyncReadResult {
             println!("conn_async_read");
             let reply = self.next_safekeeper_reply();
             println!("conn_async_read result: {:?}", reply);
-            (
-                reply,
-                crate::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS,
-            )
+            vec.extend_from_slice(reply);
+            crate::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS
         }
 
         fn conn_blocking_write(&self, _: &mut crate::bindings::Safekeeper, buf: &[u8]) -> bool {

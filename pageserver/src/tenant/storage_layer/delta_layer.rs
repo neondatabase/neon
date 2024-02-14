@@ -416,27 +416,31 @@ impl DeltaLayerWriterInner {
     /// The values must be appended in key, lsn order.
     ///
     async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init())
-            .await
+        let (_, res) = self
+            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init())
+            .await;
+        res
     }
 
     async fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: &[u8],
+        val: Vec<u8>,
         will_init: bool,
-    ) -> anyhow::Result<()> {
+    ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-
-        let off = self.blob_writer.write_blob(val).await?;
+        let (val, res) = self.blob_writer.write_blob(val).await;
+        let off = match res {
+            Ok(off) => off,
+            Err(e) => return (val, Err(anyhow::anyhow!(e))),
+        };
 
         let blob_ref = BlobRef::new(off, will_init);
 
         let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        self.tree.append(&delta_key.0, blob_ref.0)?;
-
-        Ok(())
+        let res = self.tree.append(&delta_key.0, blob_ref.0);
+        (val, res.map_err(|e| anyhow::anyhow!(e)))
     }
 
     fn size(&self) -> u64 {
@@ -457,7 +461,8 @@ impl DeltaLayerWriterInner {
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref()).await?;
+            let (_buf, res) = file.write_all(buf).await;
+            res?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -472,17 +477,12 @@ impl DeltaLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
-        if buf.spilled() {
-            // This is bad as we only have one free block for the summary
-            warn!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            );
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(buf).await;
+        res?;
 
         let metadata = file
             .metadata()
@@ -587,9 +587,9 @@ impl DeltaLayerWriter {
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: &[u8],
+        val: Vec<u8>,
         will_init: bool,
-    ) -> anyhow::Result<()> {
+    ) -> (Vec<u8>, anyhow::Result<()>) {
         self.inner
             .as_mut()
             .unwrap()
@@ -675,18 +675,12 @@ impl DeltaLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here, but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        if buf.spilled() {
-            // The code in DeltaLayerWriterInner just warn!()s for this.
-            // It should probably error out as well.
-            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            )));
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(buf).await;
+        res?;
         Ok(())
     }
 }
