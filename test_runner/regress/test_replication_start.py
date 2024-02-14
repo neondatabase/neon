@@ -24,3 +24,4 @@ def test_replication_start(neon_simple_env: NeonEnv):
                             p_cur.execute("commit")
                             wait_replica_caughtup(primary, secondary)
                             s_cur.execute("select * from t where pk = 1")
+                            assert s_cur.fetchone() == (1,0)
