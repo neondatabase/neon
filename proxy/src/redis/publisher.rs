@@ -61,6 +61,10 @@ impl RedisPublisherClient {
                 .xread_options(&["neon:endpoints:testing"], &[&id], &opts)
                 .await
                 .unwrap();
+            if res.keys.is_empty() {
+                break;
+            }
+
             assert_eq!(res.keys.len(), 1);
             let res = res.keys.pop().unwrap();
             assert_eq!(res.key, "neon:endpoints:testing");
