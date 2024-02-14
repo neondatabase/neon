@@ -96,5 +96,6 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_evictions_total",
     "pageserver_evictions_with_low_residence_duration_total",
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
+    # "pageserver_directory_entries_count", -- only used if above a certain threshold
     # "pageserver_broken_tenants_count" -- used only for broken
 )

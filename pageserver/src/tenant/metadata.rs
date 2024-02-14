@@ -279,7 +279,7 @@ pub async fn save_metadata(
     let path = conf.metadata_path(tenant_shard_id, timeline_id);
     let temp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
     let metadata_bytes = data.to_bytes().context("serialize metadata")?;
-    VirtualFile::crashsafe_overwrite(&path, &temp_path, &metadata_bytes)
+    VirtualFile::crashsafe_overwrite(&path, &temp_path, metadata_bytes)
         .await
         .context("write metadata")?;
     Ok(())

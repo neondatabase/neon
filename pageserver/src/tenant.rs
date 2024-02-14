@@ -644,10 +644,10 @@ impl Tenant {
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
         // we shut down while attaching.
-        let Ok(attach_gate_guard) = tenant.gate.enter() else {
-            // We just created the Tenant: nothing else can have shut it down yet
-            unreachable!();
-        };
+        let attach_gate_guard = tenant
+            .gate
+            .enter()
+            .expect("We just created the Tenant: nothing else can have shut it down yet");
 
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
@@ -755,35 +755,26 @@ impl Tenant {
                     AttachType::Normal
                 };
 
-                let preload_timer = TENANT.preload.start_timer();
-                let preload = match mode {
-                    SpawnMode::Create => {
-                        // Don't count the skipped preload into the histogram of preload durations
-                        preload_timer.stop_and_discard();
+                let preload = match (&mode, &remote_storage) {
+                    (SpawnMode::Create, _) => {
                         None
                     },
-                    SpawnMode::Normal => {
-                        match &remote_storage {
-                            Some(remote_storage) => Some(
-                                match tenant_clone
-                                    .preload(remote_storage, task_mgr::shutdown_token())
-                                    .instrument(
-                                        tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()),
-                                    )
-                                    .await {
-                                        Ok(p) => {
-                                            preload_timer.observe_duration();
-                                            p
-                                        }
-                                            ,
-                                        Err(e) => {
-                                            make_broken(&tenant_clone, anyhow::anyhow!(e));
-                                                return Ok(());
-                                        }
-                                    },
-                            ),
-                            None => None,
+                    (SpawnMode::Normal, Some(remote_storage)) => {
+                        let _preload_timer = TENANT.preload.start_timer();
+                        let res = tenant_clone
+                            .preload(remote_storage, task_mgr::shutdown_token())
+                            .await;
+                        match res {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                make_broken(&tenant_clone, anyhow::anyhow!(e));
+                                return Ok(());
+                            }
                         }
+                    }
+                    (SpawnMode::Normal, None) => {
+                        let _preload_timer = TENANT.preload.start_timer();
+                        None
                     }
                 };
 
@@ -820,36 +811,37 @@ impl Tenant {
                         info!("ready for backgound jobs barrier");
                     }
 
-                    match DeleteTenantFlow::resume_from_attach(
+                    let deleted = DeleteTenantFlow::resume_from_attach(
                         deletion,
                         &tenant_clone,
                         preload,
                         tenants,
                         &ctx,
                     )
-                    .await
-                    {
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
-                            return Ok(());
-                        }
-                        Ok(()) => return Ok(()),
+                    .await;
+
+                    if let Err(e) = deleted {
+                        make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
+
+                    return Ok(());
                 }
 
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
-                let attach_timer = match mode {
-                    SpawnMode::Create => None,
-                    SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
+                let attached = {
+                    let _attach_timer = match mode {
+                        SpawnMode::Create => None,
+                        SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
+                    };
+                    tenant_clone.attach(preload, mode, &ctx).await
                 };
-                match tenant_clone.attach(preload, mode, &ctx).await {
+
+                match attached {
                     Ok(()) => {
                         info!("attach finished, activating");
-                        if let Some(t)=  attach_timer {t.observe_duration();}
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
-                        if let Some(t)=  attach_timer {t.observe_duration();}
                         make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
@@ -862,34 +854,26 @@ impl Tenant {
                 // logical size calculations: if logical size calculation semaphore is saturated,
                 // then warmup will wait for that before proceeding to the next tenant.
                 if let AttachType::Warmup(_permit) = attach_type {
-                    let mut futs = FuturesUnordered::new();
-                    let timelines: Vec<_> = tenant_clone.timelines.lock().unwrap().values().cloned().collect();
-                    for t in timelines {
-                        futs.push(t.await_initial_logical_size())
-                    }
+                    let mut futs: FuturesUnordered<_> = tenant_clone.timelines.lock().unwrap().values().cloned().map(|t| t.await_initial_logical_size()).collect();
                     tracing::info!("Waiting for initial logical sizes while warming up...");
-                    while futs.next().await.is_some() {
-
-                    }
+                    while futs.next().await.is_some() {}
                     tracing::info!("Warm-up complete");
                 }
 
                 Ok(())
             }
-            .instrument({
-                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation);
-                span.follows_from(Span::current());
-                span
-            }),
+            .instrument(tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation)),
         );
         Ok(tenant)
     }
 
+    #[instrument(skip_all)]
     pub(crate) async fn preload(
         self: &Arc<Tenant>,
         remote_storage: &GenericRemoteStorage,
         cancel: CancellationToken,
     ) -> anyhow::Result<TenantPreload> {
+        span::debug_assert_current_span_has_tenant_id();
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
@@ -2896,7 +2880,7 @@ impl Tenant {
         let config_path = config_path.to_owned();
         tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
-                let conf_content = conf_content.as_bytes();
+                let conf_content = conf_content.into_bytes();
                 VirtualFile::crashsafe_overwrite(&config_path, &temp_path, conf_content)
                     .await
                     .with_context(|| {
@@ -2933,7 +2917,7 @@ impl Tenant {
         let target_config_path = target_config_path.to_owned();
         tokio::task::spawn_blocking(move || {
             Handle::current().block_on(async move {
-                let conf_content = conf_content.as_bytes();
+                let conf_content = conf_content.into_bytes();
                 VirtualFile::crashsafe_overwrite(&target_config_path, &temp_path, conf_content)
                     .await
                     .with_context(|| {
@@ -3982,6 +3966,8 @@ pub(crate) mod harness {
         }
     }
 
+    #[cfg(test)]
+    #[derive(Debug)]
     enum LoadMode {
         Local,
         Remote,
@@ -4064,7 +4050,7 @@ pub(crate) mod harness {
             info_span!("TenantHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
         }
 
-        pub async fn load(&self) -> (Arc<Tenant>, RequestContext) {
+        pub(crate) async fn load(&self) -> (Arc<Tenant>, RequestContext) {
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             (
                 self.try_load(&ctx)
@@ -4074,31 +4060,31 @@ pub(crate) mod harness {
             )
         }
 
-        fn remote_empty(&self) -> bool {
-            let tenant_path = self.conf.tenant_path(&self.tenant_shard_id);
-            let remote_tenant_dir = self
-                .remote_fs_dir
-                .join(tenant_path.strip_prefix(&self.conf.workdir).unwrap());
-            if std::fs::metadata(&remote_tenant_dir).is_err() {
-                return true;
-            }
-
-            match std::fs::read_dir(remote_tenant_dir)
-                .unwrap()
-                .flatten()
-                .next()
-            {
-                Some(entry) => {
-                    tracing::debug!(
-                        "remote_empty: not empty, found file {}",
-                        entry.file_name().to_string_lossy(),
-                    );
-                    false
-                }
-                None => true,
-            }
+        /// For tests that specifically want to exercise the local load path, which does
+        /// not use remote storage.
+        pub(crate) async fn try_load_local(
+            &self,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<Arc<Tenant>> {
+            self.do_try_load(ctx, LoadMode::Local).await
         }
 
+        /// The 'load' in this function is either a local load or a normal attachment,
+        pub(crate) async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
+            // If we have nothing in remote storage, must use load_local instead of attach: attach
+            // will error out if there are no timelines.
+            //
+            // See https://github.com/neondatabase/neon/issues/5456 for how we will eliminate
+            // this weird state of a Tenant which exists but doesn't have any timelines.
+            let mode = match self.remote_empty() {
+                true => LoadMode::Local,
+                false => LoadMode::Remote,
+            };
+
+            self.do_try_load(ctx, mode).await
+        }
+
+        #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), ?mode))]
         async fn do_try_load(
             &self,
             ctx: &RequestContext,
@@ -4125,20 +4111,13 @@ pub(crate) mod harness {
 
             match mode {
                 LoadMode::Local => {
-                    tenant
-                        .load_local(ctx)
-                        .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
-                        .await?;
+                    tenant.load_local(ctx).await?;
                 }
                 LoadMode::Remote => {
                     let preload = tenant
                         .preload(&self.remote_storage, CancellationToken::new())
-                        .instrument(info_span!("try_load_preload", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
-                    tenant
-                        .attach(Some(preload), SpawnMode::Normal, ctx)
-                        .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
-                        .await?;
+                    tenant.attach(Some(preload), SpawnMode::Normal, ctx).await?;
                 }
             }
 
@@ -4149,25 +4128,29 @@ pub(crate) mod harness {
             Ok(tenant)
         }
 
-        /// For tests that specifically want to exercise the local load path, which does
-        /// not use remote storage.
-        pub async fn try_load_local(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
-            self.do_try_load(ctx, LoadMode::Local).await
-        }
+        fn remote_empty(&self) -> bool {
+            let tenant_path = self.conf.tenant_path(&self.tenant_shard_id);
+            let remote_tenant_dir = self
+                .remote_fs_dir
+                .join(tenant_path.strip_prefix(&self.conf.workdir).unwrap());
+            if std::fs::metadata(&remote_tenant_dir).is_err() {
+                return true;
+            }
 
-        /// The 'load' in this function is either a local load or a normal attachment,
-        pub async fn try_load(&self, ctx: &RequestContext) -> anyhow::Result<Arc<Tenant>> {
-            // If we have nothing in remote storage, must use load_local instead of attach: attach
-            // will error out if there are no timelines.
-            //
-            // See https://github.com/neondatabase/neon/issues/5456 for how we will eliminate
-            // this weird state of a Tenant which exists but doesn't have any timelines.
-            let mode = match self.remote_empty() {
-                true => LoadMode::Local,
-                false => LoadMode::Remote,
-            };
-
-            self.do_try_load(ctx, mode).await
+            match std::fs::read_dir(remote_tenant_dir)
+                .unwrap()
+                .flatten()
+                .next()
+            {
+                Some(entry) => {
+                    tracing::debug!(
+                        "remote_empty: not empty, found file {}",
+                        entry.file_name().to_string_lossy(),
+                    );
+                    false
+                }
+                None => true,
+            }
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> Utf8PathBuf {
