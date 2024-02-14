@@ -101,10 +101,10 @@ fn add_multithreaded_walredo_requesters(
 
     let cancel = CancellationToken::new();
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(requesters as usize + 1));
+    let barrier = Arc::new(tokio::sync::Barrier::new(requesters + 1));
 
     let jhs = (0..requesters)
-        .map(|requester| {
+        .map(|_| {
             let manager = manager.clone();
             let barrier = barrier.clone();
             let cancel = cancel.clone();
@@ -120,9 +120,7 @@ fn add_multithreaded_walredo_requesters(
                 };
                 tokio::select! {
                     _ = work_loop => {},
-                    _ = cancel.cancelled() => {
-                        return;
-                    }
+                    _ = cancel.cancelled() => { }
                 }
             })
         })
