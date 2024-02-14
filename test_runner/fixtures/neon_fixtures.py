@@ -3967,27 +3967,24 @@ def list_files_to_compare(pgdata_dir: Path) -> List[str]:
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint: Endpoint):
-    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
-
     # Get the timeline ID. We need it for the 'basebackup' command
     timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
+    # many tests already checkpoint, but do it just in case
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CHECKPOINT")
+
+    # wait for pageserver to catch up
+    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
     # stop postgres to ensure that files won't change
     endpoint.stop()
-
-    # Read the shutdown checkpoint's LSN
-    pg_controldata_path = os.path.join(pg_bin.pg_bin_path, "pg_controldata")
-    cmd = f"{pg_controldata_path} -D {endpoint.pgdata_dir}"
-    result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-    checkpoint_lsn = re.findall(
-        "Latest checkpoint location:\\s+([0-9A-F]+/[0-9A-F]+)", result.stdout
-    )[0]
-    log.debug(f"last checkpoint at {checkpoint_lsn}")
 
     # Take a basebackup from pageserver
     restored_dir_path = env.repo_dir / f"{endpoint.endpoint_id}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
 
+    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
     psql_path = os.path.join(pg_bin.pg_bin_path, "psql")
 
     pageserver_id = env.attachment_service.locate(endpoint.tenant_id)[0]["node_id"]
@@ -3995,7 +3992,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.get_pageserver(pageserver_id).service_port.pg}  \
-            -c 'basebackup {endpoint.tenant_id} {timeline_id} {checkpoint_lsn}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline_id}'  \
          | tar -x -C {restored_dir_path}
     """
 
