@@ -1599,7 +1599,7 @@ impl TenantManager {
         // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
         let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             for dir in &create_dirs {
-                if let Err(e) = std::fs::create_dir_all(&dir) {
+                if let Err(e) = std::fs::create_dir_all(dir) {
                     // Ignore AlreadyExists errors, drop out on all other errors
                     match e.kind() {
                         std::io::ErrorKind::AlreadyExists => {}
@@ -1612,8 +1612,8 @@ impl TenantManager {
 
             for child_prefix in child_prefixes {
                 for relative_layer in &parent_layers {
-                    let parent_path = parent_path.join(&relative_layer);
-                    let child_path = child_prefix.join(&relative_layer);
+                    let parent_path = parent_path.join(relative_layer);
+                    let child_path = child_prefix.join(relative_layer);
                     if let Err(e) = std::fs::hard_link(&parent_path, &child_path) {
                         match e.kind() {
                             std::io::ErrorKind::AlreadyExists => {}
