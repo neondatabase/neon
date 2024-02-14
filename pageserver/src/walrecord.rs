@@ -44,6 +44,11 @@ pub enum NeonWalRecord {
         moff: MultiXactOffset,
         members: Vec<MultiXactMember>,
     },
+    /// Update the map of AUX files, either writing or dropping an entry
+    AuxFile {
+        file_path: String,
+        content: Option<Bytes>,
+    },
 }
 
 impl NeonWalRecord {
