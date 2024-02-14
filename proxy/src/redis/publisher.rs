@@ -1,5 +1,12 @@
+use std::hash::BuildHasherDefault;
+
+use lasso::{Spur, ThreadedRodeo};
 use pq_proto::CancelKeyData;
-use redis::AsyncCommands;
+use redis::{
+    streams::{StreamReadOptions, StreamReadReply},
+    AsyncCommands, FromRedisValue,
+};
+use rustc_hash::FxHasher;
 use uuid::Uuid;
 
 use crate::rate_limiter::{RateBucketInfo, RedisRateLimiter};
@@ -14,15 +21,70 @@ pub struct RedisPublisherClient {
 }
 
 impl RedisPublisherClient {
-    pub fn new(
+    pub async fn new(
         url: &str,
         region_id: String,
         info: &'static [RateBucketInfo],
     ) -> anyhow::Result<Self> {
         let client = redis::Client::open(url)?;
+
+        let mut conn = client.get_async_connection().await.unwrap();
+
+        let len: u64 = conn.xlen("neon:endpoints:testing").await.unwrap();
+        tracing::info!("starting with {len} endpoints in redis");
+
+        for i in len..300000u64 {
+            let _key: String = conn
+                .xadd(
+                    "neon:endpoints:testing",
+                    "*",
+                    &[("endpoint_id", format!("ep-hello-world-{i}"))],
+                )
+                .await
+                .unwrap();
+            if i.is_power_of_two() {
+                tracing::debug!("endpoints written {i}");
+            }
+            // client.
+        }
+        tracing::info!("written endpoints to redis");
+
+        // start reading
+
+        let s = ThreadedRodeo::<Spur, BuildHasherDefault<FxHasher>>::with_hasher(
+            BuildHasherDefault::default(),
+        );
+        let opts = StreamReadOptions::default().count(1000);
+        let mut id = "0-0".to_string();
+        loop {
+            let mut res: StreamReadReply = conn
+                .xread_options(&["neon:endpoints:testing"], &[&id], &opts)
+                .await
+                .unwrap();
+            assert_eq!(res.keys.len(), 1);
+            let res = res.keys.pop().unwrap();
+            assert_eq!(res.key, "neon:endpoints:testing");
+
+            if res.ids.is_empty() {
+                break;
+            }
+            for x in res.ids {
+                id = x.id;
+                if let Some(ep) = x.map.get("endpoint_id") {
+                    let ep = String::from_redis_value(ep).unwrap();
+                    s.get_or_intern(ep);
+
+                    if s.len().is_power_of_two() {
+                        tracing::debug!("endpoints read {}", s.len());
+                    }
+                }
+            }
+        }
+        tracing::info!("read {} endpoints from redis", s.len());
+
         Ok(Self {
             client,
-            publisher: None,
+            publisher: Some(conn),
             region_id,
             limiter: RedisRateLimiter::new(info),
         })
