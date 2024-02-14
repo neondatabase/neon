@@ -2214,7 +2214,7 @@ pub fn make_router(
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/keyspace",
-            |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
+            |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .any(handler_404))
