@@ -1610,7 +1610,7 @@ impl TenantManager {
         // Since we will do a large number of small filesystem metadata operations, batch them into
         // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
         let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-            for dir in create_dirs {
+            for dir in &create_dirs {
                 if let Err(e) = std::fs::create_dir_all(dir) {
                     // Ignore AlreadyExists errors, drop out on all other errors
                     match e.kind() {
@@ -1642,6 +1642,18 @@ impl TenantManager {
                             }
                         }
                     }
+                }
+            }
+
+            // Durability is not required for correctness, but if we crashed during split and
+            // then came restarted with empty timeline dirs, it would be very inefficient to
+            // re-populate from remote storage.
+            for dir in create_dirs {
+                if let Err(e) = crashsafe::fsync(&dir) {
+                    // Something removed a newly created timeline dir out from underneath us?  Extremely
+                    // unexpected, but not worth panic'ing over as this whole function is just an
+                    // optimization.
+                    tracing::warn!("Failed to fsync directory {dir}: {e}")
                 }
             }
 
