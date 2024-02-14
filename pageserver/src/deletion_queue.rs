@@ -234,7 +234,6 @@ impl DeletionHeader {
         let header_bytes = serde_json::to_vec(self).context("serialize deletion header")?;
         let header_path = conf.deletion_header_path();
         let temp_path = path_with_suffix_extension(&header_path, TEMP_SUFFIX);
-        // REVIEW: this now uses spawn_blocking instead of blocking the executor thread
         VirtualFile::crashsafe_overwrite(header_path, temp_path, header_bytes)
             .await
             .maybe_fatal_err("save deletion header")?;
@@ -327,7 +326,6 @@ impl DeletionList {
 
         let bytes = serde_json::to_vec(self).expect("Failed to serialize deletion list");
 
-        // REVIEW: this will now use spawn_blocking instead of blocking the executor thread
         VirtualFile::crashsafe_overwrite(path, temp_path, bytes)
             .await
             .maybe_fatal_err("save deletion list")
