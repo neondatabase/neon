@@ -679,6 +679,28 @@ impl Service {
             attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
         );
 
+        // Trick the reconciler into not doing anything for this tenant: this helps
+        // tests that manually configure a tenant on the pagesrever, and then call this
+        // attach hook: they don't want background reconciliation to modify what they
+        // did to the pageserver.
+        #[cfg(feature = "testing")]
+        {
+            if let Some(node_id) = attach_req.node_id {
+                tenant_state.observed.locations = HashMap::from([(
+                    node_id,
+                    ObservedStateLocation {
+                        conf: Some(attached_location_conf(
+                            tenant_state.generation,
+                            &tenant_state.shard,
+                            &tenant_state.config,
+                        )),
+                    },
+                )]);
+            } else {
+                tenant_state.observed.locations.clear();
+            }
+        }
+
         Ok(AttachHookResponse {
             gen: attach_req
                 .node_id
