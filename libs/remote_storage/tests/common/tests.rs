@@ -1,6 +1,7 @@
 use anyhow::Context;
 use camino::Utf8Path;
-use remote_storage::RemotePath;
+use futures_util::StreamExt;
+use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use std::sync::Arc;
 use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
@@ -318,4 +319,154 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
         .with_context(|| format!("{path:?} removal"))?;
 
     Ok(())
+}
+
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn download_is_timeouted(ctx: &mut MaybeEnabledStorage) {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return;
+    };
+
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/file_to_copy", ctx.base_prefix).as_str(),
+    ))
+    .unwrap();
+
+    let len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+
+    let timeout = std::time::Duration::from_secs(5);
+
+    ctx.configure_request_timeout(timeout);
+
+    let started_at = std::time::Instant::now();
+    let mut stream = ctx
+        .client
+        .download(&path, &cancel)
+        .await
+        .expect("download succeeds")
+        .download_stream;
+
+    if started_at.elapsed().mul_f32(0.9) >= timeout {
+        tracing::warn!(
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "timeout might be too low, consumed most of it during headers"
+        );
+    }
+
+    let first = stream
+        .next()
+        .await
+        .expect("should have the first blob")
+        .expect("should have succeeded");
+
+    tracing::info!(len = first.len(), "downloaded first chunk");
+
+    assert!(
+        first.len() < len,
+        "uploaded file is too small, we downloaded all on first chunk"
+    );
+
+    tokio::time::sleep(timeout).await;
+
+    let started_at = std::time::Instant::now();
+    let next = stream
+        .next()
+        .await
+        .expect("stream should not have ended yet");
+
+    tracing::info!(
+        next.is_err = next.is_err(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "received item after timeout"
+    );
+
+    let e = next.expect_err("expected an error, but got a chunk?");
+
+    let inner = e.get_ref().expect("std::io::Error::inner should be set");
+    assert!(
+        inner
+            .downcast_ref::<DownloadError>()
+            .is_some_and(|e| matches!(e, DownloadError::Timeout)),
+        "{inner:?}"
+    );
+}
+
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return;
+    };
+
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/file_to_copy", ctx.base_prefix).as_str(),
+    ))
+    .unwrap();
+
+    let len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+
+    let mut stream = ctx
+        .client
+        .download(&path, &cancel)
+        .await
+        .expect("download succeeds")
+        .download_stream;
+
+    let first = stream
+        .next()
+        .await
+        .expect("should have the first blob")
+        .expect("should have succeeded");
+
+    tracing::info!(len = first.len(), "downloaded first chunk");
+
+    assert!(
+        first.len() < len,
+        "uploaded file is too small, we downloaded all on first chunk"
+    );
+
+    cancel.cancel();
+
+    let next = stream.next().await.expect("stream should have more");
+
+    let e = next.expect_err("expected an error, but got a chunk?");
+
+    let inner = e.get_ref().expect("std::io::Error::inner should be set");
+    assert!(
+        inner
+            .downcast_ref::<DownloadError>()
+            .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
+        "{inner:?}"
+    );
+
+    todo!();
+}
+
+/// Upload a long enough file so that we cannot download it in single chunk
+///
+/// For s3 the first chunk seems to be less than 10kB, so this has a bit of a safety margin
+async fn upload_large_enough_file(
+    client: &GenericRemoteStorage,
+    path: &RemotePath,
+    cancel: &CancellationToken,
+) -> usize {
+    let header = bytes::Bytes::from_static("remote blob data content".as_bytes());
+    let body = bytes::Bytes::from(vec![0u8; 1024]);
+    let contents = std::iter::once(header).chain(std::iter::repeat(body).take(128));
+
+    let len = contents.clone().fold(0, |acc, next| acc + next.len());
+
+    let contents = futures::stream::iter(contents.map(std::io::Result::Ok));
+
+    client
+        .upload(contents, len, path, None, cancel)
+        .await
+        .expect("upload succeeds");
+
+    len
 }

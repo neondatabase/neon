@@ -39,6 +39,16 @@ impl EnabledAzure {
             base_prefix: BASE_PREFIX,
         }
     }
+
+    fn configure_request_timeout(&mut self, timeout: Duration) {
+        match Arc::get_mut(&mut self.client).expect("outer Arc::get_mut") {
+            GenericRemoteStorage::AzureBlob(azure) => {
+                let azure = Arc::get_mut(azure).expect("inner Arc::get_mut");
+                azure.timeout = timeout;
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 enum MaybeEnabledStorage {

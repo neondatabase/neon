@@ -38,7 +38,8 @@ pub struct AzureBlobStorage {
     prefix_in_container: Option<String>,
     max_keys_per_list_response: Option<NonZeroU32>,
     concurrency_limiter: ConcurrencyLimiter,
-    timeout: Duration,
+    // Per-request timeout. Accessible for tests.
+    pub timeout: Duration,
 }
 
 impl AzureBlobStorage {

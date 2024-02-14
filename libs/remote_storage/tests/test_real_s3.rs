@@ -199,6 +199,16 @@ impl EnabledS3 {
             base_prefix: BASE_PREFIX,
         }
     }
+
+    fn configure_request_timeout(&mut self, timeout: Duration) {
+        match Arc::get_mut(&mut self.client).expect("outer Arc::get_mut") {
+            GenericRemoteStorage::AwsS3(s3) => {
+                let s3 = Arc::get_mut(s3).expect("inner Arc::get_mut");
+                s3.timeout = timeout;
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 enum MaybeEnabledStorage {
@@ -372,7 +382,7 @@ fn create_s3_client(
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
         }),
-        timeout: Duration::from_secs(120),
+        timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,

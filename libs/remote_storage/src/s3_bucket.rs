@@ -63,7 +63,8 @@ pub struct S3Bucket {
     prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,
     concurrency_limiter: ConcurrencyLimiter,
-    timeout: Duration,
+    // Per-request timeout. Accessible for tests.
+    pub timeout: Duration,
 }
 
 struct GetObjectRequest {
