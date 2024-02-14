@@ -443,8 +443,6 @@ async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
             .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
         "{inner:?}"
     );
-
-    todo!();
 }
 
 /// Upload a long enough file so that we cannot download it in single chunk
