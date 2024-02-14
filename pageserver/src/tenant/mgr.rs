@@ -1564,6 +1564,8 @@ impl TenantManager {
         parent_shard: &Tenant,
         child_shards: Vec<TenantShardId>,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let parent_path = self.conf.tenant_path(parent_shard.get_tenant_shard_id());
         let (parent_timelines, parent_layers) = {
             let mut parent_layers = Vec::new();
