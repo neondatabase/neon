@@ -3,7 +3,7 @@
 #![allow(non_snake_case)]
 // bindgen creates some unsafe code with no doc comments.
 #![allow(clippy::missing_safety_doc)]
-// noted at 1.63 that in many cases there's a u32 -> u32 transmutes in bindgen code.
+// noted at 1.63 that in many cases there's u32 -> u32 transmutes in bindgen code.
 #![allow(clippy::useless_transmute)]
 // modules included with the postgres_ffi macro depend on the types of the specific version's
 // types, and trigger a too eager lint.

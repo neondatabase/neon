@@ -196,13 +196,13 @@ impl Timeline {
             ControlFlow::Continue(()) => (),
         }
 
-        #[allow(dead_code)]
         #[derive(Debug, Default)]
         struct EvictionStats {
             candidates: usize,
             evicted: usize,
             errors: usize,
             not_evictable: usize,
+            #[allow(dead_code)]
             skipped_for_shutdown: usize,
         }
 
