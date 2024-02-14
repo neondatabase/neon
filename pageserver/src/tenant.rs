@@ -28,6 +28,7 @@ use remote_storage::GenericRemoteStorage;
 use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
+use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -2877,10 +2878,17 @@ impl Tenant {
 
         let tenant_shard_id = *tenant_shard_id;
         let config_path = config_path.to_owned();
-        let conf_content = conf_content.into_bytes();
-        VirtualFile::crashsafe_overwrite(config_path.clone(), temp_path, conf_content)
-            .await
-            .with_context(|| format!("write tenant {tenant_shard_id} config to {config_path}"))?;
+        tokio::task::spawn_blocking(move || {
+            Handle::current().block_on(async move {
+                let conf_content = conf_content.into_bytes();
+                VirtualFile::crashsafe_overwrite(&config_path, &temp_path, conf_content)
+                    .await
+                    .with_context(|| {
+                        format!("write tenant {tenant_shard_id} config to {config_path}")
+                    })
+            })
+        })
+        .await??;
 
         Ok(())
     }
@@ -2907,12 +2915,17 @@ impl Tenant {
 
         let tenant_shard_id = *tenant_shard_id;
         let target_config_path = target_config_path.to_owned();
-        let conf_content = conf_content.into_bytes();
-        VirtualFile::crashsafe_overwrite(target_config_path.clone(), temp_path, conf_content)
-            .await
-            .with_context(|| {
-                format!("write tenant {tenant_shard_id} config to {target_config_path}")
-            })?;
+        tokio::task::spawn_blocking(move || {
+            Handle::current().block_on(async move {
+                let conf_content = conf_content.into_bytes();
+                VirtualFile::crashsafe_overwrite(&target_config_path, &temp_path, conf_content)
+                    .await
+                    .with_context(|| {
+                        format!("write tenant {tenant_shard_id} config to {target_config_path}")
+                    })
+            })
+        })
+        .await??;
         Ok(())
     }
 
