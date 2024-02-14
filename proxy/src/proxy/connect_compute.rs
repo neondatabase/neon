@@ -122,25 +122,24 @@ where
 
     error!(error = ?err, "could not connect to compute node");
 
-    let node_info =
-        if err.get_error_kind() == crate::error::ErrorKind::Postgres || !node_info.cached() {
-            // If the error is Postgres, that means that we managed to connect to the compute node, but there was an error.
-            // Do not need to retrieve a new node_info, just return the old one.
-            if !err.should_retry(num_retries) {
-                return Err(err.into());
-            }
-            node_info
-        } else {
-            // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
-            info!("compute node's state has likely changed; requesting a wake-up");
-            ctx.latency_timer.cache_miss();
-            let old_node_info = invalidate_cache(node_info);
-            let mut node_info = wake_compute(&mut num_retries, ctx, user_info).await?;
-            node_info.reuse_settings(old_node_info);
+    let node_info = if !node_info.cached() {
+        // If the error is Postgres, that means that we managed to connect to the compute node, but there was an error.
+        // Do not need to retrieve a new node_info, just return the old one.
+        if !err.should_retry(num_retries) {
+            return Err(err.into());
+        }
+        node_info
+    } else {
+        // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
+        info!("compute node's state has likely changed; requesting a wake-up");
+        ctx.latency_timer.cache_miss();
+        let old_node_info = invalidate_cache(node_info);
+        let mut node_info = wake_compute(&mut num_retries, ctx, user_info).await?;
+        node_info.reuse_settings(old_node_info);
 
-            mechanism.update_connect_config(&mut node_info.config);
-            node_info
-        };
+        mechanism.update_connect_config(&mut node_info.config);
+        node_info
+    };
 
     // now that we have a new node, try connect to it repeatedly.
     // this can error for a few reasons, for instance:
