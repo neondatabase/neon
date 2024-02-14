@@ -29,7 +29,7 @@ pub struct EphemeralFile {
     /// The other pages, which can no longer be modified, are accessed through the page cache.
     ///
     /// None <=> IO is ongoing.
-    /// Size is al
+    /// Size is fixed to PAGE_SZ at creation time and must not be changed.
     mutable_tail: Option<BytesMut>,
 }
 
