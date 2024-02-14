@@ -1570,8 +1570,6 @@ impl TenantManager {
             let timelines = parent_shard.timelines.lock().unwrap().clone();
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
-                // let timeline_layers_stream = timeline.layers.read().await.resident_layers();
-                // let timeline_layers = timeline_layers_stream.collect::<Vec<_>>().await;
                 let timeline_layers = timeline
                     .layers
                     .read()
