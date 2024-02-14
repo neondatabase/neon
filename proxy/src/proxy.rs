@@ -331,6 +331,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         compute: node,
         req: _request_gauge,
         conn: _client_gauge,
+        cancel: session,
     }))
 }
 
