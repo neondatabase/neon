@@ -325,7 +325,6 @@ impl S3Bucket {
     ) -> anyhow::Result<()> {
         let kind = RequestKind::Delete;
         let mut cancel = std::pin::pin!(cancel.cancelled());
-        let mut timeout = std::pin::pin!(tokio::time::sleep(self.timeout));
 
         for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
             let started_at = start_measuring_requests(kind);
@@ -344,7 +343,7 @@ impl S3Bucket {
 
             let resp = tokio::select! {
                 resp = req => resp,
-                _ = &mut timeout => return Err(TimeoutOrCancel::Timeout.into()),
+                _ = tokio::time::sleep(self.timeout) => return Err(TimeoutOrCancel::Timeout.into()),
                 _ = &mut cancel => return Err(TimeoutOrCancel::Cancel.into()),
             };
 
