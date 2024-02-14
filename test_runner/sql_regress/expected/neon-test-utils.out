@@ -24,3 +24,5 @@ select test_release_memory();   -- Release the remaining 15 MB
  test_release_memory 
 ---------------------
  
+(1 row)
+
