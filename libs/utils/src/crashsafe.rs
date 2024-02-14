@@ -161,14 +161,17 @@ pub async fn durable_rename(
     Ok(())
 }
 
-/// Writes a file to the specified `final_path` in a crash safe fasion
+/// Writes a file to the specified `final_path` in a crash safe fasion, using [`std::fs`].
 ///
-/// The file is first written to the specified tmp_path, and in a second
-/// step, the tmp path is renamed to the final path. As renames are
-/// atomic, a crash during the write operation will never leave behind a
-/// partially written file.
+/// The file is first written to the specified `tmp_path`, and in a second
+/// step, the `tmp_path` is renamed to the `final_path`. Intermediary fsync
+/// and atomic rename guarantee that, if we crash at any point, there will never
+/// be a partially written file at `final_path` (but maybe at `tmp_path`).
 ///
-/// NB: an async variant of this code exists in Pageserver's VirtualFile.
+/// Callers are responsible for serializing calls of this function for a given `final_path`.
+/// If they don't, there may be an error due to conflicting `tmp_path`, or there will
+/// be no error and the content of `final_path` will be the "winner" caller's `content`.
+/// I.e., the atomticity guarantees still hold.
 pub fn overwrite(
     final_path: &Utf8Path,
     tmp_path: &Utf8Path,
@@ -188,17 +191,14 @@ pub fn overwrite(
         .open(tmp_path)?;
     file.write_all(content)?;
     file.sync_all()?;
-    drop(file); // before the rename, that's important!
-                // renames are atomic
+    drop(file); // don't keep the fd open for longer than we have to
+
     std::fs::rename(tmp_path, final_path)?;
-    // Only open final path parent dirfd now, so that this operation only
-    // ever holds one VirtualFile fd at a time.  That's important because
-    // the current `find_victim_slot` impl might pick the same slot for both
-    // VirtualFile., and it eventually does a blocking write lock instead of
-    // try_lock.
+
     let final_parent_dirfd = std::fs::OpenOptions::new()
         .read(true)
         .open(final_path_parent)?;
+
     final_parent_dirfd.sync_all()?;
     Ok(())
 }
