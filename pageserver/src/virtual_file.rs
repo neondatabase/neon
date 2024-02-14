@@ -568,24 +568,37 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
-    pub async fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> Result<(), Error> {
+    pub async fn write_all_at<B: BoundedBuf>(
+        &self,
+        buf: B,
+        mut offset: u64,
+    ) -> (B::Buf, Result<(), Error>) {
+        let buf_len = buf.bytes_init();
+        if buf_len == 0 {
+            return (Slice::into_inner(buf.slice_full()), Ok(()));
+        }
+        let mut buf = buf.slice(0..buf_len);
         while !buf.is_empty() {
-            match self.write_at(buf, offset).await {
+            // TODO: push `buf` further down
+            match self.write_at(&buf, offset).await {
                 Ok(0) => {
-                    return Err(Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return (
+                        Slice::into_inner(buf),
+                        Err(Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        )),
+                    );
                 }
                 Ok(n) => {
-                    buf = &buf[n..];
+                    buf = buf.slice(n..);
                     offset += n as u64;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(e) => return (Slice::into_inner(buf), Err(e)),
             }
         }
-        Ok(())
+        (Slice::into_inner(buf), Ok(()))
     }
 
     /// Writes `buf.slice(0..buf.bytes_init())`.
@@ -1050,10 +1063,19 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
             }
         }
-        async fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
+        async fn write_all_at<B: BoundedBuf>(&self, buf: B, offset: u64) -> Result<(), Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.write_all_at(buf, offset).await,
-                MaybeVirtualFile::File(file) => file.write_all_at(buf, offset),
+                MaybeVirtualFile::VirtualFile(file) => {
+                    let (_buf, res) = file.write_all_at(buf, offset).await;
+                    res
+                }
+                MaybeVirtualFile::File(file) => {
+                    let buf_len = buf.bytes_init();
+                    if buf_len == 0 {
+                        return Ok(());
+                    }
+                    file.write_all_at(&buf.slice(0..buf_len), offset)
+                }
             }
         }
         async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
@@ -1200,8 +1222,8 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_b.write_all_at(b"BAR", 3).await?;
-        file_b.write_all_at(b"FOO", 0).await?;
+        file_b.write_all_at(b"BAR".to_vec(), 3).await?;
+        file_b.write_all_at(b"FOO".to_vec(), 0).await?;
 
         assert_eq!(file_b.read_string_at(2, 3).await?, "OBA");
 
