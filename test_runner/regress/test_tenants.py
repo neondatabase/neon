@@ -5,7 +5,7 @@ from contextlib import closing
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import pytest
 import requests
@@ -414,3 +414,39 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
 
     # The tenant should end up active
     wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)
+
+
+def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
+    """Test for the directory_entries_count metric"""
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+
+    env = neon_env_builder.init_start()
+
+    endpoint_tenant = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+
+    # Not sure why but this many tables creates more relations than our limit
+    TABLE_COUNT = 1600
+    COUNT_AT_LEAST_EXPECTED = 5500
+
+    with closing(endpoint_tenant.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE template_tbl(key int primary key, value text);")
+            for i in range(TABLE_COUNT):
+                cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
+    endpoint_tenant.stop()
+
+    m = env.pageserver.http_client().get_metrics()
+    directory_entries_count_metric = m.query_all(
+        "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
+    )
+
+    def only_int(samples: List[Sample]) -> Optional[int]:
+        if len(samples) == 1:
+            return int(samples[0].value)
+        assert len(samples) == 0
+        return None
+
+    directory_entries_count = only_int(directory_entries_count_metric)
+
+    assert directory_entries_count is not None and directory_entries_count > COUNT_AT_LEAST_EXPECTED
