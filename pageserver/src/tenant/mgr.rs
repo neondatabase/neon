@@ -2,6 +2,7 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
+use futures::stream::StreamExt;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::ShardParameters;
@@ -31,7 +32,6 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
-use crate::disk_usage_eviction_task::EvictionLayer;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
@@ -1558,17 +1558,16 @@ impl TenantManager {
             let timelines = parent_shard.timelines.lock().unwrap().clone();
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
-                let timeline_layers = timeline.get_local_layers_for_disk_usage_eviction().await;
-                for layer in timeline_layers.resident_layers.into_iter().map(|r| r.layer) {
-                    let layer = match layer {
-                        EvictionLayer::Attached(l) => l,
-                        EvictionLayer::Secondary(_) => {
-                            // Unreachable, because we fetched layers from an object of type `Tenant`, it can
-                            // only return attached layers
-                            unreachable!();
-                        }
-                    };
-
+                // let timeline_layers_stream = timeline.layers.read().await.resident_layers();
+                // let timeline_layers = timeline_layers_stream.collect::<Vec<_>>().await;
+                let timeline_layers = timeline
+                    .layers
+                    .read()
+                    .await
+                    .resident_layers()
+                    .collect::<Vec<_>>()
+                    .await;
+                for layer in timeline_layers {
                     let relative_path = layer
                         .local_path()
                         .strip_prefix(&parent_path)
