@@ -73,8 +73,8 @@ where
             fair,
         } = &config;
         let task_kinds: EnumSet<TaskKind> = task_kinds
-            .into_iter()
-            .filter_map(|s| match TaskKind::from_str(&s) {
+            .iter()
+            .filter_map(|s| match TaskKind::from_str(s) {
                 Ok(v) => Some(v),
                 Err(e) => {
                     // TODO: avoid this failure mode
