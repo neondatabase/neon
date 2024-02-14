@@ -176,6 +176,14 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "lazy_slru_download": True,
         "max_lsn_wal_lag": 230000,
         "min_resident_size_override": 23,
+        "timeline_get_rate_limit": {
+            "task_kinds": ["PageRequestHandler"],
+            "fair": True,
+            "initial": 0,
+            "interval_millis": 1000,
+            "interval_refill": 1000,
+            "max": 1000,
+        },
         "trace_read_requests": True,
         "walreceiver_connect_timeout": "13m",
     }
