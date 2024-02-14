@@ -484,9 +484,14 @@ impl<'a> TenantDownloader<'a> {
         let temp_path = path_with_suffix_extension(&heatmap_path, TEMP_FILE_SUFFIX);
         let context_msg = format!("write tenant {tenant_shard_id} heatmap to {heatmap_path}");
         let heatmap_path_bg = heatmap_path.clone();
-        VirtualFile::crashsafe_overwrite(heatmap_path_bg, temp_path, heatmap_bytes)
-            .await
-            .maybe_fatal_err(&context_msg)?;
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+                VirtualFile::crashsafe_overwrite(&heatmap_path_bg, &temp_path, heatmap_bytes).await
+            })
+        })
+        .await
+        .expect("Blocking task is never aborted")
+        .maybe_fatal_err(&context_msg)?;
 
         tracing::debug!("Wrote local heatmap to {}", heatmap_path);
 

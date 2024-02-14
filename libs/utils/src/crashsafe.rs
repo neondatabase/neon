@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     fs::{self, File},
-    io::{self, Write},
+    io,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -158,48 +158,6 @@ pub async fn durable_rename(
     };
     fsync_async_opt(parent, do_fsync).await?;
 
-    Ok(())
-}
-
-/// Writes a file to the specified `final_path` in a crash safe fasion, using [`std::fs`].
-///
-/// The file is first written to the specified `tmp_path`, and in a second
-/// step, the `tmp_path` is renamed to the `final_path`. Intermediary fsync
-/// and atomic rename guarantee that, if we crash at any point, there will never
-/// be a partially written file at `final_path` (but maybe at `tmp_path`).
-///
-/// Callers are responsible for serializing calls of this function for a given `final_path`.
-/// If they don't, there may be an error due to conflicting `tmp_path`, or there will
-/// be no error and the content of `final_path` will be the "winner" caller's `content`.
-/// I.e., the atomticity guarantees still hold.
-pub fn overwrite(
-    final_path: &Utf8Path,
-    tmp_path: &Utf8Path,
-    content: &[u8],
-) -> std::io::Result<()> {
-    let Some(final_path_parent) = final_path.parent() else {
-        return Err(std::io::Error::from_raw_os_error(
-            nix::errno::Errno::EINVAL as i32,
-        ));
-    };
-    std::fs::remove_file(tmp_path).or_else(crate::fs_ext::ignore_not_found)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        // Use `create_new` so that, if we race with ourselves or something else,
-        // we bail out instead of causing damage.
-        .create_new(true)
-        .open(tmp_path)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    drop(file); // don't keep the fd open for longer than we have to
-
-    std::fs::rename(tmp_path, final_path)?;
-
-    let final_parent_dirfd = std::fs::OpenOptions::new()
-        .read(true)
-        .open(final_path_parent)?;
-
-    final_parent_dirfd.sync_all()?;
     Ok(())
 }
 
