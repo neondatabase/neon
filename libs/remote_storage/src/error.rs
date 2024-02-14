@@ -1,3 +1,4 @@
+/// Reasons for downloads or listings to fail.
 #[derive(Debug)]
 pub enum DownloadError {
     /// Validation or other error happened due to user input.
@@ -82,9 +83,14 @@ impl std::fmt::Display for TimeTravelError {
 
 impl std::error::Error for TimeTravelError {}
 
-/// Root cause for cancellations however this type does not implement `std::error::Error` so it
-/// cannot be put as the root cause of `anyhow::Error`. It should never need to be exposed out of
-/// this crate.
+/// Plain cancelled error.
+///
+/// By design this type does not not implement `std::error::Error` so it cannot be put as the root
+/// cause of `std::io::Error` or `anyhow::Error`. It should never need to be exposed out of this
+/// crate.
+///
+/// It exists to implement permit acquiring in `{Download,TimeTravel}Error` and `anyhow::Error` returning
+/// operations and ensuring that those get converted to proper versions with just `?`.
 #[derive(Debug)]
 pub(crate) struct Cancelled;
 
@@ -112,8 +118,11 @@ impl From<Cancelled> for DownloadError {
     }
 }
 
-/// This type is used at as the root cause for timeouts and cancellations with anyhow returning
+/// This type is used at as the root cause for timeouts and cancellations with `anyhow::Error` returning
 /// RemoteStorage methods.
+///
+/// For use with `utils::backoff::retry` and `anyhow::Error` returning operations there is
+/// `TimeoutOrCancel::caused_by_cancel` method to query "proper form" errors.
 #[derive(Debug)]
 pub enum TimeoutOrCancel {
     Timeout,
@@ -151,8 +160,8 @@ impl TimeoutOrCancel {
     }
 }
 
-// Sadly the only way `tokio::io::copy_buf` helpers work is that if the error type is
-// `std::io::Error`.
+/// This conversion is used when [`crate::support::DownloadStream`] notices a cancellation or
+/// timeout to wrap it in an `std::io::Error`.
 impl From<TimeoutOrCancel> for std::io::Error {
     fn from(value: TimeoutOrCancel) -> Self {
         let e = DownloadError::from(value);
