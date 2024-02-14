@@ -123,7 +123,7 @@ where
     error!(error = ?err, "could not connect to compute node");
 
     let node_info = if !node_info.cached() {
-        // If the error is Postgres, that means that we managed to connect to the compute node, but there was an error.
+        // If we just recieved this from cplane and dodn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
         if !err.should_retry(num_retries) {
             return Err(err.into());
