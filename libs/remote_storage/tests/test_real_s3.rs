@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt::{Debug, Display};
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -9,9 +10,10 @@ use std::{collections::HashSet, time::SystemTime};
 use crate::common::{download_to_vec, upload_stream};
 use anyhow::Context;
 use camino::Utf8Path;
-use futures_util::Future;
+use futures_util::StreamExt;
 use remote_storage::{
-    GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
+    DownloadError, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+    S3Config,
 };
 use test_context::test_context;
 use test_context::AsyncTestContext;

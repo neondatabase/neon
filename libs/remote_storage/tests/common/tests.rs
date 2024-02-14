@@ -1,7 +1,6 @@
 use anyhow::Context;
 use camino::Utf8Path;
-use futures_util::StreamExt;
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use remote_storage::RemotePath;
 use std::sync::Arc;
 use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
