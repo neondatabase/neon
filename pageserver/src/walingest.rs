@@ -339,15 +339,7 @@ impl WalIngest {
                         xlog_checkpoint.oldestActiveXid,
                         self.checkpoint.oldestActiveXid
                     );
-                    if (self
-                        .checkpoint
-                        .oldestActiveXid
-                        .wrapping_sub(xlog_checkpoint.oldestActiveXid)
-                        as i32)
-                        < 0
-                    {
-                        self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
-                    }
+                    self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
 
                     // Write a new checkpoint key-value pair on every checkpoint record, even
                     // if nothing really changed. Not strictly required, but it seems nice to

@@ -20,8 +20,11 @@ def test_replication_start(neon_simple_env: NeonEnv):
                     wait_replica_caughtup(primary, secondary)
                     with secondary.connect() as s_con:
                         with s_con.cursor() as s_cur:
+                            # Enforce setting hint bits for pg_class tuples.
+                            # If master's transaction is not marked as in-progress in MVCC snapshot,
+                            # then XMIN_INVALID hint bit will be set for table's 't' tuple makeing it invisible.
                             s_cur.execute("select * from pg_class")
                             p_cur.execute("commit")
                             wait_replica_caughtup(primary, secondary)
                             s_cur.execute("select * from t where pk = 1")
-                            assert s_cur.fetchone() == (1,0)
+                            assert s_cur.fetchone() == (1, 0)
