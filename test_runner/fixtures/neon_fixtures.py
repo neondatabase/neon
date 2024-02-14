@@ -3972,6 +3972,9 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     # Get the timeline ID. We need it for the 'basebackup' command
     timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
+    # wait for all pageserver shards to catch up
+    pre_shutdown = wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
+
     # stop postgres to ensure that files won't change
     endpoint.stop()
 
@@ -3982,7 +3985,9 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     checkpoint_lsn = re.findall(
         "Latest checkpoint location:\\s+([0-9A-F]+/[0-9A-F]+)", result.stdout
     )[0]
-    log.debug(f"last checkpoint at {checkpoint_lsn}")
+    log.debug(
+        f"last checkpoint at {checkpoint_lsn} after shutdown (before shutdown was {pre_shutdown})"
+    )
 
     # Take a basebackup from pageserver
     restored_dir_path = env.repo_dir / f"{endpoint.endpoint_id}_restored_datadir"
