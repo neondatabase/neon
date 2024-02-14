@@ -279,21 +279,13 @@ jobs:
       # io_uring will account the memory of the CQ and SQ as locked.
       # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug ]
     env:
-      BUILD_TYPE: ${{ matrix.build_type }}
-      GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
     steps:
       - name: run test
         run: |
           #temp install docker later add it to build tools
-          #remove any old docker or docker deps
-          for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do apt-get remove $pkg; done
           # Add Docker's official GPG key:
           apt-get update
           apt-get install ca-certificates curl
