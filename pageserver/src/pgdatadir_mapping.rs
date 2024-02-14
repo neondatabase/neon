@@ -156,7 +156,7 @@ impl Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
-            pending_aux_files: false,
+            pending_aux_files: None,
             pending_directory_entries: Vec::new(),
             lsn,
         }
@@ -872,10 +872,10 @@ pub struct DatadirModification<'a> {
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
 
-    // Whether we already wrote any aux file changes in this modification.  If true,
+    // If we already wrote any aux file changes in this modification, stash the latest dir.  If set,
     // [`Self::put_file`] may assume that it is safe to emit a delta rather than checking
     // if AUX_FILES_KEY is already set.
-    pending_aux_files: bool,
+    pending_aux_files: Option<AuxFilesDirectory>,
 
     /// For special "directory" keys that store key-value maps, track the size of the map
     /// if it was updated in this modification.
@@ -1400,29 +1400,35 @@ impl<'a> DatadirModification<'a> {
             Some(Bytes::copy_from_slice(content))
         };
 
-        if self.pending_aux_files {
+        let dir = if let Some(mut dir) = self.pending_aux_files.take() {
             // We already updated aux files in `self`: emit a delta and update our latest value
 
             self.put(
                 AUX_FILES_KEY,
-                Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                Value::WalRecord(NeonWalRecord::AuxFile {
+                    file_path: file_path.clone(),
+                    content: content.clone(),
+                }),
             );
+
+            // unwrap: we checked is_some() before entering this block
+            dir.upsert(file_path, content);
+            dir
         } else {
             // Check if the AUX_FILES_KEY is initialized
             match self.get(AUX_FILES_KEY, ctx).await {
                 Ok(dir_bytes) => {
-                    let dir = AuxFilesDirectory::des(&dir_bytes)?;
+                    let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
                     // Key is already set, we may append a delta
                     self.put(
                         AUX_FILES_KEY,
-                        Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                        Value::WalRecord(NeonWalRecord::AuxFile {
+                            file_path: file_path.clone(),
+                            content: content.clone(),
+                        }),
                     );
-
-                    // This is approximate: we will update the stat for aux file count here
-                    // while we have the whole dir view, but not on subsequent calls where
-                    // we only have the delta
-                    self.pending_directory_entries
-                        .push((DirectoryKind::AuxFiles, dir.files.len()));
+                    dir.upsert(file_path, content);
+                    dir
                 }
                 Err(
                     e @ (PageReconstructError::AncestorStopping(_)
@@ -1449,11 +1455,14 @@ impl<'a> DatadirModification<'a> {
                             AuxFilesDirectory::ser(&dir).context("serialize")?,
                         )),
                     );
+                    dir
                 }
-            };
-        }
+            }
+        };
 
-        self.pending_aux_files = true;
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFiles, dir.files.len()));
+        self.pending_aux_files = Some(dir);
 
         Ok(())
     }
