@@ -1411,7 +1411,6 @@ impl<'a> DatadirModification<'a> {
                 }),
             );
 
-            // unwrap: we checked is_some() before entering this block
             dir.upsert(file_path, content);
             dir
         } else {
