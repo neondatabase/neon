@@ -25,6 +25,7 @@ use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use remote_storage::TimeoutOrCancel;
 use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
@@ -3339,7 +3340,7 @@ impl Tenant {
             &self.cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)
     }
 
@@ -3389,8 +3390,10 @@ impl Tenant {
                 );
                 let dest_path =
                     &remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &timeline_id);
+
+                // if this fails, it will get retried by retried control plane requests
                 storage
-                    .copy_object(source_path, dest_path)
+                    .copy_object(source_path, dest_path, &self.cancel)
                     .await
                     .context("copy initdb tar")?;
             }
@@ -4031,6 +4034,7 @@ pub(crate) mod harness {
             std::fs::create_dir_all(&remote_fs_dir).unwrap();
             let config = RemoteStorageConfig {
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
             let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));

@@ -13,7 +13,7 @@ use parquet::{
     },
     record::RecordWriter,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig};
+use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
@@ -314,20 +314,23 @@ async fn upload_parquet(
     let path = RemotePath::from_string(&format!(
         "{year:04}/{month:02}/{day:02}/{hour:02}/requests_{id}.parquet"
     ))?;
+    let cancel = CancellationToken::new();
     backoff::retry(
         || async {
             let stream = futures::stream::once(futures::future::ready(Ok(data.clone())));
-            storage.upload(stream, data.len(), &path, None).await
+            storage
+                .upload(stream, data.len(), &path, None, &cancel)
+                .await
         },
-        |_e| false,
+        TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_UPLOAD_MAX_RETRIES,
         "request_data_upload",
         // we don't want cancellation to interrupt here, so we make a dummy cancel token
-        &CancellationToken::new(),
+        &cancel,
     )
     .await
-    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
     .context("request_data_upload")?;
 
@@ -413,7 +416,8 @@ mod tests {
                     )
                     .unwrap(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
-                })
+                }),
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             })
         );
         assert_eq!(parquet_upload.parquet_upload_row_group_size, 100);
@@ -466,6 +470,7 @@ mod tests {
     ) -> Vec<(u64, usize, i64)> {
         let remote_storage_config = RemoteStorageConfig {
             storage: RemoteStorageKind::LocalFs(tmpdir.to_path_buf()),
+            timeout: std::time::Duration::from_secs(120),
         };
         let storage = GenericRemoteStorage::from_config(&remote_storage_config).unwrap();
 
