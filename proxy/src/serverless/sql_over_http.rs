@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::bail;
-use anyhow::Context;
 use futures::pin_mut;
 use futures::StreamExt;
 use hyper::body::HttpBody;
@@ -29,19 +28,22 @@ use utils::http::json::json_response;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
+use crate::auth::ComputeUserInfoParseError;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
+use crate::serverless::backend::HttpConnError;
+use crate::DbName;
 use crate::RoleName;
 
 use super::backend::PoolingBackend;
 use super::conn_pool::ConnInfo;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
-use super::SERVERLESS_DRIVER_SNI;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,67 +88,77 @@ where
     Ok(json_to_pg_text(json))
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ConnInfoError {
+    #[error("invalid header: {0}")]
+    InvalidHeader(&'static str),
+    #[error("invalid connection string: {0}")]
+    UrlParseError(#[from] url::ParseError),
+    #[error("incorrect scheme")]
+    IncorrectScheme,
+    #[error("missing database name")]
+    MissingDbName,
+    #[error("invalid database name")]
+    InvalidDbName,
+    #[error("missing username")]
+    MissingUsername,
+    #[error("invalid username: {0}")]
+    InvalidUsername(#[from] std::string::FromUtf8Error),
+    #[error("missing password")]
+    MissingPassword,
+    #[error("missing hostname")]
+    MissingHostname,
+    #[error("invalid hostname: {0}")]
+    InvalidEndpoint(#[from] ComputeUserInfoParseError),
+    #[error("malformed endpoint")]
+    MalformedEndpoint,
+}
+
 fn get_conn_info(
     ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
-    sni_hostname: Option<String>,
     tls: &TlsConfig,
-) -> Result<ConnInfo, anyhow::Error> {
+) -> Result<ConnInfo, ConnInfoError> {
+    // HTTP only uses cleartext (for now and likely always)
+    ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
+
     let connection_string = headers
         .get("Neon-Connection-String")
-        .ok_or(anyhow::anyhow!("missing connection string"))?
-        .to_str()?;
+        .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
+        .to_str()
+        .map_err(|_| ConnInfoError::InvalidHeader("Neon-Connection-String"))?;
 
     let connection_url = Url::parse(connection_string)?;
 
     let protocol = connection_url.scheme();
     if protocol != "postgres" && protocol != "postgresql" {
-        return Err(anyhow::anyhow!(
-            "connection string must start with postgres: or postgresql:"
-        ));
+        return Err(ConnInfoError::IncorrectScheme);
     }
 
     let mut url_path = connection_url
         .path_segments()
-        .ok_or(anyhow::anyhow!("missing database name"))?;
+        .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname = url_path
-        .next()
-        .ok_or(anyhow::anyhow!("invalid database name"))?;
+    let dbname: DbName = url_path.next().ok_or(ConnInfoError::InvalidDbName)?.into();
+    ctx.set_dbname(dbname.clone());
 
-    let username = RoleName::from(connection_url.username());
+    let username = RoleName::from(urlencoding::decode(connection_url.username())?);
     if username.is_empty() {
-        return Err(anyhow::anyhow!("missing username"));
+        return Err(ConnInfoError::MissingUsername);
     }
     ctx.set_user(username.clone());
 
     let password = connection_url
         .password()
-        .ok_or(anyhow::anyhow!("no password"))?;
-
-    // TLS certificate selector now based on SNI hostname, so if we are running here
-    // we are sure that SNI hostname is set to one of the configured domain names.
-    let sni_hostname = sni_hostname.ok_or(anyhow::anyhow!("no SNI hostname set"))?;
+        .ok_or(ConnInfoError::MissingPassword)?;
+    let password = urlencoding::decode_binary(password.as_bytes());
 
     let hostname = connection_url
         .host_str()
-        .ok_or(anyhow::anyhow!("no host"))?;
+        .ok_or(ConnInfoError::MissingHostname)?;
 
-    let host_header = headers
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.split(':').next());
-
-    // sni_hostname has to be either the same as hostname or the one used in serverless driver.
-    if !check_matches(&sni_hostname, hostname)? {
-        return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
-    } else if let Some(h) = host_header {
-        if h != sni_hostname {
-            return Err(anyhow::anyhow!("mismatched host header and hostname"));
-        }
-    }
-
-    let endpoint = endpoint_sni(hostname, &tls.common_names)?.context("malformed endpoint")?;
+    let endpoint =
+        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?;
     ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
@@ -168,41 +180,35 @@ fn get_conn_info(
 
     Ok(ConnInfo {
         user_info,
-        dbname: dbname.into(),
-        password: password.into(),
+        dbname,
+        password: match password {
+            std::borrow::Cow::Borrowed(b) => b.into(),
+            std::borrow::Cow::Owned(b) => b.into(),
+        },
     })
-}
-
-fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Error> {
-    if sni_hostname == hostname {
-        return Ok(true);
-    }
-    let (sni_hostname_first, sni_hostname_rest) = sni_hostname
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected sni format."))?;
-    let (_, hostname_rest) = hostname
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("Unexpected hostname format."))?;
-    Ok(sni_hostname_rest == hostname_rest && sni_hostname_first == SERVERLESS_DRIVER_SNI)
 }
 
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    mut ctx: RequestMonitoring,
     request: Request<Body>,
-    sni_hostname: Option<String>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.http_config.request_timeout,
-        handle_inner(config, ctx, request, sni_hostname, backend),
+        handle_inner(config, &mut ctx, request, backend),
     )
     .await;
     let mut response = match result {
         Ok(r) => match r {
-            Ok(r) => r,
+            Ok(r) => {
+                ctx.set_success();
+                r
+            }
             Err(e) => {
+                // TODO: ctx.set_error_kind(e.get_error_type());
+
                 let mut message = format!("{:?}", e);
                 let db_error = e
                     .downcast_ref::<tokio_postgres::Error>()
@@ -278,7 +284,9 @@ pub async fn handle(
                 )?
             }
         },
-        Err(_) => {
+        Err(e) => {
+            ctx.set_error_kind(e.get_error_kind());
+
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
                 config.http_config.request_timeout.as_secs()
@@ -290,6 +298,7 @@ pub async fn handle(
             )?
         }
     };
+
     response.headers_mut().insert(
         "Access-Control-Allow-Origin",
         hyper::http::HeaderValue::from_static("*"),
@@ -297,12 +306,18 @@ pub async fn handle(
     Ok(response)
 }
 
-#[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
+#[instrument(
+    name = "sql-over-http",
+    skip_all,
+    fields(
+        pid = tracing::field::Empty,
+        conn_id = tracing::field::Empty
+    )
+)]
 async fn handle_inner(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
-    sni_hostname: Option<String>,
     backend: Arc<PoolingBackend>,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
@@ -318,12 +333,7 @@ async fn handle_inner(
     //
     let headers = request.headers();
     // TLS config should be there.
-    let conn_info = get_conn_info(
-        ctx,
-        headers,
-        sni_hostname,
-        config.tls_config.as_ref().unwrap(),
-    )?;
+    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
     info!(
         user = conn_info.user_info.user.as_str(),
         project = conn_info.user_info.endpoint.as_str(),
@@ -357,12 +367,10 @@ async fn handle_inner(
     let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
     let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
-    let paused = ctx.latency_timer.pause();
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
     };
-    drop(paused);
     info!(request_content_length, "request size in bytes");
     HTTP_CONTENT_LENGTH.observe(request_content_length as f64);
 
@@ -378,15 +386,20 @@ async fn handle_inner(
         let body = hyper::body::to_bytes(request.into_body())
             .await
             .map_err(anyhow::Error::from)?;
+        info!(length = body.len(), "request payload read");
         let payload: Payload = serde_json::from_slice(&body)?;
         Ok::<Payload, anyhow::Error>(payload) // Adjust error type accordingly
     };
 
     let authenticate_and_connect = async {
         let keys = backend.authenticate(ctx, &conn_info).await?;
-        backend
+        let client = backend
             .connect_to_compute(ctx, conn_info, keys, !allow_pool)
-            .await
+            .await?;
+        // not strictly necessary to mark success here,
+        // but it's just insurance for if we forget it somewhere else
+        ctx.latency_timer.success();
+        Ok::<_, HttpConnError>(client)
     };
 
     // Run both operations in parallel
@@ -418,6 +431,7 @@ async fn handle_inner(
             results
         }
         Payload::Batch(statements) => {
+            info!("starting transaction");
             let (inner, mut discard) = client.inner();
             let mut builder = inner.build_transaction();
             if let Some(isolation_level) = txn_isolation_level {
@@ -447,6 +461,7 @@ async fn handle_inner(
             .await
             {
                 Ok(results) => {
+                    info!("commit");
                     let status = transaction.commit().await.map_err(|e| {
                         // if we cannot commit - for now don't return connection to pool
                         // TODO: get a query status from the error
@@ -457,6 +472,7 @@ async fn handle_inner(
                     results
                 }
                 Err(err) => {
+                    info!("rollback");
                     let status = transaction.rollback().await.map_err(|e| {
                         // if we cannot rollback - for now don't return connection to pool
                         // TODO: get a query status from the error
@@ -487,8 +503,6 @@ async fn handle_inner(
         }
     };
 
-    ctx.set_success();
-    ctx.log();
     let metrics = client.metrics();
 
     // how could this possibly fail
@@ -533,8 +547,10 @@ async fn query_to_json<T: GenericClient>(
     raw_output: bool,
     default_array_mode: bool,
 ) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
+    info!("executing query");
     let query_params = data.params;
     let row_stream = client.query_raw_txt(&data.query, query_params).await?;
+    info!("finished executing query");
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
@@ -568,6 +584,13 @@ async fn query_to_json<T: GenericClient>(
         command_tag_split.next()
     }
     .and_then(|s| s.parse::<i64>().ok());
+
+    info!(
+        rows = rows.len(),
+        ?ready,
+        command_tag,
+        "finished reading rows"
+    );
 
     let mut fields = vec![];
     let mut columns = vec![];

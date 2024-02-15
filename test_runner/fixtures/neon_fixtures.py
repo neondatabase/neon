@@ -23,7 +23,7 @@ from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
@@ -899,7 +899,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    S3Scrubber(self.test_output_dir, self).scan_metadata()
+                    S3Scrubber(self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -1400,7 +1400,6 @@ class AbstractNeonCli(abc.ABC):
 
         args = [bin_neon] + arguments
         log.info('Running command "{}"'.format(" ".join(args)))
-        log.info(f'Running in "{self.env.repo_dir}"')
 
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
@@ -1816,6 +1815,7 @@ class NeonCli(AbstractNeonCli):
         endpoint_id: str,
         destroy=False,
         check_return_code=True,
+        mode: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1823,6 +1823,8 @@ class NeonCli(AbstractNeonCli):
         ]
         if destroy:
             args.append("--destroy")
+        if mode is not None:
+            args.append(f"--mode={mode}")
         if endpoint_id is not None:
             args.append(endpoint_id)
 
@@ -2456,6 +2458,7 @@ def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
+# TODO make port an optional argument
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: Path, pg_bin: PgBin, port: int, init: bool = True):
         super().__init__(host="localhost", port=port, dbname="postgres")
@@ -2819,8 +2822,8 @@ class NeonProxy(PgProtocol):
 
     def http_query(self, query, args, **kwargs):
         # TODO maybe use default values if not provided
-        user = kwargs["user"]
-        password = kwargs["password"]
+        user = quote(kwargs["user"])
+        password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
@@ -3162,7 +3165,7 @@ class Endpoint(PgProtocol):
         with open(remote_extensions_spec_path, "w") as file:
             json.dump(spec, file, indent=4)
 
-    def stop(self) -> "Endpoint":
+    def stop(self, mode: str = "fast") -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
         Returns self.
@@ -3171,13 +3174,13 @@ class Endpoint(PgProtocol):
         if self.running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
-                self.endpoint_id, check_return_code=self.check_stop_result
+                self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
             )
             self.running = False
 
         return self
 
-    def stop_and_destroy(self) -> "Endpoint":
+    def stop_and_destroy(self, mode: str = "immediate") -> "Endpoint":
         """
         Stop the Postgres instance, then destroy the endpoint.
         Returns self.
@@ -3185,7 +3188,7 @@ class Endpoint(PgProtocol):
 
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, True, check_return_code=self.check_stop_result
+            self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
         )
         self.endpoint_id = None
         self.running = False
@@ -3656,9 +3659,9 @@ class SafekeeperHttpClient(requests.Session):
 
 
 class S3Scrubber:
-    def __init__(self, log_dir: Path, env: NeonEnvBuilder):
+    def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
         self.env = env
-        self.log_dir = log_dir
+        self.log_dir = log_dir or env.test_output_dir
 
     def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
@@ -3679,7 +3682,7 @@ class S3Scrubber:
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(
-            self.log_dir,
+            self.env.test_output_dir,
             args,
             echo_stderr=True,
             echo_stdout=True,
@@ -3964,27 +3967,24 @@ def list_files_to_compare(pgdata_dir: Path) -> List[str]:
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint: Endpoint):
-    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
-
     # Get the timeline ID. We need it for the 'basebackup' command
     timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
+    # many tests already checkpoint, but do it just in case
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CHECKPOINT")
+
+    # wait for pageserver to catch up
+    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
     # stop postgres to ensure that files won't change
     endpoint.stop()
-
-    # Read the shutdown checkpoint's LSN
-    pg_controldata_path = os.path.join(pg_bin.pg_bin_path, "pg_controldata")
-    cmd = f"{pg_controldata_path} -D {endpoint.pgdata_dir}"
-    result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-    checkpoint_lsn = re.findall(
-        "Latest checkpoint location:\\s+([0-9A-F]+/[0-9A-F]+)", result.stdout
-    )[0]
-    log.debug(f"last checkpoint at {checkpoint_lsn}")
 
     # Take a basebackup from pageserver
     restored_dir_path = env.repo_dir / f"{endpoint.endpoint_id}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
 
+    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
     psql_path = os.path.join(pg_bin.pg_bin_path, "psql")
 
     pageserver_id = env.attachment_service.locate(endpoint.tenant_id)[0]["node_id"]
@@ -3992,7 +3992,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.get_pageserver(pageserver_id).service_port.pg}  \
-            -c 'basebackup {endpoint.tenant_id} {timeline_id} {checkpoint_lsn}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline_id}'  \
          | tar -x -C {restored_dir_path}
     """
 

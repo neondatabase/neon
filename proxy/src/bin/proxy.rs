@@ -1,6 +1,8 @@
 use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::MaybeOwned;
+use proxy::cancellation::CancelMap;
+use proxy::cancellation::CancellationHandler;
 use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
@@ -12,6 +14,7 @@ use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
 use proxy::redis::notifications;
+use proxy::redis::publisher::RedisPublisherClient;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
 
@@ -22,6 +25,7 @@ use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -129,6 +133,9 @@ struct ProxyCliArgs {
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
+    /// Redis rate limiter max number of requests per second.
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    redis_rps_limit: Vec<RateBucketInfo>,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
     #[clap(long, default_value_t = 100)]
     initial_limit: usize,
@@ -225,6 +232,19 @@ async fn main() -> anyhow::Result<()> {
     let cancellation_token = CancellationToken::new();
 
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
+    let cancel_map = CancelMap::default();
+    let redis_publisher = match &args.redis_notifications {
+        Some(url) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
+            url,
+            args.region.clone(),
+            &config.redis_rps_limit,
+        )?))),
+        None => None,
+    };
+    let cancellation_handler = Arc::new(CancellationHandler::new(
+        cancel_map.clone(),
+        redis_publisher,
+    ));
 
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
@@ -234,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         proxy_listener,
         cancellation_token.clone(),
         endpoint_rate_limiter.clone(),
+        cancellation_handler.clone(),
     ));
 
     // TODO: rename the argument to something like serverless.
@@ -248,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
             serverless_listener,
             cancellation_token.clone(),
             endpoint_rate_limiter.clone(),
+            cancellation_handler.clone(),
         ));
     }
 
@@ -271,7 +293,12 @@ async fn main() -> anyhow::Result<()> {
             let cache = api.caches.project_info.clone();
             if let Some(url) = args.redis_notifications {
                 info!("Starting redis notifications listener ({url})");
-                maintenance_tasks.spawn(notifications::task_main(url.to_owned(), cache.clone()));
+                maintenance_tasks.spawn(notifications::task_main(
+                    url.to_owned(),
+                    cache.clone(),
+                    cancel_map.clone(),
+                    args.region.clone(),
+                ));
             }
             maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
         }
@@ -383,7 +410,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
         AuthBackend::Link => {
             let url = args.uri.parse()?;
-            auth::BackendType::Link(MaybeOwned::Owned(url))
+            auth::BackendType::Link(MaybeOwned::Owned(url), ())
         }
     };
     let http_config = HttpConfig {
@@ -403,6 +430,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
     RateBucketInfo::validate(&mut endpoint_rps_limit)?;
+    let mut redis_rps_limit = args.redis_rps_limit.clone();
+    RateBucketInfo::validate(&mut redis_rps_limit)?;
 
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
@@ -414,6 +443,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
+        redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
         // TODO: add this argument
         region: args.region.clone(),

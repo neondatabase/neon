@@ -23,7 +23,6 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     )
     n_resize = 10
     scale = 10
-    log.info("postgres is running on 'test_lfc_resize' branch")
 
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")

@@ -422,6 +422,7 @@ async fn build_timeline_info_common(
             tenant::timeline::logical_size::Accuracy::Approximate => false,
             tenant::timeline::logical_size::Accuracy::Exact => true,
         },
+        directory_entries_counts: timeline.get_directory_metrics().to_vec(),
         current_physical_size,
         current_logical_size_non_incremental: None,
         timeline_dir_layer_file_size_sum: None,
@@ -488,7 +489,9 @@ async fn timeline_create_handler(
     let state = get_state(&request);
 
     async {
-        let tenant = state.tenant_manager.get_attached_tenant_shard(tenant_shard_id, false)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id, false)?;
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -498,48 +501,62 @@ async fn timeline_create_handler(
             tracing::info!("bootstrapping");
         }
 
-        match tenant.create_timeline(
-            new_timeline_id,
-            request_data.ancestor_timeline_id.map(TimelineId::from),
-            request_data.ancestor_start_lsn,
-            request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
-            request_data.existing_initdb_timeline_id,
-            state.broker_client.clone(),
-            &ctx,
-        )
-        .await {
+        match tenant
+            .create_timeline(
+                new_timeline_id,
+                request_data.ancestor_timeline_id,
+                request_data.ancestor_start_lsn,
+                request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+                request_data.existing_initdb_timeline_id,
+                state.broker_client.clone(),
+                &ctx,
+            )
+            .await
+        {
             Ok(new_timeline) => {
                 // Created. Construct a TimelineInfo for it.
-                let timeline_info = build_timeline_info_common(&new_timeline, &ctx, tenant::timeline::GetLogicalSizePriority::User)
-                    .await
-                    .map_err(ApiError::InternalServerError)?;
+                let timeline_info = build_timeline_info_common(
+                    &new_timeline,
+                    &ctx,
+                    tenant::timeline::GetLogicalSizePriority::User,
+                )
+                .await
+                .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
             Err(_) if tenant.cancel.is_cancelled() => {
                 // In case we get some ugly error type during shutdown, cast it into a clean 503.
-                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg("Tenant shutting down".to_string()))
+                json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    HttpErrorBody::from_msg("Tenant shutting down".to_string()),
+                )
             }
-            Err(tenant::CreateTimelineError::Conflict | tenant::CreateTimelineError::AlreadyCreating) => {
-                json_response(StatusCode::CONFLICT, ())
-            }
-            Err(tenant::CreateTimelineError::AncestorLsn(err)) => {
-                json_response(StatusCode::NOT_ACCEPTABLE, HttpErrorBody::from_msg(
-                    format!("{err:#}")
-                ))
-            }
-            Err(e @ tenant::CreateTimelineError::AncestorNotActive) => {
-                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg(e.to_string()))
-            }
-            Err(tenant::CreateTimelineError::ShuttingDown) => {
-                json_response(StatusCode::SERVICE_UNAVAILABLE,HttpErrorBody::from_msg("tenant shutting down".to_string()))
-            }
+            Err(
+                tenant::CreateTimelineError::Conflict
+                | tenant::CreateTimelineError::AlreadyCreating,
+            ) => json_response(StatusCode::CONFLICT, ()),
+            Err(tenant::CreateTimelineError::AncestorLsn(err)) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
+                HttpErrorBody::from_msg(format!("{err:#}")),
+            ),
+            Err(e @ tenant::CreateTimelineError::AncestorNotActive) => json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
+            Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                HttpErrorBody::from_msg("tenant shutting down".to_string()),
+            ),
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
     .instrument(info_span!("timeline_create",
         tenant_id = %tenant_shard_id.tenant_id,
         shard_id = %tenant_shard_id.shard_slug(),
-        timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
+        timeline_id = %new_timeline_id,
+        lsn=?request_data.ancestor_start_lsn,
+        pg_version=?request_data.pg_version
+    ))
     .await
 }
 
@@ -2197,7 +2214,7 @@ pub fn make_router(
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/keyspace",
-            |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
+            |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .any(handler_404))

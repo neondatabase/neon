@@ -1014,12 +1014,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to stop"))?;
             let destroy = sub_args.get_flag("destroy");
+            let mode = sub_args.get_one::<String>("mode").expect("has a default");
 
             let endpoint = cplane
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            endpoint.stop(destroy)?;
+            endpoint.stop(mode, destroy)?;
         }
 
         _ => bail!("Unexpected endpoint subcommand '{sub_name}'"),
@@ -1303,7 +1304,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(false) {
+                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast " }, false) {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }
@@ -1652,7 +1653,16 @@ fn cli() -> Command {
                             .long("destroy")
                             .action(ArgAction::SetTrue)
                             .required(false)
-                        )
+                    )
+                    .arg(
+                        Arg::new("mode")
+                            .help("Postgres shutdown mode, passed to \"pg_ctl -m <mode>\"")
+                            .long("mode")
+                            .action(ArgAction::Set)
+                            .required(false)
+                            .value_parser(["smart", "fast", "immediate"])
+                            .default_value("fast")
+                    )
                 )
 
         )

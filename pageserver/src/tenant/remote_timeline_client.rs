@@ -196,14 +196,12 @@ pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
-use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use std::ops::DerefMut;
 use tracing::{debug, error, info, instrument, warn};
 use tracing::{info_span, Instrument};
@@ -217,6 +215,7 @@ use crate::metrics::{
 };
 use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::remote_timeline_client::download::download_retry;
 use crate::tenant::storage_layer::AsLayerDesc;
 use crate::tenant::upload_queue::Delete;
 use crate::tenant::TIMELINES_SEGMENT_NAME;
@@ -323,45 +322,6 @@ pub struct RemoteTimelineClient {
     deletion_queue_client: DeletionQueueClient,
 
     cancel: CancellationToken,
-}
-
-/// This timeout is intended to deal with hangs in lower layers, e.g. stuck TCP flows.  It is not
-/// intended to be snappy enough for prompt shutdown, as we have a CancellationToken for that.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to anyhow.
-///
-/// This is a convenience for the various upload functions.  In future
-/// the anyhow::Error result should be replaced with a more structured type that
-/// enables callers to avoid handling shutdown as an error.
-async fn upload_cancellable<F>(cancel: &CancellationToken, future: F) -> anyhow::Result<()>
-where
-    F: std::future::Future<Output = anyhow::Result<()>>,
-{
-    match timeout_cancellable(UPLOAD_TIMEOUT, cancel, future).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(TimeoutCancellableError::Timeout) => Err(anyhow::anyhow!("Timeout")),
-        Err(TimeoutCancellableError::Cancelled) => Err(anyhow::anyhow!("Shutting down")),
-    }
-}
-/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to DownloaDError.
-async fn download_cancellable<F, R>(
-    cancel: &CancellationToken,
-    future: F,
-) -> Result<R, DownloadError>
-where
-    F: std::future::Future<Output = Result<R, DownloadError>>,
-{
-    match timeout_cancellable(DOWNLOAD_TIMEOUT, cancel, future).await {
-        Ok(Ok(r)) => Ok(r),
-        Ok(Err(e)) => Err(e),
-        Err(TimeoutCancellableError::Timeout) => {
-            Err(DownloadError::Other(anyhow::anyhow!("Timed out")))
-        }
-        Err(TimeoutCancellableError::Cancelled) => Err(DownloadError::Cancelled),
-    }
 }
 
 impl RemoteTimelineClient {
@@ -506,7 +466,7 @@ impl RemoteTimelineClient {
     /// Download index file
     pub async fn download_index_file(
         &self,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> Result<MaybeDeletedIndexPart, DownloadError> {
         let _unfinished_gauge_guard = self.metrics.call_begin(
             &RemoteOpFileKind::Index,
@@ -1049,7 +1009,7 @@ impl RemoteTimelineClient {
             &self.cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)?;
 
         // all good, disarm the guard and mark as success
@@ -1081,14 +1041,14 @@ impl RemoteTimelineClient {
                 upload::preserve_initdb_archive(&self.storage_impl, tenant_id, timeline_id, cancel)
                     .await
             },
-            |_e| false,
+            TimeoutOrCancel::caused_by_cancel,
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "preserve_initdb_tar_zst",
             &cancel.clone(),
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancellled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)
         .context("backing up initdb archive")?;
         Ok(())
@@ -1147,22 +1107,17 @@ impl RemoteTimelineClient {
 
         let cancel = shutdown_token();
 
-        let remaining = backoff::retry(
+        let remaining = download_retry(
             || async {
                 self.storage_impl
-                    .list_files(Some(&timeline_storage_path))
+                    .list_files(Some(&timeline_storage_path), None, &cancel)
                     .await
             },
-            |_e| false,
-            FAILED_DOWNLOAD_WARN_THRESHOLD,
-            FAILED_REMOTE_OP_RETRIES,
-            "list_prefixes",
+            "list remaining files",
             &cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled!"))
-        .and_then(|x| x)
-        .context("list prefixes")?;
+        .context("list files remaining files")?;
 
         // We will delete the current index_part object last, since it acts as a deletion
         // marker via its deleted_at attribute
@@ -1351,6 +1306,7 @@ impl RemoteTimelineClient {
     /// queue.
     ///
     async fn perform_upload_task(self: &Arc<Self>, task: Arc<UploadTask>) {
+        let cancel = shutdown_token();
         // Loop to retry until it completes.
         loop {
             // If we're requested to shut down, close up shop and exit.
@@ -1362,7 +1318,7 @@ impl RemoteTimelineClient {
             // the Future, but we're not 100% sure if the remote storage library
             // is cancellation safe, so we don't dare to do that. Hopefully, the
             // upload finishes or times out soon enough.
-            if task_mgr::is_shutdown_requested() {
+            if cancel.is_cancelled() {
                 info!("upload task cancelled by shutdown request");
                 match self.stop() {
                     Ok(()) => {}
@@ -1448,6 +1404,10 @@ impl RemoteTimelineClient {
                 Ok(()) => {
                     break;
                 }
+                Err(e) if TimeoutOrCancel::caused_by_cancel(&e) => {
+                    // loop around to do the proper stopping
+                    continue;
+                }
                 Err(e) => {
                     let retries = task.retries.fetch_add(1, Ordering::SeqCst);
 
@@ -1473,7 +1433,7 @@ impl RemoteTimelineClient {
                         retries,
                         DEFAULT_BASE_BACKOFF_SECONDS,
                         DEFAULT_MAX_BACKOFF_SECONDS,
-                        &shutdown_token(),
+                        &cancel,
                     )
                     .await;
                 }
@@ -1702,23 +1662,6 @@ impl RemoteTimelineClient {
                 Ok(())
             }
         }
-    }
-
-    pub(crate) fn get_layers_metadata(
-        &self,
-        layers: Vec<LayerFileName>,
-    ) -> anyhow::Result<Vec<Option<LayerFileMetadata>>> {
-        let q = self.upload_queue.lock().unwrap();
-        let q = match &*q {
-            UploadQueue::Stopped(_) | UploadQueue::Uninitialized => {
-                anyhow::bail!("queue is in state {}", q.as_str())
-            }
-            UploadQueue::Initialized(inner) => inner,
-        };
-
-        let decorated = layers.into_iter().map(|l| q.latest_files.get(&l).cloned());
-
-        Ok(decorated.collect())
     }
 }
 
@@ -1990,7 +1933,7 @@ mod tests {
 
         // Download back the index.json, and check that the list of files is correct
         let initial_index_part = match client
-            .download_index_file(CancellationToken::new())
+            .download_index_file(&CancellationToken::new())
             .await
             .unwrap()
         {
@@ -2084,7 +2027,7 @@ mod tests {
 
         // Download back the index.json, and check that the list of files is correct
         let index_part = match client
-            .download_index_file(CancellationToken::new())
+            .download_index_file(&CancellationToken::new())
             .await
             .unwrap()
         {
@@ -2286,7 +2229,7 @@ mod tests {
         let client = test_state.build_client(get_generation);
 
         let download_r = client
-            .download_index_file(CancellationToken::new())
+            .download_index_file(&CancellationToken::new())
             .await
             .expect("download should always succeed");
         assert!(matches!(download_r, MaybeDeletedIndexPart::IndexPart(_)));

@@ -107,7 +107,6 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
     # which is needed for backpressure_lsns() to work
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
-    log.info("postgres is running on 'test_backpressure' branch")
 
     # setup check thread
     check_stop_event = threading.Event()

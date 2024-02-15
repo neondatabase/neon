@@ -341,18 +341,12 @@ impl ImageLayer {
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        if buf.spilled() {
-            // The code in ImageLayerWriterInner just warn!()s for this.
-            // It should probably error out as well.
-            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            )));
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(buf).await;
+        res?;
         Ok(())
     }
 }
@@ -528,9 +522,11 @@ impl ImageLayerWriterInner {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+    async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img).await?;
+        let (_img, res) = self.blob_writer.write_blob(img).await;
+        // TODO: re-use the buffer for `img` further upstack
+        let off = res?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -553,7 +549,8 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref()).await?;
+            let (_buf, res) = file.write_all(buf).await;
+            res?;
         }
 
         // Fill in the summary on blk 0
@@ -568,17 +565,12 @@ impl ImageLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
-        if buf.spilled() {
-            // This is bad as we only have one free block for the summary
-            warn!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            );
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(buf).await;
+        res?;
 
         let metadata = file
             .metadata()
@@ -659,7 +651,7 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+    pub async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         self.inner.as_mut().unwrap().put_image(key, img).await
     }
 

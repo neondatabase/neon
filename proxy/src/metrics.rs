@@ -152,6 +152,15 @@ pub static NUM_OPEN_CLIENTS_IN_HTTP_POOL: Lazy<IntGauge> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static NUM_CANCELLATION_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_cancellation_requests_total",
+        "Number of cancellation requests (per found/not_found).",
+        &["source", "kind"],
+    )
+    .unwrap()
+});
+
 #[derive(Clone)]
 pub struct LatencyTimer {
     // time since the stopwatch was started
@@ -200,8 +209,9 @@ impl LatencyTimer {
 
     pub fn success(&mut self) {
         // stop the stopwatch and record the time that we have accumulated
-        let start = self.start.take().expect("latency timer should be started");
-        self.accumulated += start.elapsed();
+        if let Some(start) = self.start.take() {
+            self.accumulated += start.elapsed();
+        }
 
         // success
         self.outcome = "success";
@@ -271,6 +281,25 @@ pub static CONNECTING_ENDPOINTS: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
         "proxy_connecting_endpoints",
         "HLL approximate cardinality of endpoints that are connecting",
         &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static ERROR_BY_KIND: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_errors_total",
+        "Number of errors by a given classification",
+        &["type"],
+    )
+    .unwrap()
+});
+
+pub static ENDPOINT_ERRORS_BY_KIND: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
+    register_hll_vec!(
+        32,
+        "proxy_endpoints_affected_by_errors",
+        "Number of endpoints affected by errors of a given classification",
+        &["type"],
     )
     .unwrap()
 });

@@ -3,10 +3,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::{models::TenantState, shard::TenantShardId};
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, instrument, Instrument, Span};
+use tracing::{error, instrument, Instrument};
 
 use utils::{backoff, completion, crashsafe, fs_ext, id::TimelineId};
 
@@ -84,17 +84,17 @@ async fn create_remote_delete_mark(
             let data = bytes::Bytes::from_static(data);
             let stream = futures::stream::once(futures::future::ready(Ok(data)));
             remote_storage
-                .upload(stream, 0, &remote_mark_path, None)
+                .upload(stream, 0, &remote_mark_path, None, cancel)
                 .await
         },
-        |_e| false,
+        TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
         cancel,
     )
     .await
-    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
     .context("mark_upload")?;
 
@@ -184,15 +184,15 @@ async fn remove_tenant_remote_delete_mark(
     if let Some(remote_storage) = remote_storage {
         let path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
         backoff::retry(
-            || async { remote_storage.delete(&path).await },
-            |_e| false,
+            || async { remote_storage.delete(&path, cancel).await },
+            TimeoutOrCancel::caused_by_cancel,
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
             cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)
         .context("remove_tenant_remote_delete_mark")?;
     }
@@ -496,11 +496,7 @@ impl DeleteTenantFlow {
                 };
                 Ok(())
             }
-            .instrument({
-                let span = tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
-                span.follows_from(Span::current());
-                span
-            }),
+            .instrument(tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
         );
     }
 

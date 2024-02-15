@@ -7,6 +7,24 @@ AS 'MODULE_PATHNAME', 'test_consume_xids'
 LANGUAGE C STRICT
 PARALLEL UNSAFE;
 
+CREATE FUNCTION test_consume_cpu(seconds int)
+RETURNS VOID
+AS 'MODULE_PATHNAME', 'test_consume_cpu'
+LANGUAGE C STRICT
+PARALLEL UNSAFE;
+
+CREATE FUNCTION test_consume_memory(megabytes int)
+RETURNS VOID
+AS 'MODULE_PATHNAME', 'test_consume_memory'
+LANGUAGE C STRICT
+PARALLEL UNSAFE;
+
+CREATE FUNCTION test_release_memory(megabytes int DEFAULT NULL)
+RETURNS VOID
+AS 'MODULE_PATHNAME', 'test_release_memory'
+LANGUAGE C
+PARALLEL UNSAFE;
+
 CREATE FUNCTION clear_buffer_cache()
 RETURNS VOID
 AS 'MODULE_PATHNAME', 'clear_buffer_cache'
