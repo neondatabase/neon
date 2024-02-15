@@ -704,10 +704,8 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
     # index upload is now hitting the failpoint, it should block the shutdown
     env.pageserver.stop(immediate=True)
 
-    local_metadata = (
-        env.pageserver.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
-    )
-    assert local_metadata.is_file()
+    timeline_dir = env.pageserver.timeline_dir(env.initial_tenant, new_branch_timeline_id)
+    assert timeline_dir.is_dir()
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
