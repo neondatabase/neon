@@ -290,13 +290,6 @@ jobs:
   run-extension-regression-test:
     needs: [ check-permissions, tag, build-neon ]
     runs-on: [ self-hosted, gen3, small ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:7910667895
-      # Raise locked memory limit for tokio-epoll-uring.
-      # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
-      # io_uring will account the memory of the CQ and SQ as locked.
-      # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     env:
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
