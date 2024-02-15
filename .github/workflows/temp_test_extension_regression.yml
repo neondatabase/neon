@@ -304,9 +304,8 @@ jobs:
         run: |
           ls .
           TAG=7910667895 PG_VERSION=v15 docker compose -f extensions_regression_tests/docker-compose.yml build
-          TAG=7910667895 PG_VERSION=v15 docker compose -f extensions_regression_tests/docker-compose.yml up
           
-          TAG=7910667895 extensions_regression_tests/docker_compose_test.sh
+          extensions_regression_tests/docker_compose_test.sh
           
           TAG=7910667895 PG_VERSION=v15 docker compose -f extensions_regression_tests/docker-compose.yml run test2
   
