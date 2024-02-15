@@ -143,6 +143,7 @@ where
     ar: &'a mut Builder<&'b mut W>,
     buf: Vec<u8>,
     current_segment: Option<(SlruKind, u32)>,
+    total_blocks: usize,
 }
 
 impl<'a, 'b, W> SlruSegmentsBuilder<'a, 'b, W>
@@ -154,6 +155,7 @@ where
             ar,
             buf: Vec::new(),
             current_segment: None,
+            total_blocks: 0,
         }
     }
 
@@ -199,7 +201,8 @@ where
         let header = new_tar_header(&segname, self.buf.len() as u64)?;
         self.ar.append(&header, self.buf.as_slice()).await?;
 
-        trace!("Added to basebackup slru {} relsize {}", segname, nblocks);
+        self.total_blocks += nblocks;
+        debug!("Added to basebackup slru {} relsize {}", segname, nblocks);
 
         self.buf.clear();
 
@@ -207,11 +210,15 @@ where
     }
 
     async fn finish(mut self) -> anyhow::Result<()> {
-        if self.current_segment.is_none() || self.buf.is_empty() {
-            return Ok(());
-        }
+        let res = if self.current_segment.is_none() || self.buf.is_empty() {
+            Ok(())
+        } else {
+            self.flush().await
+        };
 
-        self.flush().await
+        info!("Collected {} SLRU blocks", self.total_blocks);
+
+        res
     }
 }
 
