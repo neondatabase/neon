@@ -366,6 +366,13 @@ impl WalIngest {
                     }
                 }
             }
+            pg_constants::RM_STANDBY_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                if info == pg_constants::XLOG_RUNNING_XACTS {
+                    let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
+                    self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+                }
+            }
             _x => {
                 // TODO: should probably log & fail here instead of blindly
                 // doing something without understanding the protocol
