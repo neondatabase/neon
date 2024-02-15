@@ -188,11 +188,10 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 # run regression test of extensions
 #
 #########################################################################################
-FROM neon-pg-ext-build as extension-regression-tests
+FROM neon-pg-ext-build AS extension-regression-tests
 ARG PG_VERSION
 
-COPY --from=neon-pg-ext-build /usr/local/pgsql/ /usr/local/
-COPY extensions_regression_tests/neon/bin /usr/local/bin
+COPY --from=neon-pg-ext-build /usr/local/pgsql /usr/local
 
 RUN apt-get update && \
     apt-get install -y curl libclang-dev cmake curl jq netcat && \

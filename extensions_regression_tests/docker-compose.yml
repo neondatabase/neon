@@ -30,13 +30,7 @@ services:
 
 #  pageserver:
 #    restart: always
-#    build:
-#      context: ../.
-#      dockerfile: Dockerfile.compute-node1
-#      target: extension-regression-tests
-#      args:
-#        PG_VERSION: ${PG_VERSION:-v15}
-#        TAG: ${TAG:-latest}
+#    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
 #    environment:
 #      - BROKER_ENDPOINT='http://storage_broker:50051'
 #      - AWS_ACCESS_KEY_ID=minio
@@ -63,13 +57,7 @@ services:
 
 #  safekeeper:
 #    restart: always
-#    build:
-#      context: ../.
-#      dockerfile: Dockerfile.compute-node1
-#      target: extension-regression-tests
-#      args:
-#        PG_VERSION: ${PG_VERSION:-v15}
-#        TAG: ${TAG:-latest}
+#    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
 #    environment:
 #      - SAFEKEEPER_ADVERTISE_URL=safekeeper1:5454
 #      - SAFEKEEPER_ID=1
@@ -99,13 +87,7 @@ services:
 #
   storage_broker:
     restart: always
-    build:
-      context: ../.
-      dockerfile: Dockerfile.compute-node1
-      target: extension-regression-tests
-      args:
-        PG_VERSION: ${PG_VERSION:-v15}
-        TAG: ${TAG:-latest}
+    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
     ports:
       - 50051:50051
     command:
@@ -114,15 +96,7 @@ services:
 #
 #  compute:
 #    restart: always
-#    build:
-#      context: ../.
-#      dockerfile: Dockerfile.compute-node1
-#      target: extension-regression-tests
-#      args:
-#        PG_VERSION: ${PG_VERSION:-v15}
-#        TAG: ${TAG:-latest}
-#        http_proxy: $http_proxy
-#        https_proxy: $https_proxy
+#    image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
 #    environment:
 #      - PG_VERSION=${PG_VERSION:-15}
 #      #- RUST_BACKTRACE=1
