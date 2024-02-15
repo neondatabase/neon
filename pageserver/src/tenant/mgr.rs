@@ -403,7 +403,7 @@ fn load_tenant_config(
         let metadata_path = timeline_path.join(METADATA_FILE_NAME);
         match std::fs::remove_file(&metadata_path) {
             Ok(()) => {
-                crashsafe::fsync(&timeline_path)
+                crashsafe::fsync(timeline_path)
                     .context("fsync timeline dir after removing legacy metadata file")?;
                 info!("removed legacy metadata file at {metadata_path}");
             }
