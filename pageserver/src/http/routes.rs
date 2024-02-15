@@ -1951,6 +1951,7 @@ async fn put_io_engine_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
     let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
     crate::virtual_file::io_engine::set(kind);
     json_response(StatusCode::OK, ())
