@@ -3274,108 +3274,111 @@ impl Timeline {
 
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
-            if force || self.time_for_new_image_layer(partition, lsn).await {
-                let mut image_layer_writer = ImageLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_shard_id,
-                    &img_range,
-                    lsn,
-                )
-                .await?;
+            if !force && !self.time_for_new_image_layer(partition, lsn).await {
+                start = img_range.end;
+                continue;
+            }
 
-                fail_point!("image-layer-writer-fail-before-finish", |_| {
-                    Err(CreateImageLayersError::Other(anyhow::anyhow!(
-                        "failpoint image-layer-writer-fail-before-finish"
-                    )))
-                });
+            let mut image_layer_writer = ImageLayerWriter::new(
+                self.conf,
+                self.timeline_id,
+                self.tenant_shard_id,
+                &img_range,
+                lsn,
+            )
+            .await?;
 
-                let mut wrote_keys = false;
+            fail_point!("image-layer-writer-fail-before-finish", |_| {
+                Err(CreateImageLayersError::Other(anyhow::anyhow!(
+                    "failpoint image-layer-writer-fail-before-finish"
+                )))
+            });
 
-                let mut key_request_accum = KeySpaceAccum::new();
-                for range in &partition.ranges {
-                    let mut key = range.start;
-                    while key < range.end {
-                        if self.shard_identity.is_key_disposable(&key) {
-                            debug!(
-                                "Dropping key {} during compaction (it belongs on shard {:?})",
-                                key,
-                                self.shard_identity.get_shard_number(&key)
-                            );
-                        } else {
-                            key_request_accum.add_key(key);
-                        }
+            let mut wrote_keys = false;
 
-                        if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
-                            || key.next() == range.end
-                        {
-                            let results = self
-                                .get_vectored(
-                                    &key_request_accum.consume_keyspace().ranges,
-                                    lsn,
-                                    ctx,
-                                )
-                                .await?;
+            let mut key_request_accum = KeySpaceAccum::new();
+            for range in &partition.ranges {
+                let mut key = range.start;
+                while key < range.end {
+                    // Decide whether to retain this key: usually we do, but sharded tenants may
+                    // need to drop keys that don't belong to them.  If we retain the key, add it
+                    // to `key_request_accum` for later issuing a vectored get
+                    if self.shard_identity.is_key_disposable(&key) {
+                        debug!(
+                            "Dropping key {} during compaction (it belongs on shard {:?})",
+                            key,
+                            self.shard_identity.get_shard_number(&key)
+                        );
+                    } else {
+                        key_request_accum.add_key(key);
+                    }
 
-                            for (img_key, img) in results {
-                                let img = match img {
-                                    Ok(img) => img,
-                                    Err(err) => {
-                                        // If we fail to reconstruct a VM or FSM page, we can zero the
-                                        // page without losing any actual user data. That seems better
-                                        // than failing repeatedly and getting stuck.
-                                        //
-                                        // We had a bug at one point, where we truncated the FSM and VM
-                                        // in the pageserver, but the Postgres didn't know about that
-                                        // and continued to generate incremental WAL records for pages
-                                        // that didn't exist in the pageserver. Trying to replay those
-                                        // WAL records failed to find the previous image of the page.
-                                        // This special case allows us to recover from that situation.
-                                        // See https://github.com/neondatabase/neon/issues/2601.
-                                        //
-                                        // Unfortunately we cannot do this for the main fork, or for
-                                        // any metadata keys, keys, as that would lead to actual data
-                                        // loss.
-                                        if is_rel_fsm_block_key(img_key)
-                                            || is_rel_vm_block_key(img_key)
-                                        {
-                                            warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
-                                            ZERO_PAGE.clone()
-                                        } else {
-                                            return Err(
-                                                CreateImageLayersError::PageReconstructError(err),
-                                            );
-                                        }
+                    let last_key_in_range = key.next() == range.end;
+                    key = key.next();
+
+                    // Maybe flush `key_rest_accum`
+                    if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
+                        || last_key_in_range
+                    {
+                        let results = self
+                            .get_vectored(&key_request_accum.consume_keyspace().ranges, lsn, ctx)
+                            .await?;
+
+                        for (img_key, img) in results {
+                            let img = match img {
+                                Ok(img) => img,
+                                Err(err) => {
+                                    // If we fail to reconstruct a VM or FSM page, we can zero the
+                                    // page without losing any actual user data. That seems better
+                                    // than failing repeatedly and getting stuck.
+                                    //
+                                    // We had a bug at one point, where we truncated the FSM and VM
+                                    // in the pageserver, but the Postgres didn't know about that
+                                    // and continued to generate incremental WAL records for pages
+                                    // that didn't exist in the pageserver. Trying to replay those
+                                    // WAL records failed to find the previous image of the page.
+                                    // This special case allows us to recover from that situation.
+                                    // See https://github.com/neondatabase/neon/issues/2601.
+                                    //
+                                    // Unfortunately we cannot do this for the main fork, or for
+                                    // any metadata keys, keys, as that would lead to actual data
+                                    // loss.
+                                    if is_rel_fsm_block_key(img_key) || is_rel_vm_block_key(img_key)
+                                    {
+                                        warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
+                                        ZERO_PAGE.clone()
+                                    } else {
+                                        return Err(CreateImageLayersError::PageReconstructError(
+                                            err,
+                                        ));
                                     }
-                                };
+                                }
+                            };
 
-                                tracing::debug!("create_image_layers: retain key {img_key}");
-                                image_layer_writer.put_image(img_key, img).await?;
-                                wrote_keys = true;
-                            }
+                            // Write all the keys we just read into our new image layer.
+                            image_layer_writer.put_image(img_key, img).await?;
+                            wrote_keys = true;
                         }
-
-                        key = key.next();
                     }
                 }
+            }
 
-                if wrote_keys {
-                    start = img_range.end;
-                    let image_layer = image_layer_writer.finish(self).await?;
-                    image_layers.push(image_layer);
-                } else {
-                    // The image layer may be empty if this is a sharded tenant and the partition
-                    // does not cover any keys owned by this shard.  In this case, to ensure we don't
-                    // leave gaps between image layers, leave `start` where it is, so that the next
-                    // layer we write will cover the key range that we just scanned.
-                    tracing::debug!(
-                        "create_image_layers: no data in range {}-{}",
-                        img_range.start,
-                        img_range.end
-                    );
-                }
-            } else {
+            if wrote_keys {
+                // Normal path: we have written some data into the new image layer for this
+                // partition, so flush it to disk.
                 start = img_range.end;
+                let image_layer = image_layer_writer.finish(self).await?;
+                image_layers.push(image_layer);
+            } else {
+                // Special case: the image layer may be empty if this is a sharded tenant and the
+                // partition does not cover any keys owned by this shard.  In this case, to ensure
+                // we don't leave gaps between image layers, leave `start` where it is, so that the next
+                // layer we write will cover the key range that we just scanned.
+                tracing::debug!(
+                    "create_image_layers: no data in range {}-{}",
+                    img_range.start,
+                    img_range.end
+                );
             }
         }
         // All layers that the GC wanted us to create have now been created.
