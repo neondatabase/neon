@@ -1310,7 +1310,7 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     lsn,
                 ));
-                image_layer::ImageLayerInner::load(&owner.path, lsn, summary, ctx)
+                image_layer::ImageLayerInner::load(&owner.path, lsn, summary, owner.conf.max_vectored_read_size, ctx)
                     .await
                     .map(|res| res.map(LayerKind::Image))
             };
