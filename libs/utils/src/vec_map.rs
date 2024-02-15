@@ -20,8 +20,20 @@ impl<K: Ord, V> VecMap<K, V> {
         self.0.is_empty()
     }
 
+    pub fn last(&self) -> Option<&(K, V)> {
+        self.0.last()
+    }
+
     pub fn as_slice(&self) -> &[(K, V)] {
         self.0.as_slice()
+    }
+
+    pub fn inner(self) -> Vec<(K, V)> {
+        self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
     /// This function may panic if given a range where the lower bound is
@@ -88,6 +100,10 @@ impl<K: Ord, V> VecMap<K, V> {
 
         let delta_size = self.instrument_vec_op(|vec| vec.push((key, value)));
         Ok((None, delta_size))
+    }
+
+    pub fn truncate(&mut self, pos: usize) {
+        self.0.truncate(pos)
     }
 
     /// Split the map into two.
