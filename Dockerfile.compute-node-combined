@@ -40,18 +40,19 @@ RUN for pg_version in v14 v15 v16; do \
     # Install headers
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install && \
+    extension_dir="${prefix}/share/extension" && \
     # Enable some of contrib extensions
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/insert_username.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/intagg.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/moddatetime.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_stat_statements.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/refint.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control && \
+    echo 'trusted = true' >> $extension_dir/autoinc.control && \
+    echo 'trusted = true' >> $extension_dir/bloom.control && \
+    echo 'trusted = true' >> $extension_dir/earthdistance.control && \
+    echo 'trusted = true' >> $extension_dir/insert_username.control && \
+    echo 'trusted = true' >> $extension_dir/intagg.control && \
+    echo 'trusted = true' >> $extension_dir/moddatetime.control && \
+    echo 'trusted = true' >> $extension_dir/pg_stat_statements.control && \
+    echo 'trusted = true' >> $extension_dir/pgrowlocks.control && \
+    echo 'trusted = true' >> $extension_dir/pgstattuple.control && \
+    echo 'trusted = true' >> $extension_dir/refint.control && \
+    echo 'trusted = true' >> $extension_dir/xml2.control && \
     # We need to grant EXECUTE on pg_stat_statements_reset() to neon_superuser.
     # In vanilla postgres this function is limited to Postgres role superuser.
     # In neon we have neon_superuser role that is not a superuser but replaces superuser in some cases.
@@ -74,4 +75,6 @@ RUN for pg_version in v14 v15 v16; do \
             echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) TO neon_superuser;' >> $file; \
         fi; \
     done; \
+    # Go back to root dir from `/postgres-v<version>` dir
+    cd ..; \
 done
