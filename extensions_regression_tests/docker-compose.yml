@@ -102,8 +102,8 @@ services:
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
-      - ../docker-compose/compute_wrapper/var/db/postgres/specs/:/var/db/postgres/specs/
-      - ../docker-compose/compute_wrapper/shell/:/shell/
+      - ./compute_wrapper/var/db/postgres/specs/:/var/db/postgres/specs/
+      - ./compute_wrapper/shell/:/shell/
     ports:
       - 55433:55433 # pg protocol handler
       - 3080:3080 # http endpoints
@@ -142,7 +142,7 @@ services:
 #
   test2:
     container_name: pg_extensions_regression_test2
-    working_dir: /home/nonroot/extensions_regression_tests
+    working_dir: /home/postgres/extensions_regression_tests
     build:
       context: ../.
       dockerfile: Dockerfile.compute-node1

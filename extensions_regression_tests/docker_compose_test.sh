@@ -13,7 +13,7 @@ COMPOSE_FILE=extensions_regression_tests/docker-compose.yml
 
 COMPUTE_CONTAINER_NAME=docker-compose-compute-1
 SQL="CREATE TABLE t(key int primary key, value text); insert into t values(1,1); select * from t;"
-PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -c '$SQL' postgres"
+PSQL_OPTION="-h localhost -U postgres -p 55433 -c '$SQL' postgres"
 
 cleanup() {
     echo "show container information"
