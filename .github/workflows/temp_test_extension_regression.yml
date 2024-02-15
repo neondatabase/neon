@@ -88,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [ debug ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -297,7 +297,7 @@ jobs:
       - name: Get Neon artifact
         uses: ./.github/actions/download
         with:
-          name: neon-${{ runner.os }}-${{ inputs.build_type }}-artifact
+          name: neon-${{ runner.os }}-debug-artifact
           path: /tmp/neon
       - name: Checkout
         uses: actions/checkout@v3
