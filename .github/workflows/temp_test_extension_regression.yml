@@ -304,10 +304,12 @@ jobs:
         uses: ./.github/actions/download
         with:
           name: neon-${{ runner.os }}-debug-artifact
-          path: /tmp/neon
+          path: extensions_regression_tests/neon
 
       - name: run test
         run: |
+          ls /tmp/neon
+          ls .
           PG_VERSION=v15 docker compose -f extensions_regression_tests/docker-compose.yml build
           PG_VERSION=v15 docker compose -f extensions_regression_tests/docker-compose.yml up
           

@@ -192,8 +192,7 @@ FROM neon-pg-ext-build as extension-regression-tests
 ARG PG_VERSION
 
 COPY --from=neon-pg-ext-build /usr/local/pgsql/ /usr/local/
-COPY /tmp/neon/bin /usr/local/bin
-#COPY extensions_regression_tests/bin /usr/local/bin
+COPY extensions_regression_tests/neon/bin /usr/local/bin
 
 RUN apt-get update && \
     apt-get install -y curl libclang-dev cmake curl jq netcat && \
