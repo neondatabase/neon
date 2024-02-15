@@ -1,3 +1,6 @@
+import json
+
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -254,4 +257,76 @@ def test_sharding_split_smoke(
         log.info(f"Migrating shard {migrate_shard} from {ps_id} to {destination}")
         env.neon_cli.tenant_migrate(migrate_shard, destination, timeout_secs=10)
 
+    workload.validate()
+
+
+# Stripe sizes in number of pages.
+TINY_STRIPES = 16
+LARGE_STRIPES = 32768
+
+
+@pytest.mark.parametrize("stripe_size", [TINY_STRIPES, LARGE_STRIPES])
+def test_sharding_compaction(neon_env_builder: NeonEnvBuilder, stripe_size: int):
+    """
+    Use small stripes, small layers, and small compaction thresholds to exercise how compaction
+    and image layer generation interacts with sharding.
+    """
+
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{128 * 1024}",
+        "compaction_threshold": "1",
+        "compaction_target_size": f"{128 * 1024}",
+        # no PITR horizon, we specify the horizon when we request on-demand GC
+        "pitr_interval": "0s",
+        # disable background compaction and GC. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # create image layers eagerly, so that GC can remove some layers
+        "image_creation_threshold": "1",
+    }
+
+    neon_env_builder.num_pageservers = 4
+    env = neon_env_builder.init_start(
+        initial_tenant_conf=TENANT_CONF,
+        initial_tenant_shard_count=4,
+        initial_tenant_shard_stripe_size=stripe_size,
+    )
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(64)
+    workload.churn_rows(64)
+
+    # Assert that we got some image layers: this is important because this test's purpose is to exercise the sharding changes
+    # to Timeline::create_image_layers, so if we weren't creating any image layers we wouldn't be doing our job.
+    shard_has_image_layers = []
+    for shard in env.attachment_service.locate(tenant_id):
+        pageserver = env.get_pageserver(shard["node_id"])
+        shard_id = shard["shard_id"]
+        layer_map = pageserver.http_client().layer_map_info(shard_id, timeline_id)
+        image_layer_sizes = {}
+        for layer in layer_map.historic_layers:
+            if layer.kind == "Image":
+                image_layer_sizes[layer.layer_file_name] = layer.layer_file_size
+
+        shard_has_image_layers.append(len(image_layer_sizes) > 1)
+
+        log.info(f"Shard {shard_id} layer sizes: {json.dumps(image_layer_sizes, indent=2)}")
+
+        # TODO: once keyspace partitioning is updated, assert that layer sizes are as expected
+        # (see https://github.com/neondatabase/neon/issues/6774)
+
+    if stripe_size == TINY_STRIPES:
+        # Expect writes were scattered across all pageservers: they should all have compacted some image layers
+        assert all(shard_has_image_layers)
+    else:
+        # With large stripes, it is expected that most of our writes went to one pageserver, so we just require
+        # that at least one of them has some image layers.
+        assert any(shard_has_image_layers)
+
+    # Assert that everything is still readable
     workload.validate()
