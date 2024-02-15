@@ -8,7 +8,7 @@ use utils::lsn::Lsn;
 use rand::prelude::*;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -27,6 +27,8 @@ pub(crate) struct Args {
     mgmt_api_endpoint: String,
     #[clap(long, default_value = "localhost:64000")]
     page_service_host_port: String,
+    #[clap(long)]
+    page_service_connstring: Option<String>,
     #[clap(long)]
     pageserver_jwt: Option<String>,
     #[clap(long, default_value = "1")]
@@ -230,12 +232,17 @@ async fn client(
 ) {
     start_work_barrier.wait().await;
 
-    let client = pageserver_client::page_service::Client::new(crate::util::connstring::connstring(
-        &args.page_service_host_port,
-        args.pageserver_jwt.as_deref(),
-    ))
-    .await
-    .unwrap();
+    let connstr = match &args.page_service_connstring {
+        Some(connstr) => connstr.clone(),
+        None => crate::util::connstring::connstring(
+            &args.page_service_host_port,
+            args.pageserver_jwt.as_deref(),
+        ),
+    };
+
+    let client = pageserver_client::page_service::Client::new(connstr)
+        .await
+        .unwrap();
 
     while let Some(Work { lsn, gzip }) = work.recv().await {
         let start = Instant::now();
@@ -263,7 +270,7 @@ async fn client(
                 }
             })
             .await;
-        debug!("basebackup size is {} bytes", size.load(Ordering::Relaxed));
+        info!("basebackup size is {} bytes", size.load(Ordering::Relaxed));
         let elapsed = start.elapsed();
         live_stats.inc();
         STATS.with(|stats| {
