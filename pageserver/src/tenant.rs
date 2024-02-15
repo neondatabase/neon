@@ -2974,7 +2974,7 @@ impl Tenant {
 
     /// For unit tests, make this visible so that other modules can directly create timelines
     #[cfg(test)]
-    #[tracing::instrument(fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), %timeline_id))]
+    #[tracing::instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), %timeline_id))]
     pub(crate) async fn bootstrap_timeline_test(
         &self,
         timeline_id: TimelineId,
@@ -3592,8 +3592,7 @@ pub(crate) mod harness {
         TimelineId::from_array(hex!("AA223344556677881122334455667788"));
 
     /// Convenience function to create a page image with given string as the only content
-    #[allow(non_snake_case)]
-    pub fn TEST_IMG(s: &str) -> Bytes {
+    pub fn test_img(s: &str) -> Bytes {
         let mut buf = BytesMut::new();
         buf.extend_from_slice(s.as_bytes());
         buf.resize(64, 0);
@@ -3774,7 +3773,6 @@ pub(crate) mod harness {
             _pg_version: u32,
         ) -> anyhow::Result<Bytes> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
-
             if records_neon {
                 // For Neon wal records, we can decode without spawning postgres, so do so.
                 let base_img = base_img.expect("Neon WAL redo requires base image").1;
@@ -3799,7 +3797,7 @@ pub(crate) mod harness {
                 );
                 println!("{s}");
 
-                Ok(TEST_IMG(&s))
+                Ok(test_img(&s))
             }
         }
     }
@@ -3833,7 +3831,7 @@ mod tests {
             .put(
                 *TEST_KEY,
                 Lsn(0x10),
-                &Value::Image(TEST_IMG("foo at 0x10")),
+                &Value::Image(test_img("foo at 0x10")),
                 &ctx,
             )
             .await?;
@@ -3845,7 +3843,7 @@ mod tests {
             .put(
                 *TEST_KEY,
                 Lsn(0x20),
-                &Value::Image(TEST_IMG("foo at 0x20")),
+                &Value::Image(test_img("foo at 0x20")),
                 &ctx,
             )
             .await?;
@@ -3854,15 +3852,15 @@ mod tests {
 
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x10), &ctx).await?,
-            TEST_IMG("foo at 0x10")
+            test_img("foo at 0x10")
         );
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x1f), &ctx).await?,
-            TEST_IMG("foo at 0x10")
+            test_img("foo at 0x10")
         );
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x20), &ctx).await?,
-            TEST_IMG("foo at 0x20")
+            test_img("foo at 0x20")
         );
 
         Ok(())
@@ -3978,7 +3976,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {}", lsn))),
                     ctx,
                 )
                 .await?;
@@ -3988,7 +3986,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {}", lsn))),
                     ctx,
                 )
                 .await?;
@@ -4002,7 +4000,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {}", lsn))),
                     ctx,
                 )
                 .await?;
@@ -4012,7 +4010,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {}", lsn))),
                     ctx,
                 )
                 .await?;
@@ -4167,7 +4165,7 @@ mod tests {
         // Broken, as long as you don't need to access data from the parent.
         assert_eq!(
             newtline.get(*TEST_KEY, Lsn(0x70), &ctx).await?,
-            TEST_IMG(&format!("foo at {}", Lsn(0x70)))
+            test_img(&format!("foo at {}", Lsn(0x70)))
         );
 
         // This needs to traverse to the parent, and fails.
@@ -4244,7 +4242,7 @@ mod tests {
         // Check that the data is still accessible on the branch.
         assert_eq!(
             newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await?,
-            TEST_IMG(&format!("foo at {}", Lsn(0x40)))
+            test_img(&format!("foo at {}", Lsn(0x40)))
         );
 
         Ok(())
@@ -4365,7 +4363,7 @@ mod tests {
             .put(
                 *TEST_KEY,
                 Lsn(0x10),
-                &Value::Image(TEST_IMG("foo at 0x10")),
+                &Value::Image(test_img("foo at 0x10")),
                 &ctx,
             )
             .await?;
@@ -4382,7 +4380,7 @@ mod tests {
             .put(
                 *TEST_KEY,
                 Lsn(0x20),
-                &Value::Image(TEST_IMG("foo at 0x20")),
+                &Value::Image(test_img("foo at 0x20")),
                 &ctx,
             )
             .await?;
@@ -4399,7 +4397,7 @@ mod tests {
             .put(
                 *TEST_KEY,
                 Lsn(0x30),
-                &Value::Image(TEST_IMG("foo at 0x30")),
+                &Value::Image(test_img("foo at 0x30")),
                 &ctx,
             )
             .await?;
@@ -4416,7 +4414,7 @@ mod tests {
             .put(
                 *TEST_KEY,
                 Lsn(0x40),
-                &Value::Image(TEST_IMG("foo at 0x40")),
+                &Value::Image(test_img("foo at 0x40")),
                 &ctx,
             )
             .await?;
@@ -4430,23 +4428,23 @@ mod tests {
 
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x10), &ctx).await?,
-            TEST_IMG("foo at 0x10")
+            test_img("foo at 0x10")
         );
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x1f), &ctx).await?,
-            TEST_IMG("foo at 0x10")
+            test_img("foo at 0x10")
         );
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x20), &ctx).await?,
-            TEST_IMG("foo at 0x20")
+            test_img("foo at 0x20")
         );
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x30), &ctx).await?,
-            TEST_IMG("foo at 0x30")
+            test_img("foo at 0x30")
         );
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x40), &ctx).await?,
-            TEST_IMG("foo at 0x40")
+            test_img("foo at 0x40")
         );
 
         Ok(())
@@ -4478,7 +4476,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
                         &ctx,
                     )
                     .await?;
@@ -4540,7 +4538,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
                     &ctx,
                 )
                 .await?;
@@ -4561,7 +4559,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
                         &ctx,
                     )
                     .await?;
@@ -4575,7 +4573,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    TEST_IMG(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{} at {}", blknum, last_lsn))
                 );
             }
 
@@ -4629,7 +4627,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
                     &ctx,
                 )
                 .await?;
@@ -4658,7 +4656,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
                         &ctx,
                     )
                     .await?;
@@ -4673,7 +4671,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    TEST_IMG(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{} at {}", blknum, last_lsn))
                 );
             }
 
@@ -4735,7 +4733,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                        &Value::Image(test_img(&format!("{} {} at {}", idx, blknum, lsn))),
                         &ctx,
                     )
                     .await?;
@@ -4757,7 +4755,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, *lsn, &ctx).await?,
-                    TEST_IMG(&format!("{idx} {blknum} at {lsn}"))
+                    test_img(&format!("{idx} {blknum} at {lsn}"))
                 );
             }
         }
