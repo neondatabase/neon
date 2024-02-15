@@ -136,12 +136,9 @@ DELETE_FAILPOINTS = [
     "timeline-delete-before-index-deleted-at",
     "timeline-delete-before-schedule",
     "timeline-delete-before-rm",
-    "timeline-delete-during-rm",
     "timeline-delete-after-rm",
     "timeline-delete-before-index-delete",
     "timeline-delete-after-index-delete",
-    "timeline-delete-after-rm-metadata",
-    "timeline-delete-after-rm-dir",
 ]
 
 
