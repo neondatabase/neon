@@ -292,7 +292,7 @@ impl Service {
                         generation: None,
                         secondary_conf: None,
                         shard_number: tenant_shard_id.shard_number.0,
-                        shard_count: tenant_shard_id.shard_count.0,
+                        shard_count: tenant_shard_id.shard_count.literal(),
                         shard_stripe_size: 0,
                         tenant_conf: models::TenantConfig::default(),
                     },
@@ -389,14 +389,14 @@ impl Service {
             let tenant_shard_id = TenantShardId {
                 tenant_id: TenantId::from_str(tsp.tenant_id.as_str())?,
                 shard_number: ShardNumber(tsp.shard_number as u8),
-                shard_count: ShardCount(tsp.shard_count as u8),
+                shard_count: ShardCount::new(tsp.shard_count as u8),
             };
             let shard_identity = if tsp.shard_count == 0 {
                 ShardIdentity::unsharded()
             } else {
                 ShardIdentity::new(
                     ShardNumber(tsp.shard_number as u8),
-                    ShardCount(tsp.shard_count as u8),
+                    ShardCount::new(tsp.shard_count as u8),
                     ShardStripeSize(tsp.shard_stripe_size as u32),
                 )?
             };
@@ -526,7 +526,7 @@ impl Service {
             let tsp = TenantShardPersistence {
                 tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
                 shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
-                shard_count: attach_req.tenant_shard_id.shard_count.0 as i32,
+                shard_count: attach_req.tenant_shard_id.shard_count.literal() as i32,
                 shard_stripe_size: 0,
                 generation: 0,
                 generation_pageserver: i64::MAX,
@@ -726,16 +726,9 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<TenantCreateResponse, ApiError> {
-        // Shard count 0 is valid: it means create a single shard (ShardCount(0) means "unsharded")
-        let literal_shard_count = if create_req.shard_parameters.is_unsharded() {
-            1
-        } else {
-            create_req.shard_parameters.count.0
-        };
-
         // This service expects to handle sharding itself: it is an error to try and directly create
         // a particular shard here.
-        let tenant_id = if create_req.new_tenant_id.shard_count > ShardCount(1) {
+        let tenant_id = if !create_req.new_tenant_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "Attempted to create a specific shard, this API is for creating the whole tenant"
             )));
@@ -749,7 +742,7 @@ impl Service {
             create_req.shard_parameters.count,
         );
 
-        let create_ids = (0..literal_shard_count)
+        let create_ids = (0..create_req.shard_parameters.count.count())
             .map(|i| TenantShardId {
                 tenant_id,
                 shard_number: ShardNumber(i),
@@ -769,7 +762,7 @@ impl Service {
             .map(|tenant_shard_id| TenantShardPersistence {
                 tenant_id: tenant_shard_id.tenant_id.to_string(),
                 shard_number: tenant_shard_id.shard_number.0 as i32,
-                shard_count: tenant_shard_id.shard_count.0 as i32,
+                shard_count: tenant_shard_id.shard_count.literal() as i32,
                 shard_stripe_size: create_req.shard_parameters.stripe_size.0 as i32,
                 generation: create_req.generation.map(|g| g as i32).unwrap_or(0),
                 generation_pageserver: i64::MAX,
@@ -914,7 +907,7 @@ impl Service {
         tenant_id: TenantId,
         req: TenantLocationConfigRequest,
     ) -> Result<TenantLocationConfigResponse, ApiError> {
-        if req.tenant_id.shard_count.0 > 1 {
+        if !req.tenant_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "This API is for importing single-sharded or unsharded tenants"
             )));
@@ -1449,7 +1442,7 @@ impl Service {
             for (tenant_shard_id, shard) in
                 locked.tenants.range(TenantShardId::tenant_range(tenant_id))
             {
-                match shard.shard.count.0.cmp(&split_req.new_shard_count) {
+                match shard.shard.count.count().cmp(&split_req.new_shard_count) {
                     Ordering::Equal => {
                         //  Already split this
                         children_found.push(*tenant_shard_id);
@@ -1459,7 +1452,7 @@ impl Service {
                         return Err(ApiError::BadRequest(anyhow::anyhow!(
                             "Requested count {} but already have shards at count {}",
                             split_req.new_shard_count,
-                            shard.shard.count.0
+                            shard.shard.count.count()
                         )));
                     }
                     Ordering::Less => {
@@ -1489,7 +1482,7 @@ impl Service {
                     shard_ident = Some(shard.shard);
                 }
 
-                if tenant_shard_id.shard_count == ShardCount(split_req.new_shard_count) {
+                if tenant_shard_id.shard_count.count() == split_req.new_shard_count {
                     tracing::info!(
                         "Tenant shard {} already has shard count {}",
                         tenant_shard_id,
@@ -1515,7 +1508,7 @@ impl Service {
                 targets.push(SplitTarget {
                     parent_id: *tenant_shard_id,
                     node: node.clone(),
-                    child_ids: tenant_shard_id.split(ShardCount(split_req.new_shard_count)),
+                    child_ids: tenant_shard_id.split(ShardCount::new(split_req.new_shard_count)),
                 });
             }
 
@@ -1562,7 +1555,7 @@ impl Service {
                 this_child_tsps.push(TenantShardPersistence {
                     tenant_id: child.tenant_id.to_string(),
                     shard_number: child.shard_number.0 as i32,
-                    shard_count: child.shard_count.0 as i32,
+                    shard_count: child.shard_count.literal() as i32,
                     shard_stripe_size: shard_ident.stripe_size.0 as i32,
                     // Note: this generation is a placeholder, [`Persistence::begin_shard_split`] will
                     // populate the correct generation as part of its transaction, to protect us

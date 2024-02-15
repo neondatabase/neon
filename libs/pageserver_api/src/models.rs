@@ -214,14 +214,14 @@ impl ShardParameters {
     pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 
     pub fn is_unsharded(&self) -> bool {
-        self.count == ShardCount(0)
+        self.count.is_unsharded()
     }
 }
 
 impl Default for ShardParameters {
     fn default() -> Self {
         Self {
-            count: ShardCount(0),
+            count: ShardCount::new(0),
             stripe_size: Self::DEFAULT_STRIPE_SIZE,
         }
     }

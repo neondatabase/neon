@@ -2370,7 +2370,7 @@ impl Tenant {
             generation: self.generation.into(),
             secondary_conf: None,
             shard_number: self.shard_identity.number.0,
-            shard_count: self.shard_identity.count.0,
+            shard_count: self.shard_identity.count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
             tenant_conf: tenant_config,
         }

@@ -1136,7 +1136,7 @@ async fn tenant_shard_split_handler(
 
     let new_shards = state
         .tenant_manager
-        .shard_split(tenant_shard_id, ShardCount(req.new_shard_count), &ctx)
+        .shard_split(tenant_shard_id, ShardCount::new(req.new_shard_count), &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 
