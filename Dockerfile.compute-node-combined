@@ -78,3 +78,77 @@ RUN for pg_version in v14 v15 v16; do \
     # Go back to root dir from `/postgres-v<version>` dir
     cd ..; \
 done
+
+#########################################################################################
+#
+# Layer "postgis-build"
+# Build PostGIS from the upstream PostGIS mirror.
+#
+#########################################################################################
+FROM build-deps AS postgis-build
+COPY --from=pg-build /usr/local/pgsql-v14/ /usr/local/pgsql-v14/
+COPY --from=pg-build /usr/local/pgsql-v15/ /usr/local/pgsql-v15/
+COPY --from=pg-build /usr/local/pgsql-v16/ /usr/local/pgsql-v16/
+RUN apt update && \
+    apt install -y cmake gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
+    libboost-system-dev libboost-iostreams-dev libboost-program-options-dev libboost-timer-dev \
+    libcgal-dev libgdal-dev libgmp-dev libmpfr-dev libopenscenegraph-dev libprotobuf-c-dev \
+    protobuf-c-compiler xsltproc
+
+# SFCGAL > 1.3 requires CGAL > 5.2, Bullseye's libcgal-dev is 5.2
+RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar.gz -O SFCGAL.tar.gz && \
+    echo "4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 SFCGAL.tar.gz" | sha256sum --check && \
+    mkdir sfcgal-src && cd sfcgal-src && tar xvzf ../SFCGAL.tar.gz --strip-components=1 -C . && \
+    cmake -DCMAKE_BUILD_TYPE=Release . && make -j $(getconf _NPROCESSORS_ONLN) && \
+    DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
+    make clean && cp -R /sfcgal/* /
+
+
+RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.3.tar.gz -O postgis.tar.gz && \
+    echo "74eb356e3f85f14233791013360881b6748f78081cc688ff9d6f0f673a762d13 postgis.tar.gz" | sha256sum --check && \
+    mkdir postgis-src && cd postgis-src && tar xvzf ../postgis.tar.gz --strip-components=1 -C . && \
+    for pg_version in v14 v15 v16; do \
+        prefix="/usr/local/pgsql-${pg_version}/" ;\
+        find "$prefix" -type f | sed "s|^${prefix}||" > /before.txt &&\
+        export PATH="${prefix}/bin:$PATH" ;\
+        ./autogen.sh && \
+        ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
+        make -j $(getconf _NPROCESSORS_ONLN) install && \
+        cd extensions/postgis && \
+        make clean && \
+        make -j $(getconf _NPROCESSORS_ONLN) install && \
+        extension_dir="$prefix/share/extension"; \
+        echo 'trusted = true' >> $extension_dir/postgis.control && \
+        echo 'trusted = true' >> $extension_dir/postgis_raster.control && \
+        echo 'trusted = true' >> $extension_dir/postgis_sfcgal.control && \
+        echo 'trusted = true' >> $extension_dir/postgis_tiger_geocoder.control && \
+        echo 'trusted = true' >> $extension_dir/postgis_topology.control && \
+        echo 'trusted = true' >> $extension_dir/address_standardizer.control && \
+        echo 'trusted = true' >> $extension_dir/address_standardizer_data_us.control && \
+        mkdir -p /extensions/postgis && \
+        cp $extension_dir/postgis.control /extensions/postgis && \
+        cp $extension_dir/postgis_raster.control /extensions/postgis && \
+        cp $extension_dir/postgis_sfcgal.control /extensions/postgis && \
+        cp $extension_dir/postgis_tiger_geocoder.control /extensions/postgis && \
+        cp $extension_dir/postgis_topology.control /extensions/postgis && \
+        cp $extension_dir/address_standardizer.control /extensions/postgis && \
+        cp $extension_dir/address_standardizer_data_us.control /extensions/postgis && \
+        cd ../.. ;\
+    done
+
+RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
+    echo "cac297c07d34460887c4f3b522b35c470138760fe358e351ad1db4edb6ee306e pgrouting.tar.gz" | sha256sum --check && \
+    mkdir pgrouting-src && cd pgrouting-src && tar xvzf ../pgrouting.tar.gz --strip-components=1 -C . && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    for pg_version in v14 v15 v16; do \
+        prefix="/usr/local/pgsql-${pg_version}/" ;\
+        extension_dir="$prefix/share/extension"; \
+        echo 'trusted = true' >> $extension_dir/pgrouting.control && \
+        find "$prefix" -type f | sed "s|^${prefix}||" > /after.txt &&\
+        cp $extension_dir/pgrouting.control /extensions/postgis && \
+        sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
+        comm -13 /before.txt /after.txt | tar --directory=$prefix --zstd -cf /extensions/postgis.tar.zst -T - ;\
+    done
