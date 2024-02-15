@@ -35,6 +35,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::backoff;
+use utils::circuit_breaker::CircuitBreaker;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::failpoint_support;
@@ -293,6 +294,10 @@ pub struct Tenant {
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
+
+    /// Track repeated failures to compact, so that we can back off.
+    /// Overhead of mutex is acceptable because compaction is done with a multi-second period.
+    compaction_circuit_breaker: std::sync::Mutex<CircuitBreaker>,
 
     /// If the tenant is in Activating state, notify this to encourage it
     /// to proceed to Active as soon as possible, rather than waiting for lazy
@@ -1937,11 +1942,68 @@ impl Tenant {
             timelines_to_compact
         };
 
+        // Before doing any I/O work, check our circuit breaker
+        if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
+            return Ok(());
+        }
+
+        let mut total_physical = 0;
         for (timeline_id, timeline) in &timelines_to_compact {
-            timeline
+            let timeline_result = timeline
                 .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
-                .await?;
+                .await;
+
+            if let Some(remote_client) = &timeline.remote_client {
+                total_physical += remote_client.get_remote_physical_size();
+            }
+
+            if timeline_result.is_err() {
+                self.compaction_circuit_breaker.lock().unwrap().fail();
+            }
+
+            timeline_result?;
+        }
+
+        self.compaction_circuit_breaker.lock().unwrap().success();
+
+        // Circuit breaker: if a timeline's statistics indicate a pathological storage issue, such
+        // as extremely high write inflation, then we will stop ingesting data for that timeline.  This
+        // reduces the blast radius of postgres/walingest bugs that might enable one tenant to generate
+        // an extremely large storage size, and thereby interfere with other tenants on the same pageserver.
+        let synthetic_size = self.cached_synthetic_tenant_size.load(Ordering::Relaxed);
+        if synthetic_size > 0 {
+            let amplification = total_physical as f64 / synthetic_size as f64;
+
+            // We only try to evaluate amplification once synthetic size reaches some threshold, to avoid
+            // noisy results on very small/new tenants.
+            const SIZE_THRESHOLD_FOR_AMPLIFICATION_CHECK: u64 = 1000000000;
+
+            // Typical storage amplification is something like 3x-10x.  100x would be really extreme.
+            // 1000x is unthinkable: if we see an amplification this extreme, then something bad and
+            // dangerous is going on.
+            const PATHOLOGICAL_AMPLIFICATION_FACTOR: f64 = 1000.0;
+
+            if synthetic_size > SIZE_THRESHOLD_FOR_AMPLIFICATION_CHECK
+                && amplification > PATHOLOGICAL_AMPLIFICATION_FACTOR
+            {
+                tracing::error!("Pathological storage amplification detected (synthetic size {synthetic_size}, physical size {total_physical}): shutting down ingest");
+                if self.get_enforce_circuit_breakers() {
+                    for (timeline_id, timeline) in timelines_to_compact {
+                        if tokio::time::timeout(
+                            Duration::from_secs(5),
+                            timeline.kill_wal_receiver(),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            tracing::error!(
+                                "Timed out shutting down WAL intest on timeline {timeline_id}"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -2594,6 +2656,16 @@ impl Tenant {
         }
     }
 
+    pub(crate) fn get_enforce_circuit_breakers(&self) -> bool {
+        let tenant_conf = self
+            .tenant_conf
+            .read()
+            .unwrap()
+            .tenant_conf
+            .enforce_circuit_breakers;
+        tenant_conf.unwrap_or(self.conf.default_tenant_conf.enforce_circuit_breakers)
+    }
+
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().tenant_conf = new_tenant_conf;
         // Don't hold self.timelines.lock() during the notifies.
@@ -2753,6 +2825,10 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
+            compaction_circuit_breaker: std::sync::Mutex::new(CircuitBreaker::new(
+                5,
+                Some(Duration::from_secs(3600)),
+            )),
             activate_now_sem: tokio::sync::Semaphore::new(0),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
@@ -3966,6 +4042,7 @@ pub(crate) mod harness {
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
+                enforce_circuit_breakers: Some(tenant_conf.enforce_circuit_breakers),
             }
         }
     }
