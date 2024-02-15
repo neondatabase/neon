@@ -7,6 +7,7 @@ pub mod framed;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::HashMap, fmt, io, str};
 
 // re-export for use in utils pageserver_feedback.rs
@@ -123,7 +124,7 @@ impl StartupMessageParams {
     }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub struct CancelKeyData {
     pub backend_pid: i32,
     pub cancel_key: i32,

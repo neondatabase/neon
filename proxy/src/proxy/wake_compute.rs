@@ -1,9 +1,4 @@
-use crate::auth::backend::ComputeUserInfo;
-use crate::console::{
-    errors::WakeComputeError,
-    provider::{CachedNodeInfo, ConsoleBackend},
-    Api,
-};
+use crate::console::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::context::RequestMonitoring;
 use crate::metrics::{bool_to_str, NUM_WAKEUP_FAILURES};
 use crate::proxy::retry::retry_after;
@@ -11,17 +6,16 @@ use hyper::StatusCode;
 use std::ops::ControlFlow;
 use tracing::{error, warn};
 
+use super::connect_compute::ComputeConnectBackend;
 use super::retry::ShouldRetry;
 
-/// wake a compute (or retrieve an existing compute session from cache)
-pub async fn wake_compute(
+pub async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
     ctx: &mut RequestMonitoring,
-    api: &ConsoleBackend,
-    info: &ComputeUserInfo,
+    api: &B,
 ) -> Result<CachedNodeInfo, WakeComputeError> {
     loop {
-        let wake_res = api.wake_compute(ctx, info).await;
+        let wake_res = api.wake_compute(ctx).await;
         match handle_try_wake(wake_res, *num_retries) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
