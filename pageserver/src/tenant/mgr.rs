@@ -380,19 +380,30 @@ fn load_tenant_config(
         &tenant_dir_path,
         "later use of conf....path() methods would be dubious"
     );
-    let timeline_dirs: Vec<Utf8PathBuf> =
-        match conf.timelines_path(&tenant_shard_id).read_dir_utf8() {
-            Ok(iter) => iter
-                .map(|p| p.map(|p| p.path().to_owned()))
-                .collect::<Result<Vec<_>, _>>()?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
-            Err(e) => return Err(anyhow::anyhow!(e)),
-        };
-    for timeline_dir in timeline_dirs {
-        let metadata_path = timeline_dir.join(METADATA_FILE_NAME);
+    let timelines: Vec<TimelineId> = match conf.timelines_path(&tenant_shard_id).read_dir_utf8() {
+        Ok(iter) => {
+            let mut timelines = Vec::new();
+            for res in iter {
+                let p = res?;
+                let Some(timeline_id) = p.file_name().parse::<TimelineId>().ok() else {
+                    // skip any entries that aren't TimelineId, such as
+                    // - *.___temp dirs
+                    // - unfinished initdb uploads (test_non_uploaded_root_timeline_is_deleted_after_restart)
+                    continue;
+                };
+                timelines.push(timeline_id);
+            }
+            timelines
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(anyhow::anyhow!(e)),
+    };
+    for timeline_id in timelines {
+        let timeline_path = &conf.timeline_path(&tenant_shard_id, &timeline_id);
+        let metadata_path = timeline_path.join(METADATA_FILE_NAME);
         match std::fs::remove_file(&metadata_path) {
             Ok(()) => {
-                crashsafe::fsync(&timeline_dir)
+                crashsafe::fsync(&timeline_path)
                     .context("fsync timeline dir after removing legacy metadata file")?;
                 info!("removed legacy metadata file at {metadata_path}");
             }

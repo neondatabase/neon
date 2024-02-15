@@ -798,7 +798,7 @@ def test_timeline_delete_resumed_on_attach(
         )
 
     # failpoint before we remove index_part from s3
-    failpoint = "timeline-delete-during-rm"
+    failpoint = "timeline-delete-after-rm"
     ps_http.configure_failpoints((failpoint, "return"))
 
     env.pageserver.allowed_errors.extend(
