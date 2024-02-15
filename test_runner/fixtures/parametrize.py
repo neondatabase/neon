@@ -7,7 +7,7 @@ from _pytest.python import Metafunc
 from fixtures.pg_version import PgVersion
 
 """
-Dynamically parametrize tests by different parameters parameters
+Dynamically parametrize tests by different parameters
 """
 
 
