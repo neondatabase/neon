@@ -747,29 +747,6 @@ async fn init_timeline_state(
     let timeline_path = conf.timeline_path(tenant_shard_id, &heatmap.timeline_id);
     let mut detail = SecondaryDetailTimeline::default();
 
-    // Clean up legacy `metadata` file during startup.
-    //
-    // NB: this code runs before attach() divers into the deletion flow.
-    // Removing the file here allows us to remove special treatment of `metadata`
-    // from the deletion flow.
-    //
-    // NB: Do a synchronous call because it turns out that tokio::fs/spawn_blocking on
-    // this code path blows up with many tenants: https://github.com/neondatabase/neon/pull/6765
-    let metadata_path = conf.metadata_path(tenant_shard_id, &heatmap.timeline_id);
-    match std::fs::remove_file(&metadata_path) {
-        Ok(()) => {
-            let timeline_dir = metadata_path.parent().expect("we know it has a parent");
-            crashsafe::fsync(&timeline_dir)
-                .context("fsync timeline dir after removing legacy metadata file")?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // all good, this is the common case
-        }
-        Err(e) => {
-            anyhow::bail!("remove legacy metadata file: {e}");
-        }
-    }
-
     let mut dir = match tokio::fs::read_dir(&timeline_path).await {
         Ok(d) => d,
         Err(e) => {
@@ -804,6 +781,11 @@ async fn init_timeline_state(
             "Read metadata on {}",
             dentry.path().to_string_lossy()
         ));
+
+        // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
+        if file_name == METADATA_FILE_NAME {
+            continue;
+        }
 
         match LayerFileName::from_str(&file_name) {
             Ok(name) => {
