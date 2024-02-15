@@ -422,6 +422,7 @@ async fn build_timeline_info_common(
             tenant::timeline::logical_size::Accuracy::Approximate => false,
             tenant::timeline::logical_size::Accuracy::Exact => true,
         },
+        directory_entries_counts: timeline.get_directory_metrics().to_vec(),
         current_physical_size,
         current_logical_size_non_incremental: None,
         timeline_dir_layer_file_size_sum: None,
@@ -2213,7 +2214,7 @@ pub fn make_router(
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/keyspace",
-            |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
+            |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .any(handler_404))

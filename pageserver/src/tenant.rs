@@ -25,6 +25,7 @@ use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use remote_storage::TimeoutOrCancel;
 use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
@@ -3339,7 +3340,7 @@ impl Tenant {
             &self.cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)
     }
 
@@ -3389,8 +3390,10 @@ impl Tenant {
                 );
                 let dest_path =
                     &remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &timeline_id);
+
+                // if this fails, it will get retried by retried control plane requests
                 storage
-                    .copy_object(source_path, dest_path)
+                    .copy_object(source_path, dest_path, &self.cancel)
                     .await
                     .context("copy initdb tar")?;
             }
@@ -3914,6 +3917,7 @@ pub(crate) mod harness {
     use utils::lsn::Lsn;
 
     use crate::deletion_queue::mock::MockDeletionQueue;
+    use crate::walredo::apply_neon;
     use crate::{
         config::PageServerConf, repository::Key, tenant::Tenant, walrecord::NeonWalRecord,
     };
@@ -4030,6 +4034,7 @@ pub(crate) mod harness {
             std::fs::create_dir_all(&remote_fs_dir).unwrap();
             let config = RemoteStorageConfig {
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
             let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));
@@ -4173,20 +4178,34 @@ pub(crate) mod harness {
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
         ) -> anyhow::Result<Bytes> {
-            let s = format!(
-                "redo for {} to get to {}, with {} and {} records",
-                key,
-                lsn,
-                if base_img.is_some() {
-                    "base image"
-                } else {
-                    "no base image"
-                },
-                records.len()
-            );
-            println!("{s}");
+            let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
 
-            Ok(TEST_IMG(&s))
+            if records_neon {
+                // For Neon wal records, we can decode without spawning postgres, so do so.
+                let base_img = base_img.expect("Neon WAL redo requires base image").1;
+                let mut page = BytesMut::new();
+                page.extend_from_slice(&base_img);
+                for (_record_lsn, record) in records {
+                    apply_neon::apply_in_neon(&record, key, &mut page)?;
+                }
+                Ok(page.freeze())
+            } else {
+                // We never spawn a postgres walredo process in unit tests: just log what we might have done.
+                let s = format!(
+                    "redo for {} to get to {}, with {} and {} records",
+                    key,
+                    lsn,
+                    if base_img.is_some() {
+                        "base image"
+                    } else {
+                        "no base image"
+                    },
+                    records.len()
+                );
+                println!("{s}");
+
+                Ok(TEST_IMG(&s))
+            }
         }
     }
 }
@@ -4358,7 +4377,6 @@ mod tests {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
-        #[allow(non_snake_case)]
         {
             let writer = tline.writer().await;
             // Create a relation on the timeline

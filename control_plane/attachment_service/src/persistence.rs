@@ -381,7 +381,6 @@ impl Persistence {
     //
     // We create the child shards here, so that they will be available for increment_generation calls
     // if some pageserver holding a child shard needs to restart before the overall tenant split is complete.
-    #[allow(dead_code)]
     pub(crate) async fn begin_shard_split(
         &self,
         old_shard_count: ShardCount,
@@ -449,7 +448,6 @@ impl Persistence {
 
     // When we finish shard splitting, we must atomically clean up the old shards
     // and insert the new shards, and clear the splitting marker.
-    #[allow(dead_code)]
     pub(crate) async fn complete_shard_split(
         &self,
         split_tenant_id: TenantId,
