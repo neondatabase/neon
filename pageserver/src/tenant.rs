@@ -1140,6 +1140,29 @@ impl Tenant {
             None
         };
 
+        // Clean up legacy `metadata` file during startup.
+        //
+        // NB: this code runs before attach() divers into the deletion flow.
+        // Removing the file here allows us to remove special treatment of `metadata`
+        // from the deletion flow.
+        //
+        // NB: Do a synchronous call because it turns out that tokio::fs/spawn_blocking on
+        // this code path blows up with many tenants: https://github.com/neondatabase/neon/pull/6765
+        let metadata_path = self.conf.metadata_path(&self.tenant_shard_id, &timeline_id);
+        match std::fs::remove_file(&metadata_path) {
+            Ok(()) => {
+                let timeline_dir = metadata_path.parent().expect("we know it has a parent");
+                crashsafe::fsync(&timeline_dir)
+                    .context("fsync timeline dir after removing legacy metadata file")?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // all good, this is the common case
+            }
+            Err(e) => {
+                anyhow::bail!("remove legacy metadata file: {e}");
+            }
+        }
+
         self.timeline_init_and_sync(
             timeline_id,
             resources,
