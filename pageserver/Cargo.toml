@@ -21,6 +21,7 @@ camino.workspace = true
 camino-tempfile.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
+close_fds.workspace = true
 const_format.workspace = true
 consumption_metrics.workspace = true
 crc32c.workspace = true

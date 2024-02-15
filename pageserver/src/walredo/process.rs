@@ -9,7 +9,7 @@ use bytes::Bytes;
 use nix::poll::{PollFd, PollFlags};
 use pageserver_api::{reltag::RelTag, shard::TenantShardId};
 use postgres_ffi::BLCKSZ;
-use std::os::fd::AsRawFd;
+use std::os::{fd::AsRawFd, unix::process::CommandExt};
 #[cfg(feature = "testing")]
 use std::sync::atomic::AtomicUsize;
 use std::{
@@ -25,6 +25,40 @@ use utils::{lsn::Lsn, nonblock::set_nonblock};
 mod no_leak_child;
 /// The IPC protocol that pageserver and walredo process speak over their shared pipe.
 mod protocol;
+
+///
+/// Command with ability not to give all file descriptors to child process
+///
+trait CloseFileDescriptors: CommandExt {
+    ///
+    /// Close file descriptors (other than stdin, stdout, stderr) in child process
+    ///
+    fn close_fds(&mut self) -> &mut Command;
+}
+
+impl<C: CommandExt> CloseFileDescriptors for C {
+    fn close_fds(&mut self) -> &mut Command {
+        // SAFETY: Code executed inside pre_exec should have async-signal-safety,
+        // which means it should be safe to execute inside a signal handler.
+        // The precise meaning depends on platform. See `man signal-safety`
+        // for the linux definition.
+        //
+        // The set_fds_cloexec_threadsafe function is documented to be
+        // async-signal-safe.
+        //
+        // Aside from this function, the rest of the code is re-entrant and
+        // doesn't make any syscalls. We're just passing constants.
+        //
+        // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
+        // which is not async-signal-safe. Be careful.
+        unsafe {
+            self.pre_exec(move || {
+                close_fds::set_fds_cloexec_threadsafe(3, &[]);
+                Ok(())
+            })
+        }
+    }
+}
 
 pub struct WalRedoProcess {
     #[allow(dead_code)]
@@ -79,14 +113,16 @@ impl WalRedoProcess {
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
-            // NB: The redo process is not trusted after we sent it the first
-            // walredo work. Before that, it is trusted. Specifically, we trust
-            // it to
-            // 1. close all file descriptors except stdin, stdout, stderr because
-            //    pageserver might not be 100% diligent in setting FD_CLOEXEC on all
-            //    the files it opens, and
-            // 2. to use seccomp to sandbox itself before processing the first
-            //    walredo request.
+            // The redo process is not trusted, and runs in seccomp mode that
+            // doesn't allow it to open any files. We have to also make sure it
+            // doesn't inherit any file descriptors from the pageserver, that
+            // would allow an attacker to read any files that happen to be open
+            // in the pageserver.
+            //
+            // The Rust standard library makes sure to mark any file descriptors with
+            // as close-on-exec by default, but that's not enough, since we use
+            // libraries that directly call libc open without setting that flag.
+            .close_fds()
             .spawn_no_leak_child(tenant_shard_id)
             .context("spawn process")?;
         WAL_REDO_PROCESS_COUNTERS.started.inc();
