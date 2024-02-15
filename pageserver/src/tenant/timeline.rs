@@ -2226,7 +2226,7 @@ impl Timeline {
         fail::fail_point!("timeline-calculate-logical-size-check-dir-exists", |_| {
             if !self
                 .conf
-                .metadata_path(&self.tenant_shard_id, &self.timeline_id)
+                .timeline_path(&self.tenant_shard_id, &self.timeline_id)
                 .exists()
             {
                 error!("timeline-calculate-logical-size-pre metadata file does not exist")
