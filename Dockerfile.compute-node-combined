@@ -108,9 +108,9 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.3.tar.gz -O postg
     echo "74eb356e3f85f14233791013360881b6748f78081cc688ff9d6f0f673a762d13 postgis.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xvzf ../postgis.tar.gz --strip-components=1 -C . && \
     for pg_version in v14 v15 v16; do \
-        prefix="/usr/local/pgsql-${pg_version}/" ;\
+        prefix="/usr/local/pgsql-${pg_version}/"; \
         find "$prefix" -type f | sed "s|^${prefix}||" > /before.txt &&\
-        export PATH="${prefix}/bin:$PATH" ;\
+        export PATH="${prefix}/bin:$PATH"; \
         ./autogen.sh && \
         ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
         make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -133,7 +133,7 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.3.tar.gz -O postg
         cp $extension_dir/postgis_topology.control /extensions/postgis && \
         cp $extension_dir/address_standardizer.control /extensions/postgis && \
         cp $extension_dir/address_standardizer_data_us.control /extensions/postgis && \
-        cd ../.. ;\
+        cd ../..; \
     done
 
 RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
@@ -141,8 +141,8 @@ RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouti
     mkdir pgrouting-src && cd pgrouting-src && tar xvzf ../pgrouting.tar.gz --strip-components=1 -C . && \
     for pg_version in v14 v15 v16; do \
         mkdir build && cd build && \
-        prefix="/usr/local/pgsql-${pg_version}/" ;\
-        export PATH="${prefix}/bin:$PATH" ;\
+        prefix="/usr/local/pgsql-${pg_version}/"; \
+        export PATH="${prefix}/bin:$PATH"; \
         cmake -DCMAKE_BUILD_TYPE=Release .. && \
         make -j $(getconf _NPROCESSORS_ONLN) && \
         make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -155,3 +155,40 @@ RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouti
         cd .. ;\
         rm -r build ;\
     done
+
+#########################################################################################
+#
+# Layer "plv8-build"
+# Build plv8
+#
+#########################################################################################
+FROM build-deps AS plv8-build
+COPY --from=pg-build /usr/local/pgsql-v14/ /usr/local/pgsql-v14/
+COPY --from=pg-build /usr/local/pgsql-v15/ /usr/local/pgsql-v15/
+COPY --from=pg-build /usr/local/pgsql-v16/ /usr/local/pgsql-v16/
+
+RUN apt update && \
+    apt install -y ninja-build python3-dev libncurses5 binutils clang
+
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.tar.gz && \
+    echo "7096c3290928561f0d4901b7a52794295dc47f6303102fae3f8e42dd575ad97d plv8.tar.gz" | sha256sum --check && \
+    mkdir plv8-src && cd plv8-src && tar xvzf ../plv8.tar.gz --strip-components=1 -C . && \
+    # generate and copy upgrade scripts
+    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
+    for pg_version in v14 v15 v16; do \
+        prefix="/usr/local/pgsql-${pg_version}/" ;\
+        extension_dir="$prefix/share/extension" ;\
+        cp upgrade/* "$extension_dir" && \
+        export PATH="${prefix}/bin:$PATH" && \
+        make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
+        rm -rf /plv8-* && \
+        find $prefix -name "plv8-*.so" | xargs strip && \
+        # don't break computes with installed old version of plv8
+        cd "${prefix}/lib/" && \
+        ln -s plv8-3.1.10.so plv8-3.1.5.so && \
+        ln -s plv8-3.1.10.so plv8-3.1.8.so && \
+        extension_dir="$prefix/share/extension" ;\
+        echo 'trusted = true' >> $extension_dir/plv8.control && \
+        echo 'trusted = true' >> $extension_dir/plcoffee.control && \
+        echo 'trusted = true' >> $extension_dir/plls.control  ;\
+     done
