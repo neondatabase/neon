@@ -342,7 +342,7 @@ pub struct Timeline {
     ///
     /// Must only be taken in two places:
     /// - [`Timeline::compact`] (this file)
-    /// - [`delete::delete_local_layer_files`]
+    /// - [`delete::delete_local_timeline_directory`]
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     compaction_lock: tokio::sync::Mutex<()>,
@@ -351,7 +351,7 @@ pub struct Timeline {
     ///
     /// Must only be taken in two places:
     /// - [`Timeline::gc`] (this file)
-    /// - [`delete::delete_local_layer_files`]
+    /// - [`delete::delete_local_timeline_directory`]
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
