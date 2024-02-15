@@ -1719,7 +1719,11 @@ impl Timeline {
                             discovered_layers.push((file_name, file_size));
                             continue;
                         }
-                        Discovered::Metadata | Discovered::IgnoredBackup => {
+                        Discovered::Metadata => {
+                            warn!("found legacy metadata file, these should have been removed in load_tenant_config");
+                            continue;
+                        }
+                        Discovered::IgnoredBackup => {
                             continue;
                         }
                         Discovered::Unknown(file_name) => {

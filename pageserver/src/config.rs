@@ -38,7 +38,7 @@ use crate::tenant::{
 };
 use crate::virtual_file;
 use crate::{
-    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
+    IGNORED_TENANT_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
     TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
@@ -806,17 +806,6 @@ impl PageServerConf {
             .join(tenant_shard_id.to_string())
             .join(timeline_id.to_string())
             .join(connection_id.to_string())
-    }
-
-    /// Points to a place in pageserver's local directory,
-    /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-    ) -> Utf8PathBuf {
-        self.timeline_path(tenant_shard_id, timeline_id)
-            .join(METADATA_FILE_NAME)
     }
 
     /// Turns storage remote path of a file into its local path.

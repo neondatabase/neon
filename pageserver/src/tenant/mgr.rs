@@ -41,7 +41,7 @@ use crate::tenant::config::{
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
-use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext::PathExt;
@@ -358,12 +358,6 @@ fn load_tenant_config(
         return Ok(None);
     }
 
-    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-    if tenant_ignore_mark_file.exists() {
-        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-        return Ok(None);
-    }
-
     let tenant_shard_id = match tenant_dir_path
         .file_name()
         .unwrap_or_default()
@@ -375,6 +369,48 @@ fn load_tenant_config(
             return Ok(None);
         }
     };
+
+    // Clean up legacy `metadata` files.
+    // Doing it here because every single tenant directory is visited here.
+    // In any later code, there's different treatment of tenant dirs
+    // ... depending on whether the tenant is in re-attach response or not
+    // ... epending on whether the tenant is ignored or not
+    assert_eq!(
+        &conf.tenant_path(&tenant_shard_id),
+        &tenant_dir_path,
+        "later use of conf....path() methods would be dubious"
+    );
+    let timeline_dirs: Vec<Utf8PathBuf> =
+        match conf.timelines_path(&tenant_shard_id).read_dir_utf8() {
+            Ok(iter) => iter
+                .map(|p| p.map(|p| p.path().to_owned()))
+                .collect::<Result<Vec<_>, _>>()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+            Err(e) => return Err(anyhow::anyhow!(e)),
+        };
+    for timeline_dir in timeline_dirs {
+        let metadata_path = timeline_dir.join(METADATA_FILE_NAME);
+        match std::fs::remove_file(&metadata_path) {
+            Ok(()) => {
+                crashsafe::fsync(&timeline_dir)
+                    .context("fsync timeline dir after removing legacy metadata file")?;
+                info!("removed legacy metadata file at {metadata_path}");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // something removed the file earlier, or it was never there
+                // We don't care, this software version doesn't write it again, so, we're good.
+            }
+            Err(e) => {
+                anyhow::bail!("remove legacy metadata file: {e}: {metadata_path}");
+            }
+        }
+    }
+
+    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+    if tenant_ignore_mark_file.exists() {
+        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+        return Ok(None);
+    }
 
     Ok(Some((
         tenant_shard_id,
