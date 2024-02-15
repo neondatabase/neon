@@ -82,6 +82,11 @@ jobs:
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
     steps:
+      - name: Get Neon artifact
+        uses: ./.github/actions/download
+        with:
+          name: neon-${{ runner.os }}-${{ inputs.build_type }}-artifact
+          path: /tmp/neon
       - name: Checkout
         uses: actions/checkout@v3
         with:
@@ -90,6 +95,6 @@ jobs:
 
       - name: run test
         run: |
-          PG_VERSION=v15 docker compose -f extensions_regression_tests/docker-compose.yml build
-          PG_VERSION=v15 docker compose -f extensions_regression_tests/docker-compose.yml run test2
+          extensions_regression_tests/docker_compose_test.sh
+          PG_VERSION=15 docker compose -f extensions_regression_tests/docker-compose.yml run test2
   

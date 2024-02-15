@@ -4,6 +4,8 @@
 # Vars #
 ########
 TMPDIR="$(mktemp -d)"
+export HOSTNAME=localhost
+export PORT=55433
 export PGDATA="$TMPDIR"
 export PGHOST="$TMPDIR"
 export PGUSER=postgres
@@ -17,17 +19,17 @@ export PG_COLOR=auto
 # Ensure Clean Env #
 ####################
 # Stop the server (if running)
-trap 'pg_ctl stop -m i' sigint sigterm exit
+#trap 'pg_ctl stop -m i' sigint sigterm exit
 # Remove temporary data dir
-rm -rf "$TMPDIR"
+#rm -rf "$TMPDIR"
 
 ##############
 # Initialize #
 ##############
 # Initialize: setting PGUSER as the owner
-initdb --no-locale --encoding=UTF8 --nosync -U "$PGUSER"
+#initdb --no-locale --encoding=UTF8 --nosync -U "$PGUSER"
 # Start the server
-pg_ctl start -o "-F -c listen_addresses=\"\" -c log_min_messages=WARNING -k $PGDATA"
+#pg_ctl start -o "-F -c listen_addresses=\"\" -c log_min_messages=WARNING -k $PGDATA"
 # Create the test db
 createdb contrib_regression
 
