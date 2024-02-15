@@ -308,5 +308,6 @@ jobs:
       - name: run test
         run: |
           extensions_regression_tests/docker_compose_test.sh
+          
           PG_VERSION=15 docker compose -f extensions_regression_tests/docker-compose.yml run test2
   
