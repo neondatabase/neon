@@ -79,7 +79,7 @@ jobs:
     needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:7903733158
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:7910667895
       # Raise locked memory limit for tokio-epoll-uring.
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
@@ -120,7 +120,7 @@ jobs:
         run: |
           # This is a temporary solution to ensure that the Postgres submodules revision is correct (i.e. the updated intentionally).
           # Eventually it will be replaced by a regression test https://github.com/neondatabase/neon/pull/4603
-          
+
           FAILED=false
           for postgres in postgres-v14 postgres-v15 postgres-v16; do
             expected=$(cat vendor/revisions.json | jq --raw-output '."'"${postgres}"'"')
@@ -130,7 +130,7 @@ jobs:
               FAILED=true
             fi
           done
-          
+
           if [ "${FAILED}" = "true" ]; then
             echo >&2 "Please update vendors/revisions.json if these changes are intentional"
             exit 1
@@ -250,14 +250,14 @@ jobs:
             DST=/tmp/neon/bin/$bin
             cp "$SRC" "$DST"
           done
-          
+
           # Install test executables and write list of all binaries (for code coverage)
           if [[ $BUILD_TYPE == "debug" ]]; then
             # Keep bloated coverage data files away from the rest of the artifact
             mkdir -p /tmp/coverage/
-          
+
             mkdir -p /tmp/neon/test_bin/
-          
+
             test_exe_paths=$(
               ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES --message-format=json --no-run |
               jq -r '.executable | select(. != null)'
@@ -265,13 +265,13 @@ jobs:
             for bin in $test_exe_paths; do
               SRC=$bin
               DST=/tmp/neon/test_bin/$(basename $bin)
-          
+
               # We don't need debug symbols for code coverage, so strip them out to make
               # the artifact smaller.
               strip "$SRC" -o "$DST"
               echo "$DST" >> /tmp/coverage/binaries.list
             done
-          
+
             for bin in $binaries; do
               echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
@@ -289,7 +289,14 @@ jobs:
 
   run-extension-regression-test:
     needs: [ check-permissions, tag, build-neon ]
-    runs-on: ubuntu-latest
+    runs-on: [ self-hosted, gen3, small ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:7910667895
+      # Raise locked memory limit for tokio-epoll-uring.
+      # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
+      # io_uring will account the memory of the CQ and SQ as locked.
+      # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     env:
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
@@ -299,7 +306,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-          
+
       - name: Get Neon artifact
         uses: ./.github/actions/download
         with:
@@ -308,6 +315,9 @@ jobs:
 
       - name: run test
         run: |
+          PG_VERSION=15 docker compose -f extensions_regression_tests/docker-compose.yml build
+          PG_VERSION=15 docker compose -f extensions_regression_tests/docker-compose.yml up
+          
           extensions_regression_tests/docker_compose_test.sh
           
           PG_VERSION=15 docker compose -f extensions_regression_tests/docker-compose.yml run test2
