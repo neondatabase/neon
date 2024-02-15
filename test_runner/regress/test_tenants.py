@@ -5,7 +5,7 @@ from contextlib import closing
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import pytest
 import requests
@@ -18,6 +18,7 @@ from fixtures.metrics import (
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    wait_for_wal_insert_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until_tenant_active
@@ -422,6 +423,7 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
 
     endpoint_tenant = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
 
@@ -429,24 +431,32 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
     TABLE_COUNT = 1600
     COUNT_AT_LEAST_EXPECTED = 5500
 
-    with closing(endpoint_tenant.connect()) as conn:
+    with endpoint_tenant.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE TABLE template_tbl(key int primary key, value text);")
             for i in range(TABLE_COUNT):
                 cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
+    wait_for_wal_insert_lsn(env, endpoint_tenant, env.initial_tenant, env.initial_timeline)
     endpoint_tenant.stop()
 
-    m = env.pageserver.http_client().get_metrics()
+    m = ps_http.get_metrics()
     directory_entries_count_metric = m.query_all(
         "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
     )
 
-    def only_int(samples: List[Sample]) -> Optional[int]:
-        if len(samples) == 1:
-            return int(samples[0].value)
-        assert len(samples) == 0
-        return None
+    def only_int(samples: List[Sample]) -> int:
+        assert len(samples) == 1
+        return int(samples[0].value)
 
     directory_entries_count = only_int(directory_entries_count_metric)
 
-    assert directory_entries_count is not None and directory_entries_count > COUNT_AT_LEAST_EXPECTED
+    log.info(f"pageserver_directory_entries_count metric value: {directory_entries_count}")
+
+    assert directory_entries_count > COUNT_AT_LEAST_EXPECTED
+
+    timeline_detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    counts = timeline_detail["directory_entries_counts"]
+    assert counts
+
+    log.info(f"directory counts: {counts}")
