@@ -288,7 +288,7 @@ jobs:
 
 
   run-extension-regression-test:
-    needs: [ check-permissions, tag, build-neon ]
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, small ]
     env:
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
