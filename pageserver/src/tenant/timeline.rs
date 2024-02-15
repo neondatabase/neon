@@ -3274,7 +3274,6 @@ impl Timeline {
 
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
-            start = img_range.end;
             if force || self.time_for_new_image_layer(partition, lsn).await {
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
@@ -3291,6 +3290,8 @@ impl Timeline {
                     )))
                 });
 
+                let mut wrote_keys = false;
+
                 let mut key_request_accum = KeySpaceAccum::new();
                 for range in &partition.ranges {
                     let mut key = range.start;
@@ -3301,11 +3302,10 @@ impl Timeline {
                                 key,
                                 self.shard_identity.get_shard_number(&key)
                             );
-                            key = key.next();
-                            continue;
+                        } else {
+                            key_request_accum.add_key(key);
                         }
 
-                        key_request_accum.add_key(key);
                         if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
                             || key.next() == range.end
                         {
@@ -3349,15 +3349,33 @@ impl Timeline {
                                     }
                                 };
 
+                                tracing::debug!("create_image_layers: retain key {img_key}");
                                 image_layer_writer.put_image(img_key, img).await?;
+                                wrote_keys = true;
                             }
                         }
 
                         key = key.next();
                     }
                 }
-                let image_layer = image_layer_writer.finish(self).await?;
-                image_layers.push(image_layer);
+
+                if wrote_keys {
+                    start = img_range.end;
+                    let image_layer = image_layer_writer.finish(self).await?;
+                    image_layers.push(image_layer);
+                } else {
+                    // The image layer may be empty if this is a sharded tenant and the partition
+                    // does not cover any keys owned by this shard.  In this case, to ensure we don't
+                    // leave gaps between image layers, leave `start` where it is, so that the next
+                    // layer we write will cover the key range that we just scanned.
+                    tracing::debug!(
+                        "create_image_layers: no data in range {}-{}",
+                        img_range.start,
+                        img_range.end
+                    );
+                }
+            } else {
+                start = img_range.end;
             }
         }
         // All layers that the GC wanted us to create have now been created.
