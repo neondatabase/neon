@@ -351,7 +351,6 @@ pub enum IterationOutcome<U> {
     Finished(IterationOutcomeFinished<U>),
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct IterationOutcomeFinished<U> {
     /// The actual usage observed before we started the iteration.
@@ -366,7 +365,6 @@ pub struct IterationOutcomeFinished<U> {
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 struct AssumedUsage<U> {
     /// The expected value for `after`, after phase 2.
     projected_after: U,
@@ -374,14 +372,12 @@ struct AssumedUsage<U> {
     failed: LayerCount,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct PlannedUsage<U> {
     respecting_tenant_min_resident_size: U,
     fallback_to_global_lru: Option<U>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Serialize)]
 struct LayerCount {
     file_sizes: u64,
@@ -565,7 +561,6 @@ pub(crate) struct EvictionSecondaryLayer {
 #[derive(Clone)]
 pub(crate) enum EvictionLayer {
     Attached(Layer),
-    #[allow(dead_code)]
     Secondary(EvictionSecondaryLayer),
 }
 
@@ -623,6 +618,7 @@ impl std::fmt::Display for EvictionLayer {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct DiskUsageEvictionInfo {
     /// Timeline's largest layer (remote or resident)
     pub max_layer_size: Option<u64>,
@@ -854,19 +850,27 @@ async fn collect_eviction_candidates(
 
         let total = tenant_candidates.len();
 
-        for (i, mut candidate) in tenant_candidates.into_iter().enumerate() {
-            // as we iterate this reverse sorted list, the most recently accessed layer will always
-            // be 1.0; this is for us to evict it last.
-            candidate.relative_last_activity = eviction_order.relative_last_activity(total, i);
+        let tenant_candidates =
+            tenant_candidates
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut candidate)| {
+                    // as we iterate this reverse sorted list, the most recently accessed layer will always
+                    // be 1.0; this is for us to evict it last.
+                    candidate.relative_last_activity =
+                        eviction_order.relative_last_activity(total, i);
 
-            let partition = if cumsum > min_resident_size as i128 {
-                MinResidentSizePartition::Above
-            } else {
-                MinResidentSizePartition::Below
-            };
-            cumsum += i128::from(candidate.layer.get_file_size());
-            candidates.push((partition, candidate));
-        }
+                    let partition = if cumsum > min_resident_size as i128 {
+                        MinResidentSizePartition::Above
+                    } else {
+                        MinResidentSizePartition::Below
+                    };
+                    cumsum += i128::from(candidate.layer.get_file_size());
+
+                    (partition, candidate)
+                });
+
+        candidates.extend(tenant_candidates);
     }
 
     // Note: the same tenant ID might be hit twice, if it transitions from attached to
@@ -882,21 +886,41 @@ async fn collect_eviction_candidates(
     );
 
     for secondary_tenant in secondary_tenants {
-        let mut layer_info = secondary_tenant.get_layers_for_eviction();
+        // for secondary tenants we use a sum of on_disk layers and already evicted layers. this is
+        // to prevent repeated disk usage based evictions from completely draining less often
+        // updating secondaries.
+        let (mut layer_info, total_layers) = secondary_tenant.get_layers_for_eviction();
+
+        debug_assert!(
+            total_layers >= layer_info.resident_layers.len(),
+            "total_layers ({total_layers}) must be at least the resident_layers.len() ({})",
+            layer_info.resident_layers.len()
+        );
 
         layer_info
             .resident_layers
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
 
-        candidates.extend(layer_info.resident_layers.into_iter().map(|candidate| {
-            (
-                // Secondary locations' layers are always considered above the min resident size,
-                // i.e. secondary locations are permitted to be trimmed to zero layers if all
-                // the layers have sufficiently old access times.
-                MinResidentSizePartition::Above,
-                candidate,
-            )
-        }));
+        let tenant_candidates =
+            layer_info
+                .resident_layers
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut candidate)| {
+                    candidate.relative_last_activity =
+                        eviction_order.relative_last_activity(total_layers, i);
+                    (
+                        // Secondary locations' layers are always considered above the min resident size,
+                        // i.e. secondary locations are permitted to be trimmed to zero layers if all
+                        // the layers have sufficiently old access times.
+                        MinResidentSizePartition::Above,
+                        candidate,
+                    )
+                });
+
+        candidates.extend(tenant_candidates);
+
+        tokio::task::yield_now().await;
     }
 
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
@@ -1076,7 +1100,6 @@ mod filesystem_level_usage {
     use super::DiskUsageEvictionTaskConfig;
 
     #[derive(Debug, Clone, Copy)]
-    #[allow(dead_code)]
     pub struct Usage<'a> {
         config: &'a DiskUsageEvictionTaskConfig,
 

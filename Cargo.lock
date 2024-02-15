@@ -289,6 +289,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "postgres_connection",
+ "r2d2",
  "reqwest",
  "serde",
  "serde_json",
@@ -1328,8 +1329,6 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
- "diesel",
- "diesel_migrations",
  "futures",
  "git-version",
  "hex",
@@ -1641,6 +1640,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "desim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "hex",
+ "parking_lot 0.12.1",
+ "rand 0.8.5",
+ "scopeguard",
+ "smallvec",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "diesel"
 version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1651,6 +1666,7 @@ dependencies = [
  "diesel_derives",
  "itoa",
  "pq-sys",
+ "r2d2",
  "serde_json",
 ]
 
@@ -2247,11 +2263,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.8.2"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0761a1b9491c4f2e3d66aa0f62d0fba0af9a0e2852e4d48ea506632a4b56e6aa"
+checksum = "e8094feaf31ff591f651a2664fb9cfd92bba7a60ce3197265e9482ebe753c8f7"
 dependencies = [
- "hashbrown 0.13.2",
+ "hashbrown 0.14.0",
 ]
 
 [[package]]
@@ -2867,6 +2883,7 @@ dependencies = [
  "chrono",
  "libc",
  "once_cell",
+ "procfs",
  "prometheus",
  "rand 0.8.5",
  "rand_distr",
@@ -3936,6 +3953,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol",
  "rand 0.8.5",
+ "serde",
  "thiserror",
  "tokio",
  "tracing",
@@ -3985,6 +4003,8 @@ checksum = "b1de8dacb0873f77e6aefc6d71e044761fcc68060290f5b1089fcdf84626bb69"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",
+ "chrono",
+ "flate2",
  "hex",
  "lazy_static",
  "rustix 0.36.16",
@@ -4075,6 +4095,7 @@ dependencies = [
  "clap",
  "consumption_metrics",
  "dashmap",
+ "env_logger",
  "futures",
  "git-version",
  "hashbrown 0.13.2",
@@ -4122,6 +4143,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smallvec",
  "smol_str",
  "socket2 0.5.5",
  "sync_wrapper",
@@ -4140,6 +4162,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-utils",
  "url",
+ "urlencoding",
  "utils",
  "uuid",
  "walkdir",
@@ -4165,6 +4188,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50f3b39ccfb720540debaa0164757101c08ecb8d326b15358ce76a62c7e85965"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "r2d2"
+version = "0.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51de85fb3fb6524929c8a2eb85e6b6d363de4e8c48f9e2c2eac4944abc181c93"
+dependencies = [
+ "log",
+ "parking_lot 0.12.1",
+ "scheduled-thread-pool",
 ]
 
 [[package]]
@@ -4403,6 +4437,7 @@ dependencies = [
  "futures",
  "futures-util",
  "http-types",
+ "humantime",
  "hyper",
  "itertools",
  "metrics",
@@ -4414,6 +4449,7 @@ dependencies = [
  "serde_json",
  "test-context",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "toml_edit",
  "tracing",
@@ -4811,6 +4847,7 @@ dependencies = [
  "clap",
  "const_format",
  "crc32c",
+ "desim",
  "fail",
  "fs2",
  "futures",
@@ -4826,6 +4863,7 @@ dependencies = [
  "postgres_backend",
  "postgres_ffi",
  "pq_proto",
+ "rand 0.8.5",
  "regex",
  "remote_storage",
  "reqwest",
@@ -4846,8 +4884,10 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utils",
+ "walproposer",
  "workspace_hack",
 ]
 
@@ -4878,6 +4918,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "713cfb06c7059f3588fb8044c0fad1d09e3c01d225e25b9220dbfdcf16dbb1b3"
 dependencies = [
  "windows-sys 0.42.0",
+]
+
+[[package]]
+name = "scheduled-thread-pool"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cbc66816425a074528352f5789333ecff06ca41b36b0b0efdfbb29edc391a19"
+dependencies = [
+ "parking_lot 0.12.1",
 ]
 
 [[package]]
@@ -5715,7 +5764,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#0e1af4ccddf2f01805cfc9eaefa97ee13c04b52d"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#868d2c42b5d54ca82fead6e8f2f233b69a540d3e"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6240,8 +6289,9 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#0e1af4ccddf2f01805cfc9eaefa97ee13c04b52d"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#868d2c42b5d54ca82fead6e8f2f233b69a540d3e"
 dependencies = [
+ "bytes",
  "io-uring",
  "libc",
 ]
@@ -6807,7 +6857,6 @@ dependencies = [
  "clap",
  "clap_builder",
  "crossbeam-utils",
- "diesel",
  "either",
  "fail",
  "futures-channel",

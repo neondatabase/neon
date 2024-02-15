@@ -16,7 +16,7 @@ use crate::{
     config::PageServerConf,
     tenant::remote_timeline_client::{
         index::IndexPart, remote_index_path, remote_initdb_archive_path,
-        remote_initdb_preserved_archive_path, remote_path, upload_cancellable,
+        remote_initdb_preserved_archive_path, remote_path,
     },
 };
 use remote_storage::{GenericRemoteStorage, TimeTravelError};
@@ -27,7 +27,7 @@ use super::index::LayerFileMetadata;
 use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
-pub(super) async fn upload_index_part<'a>(
+pub(crate) async fn upload_index_part<'a>(
     storage: &'a GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
@@ -49,16 +49,15 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_bytes = bytes::Bytes::from(index_part_bytes);
 
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, generation);
-    upload_cancellable(
-        cancel,
-        storage.upload_storage_object(
+    storage
+        .upload_storage_object(
             futures::stream::once(futures::future::ready(Ok(index_part_bytes))),
             index_part_size,
             &remote_path,
-        ),
-    )
-    .await
-    .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
+            cancel,
+        )
+        .await
+        .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
 }
 
 /// Attempts to upload given layer files.
@@ -115,11 +114,10 @@ pub(super) async fn upload_timeline_layer<'a>(
 
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
-    upload_cancellable(cancel, storage.upload(reader, fs_size, &storage_path, None))
+    storage
+        .upload(reader, fs_size, &storage_path, None, cancel)
         .await
-        .with_context(|| format!("upload layer from local path '{source_path}'"))?;
-
-    Ok(())
+        .with_context(|| format!("upload layer from local path '{source_path}'"))
 }
 
 /// Uploads the given `initdb` data to the remote storage.
@@ -139,12 +137,10 @@ pub(crate) async fn upload_initdb_dir(
     let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, super::BUFFER_SIZE);
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
-    upload_cancellable(
-        cancel,
-        storage.upload_storage_object(file, size as usize, &remote_path),
-    )
-    .await
-    .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
+    storage
+        .upload_storage_object(file, size as usize, &remote_path, cancel)
+        .await
+        .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
 }
 
 pub(crate) async fn preserve_initdb_archive(
@@ -155,7 +151,8 @@ pub(crate) async fn preserve_initdb_archive(
 ) -> anyhow::Result<()> {
     let source_path = remote_initdb_archive_path(tenant_id, timeline_id);
     let dest_path = remote_initdb_preserved_archive_path(tenant_id, timeline_id);
-    upload_cancellable(cancel, storage.copy_object(&source_path, &dest_path))
+    storage
+        .copy_object(&source_path, &dest_path, cancel)
         .await
         .with_context(|| format!("backing up initdb archive for '{tenant_id} / {timeline_id}'"))
 }

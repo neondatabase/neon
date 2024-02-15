@@ -761,22 +761,8 @@ impl Endpoint {
         }
     }
 
-    pub fn stop(&self, destroy: bool) -> Result<()> {
-        // If we are going to destroy data directory,
-        // use immediate shutdown mode, otherwise,
-        // shutdown gracefully to leave the data directory sane.
-        //
-        // Postgres is always started from scratch, so stop
-        // without destroy only used for testing and debugging.
-        //
-        self.pg_ctl(
-            if destroy {
-                &["-m", "immediate", "stop"]
-            } else {
-                &["stop"]
-            },
-            &None,
-        )?;
+    pub fn stop(&self, mode: &str, destroy: bool) -> Result<()> {
+        self.pg_ctl(&["-m", mode, "stop"], &None)?;
 
         // Also wait for the compute_ctl process to die. It might have some
         // cleanup work to do after postgres stops, like syncing safekeepers,

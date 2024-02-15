@@ -112,11 +112,6 @@ def test_create_snapshot(
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
     pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
     pg_bin.run_capture(

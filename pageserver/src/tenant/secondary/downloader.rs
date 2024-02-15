@@ -146,14 +146,15 @@ impl SecondaryDetail {
         }
     }
 
+    /// Additionally returns the total number of layers, used for more stable relative access time
+    /// based eviction.
     pub(super) fn get_layers_for_eviction(
         &self,
         parent: &Arc<SecondaryTenant>,
-    ) -> DiskUsageEvictionInfo {
-        let mut result = DiskUsageEvictionInfo {
-            max_layer_size: None,
-            resident_layers: Vec::new(),
-        };
+    ) -> (DiskUsageEvictionInfo, usize) {
+        let mut result = DiskUsageEvictionInfo::default();
+        let mut total_layers = 0;
+
         for (timeline_id, timeline_detail) in &self.timelines {
             result
                 .resident_layers
@@ -169,6 +170,10 @@ impl SecondaryDetail {
                         relative_last_activity: finite_f32::FiniteF32::ZERO,
                     }
                 }));
+
+            // total might be missing currently downloading layers, but as a lower than actual
+            // value it is good enough approximation.
+            total_layers += timeline_detail.on_disk_layers.len() + timeline_detail.evicted_at.len();
         }
         result.max_layer_size = result
             .resident_layers
@@ -183,7 +188,7 @@ impl SecondaryDetail {
             result.resident_layers.len()
         );
 
-        result
+        (result, total_layers)
     }
 }
 
@@ -312,9 +317,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             .tenant_manager
             .get_secondary_tenant_shard(*tenant_shard_id);
         let Some(tenant) = tenant else {
-            {
-                return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
-            }
+            return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
         };
 
         Ok(PendingDownload {
@@ -389,9 +392,9 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             }
 
             CompleteDownload {
-                    secondary_state,
-                    completed_at: Instant::now(),
-                }
+                secondary_state,
+                completed_at: Instant::now(),
+            }
         }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 }
@@ -483,7 +486,7 @@ impl<'a> TenantDownloader<'a> {
         let heatmap_path_bg = heatmap_path.clone();
         tokio::task::spawn_blocking(move || {
             tokio::runtime::Handle::current().block_on(async move {
-                VirtualFile::crashsafe_overwrite(&heatmap_path_bg, &temp_path, &heatmap_bytes).await
+                VirtualFile::crashsafe_overwrite(&heatmap_path_bg, &temp_path, heatmap_bytes).await
             })
         })
         .await
@@ -520,24 +523,25 @@ impl<'a> TenantDownloader<'a> {
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
+        let cancel = &self.secondary_state.cancel;
 
         let heatmap_bytes = backoff::retry(
             || async {
                 let download = self
                     .remote_storage
-                    .download(&heatmap_path)
+                    .download(&heatmap_path, cancel)
                     .await
                     .map_err(UpdateError::from)?;
                 let mut heatmap_bytes = Vec::new();
                 let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-                let _size = tokio::io::copy(&mut body, &mut heatmap_bytes).await?;
+                let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
                 Ok(heatmap_bytes)
             },
             |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "download heatmap",
-            &self.secondary_state.cancel,
+            cancel,
         )
         .await
         .ok_or_else(|| UpdateError::Cancelled)

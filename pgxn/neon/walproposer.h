@@ -486,6 +486,8 @@ typedef struct walproposer_api
 	 *
 	 * On success, the data is placed in *buf. It is valid until the next call
 	 * to this function.
+	 * 
+	 * Returns PG_ASYNC_READ_FAIL on closed connection.
 	 */
 	PGAsyncReadResult (*conn_async_read) (Safekeeper *sk, char **buf, int *amount);
 
@@ -532,6 +534,13 @@ typedef struct walproposer_api
 	 * Returns 0 if timeout is reached, 1 if some event happened. Updates
 	 * events mask to indicate events and sets sk to the safekeeper which has
 	 * an event.
+	 * 
+	 * On timeout, events is set to WL_NO_EVENTS. On socket event, events is
+	 * set to WL_SOCKET_READABLE and/or WL_SOCKET_WRITEABLE. When socket is
+	 * closed, events is set to WL_SOCKET_READABLE.
+	 * 
+	 * WL_SOCKET_WRITEABLE is usually set only when we need to flush the buffer.
+	 * It can be returned only if caller asked for this event in the last *_event_set call.
 	 */
 	int			(*wait_event_set) (WalProposer *wp, long timeout, Safekeeper **sk, uint32 *events);
 

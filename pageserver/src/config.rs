@@ -1383,6 +1383,7 @@ broker_endpoint = '{broker_endpoint}'
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
                     storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
+                    timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
                 },
                 "Remote storage config should correctly parse the local FS config and fill other storage defaults"
             );
@@ -1450,6 +1451,7 @@ broker_endpoint = '{broker_endpoint}'
                         concurrency_limit: s3_concurrency_limit,
                         max_keys_per_list_response: None,
                     }),
+                    timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
                 },
                 "Remote storage config should correctly parse the S3 config"
             );

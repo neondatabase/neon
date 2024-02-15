@@ -31,6 +31,8 @@ pub use wrappers::{CountedReader, CountedWriter};
 mod hll;
 pub mod metric_vec_duration;
 pub use hll::{HyperLogLog, HyperLogLogVec};
+#[cfg(target_os = "linux")]
+pub mod more_process_metrics;
 
 pub type UIntGauge = GenericGauge<AtomicU64>;
 pub type UIntGaugeVec = GenericGaugeVec<AtomicU64>;
@@ -113,7 +115,6 @@ pub fn set_build_info_metric(revision: &str, build_tag: &str) {
 // performed by the process.
 // We know the size of the block, so we can determine the I/O bytes out of it.
 // The value might be not 100% exact, but should be fine for Prometheus metrics in this case.
-#[allow(clippy::unnecessary_cast)]
 fn update_rusage_metrics() {
     let rusage_stats = get_rusage_stats();
 

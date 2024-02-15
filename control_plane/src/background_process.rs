@@ -72,7 +72,6 @@ where
     let log_path = datadir.join(format!("{process_name}.log"));
     let process_log_file = fs::OpenOptions::new()
         .create(true)
-        .write(true)
         .append(true)
         .open(&log_path)
         .with_context(|| {

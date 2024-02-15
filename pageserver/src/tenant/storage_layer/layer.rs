@@ -325,8 +325,8 @@ impl Layer {
         })
     }
 
-    pub(crate) async fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        self.0.info(reset).await
+    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        self.0.info(reset)
     }
 
     pub(crate) fn access_stats(&self) -> &LayerAccessStats {
@@ -637,10 +637,10 @@ impl LayerInner {
         let mut rx = self.status.subscribe();
 
         let strong = {
-            match self.inner.get_mut().await {
+            match self.inner.get() {
                 Some(mut either) => {
                     self.wanted_evicted.store(true, Ordering::Relaxed);
-                    ResidentOrWantedEvicted::downgrade(&mut either)
+                    either.downgrade()
                 }
                 None => return Err(EvictionError::NotFound),
             }
@@ -666,7 +666,7 @@ impl LayerInner {
                 // use however late (compared to the initial expressing of wanted) as the
                 // "outcome" now
                 LAYER_IMPL_METRICS.inc_broadcast_lagged();
-                match self.inner.get_mut().await {
+                match self.inner.get() {
                     Some(_) => Err(EvictionError::Downloaded),
                     None => Ok(()),
                 }
@@ -784,7 +784,7 @@ impl LayerInner {
                 // use the already held initialization permit because it is impossible to hit the
                 // below paths anymore essentially limiting the max loop iterations to 2.
                 let (value, init_permit) = download(init_permit).await?;
-                let mut guard = self.inner.set(value, init_permit).await;
+                let mut guard = self.inner.set(value, init_permit);
                 let (strong, _upgraded) = guard
                     .get_and_upgrade()
                     .expect("init creates strong reference, we held the init permit");
@@ -792,7 +792,7 @@ impl LayerInner {
             }
 
             let (weak, permit) = {
-                let mut locked = self.inner.get_mut_or_init(download).await?;
+                let mut locked = self.inner.get_or_init(download).await?;
 
                 if let Some((strong, upgraded)) = locked.get_and_upgrade() {
                     if upgraded {
@@ -1014,12 +1014,12 @@ impl LayerInner {
         }
     }
 
-    async fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.desc.filename().file_name();
 
         // this is not accurate: we could have the file locally but there was a cancellation
         // and now we are not in sync, or we are currently downloading it.
-        let remote = self.inner.get_mut().await.is_none();
+        let remote = self.inner.get().is_none();
 
         let access_stats = self.access_stats.as_api_model(reset);
 
@@ -1078,7 +1078,7 @@ impl LayerInner {
                     LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
                     return;
                 };
-                match tokio::runtime::Handle::current().block_on(this.evict_blocking(version)) {
+                match this.evict_blocking(version) {
                     Ok(()) => LAYER_IMPL_METRICS.inc_completed_evictions(),
                     Err(reason) => LAYER_IMPL_METRICS.inc_eviction_cancelled(reason),
                 }
@@ -1086,7 +1086,7 @@ impl LayerInner {
         }
     }
 
-    async fn evict_blocking(&self, only_version: usize) -> Result<(), EvictionCancelled> {
+    fn evict_blocking(&self, only_version: usize) -> Result<(), EvictionCancelled> {
         // deleted or detached timeline, don't do anything.
         let Some(timeline) = self.timeline.upgrade() else {
             return Err(EvictionCancelled::TimelineGone);
@@ -1095,7 +1095,7 @@ impl LayerInner {
         // to avoid starting a new download while we evict, keep holding on to the
         // permit.
         let _permit = {
-            let maybe_downloaded = self.inner.get_mut().await;
+            let maybe_downloaded = self.inner.get();
 
             let (_weak, permit) = match maybe_downloaded {
                 Some(mut guard) => {
@@ -1458,10 +1458,6 @@ impl ResidentLayer {
 
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.owner.0.path
-    }
-
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        self.owner.access_stats()
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {

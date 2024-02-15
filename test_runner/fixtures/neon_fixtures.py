@@ -23,7 +23,7 @@ from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
@@ -904,7 +904,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    S3Scrubber(self.test_output_dir, self).scan_metadata()
+                    S3Scrubber(self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -1407,7 +1407,6 @@ class AbstractNeonCli(abc.ABC):
 
         args = [bin_neon] + arguments
         log.info('Running command "{}"'.format(" ".join(args)))
-        log.info(f'Running in "{self.env.repo_dir}"')
 
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
@@ -1823,6 +1822,7 @@ class NeonCli(AbstractNeonCli):
         endpoint_id: str,
         destroy=False,
         check_return_code=True,
+        mode: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1830,6 +1830,8 @@ class NeonCli(AbstractNeonCli):
         ]
         if destroy:
             args.append("--destroy")
+        if mode is not None:
+            args.append(f"--mode={mode}")
         if endpoint_id is not None:
             args.append(endpoint_id)
 
@@ -1955,6 +1957,15 @@ class NeonAttachmentService:
             headers["Authorization"] = f"Bearer {jwt_token}"
 
         return headers
+
+    def ready(self) -> bool:
+        resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
+        if resp.status_code == 503:
+            return False
+        elif resp.status_code == 200:
+            return True
+        else:
+            raise RuntimeError(f"Unexpected status {resp.status_code} from readiness endpoint")
 
     def attach_hook_issue(
         self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
@@ -2454,6 +2465,7 @@ def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
+# TODO make port an optional argument
 class VanillaPostgres(PgProtocol):
     def __init__(self, pgdatadir: Path, pg_bin: PgBin, port: int, init: bool = True):
         super().__init__(host="localhost", port=port, dbname="postgres")
@@ -2817,8 +2829,8 @@ class NeonProxy(PgProtocol):
 
     def http_query(self, query, args, **kwargs):
         # TODO maybe use default values if not provided
-        user = kwargs["user"]
-        password = kwargs["password"]
+        user = quote(kwargs["user"])
+        password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
@@ -3138,10 +3150,7 @@ class Endpoint(PgProtocol):
             log.info(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
-    # Please note: if you didn't respec this endpoint to have the `migrations`
-    # feature, this function will probably fail because neon_migration.migration_id
-    # won't exist. This is temporary - soon we'll get rid of the feature flag and
-    # migrations will be enabled for everyone.
+    # Please note: Migrations only run if pg_skip_catalog_updates is false
     def wait_for_migrations(self):
         with self.cursor() as cur:
 
@@ -3163,7 +3172,7 @@ class Endpoint(PgProtocol):
         with open(remote_extensions_spec_path, "w") as file:
             json.dump(spec, file, indent=4)
 
-    def stop(self) -> "Endpoint":
+    def stop(self, mode: str = "fast") -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
         Returns self.
@@ -3172,13 +3181,13 @@ class Endpoint(PgProtocol):
         if self.running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
-                self.endpoint_id, check_return_code=self.check_stop_result
+                self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
             )
             self.running = False
 
         return self
 
-    def stop_and_destroy(self) -> "Endpoint":
+    def stop_and_destroy(self, mode: str = "immediate") -> "Endpoint":
         """
         Stop the Postgres instance, then destroy the endpoint.
         Returns self.
@@ -3186,7 +3195,7 @@ class Endpoint(PgProtocol):
 
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, True, check_return_code=self.check_stop_result
+            self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
         )
         self.endpoint_id = None
         self.running = False
@@ -3657,9 +3666,9 @@ class SafekeeperHttpClient(requests.Session):
 
 
 class S3Scrubber:
-    def __init__(self, log_dir: Path, env: NeonEnvBuilder):
+    def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
         self.env = env
-        self.log_dir = log_dir
+        self.log_dir = log_dir or env.test_output_dir
 
     def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
@@ -3680,7 +3689,7 @@ class S3Scrubber:
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(
-            self.log_dir,
+            self.env.test_output_dir,
             args,
             echo_stderr=True,
             echo_stdout=True,
@@ -4064,7 +4073,7 @@ def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -
 
 
 def tenant_get_shards(
-    env: NeonEnv, tenant_id: TenantId, pageserver_id: Optional[int]
+    env: NeonEnv, tenant_id: TenantId, pageserver_id: Optional[int] = None
 ) -> list[tuple[TenantShardId, NeonPageserver]]:
     """
     Helper for when you want to talk to one or more pageservers, and the

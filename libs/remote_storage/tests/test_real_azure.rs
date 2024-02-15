@@ -1,9 +1,9 @@
-use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Context;
 use remote_storage::{
@@ -37,6 +37,17 @@ impl EnabledAzure {
         EnabledAzure {
             client,
             base_prefix: BASE_PREFIX,
+        }
+    }
+
+    #[allow(unused)] // this will be needed when moving the timeout integration tests back
+    fn configure_request_timeout(&mut self, timeout: Duration) {
+        match Arc::get_mut(&mut self.client).expect("outer Arc::get_mut") {
+            GenericRemoteStorage::AzureBlob(azure) => {
+                let azure = Arc::get_mut(azure).expect("inner Arc::get_mut");
+                azure.timeout = timeout;
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -213,6 +224,7 @@ fn create_azure_client(
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
         }),
+        timeout: Duration::from_secs(120),
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,

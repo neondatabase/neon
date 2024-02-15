@@ -36,7 +36,6 @@ use crate::{
 pub const VALUE_SZ: usize = 5;
 pub const MAX_VALUE: u64 = 0x007f_ffff_ffff;
 
-#[allow(dead_code)]
 pub const PAGE_SZ: usize = 8192;
 
 #[derive(Clone, Copy, Debug)]
