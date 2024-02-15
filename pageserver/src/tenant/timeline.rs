@@ -54,7 +54,7 @@ use crate::pgdatadir_mapping::DirectoryKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
-    metadata::{save_metadata, TimelineMetadata},
+    metadata::TimelineMetadata,
     par_fsync,
 };
 use crate::{
@@ -2948,7 +2948,7 @@ impl Timeline {
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now. The flushed layer is stored in
         // the mapping in `create_delta_layer`.
-        let metadata = {
+        {
             let mut guard = self.layers.write().await;
 
             if self.cancel.is_cancelled() {
@@ -2962,9 +2962,7 @@ impl Timeline {
                 self.disk_consistent_lsn.store(disk_consistent_lsn);
 
                 // Schedule remote uploads that will reflect our new disk_consistent_lsn
-                Some(self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?)
-            } else {
-                None
+                self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?;
             }
             // release lock on 'layers'
         };
@@ -2979,22 +2977,6 @@ impl Timeline {
         // This failpoint is used by another test case `test_pageserver_recovery`.
         fail_point!("flush-frozen-exit");
 
-        // Update the metadata file, with new 'disk_consistent_lsn'
-        //
-        // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
-        // *all* the layers, to avoid fsyncing the file multiple times.
-
-        // If we updated our disk_consistent_lsn, persist the updated metadata to local disk.
-        if let Some(metadata) = metadata {
-            save_metadata(
-                self.conf,
-                &self.tenant_shard_id,
-                &self.timeline_id,
-                &metadata,
-            )
-            .await
-            .context("save_metadata")?;
-        }
         Ok(())
     }
 
@@ -3048,25 +3030,6 @@ impl Timeline {
         }
 
         Ok(metadata)
-    }
-
-    async fn update_metadata_file(
-        &self,
-        disk_consistent_lsn: Lsn,
-        layers_to_upload: impl IntoIterator<Item = ResidentLayer>,
-    ) -> anyhow::Result<()> {
-        let metadata = self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?;
-
-        save_metadata(
-            self.conf,
-            &self.tenant_shard_id,
-            &self.timeline_id,
-            &metadata,
-        )
-        .await
-        .context("save_metadata")?;
-
-        Ok(())
     }
 
     pub(crate) async fn preserve_initdb_archive(&self) -> anyhow::Result<()> {
@@ -4384,18 +4347,11 @@ impl Timeline {
             .replace((new_gc_cutoff, wanted_image_layers.to_keyspace()));
 
         if !layers_to_remove.is_empty() {
-            // Persist the new GC cutoff value in the metadata file, before
-            // we actually remove anything.
-            //
-            // This does not in fact have any effect as we no longer consider local metadata unless
-            // running without remote storage.
-            //
+            // Persist the new GC cutoff value before we actually remove anything.
             // This unconditionally schedules also an index_part.json update, even though, we will
             // be doing one a bit later with the unlinked gc'd layers.
-            //
-            // TODO: remove when implementing <https://github.com/neondatabase/neon/issues/4099>.
-            self.update_metadata_file(self.disk_consistent_lsn.load(), None)
-                .await?;
+            let disk_consistent_lsn = self.disk_consistent_lsn.load();
+            self.schedule_uploads(disk_consistent_lsn, None)?;
 
             let gc_layers = layers_to_remove
                 .iter()
@@ -4849,7 +4805,7 @@ mod tests {
             TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
 
         let ctx = any_context();
-        let tenant = harness.try_load(&ctx).await.unwrap();
+        let tenant = harness.do_try_load(&ctx).await.unwrap();
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
