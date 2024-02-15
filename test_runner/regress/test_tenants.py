@@ -433,6 +433,8 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
 
     with endpoint_tenant.connect() as conn:
         with conn.cursor() as cur:
+            # Wrapping begin; commit; around this and the loop below keeps the reproduction
+            # but it also doesn't have a performance benefit
             cur.execute("CREATE TABLE template_tbl(key int primary key, value text);")
             for i in range(TABLE_COUNT):
                 cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
