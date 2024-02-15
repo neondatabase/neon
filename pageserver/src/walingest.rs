@@ -1695,22 +1695,22 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest.put_rel_creation(&mut m, TESTREL_A, &ctx).await?;
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 3"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1 at 4"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 2, test_img("foo blk 2 at 5"), &ctx)
             .await?;
         m.commit(&ctx).await?;
 
@@ -1751,46 +1751,46 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 2")
+            test_img("foo blk 0 at 2")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 2 at 5")
+            test_img("foo blk 2 at 5")
         );
 
         // Truncate last block
@@ -1812,13 +1812,13 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
 
         // should still see the truncated block with older LSN
@@ -1832,7 +1832,7 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 2 at 5")
+            test_img("foo blk 2 at 5")
         );
 
         // Truncate to zero length
@@ -1851,7 +1851,7 @@ mod tests {
         // Extend from 0 to 2 blocks, leaving a gap
         let mut m = tline.begin_modification(Lsn(0x70));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         assert_eq!(
@@ -1870,13 +1870,13 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1")
+            test_img("foo blk 1")
         );
 
         // Extend a lot more, leaving a big gap that spans across segments
         let mut m = tline.begin_modification(Lsn(0x80));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1500, test_img("foo blk 1500"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         assert_eq!(
@@ -1897,7 +1897,7 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1500")
+            test_img("foo blk 1500")
         );
 
         Ok(())
@@ -1915,7 +1915,7 @@ mod tests {
 
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
         m.commit(&ctx).await?;
 
@@ -1952,7 +1952,7 @@ mod tests {
         // Re-create it
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 4"), &ctx)
             .await?;
         m.commit(&ctx).await?;
 
@@ -1990,7 +1990,7 @@ mod tests {
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, test_img(&data), &ctx)
                 .await?;
         }
         m.commit(&ctx).await?;
@@ -2028,7 +2028,7 @@ mod tests {
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), false, &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2055,7 +2055,7 @@ mod tests {
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), false, &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2073,7 +2073,7 @@ mod tests {
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), false, &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2084,7 +2084,7 @@ mod tests {
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, lsn);
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, test_img(&data), &ctx)
                 .await?;
         }
         m.commit(&ctx).await?;
@@ -2109,7 +2109,7 @@ mod tests {
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), false, &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2130,7 +2130,7 @@ mod tests {
         for blknum in 0..RELSEG_SIZE + 1 {
             lsn += 0x10;
             let mut m = tline.begin_modification(Lsn(lsn));
-            let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
+            let img = test_img(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             walingest
                 .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img, &ctx)
                 .await?;
