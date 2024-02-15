@@ -1237,51 +1237,6 @@ impl Tenant {
         Ok(timeline_preloads)
     }
 
-    /// Subroutine of `load_tenant`, to load an individual timeline
-    ///
-    /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, local_metadata, ctx))]
-    async fn load_local_timeline(
-        self: &Arc<Self>,
-        timeline_id: TimelineId,
-        local_metadata: TimelineMetadata,
-        ctx: &RequestContext,
-        found_delete_mark: bool,
-    ) -> Result<(), LoadLocalTimelineError> {
-        span::debug_assert_current_span_has_tenant_id();
-
-        let resources = self.build_timeline_resources(timeline_id);
-
-        if found_delete_mark {
-            // There is no remote client, we found local metadata.
-            // Continue cleaning up local disk.
-            DeleteTimelineFlow::resume_deletion(
-                Arc::clone(self),
-                timeline_id,
-                &local_metadata,
-                None,
-                self.deletion_queue_client.clone(),
-            )
-            .await
-            .context("resume deletion")
-            .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-            return Ok(());
-        }
-
-        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
-            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
-                .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))
-                .map_err(LoadLocalTimelineError::Load)?;
-            Some(ancestor_timeline)
-        } else {
-            None
-        };
-
-        self.timeline_init_and_sync(timeline_id, resources, None, local_metadata, ancestor, ctx)
-            .await
-            .map_err(LoadLocalTimelineError::Load)
-    }
-
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
         self.tenant_shard_id
     }
