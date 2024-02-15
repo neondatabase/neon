@@ -431,7 +431,7 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
 
     with closing(endpoint_tenant.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute(f"CREATE TABLE template_tbl(key int primary key, value text);")
+            cur.execute("CREATE TABLE template_tbl(key int primary key, value text);")
             for i in range(TABLE_COUNT):
                 cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
     endpoint_tenant.stop()
