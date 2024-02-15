@@ -294,16 +294,17 @@ jobs:
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
     steps:
-      - name: Get Neon artifact
-        uses: ./.github/actions/download
-        with:
-          name: neon-${{ runner.os }}-debug-artifact
-          path: /tmp/neon
       - name: Checkout
         uses: actions/checkout@v3
         with:
           submodules: true
           fetch-depth: 0
+          
+      - name: Get Neon artifact
+        uses: ./.github/actions/download
+        with:
+          name: neon-${{ runner.os }}-debug-artifact
+          path: /tmp/neon
 
       - name: run test
         run: |
