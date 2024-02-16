@@ -137,11 +137,13 @@ where
         };
         let start = std::time::Instant::now();
         let mut did_throttle = false;
-        let mut acquire_fut = Arc::clone(&inner.rate_limiter).acquire_owned(key_count);
-        let mut acquire_fut = std::pin::pin!(acquire_fut);
+        let acquire = inner.rate_limiter.acquire(key_count);
+        // turn off runtime-induced preemption (aka coop) so our `did_throttle` is accurate
+        let acquire = tokio::task::unconstrained(acquire);
+        let mut acquire = std::pin::pin!(acquire);
         std::future::poll_fn(|cx| {
             use std::future::Future;
-            let poll = acquire_fut.as_mut().poll(cx);
+            let poll = acquire.as_mut().poll(cx);
             did_throttle = did_throttle || poll.is_pending();
             poll
         })
