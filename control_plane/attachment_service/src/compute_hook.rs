@@ -155,7 +155,7 @@ impl ComputeHook {
 
         for (endpoint_name, endpoint) in &cplane.endpoints {
             if endpoint.tenant_id == tenant_id && endpoint.status() == EndpointStatus::Running {
-                tracing::info!("🔁 Reconfiguring endpoint {}", endpoint_name,);
+                tracing::info!("Reconfiguring endpoint {}", endpoint_name,);
                 endpoint.reconfigure(compute_pageservers.clone()).await?;
             }
         }
@@ -177,7 +177,7 @@ impl ComputeHook {
             req
         };
 
-        tracing::debug!(
+        tracing::info!(
             "Sending notify request to {} ({:?})",
             url,
             reconfigure_request
@@ -266,7 +266,7 @@ impl ComputeHook {
     /// periods, but we don't retry forever.  The **caller** is responsible for handling failures and
     /// ensuring that they eventually call again to ensure that the compute is eventually notified of
     /// the proper pageserver nodes for a tenant.
-    #[tracing::instrument(skip_all, fields(tenant_shard_id, node_id))]
+    #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), node_id))]
     pub(super) async fn notify(
         &self,
         tenant_shard_id: TenantShardId,
@@ -298,7 +298,7 @@ impl ComputeHook {
         let Some(reconfigure_request) = reconfigure_request else {
             // The tenant doesn't yet have pageservers for all its shards: we won't notify anything
             // until it does.
-            tracing::debug!("Tenant isn't yet ready to emit a notification",);
+            tracing::info!("Tenant isn't yet ready to emit a notification");
             return Ok(());
         };
 

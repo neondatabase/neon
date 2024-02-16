@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
+use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
@@ -52,6 +53,10 @@ pub(super) struct Reconciler {
     /// example when a pageserver node goes offline, or the PlacementPolicy for
     /// the tenant is changed.
     pub(crate) cancel: CancellationToken,
+
+    /// Reconcilers are registered with a Gate so that during a graceful shutdown we
+    /// can wait for all the reconcilers to respond to their cancellation tokens.
+    pub(crate) _gate_guard: GateGuard,
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
