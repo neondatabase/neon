@@ -37,6 +37,12 @@ impl std::fmt::Display for Sequence {
     }
 }
 
+impl std::fmt::Debug for Sequence {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl MonotonicCounter<Sequence> for Sequence {
     fn cnt_advance(&mut self, v: Sequence) {
         assert!(*self <= v);

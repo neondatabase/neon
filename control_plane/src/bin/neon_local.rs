@@ -450,7 +450,7 @@ async fn handle_tenant(
                     new_tenant_id: TenantShardId::unsharded(tenant_id),
                     generation: None,
                     shard_parameters: ShardParameters {
-                        count: ShardCount(shard_count),
+                        count: ShardCount::new(shard_count),
                         stripe_size: shard_stripe_size
                             .map(ShardStripeSize)
                             .unwrap_or(ShardParameters::DEFAULT_STRIPE_SIZE),

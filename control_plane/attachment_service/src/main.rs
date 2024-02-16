@@ -15,6 +15,7 @@ use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use std::sync::Arc;
 use tokio::signal::unix::SignalKind;
+use tokio_util::sync::CancellationToken;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
 
@@ -237,15 +238,23 @@ async fn async_main() -> anyhow::Result<()> {
     let auth = secrets
         .public_key
         .map(|jwt_auth| Arc::new(SwappableJwtAuth::new(jwt_auth)));
-    let router = make_router(service, auth)
+    let router = make_router(service.clone(), auth)
         .build()
         .map_err(|err| anyhow!(err))?;
     let router_service = utils::http::RouterService::new(router).unwrap();
-    let server = hyper::Server::from_tcp(http_listener)?.serve(router_service);
 
+    // Start HTTP server
+    let server_shutdown = CancellationToken::new();
+    let server = hyper::Server::from_tcp(http_listener)?
+        .serve(router_service)
+        .with_graceful_shutdown({
+            let server_shutdown = server_shutdown.clone();
+            async move {
+                server_shutdown.cancelled().await;
+            }
+        });
     tracing::info!("Serving on {0}", args.listen);
-
-    tokio::task::spawn(server);
+    let server_task = tokio::task::spawn(server);
 
     // Wait until we receive a signal
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
@@ -265,6 +274,17 @@ async fn async_main() -> anyhow::Result<()> {
             tracing::error!("Failed to write JSON on shutdown: {e}")
         }
     }
+
+    // Stop HTTP server first, so that we don't have to service requests
+    // while shutting down Service
+    server_shutdown.cancel();
+    if let Err(e) = server_task.await {
+        tracing::error!("Error joining HTTP server task: {e}")
+    }
+    tracing::info!("Joined HTTP server task");
+
+    service.shutdown().await;
+    tracing::info!("Service shutdown complete");
 
     std::process::exit(0);
 }

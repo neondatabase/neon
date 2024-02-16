@@ -29,6 +29,9 @@ pub enum Scope {
     // Should only be used e.g. for status check.
     // Currently also used for connection from any pageserver to any safekeeper.
     SafekeeperData,
+    // The scope used by pageservers in upcalls to storage controller and cloud control plane
+    #[serde(rename = "generations_api")]
+    GenerationsApi,
 }
 
 /// JWT payload. See docs/authentication.md for the format

@@ -251,7 +251,7 @@ impl LocationConf {
         } else {
             ShardIdentity::new(
                 ShardNumber(conf.shard_number),
-                ShardCount(conf.shard_count),
+                ShardCount::new(conf.shard_count),
                 ShardStripeSize(conf.shard_stripe_size),
             )?
         };

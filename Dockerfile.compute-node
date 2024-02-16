@@ -822,6 +822,10 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
         -s install && \
     make -j $(getconf _NPROCESSORS_ONLN) \
         PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/neon_test_utils \
+        -s install && \
+    make -j $(getconf _NPROCESSORS_ONLN) \
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
         -C pgxn/neon_rmgr \
         -s install && \
     case "${PG_VERSION}" in \

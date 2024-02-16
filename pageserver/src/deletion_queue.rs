@@ -234,7 +234,7 @@ impl DeletionHeader {
         let header_bytes = serde_json::to_vec(self).context("serialize deletion header")?;
         let header_path = conf.deletion_header_path();
         let temp_path = path_with_suffix_extension(&header_path, TEMP_SUFFIX);
-        VirtualFile::crashsafe_overwrite(&header_path, &temp_path, &header_bytes)
+        VirtualFile::crashsafe_overwrite(&header_path, &temp_path, header_bytes)
             .await
             .maybe_fatal_err("save deletion header")?;
 
@@ -325,7 +325,7 @@ impl DeletionList {
         let temp_path = path_with_suffix_extension(&path, TEMP_SUFFIX);
 
         let bytes = serde_json::to_vec(self).expect("Failed to serialize deletion list");
-        VirtualFile::crashsafe_overwrite(&path, &temp_path, &bytes)
+        VirtualFile::crashsafe_overwrite(&path, &temp_path, bytes)
             .await
             .maybe_fatal_err("save deletion list")
             .map_err(Into::into)
@@ -834,7 +834,6 @@ mod test {
     }
 
     impl ControlPlaneGenerationsApi for MockControlPlane {
-        #[allow(clippy::diverging_sub_expression)] // False positive via async_trait
         async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
             unimplemented!()
         }
@@ -868,6 +867,7 @@ mod test {
         let remote_fs_dir = harness.conf.workdir.join("remote_fs").canonicalize_utf8()?;
         let storage_config = RemoteStorageConfig {
             storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         };
         let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
 
@@ -1171,6 +1171,7 @@ pub(crate) mod mock {
     pub struct ConsumerState {
         rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         executor_rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
+        cancel: CancellationToken,
     }
 
     impl ConsumerState {
@@ -1184,7 +1185,7 @@ pub(crate) mod mock {
                 match msg {
                     DeleterMessage::Delete(objects) => {
                         for path in objects {
-                            match remote_storage.delete(&path).await {
+                            match remote_storage.delete(&path, &self.cancel).await {
                                 Ok(_) => {
                                     debug!("Deleted {path}");
                                 }
@@ -1217,7 +1218,7 @@ pub(crate) mod mock {
 
                         for path in objects {
                             info!("Executing deletion {path}");
-                            match remote_storage.delete(&path).await {
+                            match remote_storage.delete(&path, &self.cancel).await {
                                 Ok(_) => {
                                     debug!("Deleted {path}");
                                 }
@@ -1267,7 +1268,11 @@ pub(crate) mod mock {
                 executor_tx,
                 executed,
                 remote_storage,
-                consumer: std::sync::Mutex::new(ConsumerState { rx, executor_rx }),
+                consumer: std::sync::Mutex::new(ConsumerState {
+                    rx,
+                    executor_rx,
+                    cancel: CancellationToken::new(),
+                }),
                 lsn_table: Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new())),
             }
         }

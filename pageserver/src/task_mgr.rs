@@ -30,10 +30,6 @@
 //! only a single tenant or timeline.
 //!
 
-// Clippy 1.60 incorrectly complains about the tokio::task_local!() macro.
-// Silence it. See https://github.com/rust-lang/rust-clippy/issues/9224.
-#![allow(clippy::declare_interior_mutable_const)]
-
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -313,7 +309,6 @@ struct MutableTaskState {
 }
 
 struct PageServerTask {
-    #[allow(dead_code)] // unused currently
     task_id: PageserverTaskId,
 
     kind: TaskKind,

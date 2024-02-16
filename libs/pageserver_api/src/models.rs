@@ -214,14 +214,14 @@ impl ShardParameters {
     pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 
     pub fn is_unsharded(&self) -> bool {
-        self.count == ShardCount(0)
+        self.count.is_unsharded()
     }
 }
 
 impl Default for ShardParameters {
     fn default() -> Self {
         Self {
-            count: ShardCount(0),
+            count: ShardCount::new(0),
             stripe_size: Self::DEFAULT_STRIPE_SIZE,
         }
     }
@@ -523,6 +523,8 @@ pub struct TimelineInfo {
 
     pub current_logical_size: u64,
     pub current_logical_size_is_accurate: bool,
+
+    pub directory_entries_counts: Vec<u64>,
 
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.

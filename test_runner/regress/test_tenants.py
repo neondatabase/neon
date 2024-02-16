@@ -18,6 +18,7 @@ from fixtures.metrics import (
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until_tenant_active
@@ -414,3 +415,50 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
 
     # The tenant should end up active
     wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)
+
+
+def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
+    """Test for the directory_entries_count metric"""
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+
+    endpoint_tenant = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+
+    # Not sure why but this many tables creates more relations than our limit
+    TABLE_COUNT = 1600
+    COUNT_AT_LEAST_EXPECTED = 5500
+
+    with endpoint_tenant.connect() as conn:
+        with conn.cursor() as cur:
+            # Wrapping begin; commit; around this and the loop below keeps the reproduction
+            # but it also doesn't have a performance benefit
+            cur.execute("CREATE TABLE template_tbl(key int primary key, value text);")
+            for i in range(TABLE_COUNT):
+                cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
+    wait_for_last_flush_lsn(env, endpoint_tenant, env.initial_tenant, env.initial_timeline)
+    endpoint_tenant.stop()
+
+    m = ps_http.get_metrics()
+    directory_entries_count_metric = m.query_all(
+        "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
+    )
+
+    def only_int(samples: List[Sample]) -> int:
+        assert len(samples) == 1
+        return int(samples[0].value)
+
+    directory_entries_count = only_int(directory_entries_count_metric)
+
+    log.info(f"pageserver_directory_entries_count metric value: {directory_entries_count}")
+
+    assert directory_entries_count > COUNT_AT_LEAST_EXPECTED
+
+    timeline_detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    counts = timeline_detail["directory_entries_counts"]
+    assert counts
+    log.info(f"directory counts: {counts}")
+    assert counts[2] > COUNT_AT_LEAST_EXPECTED

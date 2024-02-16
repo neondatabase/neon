@@ -422,6 +422,7 @@ async fn build_timeline_info_common(
             tenant::timeline::logical_size::Accuracy::Approximate => false,
             tenant::timeline::logical_size::Accuracy::Exact => true,
         },
+        directory_entries_counts: timeline.get_directory_metrics().to_vec(),
         current_physical_size,
         current_logical_size_non_incremental: None,
         timeline_dir_layer_file_size_sum: None,
@@ -1135,7 +1136,7 @@ async fn tenant_shard_split_handler(
 
     let new_shards = state
         .tenant_manager
-        .shard_split(tenant_shard_id, ShardCount(req.new_shard_count), &ctx)
+        .shard_split(tenant_shard_id, ShardCount::new(req.new_shard_count), &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1950,6 +1951,7 @@ async fn put_io_engine_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
     let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
     crate::virtual_file::io_engine::set(kind);
     json_response(StatusCode::OK, ())
@@ -2213,7 +2215,7 @@ pub fn make_router(
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/keyspace",
-            |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
+            |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .any(handler_404))

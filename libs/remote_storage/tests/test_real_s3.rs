@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt::{Debug, Display};
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -9,9 +10,10 @@ use std::{collections::HashSet, time::SystemTime};
 use crate::common::{download_to_vec, upload_stream};
 use anyhow::Context;
 use camino::Utf8Path;
-use futures_util::Future;
+use futures_util::StreamExt;
 use remote_storage::{
-    GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
+    DownloadError, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+    S3Config,
 };
 use test_context::test_context;
 use test_context::AsyncTestContext;
@@ -27,7 +29,6 @@ use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_re
 use utils::backoff;
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
-
 const BASE_PREFIX: &str = "test";
 
 #[test_context(MaybeEnabledStorage)]
@@ -69,8 +70,11 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
         ret
     }
 
-    async fn list_files(client: &Arc<GenericRemoteStorage>) -> anyhow::Result<HashSet<RemotePath>> {
-        Ok(retry(|| client.list_files(None, None))
+    async fn list_files(
+        client: &Arc<GenericRemoteStorage>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<HashSet<RemotePath>> {
+        Ok(retry(|| client.list_files(None, None, cancel))
             .await
             .context("list root files failure")?
             .into_iter()
@@ -90,11 +94,11 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream("remote blob data1".as_bytes().into());
-        ctx.client.upload(data, len, &path1, None)
+        ctx.client.upload(data, len, &path1, None, &cancel)
     })
     .await?;
 
-    let t0_files = list_files(&ctx.client).await?;
+    let t0_files = list_files(&ctx.client, &cancel).await?;
     let t0 = time_point().await;
     println!("at t0: {t0_files:?}");
 
@@ -102,17 +106,17 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream(old_data.as_bytes().into());
-        ctx.client.upload(data, len, &path2, None)
+        ctx.client.upload(data, len, &path2, None, &cancel)
     })
     .await?;
 
-    let t1_files = list_files(&ctx.client).await?;
+    let t1_files = list_files(&ctx.client, &cancel).await?;
     let t1 = time_point().await;
     println!("at t1: {t1_files:?}");
 
     // A little check to ensure that our clock is not too far off from the S3 clock
     {
-        let dl = retry(|| ctx.client.download(&path2)).await?;
+        let dl = retry(|| ctx.client.download(&path2, &cancel)).await?;
         let last_modified = dl.last_modified.unwrap();
         let half_wt = WAIT_TIME.mul_f32(0.5);
         let t0_hwt = t0 + half_wt;
@@ -125,7 +129,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream("remote blob data3".as_bytes().into());
-        ctx.client.upload(data, len, &path3, None)
+        ctx.client.upload(data, len, &path3, None, &cancel)
     })
     .await?;
 
@@ -133,12 +137,12 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     retry(|| {
         let (data, len) = upload_stream(new_data.as_bytes().into());
-        ctx.client.upload(data, len, &path2, None)
+        ctx.client.upload(data, len, &path2, None, &cancel)
     })
     .await?;
 
-    retry(|| ctx.client.delete(&path1)).await?;
-    let t2_files = list_files(&ctx.client).await?;
+    retry(|| ctx.client.delete(&path1, &cancel)).await?;
+    let t2_files = list_files(&ctx.client, &cancel).await?;
     let t2 = time_point().await;
     println!("at t2: {t2_files:?}");
 
@@ -147,10 +151,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     ctx.client
         .time_travel_recover(None, t2, t_final, &cancel)
         .await?;
-    let t2_files_recovered = list_files(&ctx.client).await?;
+    let t2_files_recovered = list_files(&ctx.client, &cancel).await?;
     println!("after recovery to t2: {t2_files_recovered:?}");
     assert_eq!(t2_files, t2_files_recovered);
-    let path2_recovered_t2 = download_to_vec(ctx.client.download(&path2).await?).await?;
+    let path2_recovered_t2 = download_to_vec(ctx.client.download(&path2, &cancel).await?).await?;
     assert_eq!(path2_recovered_t2, new_data.as_bytes());
 
     // after recovery to t1: path1 is back, path2 has the old content
@@ -158,10 +162,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     ctx.client
         .time_travel_recover(None, t1, t_final, &cancel)
         .await?;
-    let t1_files_recovered = list_files(&ctx.client).await?;
+    let t1_files_recovered = list_files(&ctx.client, &cancel).await?;
     println!("after recovery to t1: {t1_files_recovered:?}");
     assert_eq!(t1_files, t1_files_recovered);
-    let path2_recovered_t1 = download_to_vec(ctx.client.download(&path2).await?).await?;
+    let path2_recovered_t1 = download_to_vec(ctx.client.download(&path2, &cancel).await?).await?;
     assert_eq!(path2_recovered_t1, old_data.as_bytes());
 
     // after recovery to t0: everything is gone except for path1
@@ -169,14 +173,14 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     ctx.client
         .time_travel_recover(None, t0, t_final, &cancel)
         .await?;
-    let t0_files_recovered = list_files(&ctx.client).await?;
+    let t0_files_recovered = list_files(&ctx.client, &cancel).await?;
     println!("after recovery to t0: {t0_files_recovered:?}");
     assert_eq!(t0_files, t0_files_recovered);
 
     // cleanup
 
     let paths = &[path1, path2, path3];
-    retry(|| ctx.client.delete_objects(paths)).await?;
+    retry(|| ctx.client.delete_objects(paths, &cancel)).await?;
 
     Ok(())
 }
@@ -195,6 +199,16 @@ impl EnabledS3 {
         EnabledS3 {
             client,
             base_prefix: BASE_PREFIX,
+        }
+    }
+
+    fn configure_request_timeout(&mut self, timeout: Duration) {
+        match Arc::get_mut(&mut self.client).expect("outer Arc::get_mut") {
+            GenericRemoteStorage::AwsS3(s3) => {
+                let s3 = Arc::get_mut(s3).expect("inner Arc::get_mut");
+                s3.timeout = timeout;
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -370,8 +384,169 @@ fn create_s3_client(
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
         }),
+        timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,
     ))
+}
+
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn download_is_timeouted(ctx: &mut MaybeEnabledStorage) {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return;
+    };
+
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/file_to_copy", ctx.base_prefix).as_str(),
+    ))
+    .unwrap();
+
+    let len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+
+    let timeout = std::time::Duration::from_secs(5);
+
+    ctx.configure_request_timeout(timeout);
+
+    let started_at = std::time::Instant::now();
+    let mut stream = ctx
+        .client
+        .download(&path, &cancel)
+        .await
+        .expect("download succeeds")
+        .download_stream;
+
+    if started_at.elapsed().mul_f32(0.9) >= timeout {
+        tracing::warn!(
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "timeout might be too low, consumed most of it during headers"
+        );
+    }
+
+    let first = stream
+        .next()
+        .await
+        .expect("should have the first blob")
+        .expect("should have succeeded");
+
+    tracing::info!(len = first.len(), "downloaded first chunk");
+
+    assert!(
+        first.len() < len,
+        "uploaded file is too small, we downloaded all on first chunk"
+    );
+
+    tokio::time::sleep(timeout).await;
+
+    {
+        let started_at = std::time::Instant::now();
+        let next = stream
+            .next()
+            .await
+            .expect("stream should not have ended yet");
+
+        tracing::info!(
+            next.is_err = next.is_err(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "received item after timeout"
+        );
+
+        let e = next.expect_err("expected an error, but got a chunk?");
+
+        let inner = e.get_ref().expect("std::io::Error::inner should be set");
+        assert!(
+            inner
+                .downcast_ref::<DownloadError>()
+                .is_some_and(|e| matches!(e, DownloadError::Timeout)),
+            "{inner:?}"
+        );
+    }
+
+    ctx.configure_request_timeout(RemoteStorageConfig::DEFAULT_TIMEOUT);
+
+    ctx.client.delete_objects(&[path], &cancel).await.unwrap()
+}
+
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return;
+    };
+
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/file_to_copy", ctx.base_prefix).as_str(),
+    ))
+    .unwrap();
+
+    let len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+
+    {
+        let mut stream = ctx
+            .client
+            .download(&path, &cancel)
+            .await
+            .expect("download succeeds")
+            .download_stream;
+
+        let first = stream
+            .next()
+            .await
+            .expect("should have the first blob")
+            .expect("should have succeeded");
+
+        tracing::info!(len = first.len(), "downloaded first chunk");
+
+        assert!(
+            first.len() < len,
+            "uploaded file is too small, we downloaded all on first chunk"
+        );
+
+        cancel.cancel();
+
+        let next = stream.next().await.expect("stream should have more");
+
+        let e = next.expect_err("expected an error, but got a chunk?");
+
+        let inner = e.get_ref().expect("std::io::Error::inner should be set");
+        assert!(
+            inner
+                .downcast_ref::<DownloadError>()
+                .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
+            "{inner:?}"
+        );
+    }
+
+    let cancel = CancellationToken::new();
+
+    ctx.client.delete_objects(&[path], &cancel).await.unwrap();
+}
+
+/// Upload a long enough file so that we cannot download it in single chunk
+///
+/// For s3 the first chunk seems to be less than 10kB, so this has a bit of a safety margin
+async fn upload_large_enough_file(
+    client: &GenericRemoteStorage,
+    path: &RemotePath,
+    cancel: &CancellationToken,
+) -> usize {
+    let header = bytes::Bytes::from_static("remote blob data content".as_bytes());
+    let body = bytes::Bytes::from(vec![0u8; 1024]);
+    let contents = std::iter::once(header).chain(std::iter::repeat(body).take(128));
+
+    let len = contents.clone().fold(0, |acc, next| acc + next.len());
+
+    let contents = futures::stream::iter(contents.map(std::io::Result::Ok));
+
+    client
+        .upload(contents, len, path, None, cancel)
+        .await
+        .expect("upload succeeds");
+
+    len
 }
