@@ -2,6 +2,7 @@ import time
 from typing import Any, Dict, List, Optional, Union
 
 from mypy_boto3_s3.type_defs import (
+    DeleteObjectOutputTypeDef,
     EmptyResponseMetadataTypeDef,
     ListObjectsV2OutputTypeDef,
     ObjectTypeDef,
@@ -346,6 +347,30 @@ def list_prefix(
         Delimiter=delimiter,
         Bucket=remote.bucket_name,
         Prefix=prefix,
+    )
+    return response
+
+
+def remote_storage_delete_key(
+    remote: RemoteStorage,
+    key: str,
+) -> DeleteObjectOutputTypeDef:
+    """
+    Note that this function takes into account prefix_in_bucket.
+    """
+    # For local_fs we need to use a different implementation. As we don't need local_fs, just don't support it for now.
+    assert isinstance(remote, S3Storage), "localfs is currently not supported"
+    assert remote.client is not None
+
+    prefix_in_bucket = remote.prefix_in_bucket or ""
+
+    # real s3 tests have uniqie per test prefix
+    # mock_s3 tests use special pageserver prefix for pageserver stuff
+    key = "/".join((prefix_in_bucket, key))
+
+    response = remote.client.delete_object(
+        Bucket=remote.bucket_name,
+        Key=key,
     )
     return response
 
