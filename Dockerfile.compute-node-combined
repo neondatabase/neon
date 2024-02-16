@@ -95,6 +95,27 @@ RUN cd compute_tools && cargo build --locked --profile release-line-debug-size-l
 
 #########################################################################################
 #
+# Clean up postgres folder before inclusion
+#
+#########################################################################################
+FROM pg-build AS postgres-cleanup-layer
+# COPY --from=neon-pg-ext-build /usr/local/pgsql /usr/local/pgsql
+
+RUN for pg_version in v14 v15 v16; do \
+    prefix="/usr/local/pgsql-${pg_version}"; \
+    # Remove binaries from /bin/ that we won't use (or would manually copy & install otherwise)
+    cd "${prefix}/bin" && rm ecpg raster2pgsql shp2pgsql pgtopo_export pgtopo_import pgsql2shp; \
+    cd ..; \
+    # Remove headers that we won't need anymore - we've completed installation of all extensions
+    rm -r "${prefix}/include"; \
+    # Remove static postgresql libraries - all compilation is finished, so we
+    # can now remove these files - they must be included in other binaries by now
+    # if they were to be used by other libraries.
+    rm ${prefix}/lib/lib*.a; \
+done
+
+#########################################################################################
+#
 # Final layer
 # Put it all together into the final image
 #
@@ -112,7 +133,9 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     # create folder for file cache
     mkdir -p -m 777 /neon/cache
 
-COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql-v14 /usr/local
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql-v15 /usr/local
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql-v16 /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
 # Install:
