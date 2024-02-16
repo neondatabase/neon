@@ -32,6 +32,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
+use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
