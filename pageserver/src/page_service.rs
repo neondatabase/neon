@@ -637,25 +637,6 @@ impl PageServerHandler {
                         span,
                     )
                 }
-                PagestreamFeMessage::GetLatestPage(old_req) => {
-                    let req = PagestreamGetPageRequest {
-                        horizon: if old_req.latest {
-                            Lsn::MAX
-                        } else {
-                            old_req.lsn
-                        },
-                        lsn: old_req.lsn,
-                        rel: old_req.rel,
-                        blkno: old_req.blkno,
-                    };
-                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
-                    (
-                        self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
-                            .instrument(span.clone())
-                            .await,
-                        span,
-                    )
-                }
                 PagestreamFeMessage::GetPage(req) => {
                     // shard_id is filled in by the handler
                     let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);

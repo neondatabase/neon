@@ -7,9 +7,7 @@ use std::{
     io::BufReader,
 };
 
-use pageserver_api::models::{
-    PagestreamFeMessage, PagestreamGetLatestPageRequest, PagestreamGetPageRequest,
-};
+use pageserver_api::models::{PagestreamFeMessage, PagestreamGetPageRequest};
 use utils::id::{ConnectionId, TenantId, TimelineId};
 
 use clap::{Parser, Subcommand};
@@ -53,11 +51,9 @@ enum Command {
 //      - detect any prefetching anomalies by looking for negative deltas during seqscan
 fn analyze_trace<R: std::io::Read>(mut reader: R) {
     let mut total = 0; // Total requests traced
-    let mut old = 0; // Old requests traced
     let mut cross_rel = 0; // Requests that ask for different rel than previous request
     let mut deltas = HashMap::<i32, u32>::new(); // Consecutive blkno differences
     let mut prev: Option<PagestreamGetPageRequest> = None;
-    let mut old_prev: Option<PagestreamGetLatestPageRequest> = None;
 
     // Compute stats
     while let Ok(msg) = PagestreamFeMessage::parse(&mut reader) {
@@ -65,20 +61,6 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
             PagestreamFeMessage::Exists(_) => {}
             PagestreamFeMessage::Nblocks(_) => {}
             PagestreamFeMessage::GetSlruSegment(_) => {}
-            PagestreamFeMessage::GetLatestPage(req) => {
-                total += 1;
-                old += 1;
-
-                if let Some(prev) = old_prev {
-                    if prev.rel == req.rel {
-                        let delta = (req.blkno as i32) - (prev.blkno as i32);
-                        deltas.entry(delta).and_modify(|c| *c += 1).or_insert(1);
-                    } else {
-                        cross_rel += 1;
-                    }
-                }
-                old_prev = Some(req);
-            }
             PagestreamFeMessage::GetPage(req) => {
                 total += 1;
 
@@ -101,7 +83,6 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
     deltas.retain(|_, count| *count > 300);
     other -= deltas.len();
     dbg!(total);
-    dbg!(old);
     dbg!(cross_rel);
     dbg!(other);
     dbg!(deltas);
