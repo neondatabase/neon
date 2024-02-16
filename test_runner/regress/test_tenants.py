@@ -18,7 +18,7 @@ from fixtures.metrics import (
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    wait_for_wal_insert_lsn,
+    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until_tenant_active
@@ -438,7 +438,7 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
             cur.execute("CREATE TABLE template_tbl(key int primary key, value text);")
             for i in range(TABLE_COUNT):
                 cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
-    wait_for_wal_insert_lsn(env, endpoint_tenant, env.initial_tenant, env.initial_timeline)
+    wait_for_last_flush_lsn(env, endpoint_tenant, env.initial_tenant, env.initial_timeline)
     endpoint_tenant.stop()
 
     m = ps_http.get_metrics()
