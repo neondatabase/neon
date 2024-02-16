@@ -4849,7 +4849,7 @@ mod tests {
             TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
 
         let ctx = any_context();
-        let tenant = harness.try_load(&ctx).await.unwrap();
+        let tenant = harness.do_try_load(&ctx).await.unwrap();
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
