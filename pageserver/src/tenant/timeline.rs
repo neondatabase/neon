@@ -3374,11 +3374,7 @@ impl Timeline {
                 // partition does not cover any keys owned by this shard.  In this case, to ensure
                 // we don't leave gaps between image layers, leave `start` where it is, so that the next
                 // layer we write will cover the key range that we just scanned.
-                tracing::debug!(
-                    "no data in range {}-{}",
-                    img_range.start,
-                    img_range.end
-                );
+                tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             }
         }
         // All layers that the GC wanted us to create have now been created.
