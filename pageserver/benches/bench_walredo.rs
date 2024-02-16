@@ -140,11 +140,13 @@ fn add_multithreaded_walredo_requesters(
         });
     }
 
-    let do_one_iteration = || rt.block_on(async {
-        barrier.wait().await;
-        // wait for work to complete
-        barrier.wait().await;
-    });
+    let do_one_iteration = || {
+        rt.block_on(async {
+            barrier.wait().await;
+            // wait for work to complete
+            barrier.wait().await;
+        })
+    };
 
     b.iter_batched(
         || {
