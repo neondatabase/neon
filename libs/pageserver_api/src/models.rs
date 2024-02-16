@@ -324,7 +324,7 @@ pub struct ThrottleConfig {
 impl ThrottleConfig {
     pub fn disabled() -> Self {
         Self {
-            task_kinds: vec![], // effectively disables the rate limit
+            task_kinds: vec![], // effectively disables the throttle
             // other values don't matter with emtpy `task_kinds`.
             initial: 0,
             refill_interval: Duration::from_millis(1),

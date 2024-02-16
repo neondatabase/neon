@@ -13,6 +13,13 @@ use tracing::error;
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
+/// Throttle for `async` functions.
+///
+/// Runtime reconfigurable.
+///
+/// To share a throttle among multiple entities, wrap it in an [`Arc`].
+///
+/// The intial use case for this is tenant-wide throttling of getpage@lsn requests.
 pub struct Throttle<M: Metric> {
     inner: ArcSwap<Inner>,
     metric: M,
