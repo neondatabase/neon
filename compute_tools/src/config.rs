@@ -74,7 +74,7 @@ pub fn write_postgres_conf(
     }
 
     match spec.mode {
-        ComputeMode::Primary => {}
+        ComputeMode::Primary | ComputeMode::Upgrade => {}
         ComputeMode::Static(lsn) => {
             // hot_standby is 'on' by default, but let's be explicit
             writeln!(file, "hot_standby=on")?;

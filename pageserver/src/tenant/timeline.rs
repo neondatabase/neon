@@ -14,7 +14,7 @@ mod walreceiver;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
@@ -4355,6 +4355,10 @@ impl Timeline {
             _ = self.current_logical_size.initialized.acquire() => {},
             _ = self.cancel.cancelled() => {}
         )
+    }
+
+    pub fn get_path(&self) -> Utf8PathBuf {
+        self.conf.timelines_path(&self.tenant_shard_id)
     }
 
     /// Detach this timeline from its ancestor by copying all of ancestors layers as this

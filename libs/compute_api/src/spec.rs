@@ -199,6 +199,11 @@ pub enum ComputeMode {
     /// Future versions may want to distinguish between replicas with hot standby
     /// feedback and other kinds of replication configurations.
     Replica,
+    /// An upgrade-only node
+    ///
+    /// This node will not accept remote Postgres connections. It's only
+    /// purpose is to upgrade a timeline.
+    Upgrade,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

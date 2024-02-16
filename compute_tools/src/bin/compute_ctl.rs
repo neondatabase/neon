@@ -43,7 +43,8 @@ use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::Arg;
+use clap::{Arg, ArgAction};
+use compute_api::spec::ComputeMode;
 use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
@@ -57,7 +58,6 @@ use compute_tools::compute::{
     forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
 };
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::get_pg_version;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -121,11 +121,14 @@ fn init() -> Result<(String, clap::ArgMatches)> {
 }
 
 fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
-    let pgbin_default = "postgres";
-    let pgbin = matches
-        .get_one::<String>("pgbin")
+    let pgroot = matches
+        .get_one::<String>("pgroot")
         .map(|s| s.as_str())
-        .unwrap_or(pgbin_default);
+        .expect("pgroot is required");
+    let pgversion = matches
+        .get_one::<String>("pgversion")
+        .map(|s| s.as_str())
+        .expect("pgversion is required");
 
     let ext_remote_storage = matches
         .get_one::<String>("remote-ext-config")
@@ -156,7 +159,8 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
     Ok(ProcessCliResult {
         connstr,
         pgdata,
-        pgbin,
+        pgroot,
+        pgversion,
         ext_remote_storage,
         http_port,
         spec_json,
@@ -168,7 +172,8 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
 struct ProcessCliResult<'clap> {
     connstr: &'clap str,
     pgdata: &'clap str,
-    pgbin: &'clap str,
+    pgroot: &'clap str,
+    pgversion: &'clap str,
     ext_remote_storage: Option<&'clap str>,
     http_port: u16,
     spec_json: Option<&'clap String>,
@@ -290,8 +295,9 @@ fn wait_spec(
     build_tag: String,
     ProcessCliResult {
         connstr,
+        pgroot,
+        pgversion,
         pgdata,
-        pgbin,
         ext_remote_storage,
         resize_swap_on_bind,
         http_port,
@@ -316,8 +322,9 @@ fn wait_spec(
     let compute_node = ComputeNode {
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
-        pgbin: pgbin.to_string(),
-        pgversion: get_pg_version(pgbin),
+        pgroot: pgroot.to_string(),
+        pgversion: pgversion.to_string(),
+        http_port,
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
@@ -337,7 +344,7 @@ fn wait_spec(
 
     // Launch http service first, so that we can serve control-plane requests
     // while configuration is still in progress.
-    let _http_handle =
+    let http_handle =
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
     if !spec_set {
@@ -372,15 +379,12 @@ fn wait_spec(
 
     Ok(WaitSpecResult {
         compute,
-        http_port,
         resize_swap_on_bind,
     })
 }
 
 struct WaitSpecResult {
     compute: Arc<ComputeNode>,
-    // passed through from ProcessCliResult
-    http_port: u16,
     resize_swap_on_bind: bool,
 }
 
@@ -389,7 +393,6 @@ async fn start_postgres(
     #[allow(unused_variables)] matches: &clap::ArgMatches,
     WaitSpecResult {
         compute,
-        http_port,
         resize_swap_on_bind,
     }: WaitSpecResult,
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
@@ -442,12 +445,10 @@ async fn start_postgres(
         }
     }
 
-    let extension_server_port: u16 = http_port;
-
     // Start Postgres
     let mut pg = None;
     if !prestartup_failed {
-        pg = match compute.start_compute(extension_server_port).await {
+        pg = match compute.start_compute() {
             Ok(pg) => Some(pg),
             Err(err) => {
                 error!("could not start the compute node: {:#}", err);
@@ -687,11 +688,17 @@ fn cli() -> clap::Command {
                 .required(true),
         )
         .arg(
-            Arg::new("pgbin")
-                .short('b')
-                .long("pgbin")
-                .default_value("postgres")
-                .value_name("POSTGRES_PATH"),
+            Arg::new("pgroot")
+                .short('R')
+                .long("pgroot")
+                .value_name("POSTGRES_ROOT")
+                .required(true),
+        )
+        .arg(
+            Arg::new("pgversion")
+                .long("pgversion")
+                .value_name("POSTGRES_VERSION")
+                .required(true),
         )
         .arg(
             Arg::new("spec")
@@ -750,6 +757,11 @@ fn cli() -> clap::Command {
             Arg::new("resize-swap-on-bind")
                 .long("resize-swap-on-bind")
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("no-postgres")
+                .long("no-postgres")
+                .action(ArgAction::SetTrue),
         )
 }
 

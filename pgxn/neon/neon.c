@@ -11,6 +11,8 @@
 #include "postgres.h"
 #include "fmgr.h"
 
+#include <sys/stat.h>
+
 #include "miscadmin.h"
 #include "access/subtrans.h"
 #include "access/twophase.h"
@@ -29,11 +31,19 @@
 #include "tcop/tcopprot.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
+#include "access/xloginsert.h"
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
 #include "utils/guc.h"
 #include "utils/guc_tables.h"
+#include "utils/timeout.h"
 #include "utils/wait_event.h"
+#include "storage/ipc.h"
+#include "storage/proc.h"
+
+#if PG_MAJORVERSION_NUM >= 15
+#include "access/neon_xlog.h"
+#endif
 
 #include "extension_server.h"
 #include "neon.h"
@@ -629,10 +639,17 @@ ReportSearchPath(void)
 void
 _PG_init(void)
 {
+	const char *purpose;
+
+	purpose = getenv("NEON_PURPOSE");
+	if (purpose && strcmp(purpose, "upgrade") == 0)
+		return;
+
 	/*
 	 * Also load 'neon_rmgr'. This makes it unnecessary to list both 'neon'
 	 * and 'neon_rmgr' in shared_preload_libraries.
 	 */
+
 #if PG_VERSION_NUM >= 160000
 	load_file("$libdir/neon_rmgr", false);
 #endif
@@ -676,6 +693,9 @@ _PG_init(void)
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
 PG_FUNCTION_INFO_V1(backpressure_throttling_time);
+#if PG_MAJORVERSION_NUM >= 15
+PG_FUNCTION_INFO_V1(wal_log_file);
+#endif
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)
@@ -721,3 +741,200 @@ backpressure_throttling_time(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_UINT64(BackpressureThrottlingTime());
 }
+
+#if PG_MAJORVERSION_NUM >= 15
+
+Datum
+wal_log_file(PG_FUNCTION_ARGS)
+{
+	int rc;
+	int fd;
+	ssize_t n;
+	text *path;
+	size_t off;
+	char *data;
+	short nargs;
+	struct stat st;
+	XLogRecPtr lsn;
+	size_t path_len;
+	xl_neon_file xlrec;
+	char file[MAXPGPATH];
+
+#if defined(WAL_DEBUG) && PG_MAJORVERSION_NUM < 16
+	bool wal_debug;
+#endif
+
+	path = PG_GETARG_TEXT_PP(0);
+	path_len = VARSIZE(path) - VARHDRSZ;
+
+	memcpy(file, VARDATA(path), path_len);
+	file[path_len] = '\0';
+
+	/* Get the size of the file. Note that stat(2) follows symlinks. */
+	rc = stat(file, &st);
+	if (rc != 0)
+		ereport(ERROR,
+				(errmsg("failed to get size of file (%s): %m", file)));
+
+	xlrec.size = (size_t) st.st_size;
+
+	fd = open(file, O_RDONLY);
+	if (fd == -1)
+		ereport(ERROR,
+				(errmsg("could not open %s: %m", file)));
+
+	/* If the file is too large, error out. */
+
+	data = palloc(xlrec.size);
+
+	/* Copy the file contents */
+	off = 0;
+	while (true) {
+		n = read(fd, data + off, xlrec.size - off);
+		if (n == EOF)
+		{
+			close(fd);
+			ereport(ERROR,
+					(errmsg("failed to read %s: %m", file)));
+		}
+
+		off += n;
+
+		if (xlrec.size - off == 0)
+			break;
+	}
+
+	close(fd);
+
+	xlrec.filetype = XL_NEON_FILE_UPGRADE_TARBALL;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, SizeOfNeonFile);
+	XLogRegisterData((char *) data, xlrec.size);
+
+	/*
+	 * We must turn debugging off on anything where the Neon RMGR is not
+	 * registered. Stash the original value for restoration later.
+	 */
+#if defined(WAL_DEBUG) && PG_MAJORVERSION_NUM < 16
+	wal_debug = XLOG_DEBUG;
+	XLOG_DEBUG = false;
+#endif
+
+	lsn = XLogInsert(RM_NEON_ID, XLOG_NEON_FILE);
+
+#if defined(WAL_DEBUG) && PG_MAJORVERSION_NUM < 16
+	XLOG_DEBUG = wal_debug;
+#endif
+
+	PG_RETURN_LSN(lsn);
+}
+
+#endif
+
+#if PG_MAJORVERSION_NUM >= 15
+
+/*
+ * Entry point for `postgres --wal-log`.
+ */
+PGDLLEXPORT void
+WalLogMain(int argc, char *argv[])
+{
+	int			rc;
+	int			fd;
+	off_t		off;
+	struct stat	st;
+	XLogRecPtr	lsn;
+	void	   *data;
+	xl_neon_file xlrec;
+	/* TODO: should this be PATH_MAX? should we require an absolute path? */
+	char		file[MAXPGPATH];
+
+#if defined(WAL_DEBUG) && PG_MAJORVERSION_NUM < 16
+	bool wal_debug;
+#endif
+
+	if (argc != 3)
+		ereport(ERROR, errmsg("wrong number of arguments passed to --wal-log"));
+
+	if (!realpath(argv[2], file))
+		ereport(ERROR, errmsg("failed to resolve path: %m"));
+
+	ereport(LOG, errmsg("writing %s to WAL", file));
+
+	ChangeToDataDir();
+	CreateDataDirLockFile(false);
+	LocalProcessControlFile(false);
+	InitializeMaxBackends();
+	CreateSharedMemoryAndSemaphores();
+	InitializeTimeouts();
+	InitProcess();
+	BaseInit();
+	CreateAuxProcessResourceOwner();
+	StartupXLOG();
+
+	/* Get the size of the file. Note that stat(2) follows symlinks. */
+	rc = stat(file, &st);
+	if (rc != 0)
+		ereport(ERROR,
+				(errmsg("failed to get size of file (%s): %m", file)));
+
+	xlrec.size = (size_t) st.st_size;
+
+	fd = open(file, O_RDONLY);
+	if (fd == -1)
+		ereport(ERROR,
+				(errmsg("could not open %s: %m", file)));
+
+	/* If the file is too large, error out. */
+
+	data = palloc(xlrec.size);
+
+	/* Copy the file contents */
+	off = 0;
+	while (true) {
+		ssize_t		n;
+
+		n = read(fd, data + off, xlrec.size - off);
+		if (n == EOF)
+		{
+			close(fd);
+			ereport(ERROR,
+					(errmsg("failed to read %s: %m", file)));
+		}
+
+		off += n;
+
+		if (xlrec.size - off == 0)
+			break;
+	}
+
+	close(fd);
+
+	xlrec.filetype = XL_NEON_FILE_UPGRADE_TARBALL;
+
+	/* ereport(LOG, errmsg("Current LSN: %X/%X" , LSN_FORMAT_ARGS(GetXLogWriteRecPtr()))); */
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, SizeOfNeonFile);
+	XLogRegisterData(data, xlrec.size);
+
+	/*
+	 * We must turn debugging off on anything where the Neon RMGR is not
+	 * registered. Stash the original value for restoration later.
+	 */
+#if defined(WAL_DEBUG) && PG_MAJORVERSION_NUM < 16
+	wal_debug = XLOG_DEBUG;
+	XLOG_DEBUG = false;
+#endif
+
+	lsn = XLogInsert(RM_NEON_ID, XLOG_NEON_FILE);
+
+#if defined(WAL_DEBUG) && PG_MAJORVERSION_NUM < 16
+	XLOG_DEBUG = wal_debug;
+#endif
+
+	exit(0);
+}
+
+#endif

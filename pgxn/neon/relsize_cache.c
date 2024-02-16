@@ -78,11 +78,16 @@ neon_smgr_shmem_startup(void)
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
+	if (relsize_hash_size <= 0)
+		return;
+
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	relsize_ctl = (RelSizeHashControl *) ShmemInitStruct("relsize_hash", sizeof(RelSizeHashControl), &found);
 	if (!found)
 	{
+		elog(LOG, "neon_relsize: %d", relsize_hash_size);
 		relsize_lock = (LWLockId) GetNamedLWLockTranche("neon_relsize");
+		elog(LOG, "neon_relsize");
 		info.keysize = sizeof(RelTag);
 		info.entrysize = sizeof(RelSizeEntry);
 		relsize_hash = ShmemInitHash("neon_relsize",

@@ -182,6 +182,7 @@ impl ComputeControlPlane {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<()> {
+        // TODO: It really feels like I need to do some protection here
         if matches!(mode, ComputeMode::Primary) {
             // this check is not complete, as you could have a concurrent attempt at
             // creating another primary, both reading the state before checking it here,
@@ -393,6 +394,7 @@ impl Endpoint {
                     conf.append("recovery_prefetch", "off");
                 }
             }
+            ComputeMode::Upgrade => {}
         }
 
         Ok(conf)
@@ -624,13 +626,16 @@ impl Endpoint {
                 self.endpoint_path().join("spec.json").to_str().unwrap(),
             ])
             .args([
-                "--pgbin",
-                self.env
-                    .pg_bin_dir(self.pg_version)?
-                    .join("postgres")
-                    .to_str()
+                "--pgroot",
+                &self
+                    .env
+                    .pg_distrib_dir
+                    .clone()
+                    .into_os_string()
+                    .into_string()
                     .unwrap(),
             ])
+            .args(["--pgversion", &self.pg_version.to_string()])
             .stdin(std::process::Stdio::null())
             .stderr(logfile.try_clone()?)
             .stdout(logfile);
@@ -674,7 +679,7 @@ impl Endpoint {
                             }
                             // keep retrying
                         }
-                        ComputeStatus::Running => {
+                        ComputeStatus::Running | ComputeStatus::Prepared => {
                             // All good!
                             break;
                         }
@@ -688,6 +693,7 @@ impl Endpoint {
                             );
                         }
                         ComputeStatus::Empty
+                        | ComputeStatus::Upgrading
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
                         | ComputeStatus::TerminationPending

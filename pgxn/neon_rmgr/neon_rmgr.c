@@ -76,6 +76,8 @@ neon_rm_redo(XLogReaderState *record)
 		case XLOG_NEON_HEAP_MULTI_INSERT:
 			redo_neon_heap_multi_insert(record);
 			break;
+		case XLOG_NEON_FILE:
+			break;
 		default:
 			elog(PANIC, "neon_rm_redo: unknown op code %u", info);
 	}

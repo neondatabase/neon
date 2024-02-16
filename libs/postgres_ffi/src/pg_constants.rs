@@ -181,8 +181,26 @@ pub const XLOG_NEON_HEAP_UPDATE: u8 = 0x20;
 pub const XLOG_NEON_HEAP_HOT_UPDATE: u8 = 0x30;
 pub const XLOG_NEON_HEAP_LOCK: u8 = 0x40;
 pub const XLOG_NEON_HEAP_MULTI_INSERT: u8 = 0x50;
+pub const XLOG_NEON_FILE: u8 = 0x60;
 
 pub const XLOG_NEON_HEAP_VISIBLE: u8 = 0x40;
+
+#[repr(C)]
+#[derive(Debug)]
+pub enum XlNeonFileFiletype {
+    UPGRADE_TARBALL,
+}
+
+impl TryFrom<u8> for XlNeonFileFiletype {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(XlNeonFileFiletype::UPGRADE_TARBALL),
+            _ => Err(()),
+        }
+    }
+}
 
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;

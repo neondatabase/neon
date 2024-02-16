@@ -526,6 +526,29 @@ pub mod v16 {
                 }
             }
         }
+
+        #[repr(C)]
+        #[derive(Debug)]
+        pub struct XlNeonFile {
+            pub filetype: u8,
+            pub size: u32,
+            pub data: Bytes,
+        }
+
+        impl XlNeonFile {
+            pub fn decode(buf: &mut Bytes) -> Self {
+                let filetype = buf.get_u8();
+                // Skip the padding
+                buf.advance(std::mem::size_of::<u8>() * 3);
+                let size = buf.get_u32_le();
+
+                Self {
+                    filetype,
+                    size,
+                    data: buf.copy_to_bytes(buf.remaining()),
+                }
+            }
+        }
     }
 }
 

@@ -55,9 +55,7 @@ pub async fn get_database_schema(
     compute: &Arc<ComputeNode>,
     dbname: &str,
 ) -> Result<impl Stream<Item = Result<bytes::Bytes, std::io::Error>>, SchemaDumpError> {
-    let pgbin = &compute.pgbin;
-    let basepath = Path::new(pgbin).parent().unwrap();
-    let pgdump = basepath.join("pg_dump");
+    let pgdump = compute.get_my_pg_binary("pg_dump");
     let mut connstr = compute.connstr.clone();
     connstr.set_path(dbname);
     let mut cmd = Command::new(pgdump)

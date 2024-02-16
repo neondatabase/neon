@@ -212,6 +212,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GenericError"
+  /upgrade:
+    post:
+      tags:
+        - Upgrade
+      summary: Upgrade project to another Postgres major version.
+      operationId: upgradePostgres
+      responses:
+        202:
+          description: Upgrade request in progress.
+        409:
+          description: Upgrade already in progress.
+        422:
+          description: Upgrade request could not be processed.
+        500:
+          description: Upgrade request failed.
 
   /terminate:
     post:

@@ -44,10 +44,15 @@ pub enum ComputeStatus {
     // Compute node has spec and initial startup and
     // configuration is in progress.
     Init,
+    // Compute has been prepared, meaning that remote extensions have been
+    // downloaded and the data directory has been prepared.
+    Prepared,
     // Compute is configured and running.
     Running,
     // New spec is being applied.
     Configuration,
+    // Compute is upgrading Postgres.
+    Upgrading,
     // Either startup or configuration failed,
     // compute will exit soon or is waiting for
     // control-plane to terminate it.

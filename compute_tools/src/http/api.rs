@@ -10,6 +10,7 @@ use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
+use compute_api::requests::UpgradeRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
@@ -133,6 +134,20 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Err((msg, code)) => {
                     error!("error handling /terminate request: {msg}");
                     render_json_error(&msg, code)
+                }
+            }
+        }
+
+        (&Method::POST, "/upgrade") => {
+            info!("serving /upgrade POST request");
+            match handle_upgrade_request(req, compute).await {
+                Ok(_) => Response::builder()
+                    .status(StatusCode::ACCEPTED)
+                    .body(Body::from("Starting upgrade"))
+                    .unwrap(),
+                Err((e, status)) => {
+                    error!("error handling /upgrade request: {e}");
+                    render_json_error(&format!("{}", e), status)
                 }
             }
         }
@@ -394,6 +409,59 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
     .await
     .unwrap()?;
     info!("terminated Postgres");
+    Ok(())
+}
+
+async fn handle_upgrade_request(
+    req: Request<Body>,
+    compute: &Arc<ComputeNode>,
+) -> Result<(), (anyhow::Error, StatusCode)> {
+    let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
+    let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+    let body = match serde_json::from_str::<UpgradeRequest>(&body_str) {
+        Ok(r) => r,
+        Err(e) => return Err((Into::into(e), StatusCode::BAD_REQUEST)),
+    };
+
+    // No sense in trying to upgrade to the same version.
+    let curr_version = compute.pgversion.clone();
+    let new_version = body.pg_version;
+    if curr_version == new_version {
+        return Err((
+            anyhow::anyhow!("cannot upgrade endpoint to the same version"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+
+    // Check that we are in the running state before trying to upgrade.
+    match compute.get_status() {
+        ComputeStatus::Prepared => (),
+        ComputeStatus::Upgrading => {
+            return Err((
+                anyhow::anyhow!("upgrade already in progress"),
+                StatusCode::CONFLICT,
+            ));
+        }
+        _ => {
+            return Err((
+                anyhow::anyhow!("expected compute to be in the prepared state"),
+                StatusCode::CONFLICT,
+            ));
+        }
+    }
+
+    compute.set_status(ComputeStatus::Upgrading);
+
+    let c = compute.clone();
+    tokio::spawn(async move {
+        if let Err(e) = c.upgrade(&new_version).await {
+            error!("Failed to upgrade database: {}", e);
+        }
+
+        c.set_status(ComputeStatus::Running);
+    });
+
     Ok(())
 }
 

@@ -24,6 +24,7 @@
 use std::time::Duration;
 use std::time::SystemTime;
 
+use camino::Utf8PathBuf;
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
@@ -33,8 +34,10 @@ use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 use utils::failpoint_support;
 use utils::rate_limit::RateLimit;
+use utils::zstd::extract_zst_tarball;
 
 use crate::context::RequestContext;
+use crate::import_datadir;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -69,7 +72,9 @@ impl CheckPoint {
     }
 }
 
-pub struct WalIngest {
+pub struct WalIngest<'t> {
+    timeline: &'t Timeline,
+    timeline_path: Utf8PathBuf,
     shard: ShardIdentity,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
@@ -82,12 +87,12 @@ struct WarnIngestLag {
     timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
-impl WalIngest {
+impl<'t> WalIngest<'t> {
     pub async fn new(
-        timeline: &Timeline,
+        timeline: &'t Timeline,
         startpoint: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<WalIngest> {
+    ) -> anyhow::Result<WalIngest<'t>> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
         let checkpoint_bytes = timeline.get_checkpoint(startpoint, ctx).await?;
@@ -100,6 +105,8 @@ impl WalIngest {
         });
 
         Ok(WalIngest {
+            timeline,
+            timeline_path: timeline.get_path(),
             shard: *timeline.get_shard_identity(),
             checkpoint,
             checkpoint_modified: false,
@@ -457,6 +464,18 @@ impl WalIngest {
                     let xlrec = crate::walrecord::XlReploriginDrop::decode(&mut buf);
                     modification.drop_replorigin(xlrec.node_id).await?
                 }
+            }
+            pg_constants::RM_BTREE_ID
+            | pg_constants::RM_HASH_ID
+            | pg_constants::RM_GIN_ID
+            | pg_constants::RM_GIST_ID
+            | pg_constants::RM_SEQ_ID
+            | pg_constants::RM_SPGIST_ID
+            | pg_constants::RM_BRIN_ID
+            | pg_constants::RM_COMMIT_TS_ID
+            | pg_constants::RM_REPLORIGIN_ID
+            | pg_constants::RM_GENERIC_ID => {
+                // No special handling currently for these resource managers
             }
             _x => {
                 // TODO: should probably log & fail here instead of blindly
@@ -923,6 +942,33 @@ impl WalIngest {
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match pg_version {
+            15 => {
+                let info = decoded.xl_info;
+
+                match info {
+                    pg_constants::XLOG_NEON_FILE => {
+                        info!(
+                            "tristan: last_record_lsn={}",
+                            self.timeline.get_last_record_lsn()
+                        );
+                        let xlrec = v16::rm_neon::XlNeonFile::decode(buf);
+                        let pgdata_path = self.timeline_path.join("new-pgdata");
+
+                        extract_zst_tarball(&pgdata_path, &*xlrec.data).await?;
+
+                        let lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?;
+                        info!("LSN from pg_upgraded controlfile: {lsn}");
+                        Box::pin(import_datadir::import_timeline_from_postgres_datadir(
+                            self.timeline,
+                            &pgdata_path,
+                            lsn,
+                            ctx,
+                        ))
+                        .await?;
+                    }
+                    _ => return Err(anyhow::anyhow!("Unknown XLOG xl_info field: {}", info)),
+                }
+            }
             16 => {
                 let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 

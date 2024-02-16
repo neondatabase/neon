@@ -12,3 +12,9 @@ use serde::Deserialize;
 pub struct ConfigurationRequest {
     pub spec: ComputeSpec,
 }
+
+/// Request body of the /upgrade API
+#[derive(Deserialize, Debug)]
+pub struct UpgradeRequest {
+    pub pg_version: String,
+}

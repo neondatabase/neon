@@ -798,14 +798,19 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .get_one::<bool>("hot-standby")
                 .copied()
                 .unwrap_or(false);
-
+            let upgrade_only = sub_args
+                .get_one::<bool>("upgrade-only")
+                .copied()
+                .unwrap_or(false);
             let allow_multiple = sub_args.get_flag("allow-multiple");
 
-            let mode = match (lsn, hot_standby) {
-                (Some(lsn), false) => ComputeMode::Static(lsn),
-                (None, true) => ComputeMode::Replica,
-                (None, false) => ComputeMode::Primary,
-                (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+            let mode = match (lsn, hot_standby, upgrade_only) {
+                (Some(lsn), false, false) => ComputeMode::Static(lsn),
+                (None, true, false) => ComputeMode::Replica,
+                (None, false, false) => ComputeMode::Primary,
+                (None, false, true) => ComputeMode::Upgrade,
+                // Seeing this message means we aren't setting conflicts_with on clap arguments.
+                _ => anyhow::bail!("Invalid command line invocation"),
             };
 
             match (mode, hot_standby) {
@@ -1501,7 +1506,8 @@ fn cli() -> Command {
     let lsn_arg = Arg::new("lsn")
         .long("lsn")
         .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
-        .required(false);
+        .required(false)
+        .conflicts_with("hot-standby");
 
     let hot_standby_arg = Arg::new("hot-standby")
         .value_parser(value_parser!(bool))
@@ -1718,6 +1724,18 @@ fn cli() -> Command {
                     .arg(hot_standby_arg.clone())
                     .arg(update_catalog)
                     .arg(allow_multiple.clone())
+                    .arg(
+                        Arg::new("upgrade-only")
+                            .help("Mark this compute as an upgrade compute")
+                            .long("upgrade-only")
+                            .action(ArgAction::SetTrue)
+                            .conflicts_with_all(&[
+                                "config-only",
+                                "hot-standby",
+                                // Perhaps we could offer upgrades at a specific LSN in the future.
+                                "lsn",
+                            ])
+                    )
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")

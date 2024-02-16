@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::AtomicU32;
@@ -13,6 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytes::{Buf, BufMut};
+use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
@@ -20,9 +22,12 @@ use futures::StreamExt;
 use nix::unistd::Pid;
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};
+use tokio;
+use tokio_postgres;
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use utils::zstd::create_zst_tarball;
 
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
@@ -46,8 +51,9 @@ pub struct ComputeNode {
     // Url type maintains proper escaping
     pub connstr: url::Url,
     pub pgdata: String,
-    pub pgbin: String,
+    pub pgroot: String,
     pub pgversion: String,
+    pub http_port: u16,
     /// We should only allow live re- / configuration of the compute node if
     /// it uses 'pull model', i.e. it can go to control-plane and fetch
     /// the latest configuration. Otherwise, there could be a case:
@@ -308,6 +314,13 @@ impl ComputeNode {
         self.state.lock().unwrap().status
     }
 
+    /// Get the mode of this compute.
+    pub fn get_mode(&self) -> ComputeMode {
+        let state = self.state.lock().unwrap();
+
+        state.pspec.as_ref().unwrap().spec.mode
+    }
+
     // Remove `pgdata` directory and create it again with right permissions.
     fn create_pgdata(&self) -> Result<()> {
         // Ignore removal error, likely it is a 'No such file or directory (os error 2)'.
@@ -317,6 +330,35 @@ impl ComputeNode {
         fs::set_permissions(&self.pgdata, fs::Permissions::from_mode(0o700))?;
 
         Ok(())
+    }
+
+    /// Get path pointing to requested binary directory.
+    pub fn get_pg_bindir(&self, version: &str) -> PathBuf {
+        Path::new(&self.pgroot)
+            .join(format!("v{}", version))
+            .join("bin")
+    }
+
+    /// Get path to requested Postgres binary.
+    pub fn get_pg_binary(&self, version: &str, binary: &str) -> String {
+        self.get_pg_bindir(version)
+            .join(binary)
+            .into_os_string()
+            .into_string()
+            .expect(&format!(
+                "path to {}-{} cannot be represented as UTF-8",
+                binary, version
+            ))
+    }
+
+    /// Get path to Postgres binary directory of this compute.
+    pub fn get_my_pg_bindir(&self) -> PathBuf {
+        self.get_pg_bindir(&self.pgversion)
+    }
+
+    /// Get path to specified Postgres binary of this compute.
+    pub fn get_my_pg_binary(&self, binary: &str) -> String {
+        self.get_pg_binary(&self.pgversion, binary)
     }
 
     // Get basebackup from the libpq connection to pageserver using `connstr` and
@@ -537,7 +579,8 @@ impl ComputeNode {
     pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
-        let mut sync_handle = maybe_cgexec(&self.pgbin)
+        let postgres = self.get_my_pg_binary("postgres");
+        let mut sync_handle = maybe_cgexec(&postgres)
             .args(["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
@@ -593,11 +636,7 @@ impl ComputeNode {
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip_all)]
-    pub async fn prepare_pgdata(
-        &self,
-        compute_state: &ComputeState,
-        extension_server_port: u16,
-    ) -> Result<()> {
+    pub async fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
@@ -607,7 +646,7 @@ impl ComputeNode {
         config::write_postgres_conf(
             &pgdata_path.join("postgresql.conf"),
             &pspec.spec,
-            Some(extension_server_port),
+            Some(self.http_port),
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -633,6 +672,10 @@ impl ComputeNode {
             }
             ComputeMode::Replica => {
                 info!("Initializing standby from latest Pageserver LSN");
+                Lsn(0)
+            }
+            ComputeMode::Upgrade => {
+                info!("Starting upgrade node at latest Pageserver LSN");
                 Lsn(0)
             }
         };
@@ -696,7 +739,7 @@ impl ComputeNode {
         symlink("/dev/shm/", pgdata_path.join("pg_dynshmem"))?;
 
         match spec.mode {
-            ComputeMode::Primary => {}
+            ComputeMode::Primary | ComputeMode::Upgrade => {}
             ComputeMode::Replica | ComputeMode::Static(..) => {
                 add_standby_signal(pgdata_path)?;
             }
@@ -715,7 +758,7 @@ impl ComputeNode {
 
         // Run initdb to completion
         info!("running initdb");
-        let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
+        let initdb_bin = self.get_my_pg_binary("initdb");
         Command::new(initdb_bin)
             .args(["-D", pgdata])
             .output()
@@ -731,7 +774,8 @@ impl ComputeNode {
 
         // Start postgres
         info!("starting postgres");
-        let mut pg = maybe_cgexec(&self.pgbin)
+        let postgres = self.get_my_pg_binary("postgres");
+        let mut pg = maybe_cgexec(&postgres)
             .args(["-D", pgdata])
             .spawn()
             .expect("cannot start postgres process");
@@ -764,7 +808,8 @@ impl ComputeNode {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
-        let mut pg = maybe_cgexec(&self.pgbin)
+        let postgres = self.get_my_pg_binary("postgres");
+        let mut pg = maybe_cgexec(&postgres)
             .args(["-D", &self.pgdata])
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
@@ -783,6 +828,152 @@ impl ComputeNode {
         wait_for_postgres(&mut pg, pgdata_path)?;
 
         Ok((pg, logs_handle))
+    }
+
+    pub async fn upgrade(&self, pg_version: &str) -> Result<()> {
+        let old_bindir = self.get_my_pg_bindir();
+        let new_bindir = self.get_pg_bindir(pg_version);
+
+        let old_datadir = Utf8Path::new(&self.pgdata);
+        let parent_dir = old_datadir.parent().unwrap();
+        let new_datadir = parent_dir.join("new-pgdata");
+
+        // Delete the new data directory before attempting, just in case it exists
+        let _ = std::fs::remove_dir_all(&new_datadir);
+
+        // Step 1: Create new cluster
+        info!(
+            "Running initdb to start a cluster upgrade from v{} to v{}",
+            self.pgversion, pg_version
+        );
+
+        let initdb_bin = self.get_pg_binary(pg_version, "initdb");
+        let mut initdb_cmd = Command::new(&initdb_bin);
+        initdb_cmd
+            .args(["--pgdata", new_datadir.as_str()])
+            .args(["--username", "cloud_admin"])
+            .args(["--encoding", "utf8"])
+            .args(["--auth-local", "trust"])
+            .env_clear()
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        match initdb_cmd.status() {
+            Ok(status) => {
+                if !status.success() {
+                    return Err(anyhow::anyhow!("failed to initialize the new database"));
+                }
+
+                info!("Initialized v{} database", pg_version);
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "failed to spawn initdb for the new database"
+                ))
+            }
+        };
+
+        // Step 2: Run pg_upgrade
+        info!(
+            "Running pg_upgrade to upgrade from v{} to v{}",
+            self.pgversion, pg_version
+        );
+
+        let pg_upgrade_bin = self.get_pg_binary(pg_version, "pg_upgrade");
+        let mut pg_upgrade_cmd = Command::new(&pg_upgrade_bin);
+        let mut child = pg_upgrade_cmd
+            .args([
+                "--old-bindir",
+                &old_bindir.into_os_string().into_string().unwrap(),
+            ])
+            .args(["--old-datadir", old_datadir.as_str()])
+            .args(["--old-options", "-c neon.safekeepers=''"])
+            .args([
+                "--new-bindir",
+                &new_bindir.into_os_string().into_string().unwrap(),
+            ])
+            .args(["--new-datadir", new_datadir.as_str()])
+            .args(["--new-options", "-c neon.safekeepers=''"])
+            .args(["--username", "cloud_admin"])
+            .arg("--no-transfer")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+
+        let status = child.wait()?;
+        if status.success() {
+            info!("pg_upgrade was successful");
+        } else {
+            return Err(anyhow::anyhow!(
+                "pg_upgrade failed with exit code {}",
+                status.code().unwrap()
+            ));
+        }
+
+        /* Step 3: Delete the script that pg_upgrade generates, which is created in the current
+         * working directory
+         */
+        // TODO: We should write a patch for upstream to not generate this file
+        if cfg!(windows) {
+            let _ = std::fs::remove_file("delete_old_cluster.bat");
+        } else {
+            let _ = std::fs::remove_file("delete_old_cluster.sh");
+        }
+
+        /* Step 4: Re-prepare the pgdata directory to work with the latest basebackup from the
+         * pageserver
+         */
+        {
+            let state = self.state.lock().unwrap().clone();
+
+            self.prepare_pgdata(&state).await?;
+        }
+
+        // Step 5: Create tarball minus things like pg_dynshm, etc.
+        info!("Creating tarball of upgraded initdb directory, minus some files");
+
+        let initdb_tar_path = parent_dir.join("initdb.tar.zst");
+        let _ = std::fs::remove_file(&initdb_tar_path);
+        create_zst_tarball(&new_datadir, &initdb_tar_path).await?;
+
+        // Step 6: Write new postgresql.conf file for upgraded initdb
+        std::fs::copy(
+            old_datadir.join("postgresql.conf"),
+            new_datadir.join("postgresql.conf"),
+        )?;
+
+        // Step 7: Write the tarball into the Postgres WAL
+        info!("Writing initdb.tar.zst to WAL");
+
+        let postgres_bin = self.get_my_pg_binary("postgres");
+        let mut wal_log_cmd = Command::new(&postgres_bin);
+        child = wal_log_cmd
+            .args(["--wal-log", initdb_tar_path.as_str()])
+            .env_clear()
+            .env("PGDATA", old_datadir.as_str())
+            .env("NEON_PURPOSE", "upgrade")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("postgres --wal-log failed to start");
+        match child.wait() {
+            Ok(s) => {
+                if !s.success() {
+                    return Err(anyhow::anyhow!("Could not wal log upgrade tarball"));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        // Step 8: Sync the safekeepers to push WAL record to Neon
+        self.sync_safekeepers(None)?;
+
+        /* Note that whether any errors occur after this are unimportant. ALWAYS return success
+         * after this point. The compute will be terminated immediately after the upgrade. Remember
+         * that this is an upgrade-only compute, and it will not accept connections from users.
+         */
+
+        Ok(())
     }
 
     /// Do post configuration of the already started Postgres. This function spawns a background thread to
@@ -902,8 +1093,8 @@ impl ComputeNode {
     // `pg_ctl` for start / stop.
     #[instrument(skip_all)]
     fn pg_reload_conf(&self) -> Result<()> {
-        let pgctl_bin = Path::new(&self.pgbin).parent().unwrap().join("pg_ctl");
-        Command::new(pgctl_bin)
+        let pgctl_bin = self.get_my_pg_binary("pg_ctl");
+        Command::new(&pgctl_bin)
             .args(["reload", "-D", &self.pgdata])
             .output()
             .expect("cannot run pg_ctl process");
@@ -987,43 +1178,25 @@ impl ComputeNode {
         Ok(())
     }
 
+    /// Prepares the compute for Postgres operations, including downloading
+    /// remote extensions and preparing the pgdata directory.
+    ///
+    /// The caller must hold the state mutex.
     #[instrument(skip_all)]
-    pub async fn start_compute(
-        &self,
-        extension_server_port: u16,
-    ) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
-        let compute_state = self.state.lock().unwrap().clone();
-        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+    pub async fn prepare_compute(&self) -> Result<()> {
+        let state = self.state.lock().unwrap().clone();
+        let pspec = state.pspec.as_ref().expect("spec must be set");
+
         info!(
-            "starting compute for project {}, operation {}, tenant {}, timeline {}",
+            "preparing compute for project {}, operation {}, tenant {}, timeline {}",
             pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
             pspec.spec.operation_uuid.as_deref().unwrap_or("None"),
             pspec.tenant_id,
             pspec.timeline_id,
         );
 
-        // tune pgbouncer
-        if let Some(pgbouncer_settings) = &pspec.spec.pgbouncer_settings {
-            info!("tuning pgbouncer");
-
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create rt");
-
-            // Spawn a thread to do the tuning,
-            // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pgbouncer_settings.clone();
-            let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
-                if let Err(err) = res {
-                    error!("error while tuning pgbouncer: {err:?}");
-                }
-            });
-        }
-
         info!(
-            "start_compute spec.remote_extensions {:?}",
+            "prepare_compute spec.remote_extensions {:?}",
             pspec.spec.remote_extensions
         );
 
@@ -1031,7 +1204,8 @@ impl ComputeNode {
         // remote shared_preload_libraries before postgres start (if any)
         if let Some(remote_extensions) = &pspec.spec.remote_extensions {
             // First, create control files for all availale extensions
-            extension_server::create_control_files(remote_extensions, &self.pgbin);
+            let postgres_bin = self.get_my_pg_binary("postgres");
+            extension_server::create_control_files(remote_extensions, &postgres_bin);
 
             let library_load_start_time = Utc::now();
             let remote_ext_metrics = self.prepare_preload_libraries(&pspec.spec)?;
@@ -1053,8 +1227,17 @@ impl ComputeNode {
             info!("{:?}", remote_ext_metrics);
         }
 
-        self.prepare_pgdata(&compute_state, extension_server_port)
-            .await?;
+        self.prepare_pgdata(&state).await?;
+
+        self.set_status(ComputeStatus::Prepared);
+
+        Ok(())
+    }
+
+    #[instrument(skip_all)]
+    pub fn start_compute(&self) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
+        let compute_state = self.state.lock().unwrap().clone();
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
 
         let start_time = Utc::now();
         let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
@@ -1160,9 +1343,11 @@ impl ComputeNode {
                 core_path.display()
             );
 
+            let postgres_bin = self.get_my_pg_binary("postgres");
+
             // Try first with gdb
             let backtrace = Command::new("gdb")
-                .args(["--batch", "-q", "-ex", "bt", &self.pgbin])
+                .args(["--batch", "-q", "-ex", "bt", &postgres_bin])
                 .arg(&core_path)
                 .output();
 
@@ -1295,11 +1480,12 @@ LIMIT 100",
         // then we try to download it here
         info!("downloading new extension {ext_archive_name}");
 
+        let postgres_bin = self.get_my_pg_binary("postgres");
         let download_size = extension_server::download_extension(
             &real_ext_name,
             &ext_path,
             ext_remote_storage,
-            &self.pgbin,
+            &postgres_bin,
         )
         .await
         .map_err(DownloadError::Other);
