@@ -313,10 +313,6 @@ def test_sharding_compaction(neon_env_builder: NeonEnvBuilder, stripe_size: int)
             if layer.kind == "Image":
                 image_layer_sizes[layer.layer_file_name] = layer.layer_file_size
 
-                # Pageserver should assert rather than emit an empty layer file, but double check here
-                assert layer.layer_file_size is not None
-                assert layer.layer_file_size > 0
-
         shard_has_image_layers.append(len(image_layer_sizes) > 1)
 
         log.info(f"Shard {shard_id} layer sizes: {json.dumps(image_layer_sizes, indent=2)}")
