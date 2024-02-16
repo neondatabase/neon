@@ -6,6 +6,19 @@
 //! There are two sets of inputs; `short` and `medium`. They were collected on postgres v14 by
 //! logging what happens when a sequential scan is requested on a small table, then picking out two
 //! suitable from logs.
+//!
+//!
+//! Reference data (git blame to see commit) on an i3en.3xlarge
+// ```text
+//! short/short/1           time:   [39.175 µs 39.348 µs 39.536 µs]
+//! short/short/2           time:   [51.227 µs 51.487 µs 51.755 µs]
+//! short/short/4           time:   [76.048 µs 76.362 µs 76.674 µs]
+//! short/short/8           time:   [128.94 µs 129.82 µs 130.74 µs]
+//! short/short/16          time:   [227.84 µs 229.00 µs 230.28 µs]
+//! short/short/32          time:   [455.97 µs 457.81 µs 459.90 µs]
+//! short/short/64          time:   [902.46 µs 904.84 µs 907.32 µs]
+//! short/short/128         time:   [1.7416 ms 1.7487 ms 1.7561 ms]
+//! ``
 
 use std::sync::Arc;
 
@@ -14,6 +27,7 @@ use pageserver::{
     config::PageServerConf, repository::Key, walrecord::NeonWalRecord, walredo::PostgresRedoManager,
 };
 use pageserver_api::shard::TenantShardId;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use utils::{id::TenantId, lsn::Lsn};
 
@@ -88,11 +102,11 @@ fn redo_scenarios(c: &mut Criterion) {
 /// use the same hardware.
 fn add_multithreaded_walredo_requesters(
     b: &mut criterion::Bencher,
-    requesters: usize,
+    nrequesters: usize,
     manager: &Arc<PostgresRedoManager>,
     input_factory: fn() -> Request,
 ) {
-    assert_ne!(requesters, 0);
+    assert_ne!(nrequesters, 0);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -101,56 +115,53 @@ fn add_multithreaded_walredo_requesters(
 
     let cancel = CancellationToken::new();
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(requesters + 1));
+    let barrier = Arc::new(tokio::sync::Barrier::new(nrequesters + 1));
 
-    let jhs = (0..requesters)
-        .map(|_| {
-            let manager = manager.clone();
-            let barrier = barrier.clone();
-            let cancel = cancel.clone();
-            rt.spawn(async move {
-                let work_loop = async move {
-                    loop {
-                        let input = input_factory();
-                        barrier.wait().await;
-                        let page = input.execute(&manager).await.unwrap();
-                        assert_eq!(page.remaining(), 8192);
-                        barrier.wait().await;
-                    }
-                };
-                tokio::select! {
-                    _ = work_loop => {},
-                    _ = cancel.cancelled() => { }
+    let mut requesters = JoinSet::new();
+    for _ in 0..nrequesters {
+        let _entered = rt.enter();
+        let manager = manager.clone();
+        let barrier = barrier.clone();
+        let cancel = cancel.clone();
+        requesters.spawn(async move {
+            let work_loop = async move {
+                loop {
+                    let input = input_factory();
+                    barrier.wait().await;
+                    let page = input.execute(&manager).await.unwrap();
+                    assert_eq!(page.remaining(), 8192);
+                    barrier.wait().await;
                 }
-            })
-        })
-        .collect::<Vec<_>>();
+            };
+            tokio::select! {
+                _ = work_loop => {},
+                _ = cancel.cancelled() => { }
+            }
+        });
+    }
+
+    let do_one_iteration = || rt.block_on(async {
+        barrier.wait().await;
+        // wait for work to complete
+        barrier.wait().await;
+    });
 
     b.iter_batched(
-        || (),
+        || {
+            // warmup
+            do_one_iteration();
+        },
         |()| {
-            // start the work
-            rt.block_on(async {
-                barrier.wait().await;
-                // wait for work to complete
-                barrier.wait().await;
-            });
+            // work loop
+            do_one_iteration();
         },
         criterion::BatchSize::PerIteration,
     );
 
     cancel.cancel();
 
-    let jhs = JoinOnDrop(jhs);
-    rt.block_on(jhs.join_all());
-}
-
-struct JoinOnDrop(Vec<tokio::task::JoinHandle<()>>);
-
-impl JoinOnDrop {
-    /// Checks all the futures for panics.
-    pub async fn join_all(self) {
-        futures::future::try_join_all(self.0).await.unwrap();
+    while let Some(res) = rt.block_on(requesters.join_next()) {
+        res.unwrap();
     }
 }
 
