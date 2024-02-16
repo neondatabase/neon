@@ -798,10 +798,9 @@ pub mod virtual_file {
 pub enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
-    GetLatestPage(PagestreamGetLatestPageRequest), // for compatinility with old clients
+    GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
     GetSlruSegment(PagestreamGetSlruSegmentRequest),
-    GetPage(PagestreamGetPageRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -852,14 +851,6 @@ pub struct PagestreamNblocksRequest {
     pub horizon: Lsn,
     pub lsn: Lsn,
     pub rel: RelTag,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct PagestreamGetLatestPageRequest {
-    pub latest: bool,
-    pub lsn: Lsn,
-    pub rel: RelTag,
-    pub blkno: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -951,9 +942,9 @@ impl PagestreamFeMessage {
                 bytes.put_u8(req.rel.forknum);
             }
 
-            Self::GetLatestPage(req) => {
+            Self::GetPage(req) => {
                 bytes.put_u8(2);
-                bytes.put_u8(u8::from(req.latest));
+                bytes.put_u64(req.horizon.0);
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
@@ -976,17 +967,6 @@ impl PagestreamFeMessage {
                 bytes.put_u8(req.kind);
                 bytes.put_u32(req.segno);
             }
-
-            Self::GetPage(req) => {
-                bytes.put_u8(5);
-                bytes.put_u64(req.horizon.0);
-                bytes.put_u64(req.lsn.0);
-                bytes.put_u32(req.rel.spcnode);
-                bytes.put_u32(req.rel.dbnode);
-                bytes.put_u32(req.rel.relnode);
-                bytes.put_u8(req.rel.forknum);
-                bytes.put_u32(req.blkno);
-            }
         }
 
         bytes.into()
@@ -999,11 +979,25 @@ impl PagestreamFeMessage {
         //
         // TODO: consider using protobuf or serde bincode for less error prone
         // serialization.
-        let msg_tag = body.read_u8()?;
+        let mut msg_tag = body.read_u8()?;
+        let horizon = if msg_tag >= 10 {
+            // new protocol
+            msg_tag -= 10;
+            Lsn::from(body.read_u64::<BigEndian>()?)
+        } else {
+            // old_protocol
+            let latest = body.read_u8()? != 0;
+            if latest {
+                Lsn::MAX
+            } else {
+                Lsn::INVALID
+            }
+        };
+        let lsn = Lsn::from(body.read_u64::<BigEndian>()?);
         match msg_tag {
             0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                horizon: Lsn::from(body.read_u64::<BigEndian>()?),
-                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                horizon,
+                lsn,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1012,8 +1006,8 @@ impl PagestreamFeMessage {
                 },
             })),
             1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                horizon: Lsn::from(body.read_u64::<BigEndian>()?),
-                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                horizon,
+                lsn,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1021,35 +1015,9 @@ impl PagestreamFeMessage {
                     forknum: body.read_u8()?,
                 },
             })),
-            2 => Ok(PagestreamFeMessage::GetLatestPage(
-                PagestreamGetLatestPageRequest {
-                    latest: body.read_u8()? != 0,
-                    lsn: Lsn::from(body.read_u64::<BigEndian>()?),
-                    rel: RelTag {
-                        spcnode: body.read_u32::<BigEndian>()?,
-                        dbnode: body.read_u32::<BigEndian>()?,
-                        relnode: body.read_u32::<BigEndian>()?,
-                        forknum: body.read_u8()?,
-                    },
-                    blkno: body.read_u32::<BigEndian>()?,
-                },
-            )),
-            3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                horizon: Lsn::from(body.read_u64::<BigEndian>()?),
-                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
-                dbnode: body.read_u32::<BigEndian>()?,
-            })),
-            4 => Ok(PagestreamFeMessage::GetSlruSegment(
-                PagestreamGetSlruSegmentRequest {
-                    horizon: Lsn::from(body.read_u64::<BigEndian>()?),
-                    lsn: Lsn::from(body.read_u64::<BigEndian>()?),
-                    kind: body.read_u8()?,
-                    segno: body.read_u32::<BigEndian>()?,
-                },
-            )),
-            5 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                horizon: Lsn::from(body.read_u64::<BigEndian>()?),
-                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+            2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
+                horizon,
+                lsn,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1058,6 +1026,19 @@ impl PagestreamFeMessage {
                 },
                 blkno: body.read_u32::<BigEndian>()?,
             })),
+            3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
+                horizon,
+                lsn,
+                dbnode: body.read_u32::<BigEndian>()?,
+            })),
+            4 => Ok(PagestreamFeMessage::GetSlruSegment(
+                PagestreamGetSlruSegmentRequest {
+                    horizon,
+                    lsn,
+                    kind: body.read_u8()?,
+                    segno: body.read_u32::<BigEndian>()?,
+                },
+            )),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
