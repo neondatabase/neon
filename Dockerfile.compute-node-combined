@@ -81,114 +81,76 @@ done
 
 #########################################################################################
 #
-# Layer "postgis-build"
-# Build PostGIS from the upstream PostGIS mirror.
+# Compile and run the Neon-specific `compute_ctl` binary
 #
 #########################################################################################
-FROM build-deps AS postgis-build
-COPY --from=pg-build /usr/local/pgsql-v14/ /usr/local/pgsql-v14/
-COPY --from=pg-build /usr/local/pgsql-v15/ /usr/local/pgsql-v15/
-COPY --from=pg-build /usr/local/pgsql-v16/ /usr/local/pgsql-v16/
-RUN apt update && \
-    apt install -y cmake gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
-    libboost-system-dev libboost-iostreams-dev libboost-program-options-dev libboost-timer-dev \
-    libcgal-dev libgdal-dev libgmp-dev libmpfr-dev libopenscenegraph-dev libprotobuf-c-dev \
-    protobuf-c-compiler xsltproc
+FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
+ARG BUILD_TAG
+ENV BUILD_TAG=$BUILD_TAG
 
-# SFCGAL > 1.3 requires CGAL > 5.2, Bullseye's libcgal-dev is 5.2
-RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar.gz -O SFCGAL.tar.gz && \
-    echo "4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 SFCGAL.tar.gz" | sha256sum --check && \
-    mkdir sfcgal-src && cd sfcgal-src && tar xvzf ../SFCGAL.tar.gz --strip-components=1 -C . && \
-    cmake -DCMAKE_BUILD_TYPE=Release . && make -j $(getconf _NPROCESSORS_ONLN) && \
-    DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
-    make clean && cp -R /sfcgal/* /
-
-
-RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.3.tar.gz -O postgis.tar.gz && \
-    echo "74eb356e3f85f14233791013360881b6748f78081cc688ff9d6f0f673a762d13 postgis.tar.gz" | sha256sum --check && \
-    mkdir postgis-src && cd postgis-src && tar xvzf ../postgis.tar.gz --strip-components=1 -C . && \
-    for pg_version in v14 v15 v16; do \
-        prefix="/usr/local/pgsql-${pg_version}/"; \
-        find "$prefix" -type f | sed "s|^${prefix}||" > /before.txt &&\
-        export PATH="${prefix}/bin:$PATH"; \
-        ./autogen.sh && \
-        ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
-        make -j $(getconf _NPROCESSORS_ONLN) install && \
-        cd extensions/postgis && \
-        make clean && \
-        make -j $(getconf _NPROCESSORS_ONLN) install && \
-        extension_dir="$prefix/share/extension"; \
-        echo 'trusted = true' >> $extension_dir/postgis.control && \
-        echo 'trusted = true' >> $extension_dir/postgis_raster.control && \
-        echo 'trusted = true' >> $extension_dir/postgis_sfcgal.control && \
-        echo 'trusted = true' >> $extension_dir/postgis_tiger_geocoder.control && \
-        echo 'trusted = true' >> $extension_dir/postgis_topology.control && \
-        echo 'trusted = true' >> $extension_dir/address_standardizer.control && \
-        echo 'trusted = true' >> $extension_dir/address_standardizer_data_us.control && \
-        mkdir -p /extensions/postgis && \
-        cp $extension_dir/postgis.control /extensions/postgis && \
-        cp $extension_dir/postgis_raster.control /extensions/postgis && \
-        cp $extension_dir/postgis_sfcgal.control /extensions/postgis && \
-        cp $extension_dir/postgis_tiger_geocoder.control /extensions/postgis && \
-        cp $extension_dir/postgis_topology.control /extensions/postgis && \
-        cp $extension_dir/address_standardizer.control /extensions/postgis && \
-        cp $extension_dir/address_standardizer_data_us.control /extensions/postgis && \
-        cd ../..; \
-    done
-
-RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
-    echo "cac297c07d34460887c4f3b522b35c470138760fe358e351ad1db4edb6ee306e pgrouting.tar.gz" | sha256sum --check && \
-    mkdir pgrouting-src && cd pgrouting-src && tar xvzf ../pgrouting.tar.gz --strip-components=1 -C . && \
-    for pg_version in v14 v15 v16; do \
-        mkdir build && cd build && \
-        prefix="/usr/local/pgsql-${pg_version}/"; \
-        export PATH="${prefix}/bin:$PATH"; \
-        cmake -DCMAKE_BUILD_TYPE=Release .. && \
-        make -j $(getconf _NPROCESSORS_ONLN) && \
-        make -j $(getconf _NPROCESSORS_ONLN) install && \
-        extension_dir="$prefix/share/extension"; \
-        echo 'trusted = true' >> $extension_dir/pgrouting.control && \
-        find "$prefix" -type f | sed "s|^${prefix}||" > /after.txt &&\
-        cp $extension_dir/pgrouting.control /extensions/postgis && \
-        sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-        comm -13 /before.txt /after.txt | tar --directory=$prefix --zstd -cf /extensions/postgis.tar.zst -T - ;\
-        cd .. ;\
-        rm -r build ;\
-    done
+USER nonroot
+# Copy entire project to get Cargo.* files with proper dependencies for the whole project
+COPY --chown=nonroot . .
+RUN cd compute_tools && cargo build --locked --profile release-line-debug-size-lto
 
 #########################################################################################
 #
-# Layer "plv8-build"
-# Build plv8
+# Final layer
+# Put it all together into the final image
 #
 #########################################################################################
-FROM build-deps AS plv8-build
-COPY --from=pg-build /usr/local/pgsql-v14/ /usr/local/pgsql-v14/
-COPY --from=pg-build /usr/local/pgsql-v15/ /usr/local/pgsql-v15/
-COPY --from=pg-build /usr/local/pgsql-v16/ /usr/local/pgsql-v16/
+FROM debian:bullseye-slim
+# Add user postgres
+RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
+    echo "postgres:test_console_pass" | chpasswd && \
+    mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
+    mkdir /var/db/postgres/pgbouncer && \
+    chown -R postgres:postgres /var/db/postgres && \
+    chmod 0750 /var/db/postgres/compute && \
+    chmod 0750 /var/db/postgres/pgbouncer && \
+    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig && \
+    # create folder for file cache
+    mkdir -p -m 777 /neon/cache
 
-RUN apt update && \
-    apt install -y ninja-build python3-dev libncurses5 binutils clang
+COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
-RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.tar.gz && \
-    echo "7096c3290928561f0d4901b7a52794295dc47f6303102fae3f8e42dd575ad97d plv8.tar.gz" | sha256sum --check && \
-    mkdir plv8-src && cd plv8-src && tar xvzf ../plv8.tar.gz --strip-components=1 -C . && \
-    # generate and copy upgrade scripts
-    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
-    for pg_version in v14 v15 v16; do \
-        prefix="/usr/local/pgsql-${pg_version}/" ;\
-        extension_dir="$prefix/share/extension" ;\
-        cp upgrade/* "$extension_dir" && \
-        export PATH="${prefix}/bin:$PATH" && \
-        make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
-        rm -rf /plv8-* && \
-        find $prefix -name "plv8-*.so" | xargs strip && \
-        # don't break computes with installed old version of plv8
-        cd "${prefix}/lib/" && \
-        ln -s plv8-3.1.10.so plv8-3.1.5.so && \
-        ln -s plv8-3.1.10.so plv8-3.1.8.so && \
-        extension_dir="$prefix/share/extension" ;\
-        echo 'trusted = true' >> $extension_dir/plv8.control && \
-        echo 'trusted = true' >> $extension_dir/plcoffee.control && \
-        echo 'trusted = true' >> $extension_dir/plls.control  ;\
-     done
+# Install:
+# libreadline8 for psql
+# libicu67, locales for collations (including ICU and plpgsql_check)
+# liblz4-1 for lz4
+# libossp-uuid16 for extension ossp-uuid
+# libgeos, libgdal, libsfcgal1, libproj and libprotobuf-c1 for PostGIS
+# libxml2, libxslt1.1 for xml2
+# libzstd1 for zstd
+# libboost* for rdkit
+# ca-certificates for communicating with s3 by compute_ctl
+RUN apt update &&  \
+    apt install --no-install-recommends -y \
+        gdb \
+        libicu67 \
+        liblz4-1 \
+        libreadline8 \
+        libboost-iostreams1.74.0 \
+        libboost-regex1.74.0 \
+        libboost-serialization1.74.0 \
+        libboost-system1.74.0 \
+        libossp-uuid16 \
+        libgeos-c1v5 \
+        libgdal28 \
+        libproj19 \
+        libprotobuf-c1 \
+        libsfcgal1 \
+        libxml2 \
+        libxslt1.1 \
+        libzstd1 \
+        libcurl4-openssl-dev \
+        locales \
+        procps \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+
+ENV LANG en_US.utf8
+USER postgres
+ENTRYPOINT ["/usr/local/bin/compute_ctl"]
