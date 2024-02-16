@@ -419,7 +419,7 @@ impl DeleteTimelineFlow {
                 TimelineResources {
                     remote_client,
                     deletion_queue_client,
-                    timeline_get_rate_limiter: tenant.timeline_get_rate_limiter.clone(),
+                    timeline_get_throttle: tenant.timeline_get_throttle.clone(),
                 },
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.

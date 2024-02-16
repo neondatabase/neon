@@ -349,7 +349,7 @@ pub struct TenantConf {
     /// If true then SLRU segments are dowloaded on demand, if false SLRU segments are included in basebackup
     pub lazy_slru_download: bool,
 
-    pub timeline_get_rate_limit: pageserver_api::models::ThrottleConfig,
+    pub timeline_get_throttle: pageserver_api::models::ThrottleConfig,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -441,7 +441,7 @@ pub struct TenantConfOpt {
     pub lazy_slru_download: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeline_get_rate_limit: Option<pageserver_api::models::ThrottleConfig>,
+    pub timeline_get_throttle: Option<pageserver_api::models::ThrottleConfig>,
 }
 
 impl TenantConfOpt {
@@ -490,10 +490,10 @@ impl TenantConfOpt {
             lazy_slru_download: self
                 .lazy_slru_download
                 .unwrap_or(global_conf.lazy_slru_download),
-            timeline_get_rate_limit: self
-                .timeline_get_rate_limit
+            timeline_get_throttle: self
+                .timeline_get_throttle
                 .clone()
-                .unwrap_or(global_conf.timeline_get_rate_limit),
+                .unwrap_or(global_conf.timeline_get_throttle),
         }
     }
 }
@@ -533,7 +533,7 @@ impl Default for TenantConf {
             gc_feedback: false,
             heatmap_period: Duration::ZERO,
             lazy_slru_download: false,
-            timeline_get_rate_limit: crate::tenant::throttle::Config::disabled(),
+            timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
         }
     }
 }
@@ -606,7 +606,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             gc_feedback: value.gc_feedback,
             heatmap_period: value.heatmap_period.map(humantime),
             lazy_slru_download: value.lazy_slru_download,
-            timeline_get_rate_limit: value.timeline_get_rate_limit.map(ThrottleConfig::from),
+            timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
         }
     }
 }

@@ -158,7 +158,7 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
     pub deletion_queue_client: DeletionQueueClient,
-    pub timeline_get_rate_limiter: Arc<
+    pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
 }
@@ -351,8 +351,8 @@ pub struct Timeline {
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
 
-    /// Cloned from [`super::Tenant::timeline_get_rate_limiter`] on construction.
-    timeline_get_rate_limiter: Arc<
+    /// Cloned from [`super::Tenant::timeline_get_throttle`] on construction.
+    timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
 }
@@ -615,7 +615,7 @@ impl Timeline {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
 
-        self.timeline_get_rate_limiter.throttle(ctx, 1).await;
+        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
@@ -716,7 +716,7 @@ impl Timeline {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
-        self.timeline_get_rate_limiter
+        self.timeline_get_throttle
             .throttle(ctx, key_count as usize)
             .await;
 
@@ -1556,7 +1556,7 @@ impl Timeline {
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),
 
-                timeline_get_rate_limiter: resources.timeline_get_rate_limiter,
+                timeline_get_throttle: resources.timeline_get_throttle,
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;

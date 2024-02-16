@@ -312,7 +312,7 @@ pub struct Tenant {
 
     /// Throttle applied at the top of [`Timeline::get`].
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
-    pub(crate) timeline_get_rate_limiter:
+    pub(crate) timeline_get_throttle:
         Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
 }
 
@@ -1006,7 +1006,7 @@ impl Tenant {
                 TimelineResources {
                     remote_client: Some(remote_client),
                     deletion_queue_client: self.deletion_queue_client.clone(),
-                    timeline_get_rate_limiter: self.timeline_get_rate_limiter.clone(),
+                    timeline_get_throttle: self.timeline_get_throttle.clone(),
                 },
                 ctx,
             )
@@ -2625,22 +2625,22 @@ impl Tenant {
         }
     }
 
-    fn get_timeline_get_rate_limit_config(
+    fn get_timeline_get_throttle_config(
         psconf: &'static PageServerConf,
         overrides: &TenantConfOpt,
     ) -> throttle::Config {
         overrides
-            .timeline_get_rate_limit
+            .timeline_get_throttle
             .clone()
-            .unwrap_or(psconf.default_tenant_conf.timeline_get_rate_limit.clone())
+            .unwrap_or(psconf.default_tenant_conf.timeline_get_throttle.clone())
     }
 
     pub(crate) fn tenant_conf_updated(&self) {
         let conf = {
             let guard = self.tenant_conf.read().unwrap();
-            Self::get_timeline_get_rate_limit_config(self.conf, &guard.tenant_conf)
+            Self::get_timeline_get_throttle_config(self.conf, &guard.tenant_conf)
         };
-        self.timeline_get_rate_limiter.reconfigure(conf)
+        self.timeline_get_throttle.reconfigure(conf)
     }
 
     /// Helper function to create a new Timeline struct.
@@ -2783,8 +2783,8 @@ impl Tenant {
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
-            timeline_get_rate_limiter: Arc::new(throttle::Throttle::new(
-                Tenant::get_timeline_get_rate_limit_config(conf, &attached_conf.tenant_conf),
+            timeline_get_throttle: Arc::new(throttle::Throttle::new(
+                Tenant::get_timeline_get_throttle_config(conf, &attached_conf.tenant_conf),
                 &crate::metrics::tenant_throttling::TIMELINE_GET,
             )),
             tenant_conf: Arc::new(RwLock::new(attached_conf)),
@@ -3541,7 +3541,7 @@ impl Tenant {
         TimelineResources {
             remote_client,
             deletion_queue_client: self.deletion_queue_client.clone(),
-            timeline_get_rate_limiter: self.timeline_get_rate_limiter.clone(),
+            timeline_get_throttle: self.timeline_get_throttle.clone(),
         }
     }
 
@@ -3995,7 +3995,7 @@ pub(crate) mod harness {
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
-                timeline_get_rate_limit: Some(tenant_conf.timeline_get_rate_limit),
+                timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
             }
         }
     }

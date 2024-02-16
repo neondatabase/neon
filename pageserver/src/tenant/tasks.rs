@@ -211,11 +211,11 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             info_span!(parent: None, "timeline_get_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
                 let now = Instant::now();
                 let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
-                let Stats { count_accounted, count_throttled, sum_throttled_usecs } = tenant.timeline_get_rate_limiter.reset_stats();
+                let Stats { count_accounted, count_throttled, sum_throttled_usecs } = tenant.timeline_get_throttle.reset_stats();
                 if count_throttled == 0 {
                     return;
                 }
-                let allowed_rps = tenant.timeline_get_rate_limiter.steady_rps();
+                let allowed_rps = tenant.timeline_get_throttle.steady_rps();
                 let delta = now - prev;
                 warn!(
                     n_seconds=%format_args!("{:.3}",

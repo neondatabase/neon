@@ -283,7 +283,7 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
-    pub timeline_get_rate_limit: Option<ThrottleConfig>,
+    pub timeline_get_throttle: Option<ThrottleConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
