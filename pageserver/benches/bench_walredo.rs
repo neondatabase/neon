@@ -28,7 +28,6 @@ use pageserver::{
 };
 use pageserver_api::shard::TenantShardId;
 use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
 use utils::{id::TenantId, lsn::Lsn};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -113,8 +112,6 @@ fn add_multithreaded_walredo_requesters(
         .build()
         .unwrap();
 
-    let cancel = CancellationToken::new();
-
     let barrier = Arc::new(tokio::sync::Barrier::new(nrequesters + 1));
 
     let mut requesters = JoinSet::new();
@@ -122,20 +119,13 @@ fn add_multithreaded_walredo_requesters(
         let _entered = rt.enter();
         let manager = manager.clone();
         let barrier = barrier.clone();
-        let cancel = cancel.clone();
         requesters.spawn(async move {
-            let work_loop = async move {
-                loop {
-                    let input = input_factory();
-                    barrier.wait().await;
-                    let page = input.execute(&manager).await.unwrap();
-                    assert_eq!(page.remaining(), 8192);
-                    barrier.wait().await;
-                }
-            };
-            tokio::select! {
-                _ = work_loop => {},
-                _ = cancel.cancelled() => { }
+            loop {
+                let input = input_factory();
+                barrier.wait().await;
+                let page = input.execute(&manager).await.unwrap();
+                assert_eq!(page.remaining(), 8192);
+                barrier.wait().await;
             }
         });
     }
@@ -160,11 +150,7 @@ fn add_multithreaded_walredo_requesters(
         criterion::BatchSize::PerIteration,
     );
 
-    cancel.cancel();
-
-    while let Some(res) = rt.block_on(requesters.join_next()) {
-        res.unwrap();
-    }
+    rt.block_on(requesters.shutdown());
 }
 
 criterion_group!(benches, redo_scenarios);
