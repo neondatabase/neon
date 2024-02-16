@@ -89,6 +89,8 @@ pub mod defaults {
 
     pub const DEFAULT_MAX_VECTORED_READ_SIZE: usize = 128 * 1024; // 128 KiB
 
+    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
+
     ///
     /// Default built-in configuration file.
     ///
@@ -129,6 +131,8 @@ pub mod defaults {
 #get_vectored_impl = '{DEFAULT_GET_VECTORED_IMPL}'
 
 #max_vectored_read_size = '{DEFAULT_MAX_VECTORED_READ_SIZE}'
+
+#validate_vectored_get = '{DEFAULT_VALIDATE_VECTORED_GET}'
 
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -269,6 +273,8 @@ pub struct PageServerConf {
     pub get_vectored_impl: GetVectoredImpl,
 
     pub max_vectored_read_size: usize,
+
+    pub validate_vectored_get: bool,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -359,6 +365,8 @@ struct PageServerConfigBuilder {
     get_vectored_impl: BuilderValue<GetVectoredImpl>,
 
     max_vectored_read_size: BuilderValue<usize>,
+
+    validate_vectored_get: BuilderValue<bool>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -439,6 +447,7 @@ impl Default for PageServerConfigBuilder {
 
             get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
             max_vectored_read_size: Set(DEFAULT_MAX_VECTORED_READ_SIZE),
+            validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
         }
     }
 }
@@ -607,6 +616,10 @@ impl PageServerConfigBuilder {
         self.max_vectored_read_size = BuilderValue::Set(value);
     }
 
+    pub fn get_validate_vectored_get(&mut self, value: bool) {
+        self.validate_vectored_get = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_warmup = self
             .concurrent_tenant_warmup
@@ -723,6 +736,9 @@ impl PageServerConfigBuilder {
             max_vectored_read_size: self
                 .max_vectored_read_size
                 .ok_or(anyhow!("missing max_vectored_read_size"))?,
+            validate_vectored_get: self
+                .validate_vectored_get
+                .ok_or(anyhow!("missing validate_vectored_get"))?,
         })
     }
 }
@@ -983,6 +999,9 @@ impl PageServerConf {
                 "max_vectored_read_size" => {
                     builder.get_max_vectored_read_size(parse_toml_u64("max_vectored_read_size", item)? as usize)
                 }
+                "validate_vectored_get" => {
+                    builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -1059,6 +1078,7 @@ impl PageServerConf {
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
             max_vectored_read_size: defaults::DEFAULT_MAX_VECTORED_READ_SIZE,
+            validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
         }
     }
 }
@@ -1294,6 +1314,7 @@ background_task_maximum_delay = '334 s'
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
                 max_vectored_read_size: defaults::DEFAULT_MAX_VECTORED_READ_SIZE,
+                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1360,6 +1381,7 @@ background_task_maximum_delay = '334 s'
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
                 max_vectored_read_size: defaults::DEFAULT_MAX_VECTORED_READ_SIZE,
+                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             },
             "Should be able to parse all basic config values correctly"
         );

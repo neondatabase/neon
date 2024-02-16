@@ -778,8 +778,10 @@ impl Timeline {
             GetVectoredImpl::Vectored => {
                 let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
 
-                self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                    .await;
+                if self.conf.validate_vectored_get {
+                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                        .await;
+                }
 
                 vectored_res
             }
