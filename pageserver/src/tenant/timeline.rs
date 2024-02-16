@@ -351,7 +351,7 @@ pub struct Timeline {
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
 
-    /// Inherited from [`Tenant::timeline_get_rate_limiter`] on construction on construction on construction on construction
+    /// Cloned from [`super::Tenant::timeline_get_rate_limiter`] on construction.
     timeline_get_rate_limiter: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,

@@ -314,8 +314,9 @@ pub struct EvictionPolicyLayerAccessThreshold {
 pub struct ThrottleConfig {
     pub task_kinds: Vec<String>, // TaskKind
     pub initial: usize,
-    pub interval_millis: NonZeroU64,
-    pub interval_refill: NonZeroUsize,
+    #[serde(with = "humantime_serde")]
+    pub refill_interval: Duration,
+    pub refill_amount: NonZeroUsize,
     pub max: usize,
     pub fair: bool,
 }
@@ -323,17 +324,18 @@ pub struct ThrottleConfig {
 impl ThrottleConfig {
     pub fn disabled() -> Self {
         Self {
-            task_kinds: vec![], // disables the rate limit
+            task_kinds: vec![], // effectively disables the rate limit
+            // other values don't matter with emtpy `task_kinds`.
             initial: 0,
-            interval_millis: NonZeroU64::try_from(1).unwrap(),
-            interval_refill: NonZeroUsize::try_from(1).unwrap(),
+            refill_interval: Duration::from_millis(1),
+            refill_amount: NonZeroUsize::new(1).unwrap(),
             max: 1,
             fair: true,
         }
     }
     /// The requests per second allowed  by the given config.
     pub fn steady_rps(&self) -> f64 {
-        (self.interval_refill.get() as f64) / (self.interval_millis.get() as f64) / 1e3
+        (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64()) / 1e3
     }
 }
 

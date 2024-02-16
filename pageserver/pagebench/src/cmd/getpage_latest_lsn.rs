@@ -288,10 +288,9 @@ async fn main_impl(
             while !cancel.is_cancelled() {
                 // Detect if a request took longer than the RPS rate
                 if let Some(period) = &rps_period {
-                    let periods_passed_until_now = usize::try_from(
-                        (Instant::now() - client_start).as_micros() / period.as_micros(),
-                    )
-                    .unwrap();
+                    let periods_passed_until_now =
+                        usize::try_from(client_start.elapsed().as_micros() / period.as_micros())
+                            .unwrap();
 
                     if periods_passed_until_now > ticks_processed {
                         live_stats.missed((periods_passed_until_now - ticks_processed) as u64);

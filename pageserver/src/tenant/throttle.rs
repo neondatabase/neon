@@ -16,11 +16,11 @@ use crate::{context::RequestContext, task_mgr::TaskKind};
 pub struct Throttle<M: Metric> {
     inner: ArcSwap<Inner>,
     metric: M,
-    /// will be turned into [`ResetWasThrottledResult`]
+    /// will be turned into [`Stats::count_accounted`]
     count_accounted: AtomicU64,
-    /// will be turned into [`ResetWasThrottledResult`]
+    /// will be turned into [`Stats::count_throttled`]
     count_throttled: AtomicU64,
-    /// will be turned into [`ResetWasThrottledResult`]
+    /// will be turned into [`Stats::sum_throttled_usecs`]
     sum_throttled_usecs: AtomicU64,
 }
 
@@ -67,8 +67,8 @@ where
         let Config {
             task_kinds,
             initial,
-            interval_millis,
-            interval_refill,
+            refill_interval,
+            refill_amount,
             max,
             fair,
         } = &config;
@@ -79,7 +79,7 @@ where
                 Err(e) => {
                     // TODO: avoid this failure mode
                     error!(
-                        "canont parse task kind, ignoring for rate limiting {}",
+                        "cannot parse task kind, ignoring for rate limiting {}",
                         utils::error::report_compact_sources(&e)
                     );
                     None
@@ -91,8 +91,8 @@ where
             rate_limiter: Arc::new(
                 leaky_bucket::RateLimiter::builder()
                     .initial(*initial)
-                    .interval(Duration::from_millis(interval_millis.get()))
-                    .refill(interval_refill.get())
+                    .interval(*refill_interval)
+                    .refill(refill_amount.get())
                     .max(*max)
                     .fair(*fair)
                     .build(),

@@ -310,9 +310,10 @@ pub struct Tenant {
     // trying to use a Tenant which is shutting down.
     pub(crate) gate: Gate,
 
-    pub(crate) timeline_get_rate_limiter: Arc<
-        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
-    >,
+    /// Throttle applied at the top of [`Timeline::get`].
+    /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
+    pub(crate) timeline_get_rate_limiter:
+        Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -2782,7 +2783,7 @@ impl Tenant {
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
-            timeline_get_rate_limiter: Arc::new(crate::tenant::throttle::Throttle::new(
+            timeline_get_rate_limiter: Arc::new(throttle::Throttle::new(
                 Tenant::get_timeline_get_rate_limit_config(conf, &attached_conf.tenant_conf),
                 &crate::metrics::tenant_throttling::TIMELINE_GET,
             )),
