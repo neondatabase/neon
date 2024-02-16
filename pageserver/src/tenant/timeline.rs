@@ -3375,7 +3375,7 @@ impl Timeline {
                 // we don't leave gaps between image layers, leave `start` where it is, so that the next
                 // layer we write will cover the key range that we just scanned.
                 tracing::debug!(
-                    "create_image_layers: no data in range {}-{}",
+                    "no data in range {}-{}",
                     img_range.start,
                     img_range.end
                 );
