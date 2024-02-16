@@ -167,6 +167,8 @@ pub(crate) mod timeline;
 
 pub mod size;
 
+pub(crate) mod throttle;
+
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
@@ -305,6 +307,11 @@ pub struct Tenant {
     // Users of the Tenant such as the page service must take this Gate to avoid
     // trying to use a Tenant which is shutting down.
     pub(crate) gate: Gate,
+
+    /// Throttle applied at the top of [`Timeline::get`].
+    /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
+    pub(crate) timeline_get_throttle:
+        Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -990,6 +997,7 @@ impl Tenant {
                 TimelineResources {
                     remote_client: Some(remote_client),
                     deletion_queue_client: self.deletion_queue_client.clone(),
+                    timeline_get_throttle: self.timeline_get_throttle.clone(),
                 },
                 ctx,
             )
@@ -2075,7 +2083,7 @@ impl Tenant {
         };
 
         // We have a pageserver TenantConf, we need the API-facing TenantConfig.
-        let tenant_config: models::TenantConfig = conf.tenant_conf.into();
+        let tenant_config: models::TenantConfig = conf.tenant_conf.clone().into();
 
         models::LocationConfig {
             mode: location_config_mode,
@@ -2209,93 +2217,93 @@ where
 
 impl Tenant {
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
-        self.tenant_conf.read().unwrap().tenant_conf
+        self.tenant_conf.read().unwrap().tenant_conf.clone()
     }
 
     pub fn effective_config(&self) -> TenantConf {
         self.tenant_specific_overrides()
-            .merge(self.conf.default_tenant_conf)
+            .merge(self.conf.default_tenant_conf.clone())
     }
 
     pub fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     pub fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     pub fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     pub fn get_compaction_period(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_period
             .unwrap_or(self.conf.default_tenant_conf.compaction_period)
     }
 
     pub fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     pub fn get_gc_horizon(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .gc_horizon
             .unwrap_or(self.conf.default_tenant_conf.gc_horizon)
     }
 
     pub fn get_gc_period(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .gc_period
             .unwrap_or(self.conf.default_tenant_conf.gc_period)
     }
 
     pub fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     pub fn get_pitr_interval(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .pitr_interval
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
     pub fn get_trace_read_requests(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .trace_read_requests
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
     pub fn get_min_resident_size_override(&self) -> Option<u64> {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .min_resident_size_override
             .or(self.conf.default_tenant_conf.min_resident_size_override)
     }
 
     pub fn get_heatmap_period(&self) -> Option<Duration> {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         let heatmap_period = tenant_conf
             .heatmap_period
             .unwrap_or(self.conf.default_tenant_conf.heatmap_period);
@@ -2308,6 +2316,7 @@ impl Tenant {
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().tenant_conf = new_tenant_conf;
+        self.tenant_conf_updated();
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -2319,6 +2328,7 @@ impl Tenant {
 
     pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
         *self.tenant_conf.write().unwrap() = new_conf;
+        self.tenant_conf_updated();
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -2326,6 +2336,24 @@ impl Tenant {
         for timeline in timelines {
             timeline.tenant_conf_updated();
         }
+    }
+
+    fn get_timeline_get_throttle_config(
+        psconf: &'static PageServerConf,
+        overrides: &TenantConfOpt,
+    ) -> throttle::Config {
+        overrides
+            .timeline_get_throttle
+            .clone()
+            .unwrap_or(psconf.default_tenant_conf.timeline_get_throttle.clone())
+    }
+
+    pub(crate) fn tenant_conf_updated(&self) {
+        let conf = {
+            let guard = self.tenant_conf.read().unwrap();
+            Self::get_timeline_get_throttle_config(self.conf, &guard.tenant_conf)
+        };
+        self.timeline_get_throttle.reconfigure(conf)
     }
 
     /// Helper function to create a new Timeline struct.
@@ -2454,7 +2482,6 @@ impl Tenant {
             // using now here is good enough approximation to catch tenants with really long
             // activation times.
             constructed_at: Instant::now(),
-            tenant_conf: Arc::new(RwLock::new(attached_conf)),
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             gc_cs: tokio::sync::Mutex::new(()),
@@ -2469,6 +2496,11 @@ impl Tenant {
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
+            timeline_get_throttle: Arc::new(throttle::Throttle::new(
+                Tenant::get_timeline_get_throttle_config(conf, &attached_conf.tenant_conf),
+                &crate::metrics::tenant_throttling::TIMELINE_GET,
+            )),
+            tenant_conf: Arc::new(RwLock::new(attached_conf)),
         }
     }
 
@@ -3224,6 +3256,7 @@ impl Tenant {
         TimelineResources {
             remote_client,
             deletion_queue_client: self.deletion_queue_client.clone(),
+            timeline_get_throttle: self.timeline_get_throttle.clone(),
         }
     }
 
@@ -3495,7 +3528,7 @@ impl Tenant {
     }
 
     pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
-        self.tenant_conf.read().unwrap().tenant_conf
+        self.tenant_conf.read().unwrap().tenant_conf.clone()
     }
 }
 
@@ -3654,6 +3687,7 @@ pub(crate) mod harness {
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
+                timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
             }
         }
     }
@@ -3757,7 +3791,7 @@ pub(crate) mod harness {
                 TenantState::Loading,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
-                    TenantConfOpt::from(self.tenant_conf),
+                    TenantConfOpt::from(self.tenant_conf.clone()),
                     self.generation,
                     &ShardParameters::default(),
                 ))

@@ -164,6 +164,9 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
     pub deletion_queue_client: DeletionQueueClient,
+    pub timeline_get_throttle: Arc<
+        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
+    >,
 }
 
 pub struct Timeline {
@@ -355,6 +358,11 @@ pub struct Timeline {
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
+
+    /// Cloned from [`super::Tenant::timeline_get_throttle`] on construction.
+    timeline_get_throttle: Arc<
+        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
+    >,
 }
 
 pub struct WalReceiverInfo {
@@ -615,6 +623,8 @@ impl Timeline {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
 
+        self.timeline_get_throttle.throttle(ctx, 1).await;
+
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
         // page_service.
@@ -713,6 +723,10 @@ impl Timeline {
         if key_count > Timeline::MAX_GET_VECTORED_KEYS {
             return Err(GetVectoredError::Oversized(key_count));
         }
+
+        self.timeline_get_throttle
+            .throttle(ctx, key_count as usize)
+            .await;
 
         let _timer = crate::metrics::GET_VECTORED_LATENCY
             .for_task_kind(ctx.task_kind())
@@ -1335,49 +1349,49 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 // Private functions
 impl Timeline {
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .lazy_slru_download
             .unwrap_or(self.conf.default_tenant_conf.lazy_slru_download)
     }
 
     fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .eviction_policy
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
@@ -1393,7 +1407,7 @@ impl Timeline {
     }
 
     fn get_gc_feedback(&self) -> bool {
-        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .gc_feedback
             .unwrap_or(self.conf.default_tenant_conf.gc_feedback)
@@ -1555,6 +1569,8 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),
+
+                timeline_get_throttle: resources.timeline_get_throttle,
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;

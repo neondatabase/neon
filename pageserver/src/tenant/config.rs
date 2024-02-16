@@ -9,8 +9,8 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
-use pageserver_api::models;
 use pageserver_api::models::EvictionPolicy;
+use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -285,7 +285,7 @@ impl Default for LocationConf {
 ///
 /// For storing and transmitting individual tenant's configuration, see
 /// TenantConfOpt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the
@@ -348,11 +348,13 @@ pub struct TenantConf {
 
     /// If true then SLRU segments are dowloaded on demand, if false SLRU segments are included in basebackup
     pub lazy_slru_download: bool,
+
+    pub timeline_get_throttle: pageserver_api::models::ThrottleConfig,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
 /// which parameters are set and which are not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -437,6 +439,9 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub lazy_slru_download: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline_get_throttle: Option<pageserver_api::models::ThrottleConfig>,
 }
 
 impl TenantConfOpt {
@@ -485,6 +490,10 @@ impl TenantConfOpt {
             lazy_slru_download: self
                 .lazy_slru_download
                 .unwrap_or(global_conf.lazy_slru_download),
+            timeline_get_throttle: self
+                .timeline_get_throttle
+                .clone()
+                .unwrap_or(global_conf.timeline_get_throttle),
         }
     }
 }
@@ -524,6 +533,7 @@ impl Default for TenantConf {
             gc_feedback: false,
             heatmap_period: Duration::ZERO,
             lazy_slru_download: false,
+            timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
         }
     }
 }
@@ -596,6 +606,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             gc_feedback: value.gc_feedback,
             heatmap_period: value.heatmap_period.map(humantime),
             lazy_slru_download: value.lazy_slru_download,
+            timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
         }
     }
 }

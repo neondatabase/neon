@@ -484,7 +484,7 @@ pub async fn init_tenant_mgr(
                             TenantSlot::Secondary(SecondaryTenant::new(
                                 tenant_shard_id,
                                 location_conf.shard,
-                                location_conf.tenant_conf,
+                                location_conf.tenant_conf.clone(),
                                 &SecondaryLocationConfig { warm: false },
                             )),
                         );
@@ -805,7 +805,7 @@ pub(crate) async fn set_new_tenant_config(
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
     let location_conf = LocationConf::attached_single(
-        new_tenant_conf,
+        new_tenant_conf.clone(),
         tenant.generation,
         &ShardParameters::default(),
     );
@@ -1466,7 +1466,7 @@ impl TenantManager {
                     attach_mode: AttachmentMode::Single,
                 }),
                 shard: child_shard_identity,
-                tenant_conf: parent_tenant_conf,
+                tenant_conf: parent_tenant_conf.clone(),
             };
 
             self.upsert_location(
