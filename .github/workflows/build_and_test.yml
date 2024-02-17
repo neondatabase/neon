@@ -81,7 +81,7 @@ jobs:
     needs: [ check-permissions ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      dockerfile-path: Dockerfile.buildtools
+      dockerfile-path: Dockerfile.build-tools
       image-name: build-tools
     secrets: inherit
 

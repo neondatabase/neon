@@ -20,7 +20,7 @@ jobs:
     outputs:
       docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
     steps:
-      - name: Check if Dockerfile.buildtools has changed
+      - name: Check if Dockerfile.build-tools has changed
         id: dockerfile
         run: |
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
@@ -28,7 +28,7 @@ jobs:
             exit
           fi
           updated_files=$(gh pr --repo neondatabase/neon diff ${{ github.event.pull_request.number }} --name-only)
-          if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
+          if [[ $updated_files == *"Dockerfile.build-tools"* ]]; then
             echo "docker_file_changed=true" >> $GITHUB_OUTPUT
           fi
         env:
