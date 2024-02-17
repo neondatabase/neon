@@ -92,7 +92,6 @@ check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
 )
 
 
-@pytest.mark.repeat(25)
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
 def test_create_snapshot(
