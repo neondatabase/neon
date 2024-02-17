@@ -27,24 +27,9 @@ env:
 jobs:
   check-permissions:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
-    runs-on: ubuntu-latest
-    steps:
-    - name: Disallow PRs from forks
-      if: |
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name != github.repository
-
-      run: |
-        if [ "${{ contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}" = "true" ]; then
-          MESSAGE="Please create a PR from a branch of ${GITHUB_REPOSITORY} instead of a fork"
-        else
-          MESSAGE="The PR should be reviewed and labelled with 'approved-for-ci-run' to trigger a CI run"
-        fi
-
-        echo >&2 "We don't run CI for PRs from forks"
-        echo >&2 "${MESSAGE}"
-
-        exit 1
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
 
   cancel-previous-e2e-tests:
     needs: [ check-permissions ]
