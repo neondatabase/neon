@@ -80,9 +80,6 @@ jobs:
   build-buildtools-image:
     needs: [ check-permissions ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      dockerfile-path: Dockerfile.build-tools
-      image-name: build-tools
     secrets: inherit
 
   check-codestyle-python:

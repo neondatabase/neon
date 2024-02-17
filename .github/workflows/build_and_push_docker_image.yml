@@ -2,17 +2,14 @@ name: Build and Push Docker Image
 
 on:
   workflow_call:
-    inputs:
-      dockerfile-path:
-        required: true
-        type: string
-      image-name:
-        required: true
-        type: string
     outputs:
       build-tools-tag:
         description: "tag generated for build tools"
         value: ${{ jobs.tag.outputs.build-tools-tag }}
+
+env:
+  DOCKERFILE_PATH: Dockerfile.build-tools
+  IMAGE_NAME: build-tools
 
 jobs:
   check-if-build-tools-dockerfile-changed:
@@ -74,10 +71,10 @@ jobs:
             --reproducible \
             --snapshotMode=redo \
             --skip-unused-stages \
-            --dockerfile ${{ inputs.dockerfile-path }} \
+            --dockerfile ${DOCKERFILE_PATH} \
             --cache=true \
             --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
-            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-amd64
+            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}-amd64
 
   kaniko-arm:
     if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
@@ -98,10 +95,10 @@ jobs:
             --reproducible \
             --snapshotMode=redo \
             --skip-unused-stages \
-            --dockerfile ${{ inputs.dockerfile-path }} \
+            --dockerfile ${DOCKERFILE_PATH} \
             --cache=true \
             --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
-            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-arm64
+            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}-arm64
 
   manifest:
     if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
@@ -116,9 +113,9 @@ jobs:
     steps:
       - name: Create manifest
         run: |
-          docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }} \
-                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-amd64 \
-                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}-arm64
+          docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }} \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}-amd64 \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}-arm64
 
       - name: Push manifest
-        run: docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ needs.tag.outputs.build-tools-tag }}
+        run: docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}
