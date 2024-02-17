@@ -1,69 +1,99 @@
-name: Build and Push Docker Image
+name: Build build-tools image
 
 on:
   workflow_call:
     outputs:
-      build-tools-tag:
-        description: "tag generated for build tools"
-        value: ${{ jobs.tag.outputs.build-tools-tag }}
+      image:
+        description: "build-tools docker image (with digest)"
+        value: ${{ jobs.check-image.outputs.full-image || jobs.manifest.outputs.full-image }}
+      tag:
+        description: "build-tools docker image tag"
+        value: ${{ jobs.check-image.outputs.tag }}
 
-env:
-  DOCKERFILE_PATH: Dockerfile.build-tools
-  IMAGE_NAME: build-tools
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
 
 jobs:
-  check-if-build-tools-dockerfile-changed:
+  check-image:
     runs-on: ubuntu-latest
     outputs:
-      docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
+      full-image: ${{ steps.check-image.outputs.image }}
+      tag: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+
     steps:
-      - name: Check if Dockerfile.build-tools has changed
-        id: dockerfile
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
-            echo "docker_file_changed=false" >> $GITHUB_OUTPUT
-            exit
-          fi
-          updated_files=$(gh pr --repo neondatabase/neon diff ${{ github.event.pull_request.number }} --name-only)
-          if [[ $updated_files == *"Dockerfile.build-tools"* ]]; then
-            echo "docker_file_changed=true" >> $GITHUB_OUTPUT
-          fi
+      - name: Get build-tools image tag for current commit
+        id: get-build-tools-tag
         env:
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  tag:
-    runs-on: ubuntu-latest
-    needs: [ check-if-build-tools-dockerfile-changed ]
-    outputs:
-      build-tools-tag: ${{steps.buildtools-tag.outputs.image_tag}}
-
-    steps:
-      - name: Get buildtools tag
-        env:
-          DOCKERFILE_CHANGED: ${{ needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]] && [[ "${DOCKERFILE_CHANGED}" == "true" ]]; then
-            IMAGE_TAG=$GITHUB_RUN_ID
+          LAST_BUILD_TOOLS_SHA=$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --method GET \
+              --field path=Dockerfile.build-tools \
+              --field sha=${COMMIT_SHA} \
+              --field per_page=1 \
+              --jq ".[0].sha" \
+              "/repos/${GITHUB_REPOSITORY}/commits"
+          )
+          echo "image-tag=${LAST_BUILD_TOOLS_SHA}" | tee -a $GITHUB_OUTPUT
+
+      - name: Check if such tag exists
+        id: check-image
+        env:
+          IMAGE_TAG: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+          # We run CI pipeline on x86_64 arch only
+          ARCH: amd64
+        run: |
+          digest=$(docker manifest inspect neondatabase/build-tools:${IMAGE_TAG} | jq ".manifests[] | select(.platform.architecture == '${ARCH}') | .digest" || true)
+          if [[ -n "${digest}" ]]; then
+            image="neondatabase/build-tools:${IMAGE_TAG}@${digest}"
           else
-            IMAGE_TAG=pinned
+            image=""
           fi
 
-          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-        shell: bash
-        id: buildtools-tag
+          echo "image=${image}" | tee -a $GITHUB_OUTPUT
 
   kaniko:
-    if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
-    needs: [ tag, check-if-build-tools-dockerfile-changed ]
-    runs-on: [ self-hosted, dev, x64 ]
+    needs: [ check-image ]
+    if: needs.check-image.outputs.full-image == ''
+
+    strategy:
+      matrix:
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "dev", "{0}"]', matrix.arch)) }}
     container: gcr.io/kaniko-project/executor:v1.7.0-debug
+
+    # kaniko image doesn't have bash
+    defaults:
+      run:
+        shell: sh -euo pipefail {0}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v1
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Configure Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              }
+            }
+          EOF
 
       - name: Kaniko build
         run: |
@@ -71,51 +101,57 @@ jobs:
             --reproducible \
             --snapshotMode=redo \
             --skip-unused-stages \
-            --dockerfile ${DOCKERFILE_PATH} \
+            --dockerfile Dockerfile.build-tools \
             --cache=true \
-            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
-            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}-amd64
-
-  kaniko-arm:
-    if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
-    needs: [ tag, check-if-build-tools-dockerfile-changed ]
-    runs-on: [ self-hosted, dev, arm64 ]
-    container: gcr.io/kaniko-project/executor:v1.7.0-debug
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v1
-
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
-
-      - name: Kaniko build
-        run: |
-          /kaniko/executor \
-            --reproducible \
-            --snapshotMode=redo \
-            --skip-unused-stages \
-            --dockerfile ${DOCKERFILE_PATH} \
-            --cache=true \
-            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
-            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}-arm64
+            --cache-repo neondatabase/cache \
+            --destination neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.arch }}
 
   manifest:
-    if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
-    name: 'manifest'
-    runs-on: [ self-hosted, dev, x64 ]
-    needs:
-      - tag
-      - kaniko
-      - kaniko-arm
-      - check-if-build-tools-dockerfile-changed
+    needs: [ check-image, kaniko ]
+    runs-on: ubuntu-latest
+    outputs:
+      full-image: ${{ steps.manifest.outputs.image }}
+
+    env:
+      IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
 
     steps:
-      - name: Create manifest
-        run: |
-          docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }} \
-                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}-amd64 \
-                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}-arm64
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Push manifest
-        run: docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${IMAGE_NAME}${{ needs.tag.outputs.build-tools-tag }}
+      - name: Create multi-arch image
+        run: |
+          docker manifest create neondatabase/build-tools:${IMAGE_TAG} \
+                         --amend neondatabase/build-tools:${IMAGE_TAG}-x64 \
+                         --amend neondatabase/build-tools:${IMAGE_TAG}-arm64
+
+      - name: Push image
+        id: manifest
+        run: |
+          digest=$(docker manifest push neondatabase/build-tools:${IMAGE_TAG})
+          echo "image=neondatabase/build-tools:${IMAGE_TAG}@${digest}" | tee -a $GITHUB_OUTPUT
+
+      - uses: docker/login-action@v3
+        if: github.ref_name == 'main'
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - uses: actions/setup-go@v5
+        if: github.ref_name == 'main'
+        with:
+          go-version: '1.22'
+
+      - name: Install crane
+        if: github.ref_name == 'main'
+        run: |
+          go install github.com/google/go-containerregistry/cmd/crane@8dadbe76ff8c20d0e509406f04b7eade43baa6c1 # v0.19.0
+
+      - name: Promote image
+        if: github.ref_name == 'main'
+        run: |
+          crane copy neondatabase/build-tools:${IMAGE_TAG} pinned
+          crane copy neondatabase/build-tools:pinned 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned

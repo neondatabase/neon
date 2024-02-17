@@ -86,7 +86,7 @@ jobs:
     needs: [ check-permissions, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: ${{ needs.build-buildtools-image.outputs.image }}
       options: --init
 
     steps:
@@ -118,7 +118,7 @@ jobs:
     needs: [ check-permissions, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: ${{ needs.build-buildtools-image.outputs.image }}
       options: --init
 
     steps:
@@ -185,7 +185,7 @@ jobs:
     needs: [ check-permissions, tag, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: ${{ needs.build-buildtools-image.outputs.image }}
       # Raise locked memory limit for tokio-epoll-uring.
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
@@ -426,7 +426,7 @@ jobs:
     needs: [ check-permissions, build-neon, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: ${{ needs.build-buildtools-image.outputs.image }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
@@ -473,7 +473,7 @@ jobs:
     needs: [ check-permissions, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: ${{ needs.build-buildtools-image.outputs.image }}
       options: --init
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     steps:
@@ -503,7 +503,7 @@ jobs:
     needs: [ check-permissions, build-neon, build-buildtools-image, get-benchmarks-durations ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: ${{ needs.build-buildtools-image.outputs.image }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -540,7 +540,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: ${{ needs.build-buildtools-image.outputs.image }}
       options: --init
 
     steps:
@@ -584,7 +584,7 @@ jobs:
     needs: [ check-permissions, regress-tests, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+      image: ${{ needs.build-buildtools-image.outputs.image }}
       options: --init
     strategy:
       fail-fast: false
@@ -723,8 +723,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+            TAG=${{ needs.build-buildtools-image.outputs.tag }}
           provenance: false
           push: true
           pull: true
@@ -776,8 +775,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{needs.tag.outputs.build-tag}}
-            TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
-            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+            TAG=${{ needs.build-buildtools-image.outputs.tag }}
           provenance: false
           push: true
           pull: true
@@ -841,8 +839,7 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version }}
             BUILD_TAG=${{needs.tag.outputs.build-tag}}
-            TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
-            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+            TAG=${{ needs.build-buildtools-image.outputs.tag }}
           provenance: false
           push: true
           pull: true
@@ -935,7 +932,7 @@ jobs:
 
       - name: Verify docker-compose example
         timeout-minutes: 20
-        run: env REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
+        run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
 
       - name: Print logs and clean up
         if: always()
