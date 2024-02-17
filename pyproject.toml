@@ -38,6 +38,7 @@ pytest-rerunfailures = "^13.0"
 types-pytest-lazy-fixture = "^0.6.3.3"
 pytest-split = "^0.8.1"
 zstandard = "^0.21.0"
+pytest-repeat = "^0.9.3"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.3.0"
