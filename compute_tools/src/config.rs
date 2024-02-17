@@ -51,6 +51,9 @@ pub fn write_postgres_conf(
     if let Some(s) = &spec.pageserver_connstring {
         writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
     }
+    if let Some(stripe_size) = spec.shard_stripe_size {
+        writeln!(file, "neon.stripe_size={}", stripe_size)?;
+    }
     if !spec.safekeeper_connstrings.is_empty() {
         writeln!(
             file,

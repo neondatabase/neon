@@ -1,7 +1,7 @@
 use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 
-use crate::key::Key;
+use crate::{key::Key, shard::ShardIdentity};
 
 ///
 /// Represents a set of Keys, in a compact form.
@@ -18,39 +18,43 @@ impl KeySpace {
     /// Partition a key space into roughly chunks of roughly 'target_size' bytes
     /// in each partition.
     ///
-    pub fn partition(&self, target_size: u64) -> KeyPartitioning {
+    pub fn partition(&self, shard_identity: &ShardIdentity, target_size: u64) -> KeyPartitioning {
         // Assume that each value is 8k in size.
         let target_nblocks = (target_size / BLCKSZ as u64) as usize;
 
         let mut parts = Vec::new();
         let mut current_part = Vec::new();
-        let mut current_part_size: usize = 0;
-        for range in &self.ranges {
-            // If appending the next contiguous range in the keyspace to the current
-            // partition would cause it to be too large, start a new partition.
-            let this_size = key_range_size(range) as usize;
-            if current_part_size + this_size > target_nblocks && !current_part.is_empty() {
-                parts.push(KeySpace {
-                    ranges: current_part,
-                });
-                current_part = Vec::new();
-                current_part_size = 0;
-            }
 
-            // If the next range is larger than 'target_size', split it into
-            // 'target_size' chunks.
-            let mut remain_size = this_size;
-            let mut start = range.start;
-            while remain_size > target_nblocks {
-                let next = start.add(target_nblocks as u32);
-                parts.push(KeySpace {
-                    ranges: vec![start..next],
-                });
-                start = next;
-                remain_size -= target_nblocks
+        // Size of the current partition, which is the intersection of:
+        // - keyspace ranges added to the partition
+        // - the parts of the keyspace which belong to the current shard
+        let mut current_part_size: usize = 0;
+
+        // Try to generate partitions that don't exceed `target_nblocks`, while
+        // also ensuring that the partitions we generate always contain at least one
+        // block in the keyspace which is local to the shard we are running on.  This is important,
+        // because our resulting partition must simultaneously satisfy two constraints:
+        // * Cover the whole keyspace
+        // * and, have at least one written key in each partition.
+
+        for range in &self.ranges {
+            // Chunk up the range into parts that each contain up to target_size local blocks
+            for (range_size, range) in shard_identity.key_range_chunk(range, target_nblocks) {
+                // If appending the next contiguous range in the keyspace to the current
+                // partition would cause it to be too large, and our current partition
+                // covers at least one block that is physically present in this shard,
+                // then start a new partition
+                if current_part_size + range_size as usize > target_nblocks && current_part_size > 0
+                {
+                    parts.push(KeySpace {
+                        ranges: current_part,
+                    });
+                    current_part = Vec::new();
+                    current_part_size = 0;
+                }
+                current_part.push(range.start..range.end);
+                current_part_size += range_size as usize;
             }
-            current_part.push(start..range.end);
-            current_part_size += remain_size;
         }
 
         // add last partition that wasn't full yet.
@@ -285,6 +289,16 @@ pub fn key_range_size(key_range: &Range<Key>) -> u32 {
     let start = key_range.start;
     let end = key_range.end;
 
+    // Ranges end vs. start is a different key type (field1), spcNode (field2), dbNode (field3), or relNode (field 4),
+    // then account for this key range as if it were infinite size: this causes keyspace partitioning
+    // to assume that this key range is greater than its target partition size, and split partitions
+    // ahead of such ranges.
+    //
+    // This doesn't happen on KeySpaces that are built from the dbdir (because each range belongs to
+    // a particular relation/key), but it can happen in the general case of arbitrary ranges, such as
+    // where KeySpaceRandomAccum has been used to record the ranges of some existing layer files: where those
+    // input layer files ranges span relations, so will the output of the resulting keyspace's partitioning
+    // also split its partitions at the boundaries between those relation-spanning layers that were used as input.
     if end.field1 != start.field1
         || end.field2 != start.field2
         || end.field3 != start.field3
@@ -304,7 +318,7 @@ pub fn key_range_size(key_range: &Range<Key>) -> u32 {
     }
 }
 
-pub fn singleton_range(key: Key) -> Range<Key> {
+pub(crate) fn singleton_range(key: Key) -> Range<Key> {
     key..key.next()
 }
 

@@ -1,7 +1,11 @@
-use std::{ops::RangeInclusive, str::FromStr};
+use std::{
+    ops::{Range, RangeInclusive},
+    str::FromStr,
+};
 
 use crate::{
     key::{is_rel_block_key, Key},
+    keyspace::key_range_size,
     models::ShardParameters,
 };
 use hex::FromHex;
@@ -497,15 +501,23 @@ impl ShardIdentity {
         }
     }
 
+    /// Keys that are set on all shards
+    pub fn is_key_global(&self, key: &Key) -> bool {
+        // Logical size key
+        key.field1 == 0x00 && key.field4 != 0 && key.field6 == 0xffffffff
+    }
+
     /// Return true if the key should be discarded if found in this shard's
     /// data store, e.g. during compaction after a split
     pub fn is_key_disposable(&self, key: &Key) -> bool {
         if key_is_shard0(key) {
             // Q: Why can't we dispose of shard0 content if we're not shard 0?
-            // A: because the WAL ingestion logic currently ingests some shard 0
-            //    content on all shards, even though it's only read on shard 0.  If we
-            //    dropped it, then subsequent WAL ingest to these keys would encounter
-            //    an error.
+            // A1: because the WAL ingestion logic currently ingests some shard 0
+            //     content on all shards, even though it's only read on shard 0.  If we
+            //     dropped it, then subsequent WAL ingest to these keys would encounter
+            //     an error.
+            // A2: because key_is_shard0 also covers relation size keys, which are written
+            //     on all shards even though they're only maintained accurately on shard 0.
             false
         } else {
             !self.is_key_local(key)
@@ -524,6 +536,127 @@ impl ShardIdentity {
     /// for special cases on shard 0 such as ingesting relation sizes.
     pub fn is_zero(&self) -> bool {
         self.number == ShardNumber(0)
+    }
+
+    pub fn key_range_local_size(&self, range: &Range<Key>) -> u32 {
+        let r = self.key_range_local_size_impl(range);
+        let naive = key_range_size(range);
+        debug_assert!(r <= naive);
+        r
+    }
+    /// Given a range of the keyspace, calculate how many blocks within the range
+    /// are stored on this shard.  
+    ///
+    /// If the range spans multiple relations, we can't calculate this (because we don't
+    /// know about the relation in between), so we return u32::MAX -- this acts as a hint
+    /// to callers in compaction that they should start a new layer.
+    pub fn key_range_local_size_impl(&self, range: &Range<Key>) -> u32 {
+        let start = range.start;
+        let end = range.end;
+        // Although only field4 & field6 are included in the hash, if other fields differ then
+        // it would be inaccurate for us to return a block count that assumed they were the same.
+        if end.field1 != start.field1
+            || end.field2 != start.field2
+            || end.field3 != start.field3
+            || end.field4 != start.field4
+        {
+            return u32::MAX;
+        }
+
+        // Fast path: avoid hashing if we can immediately identify the owner of the whole range
+        if self.is_unsharded()
+            || self.count == ShardCount(1)
+            || (key_is_shard0(&start) && self.number == ShardNumber(0))
+        {
+            let start = (start.field5 as u64) << 32 | start.field6 as u64;
+            let end = (end.field5 as u64) << 32 | end.field6 as u64;
+
+            let diff = end - start;
+            if diff > u32::MAX as u64 {
+                return u32::MAX;
+            } else {
+                return diff as u32;
+            }
+        }
+
+        // Special cases for single keys like logical sizes
+        if end == start.add(1) && self.is_key_global(&start) {
+            return 1;
+        }
+
+        // Normal path: step through stripes and part-stripes in the range, evaluate whether each one belongs
+        // to Self, and add the stripe's block count to our total if so.
+        let mut result: u64 = 0;
+        let mut stripe_start = start;
+        while stripe_start < end {
+            let shard = key_to_shard_number(self.count, self.stripe_size, &stripe_start);
+
+            // Count up to the next stripe_size boundary
+            let stripe_index = stripe_start.field6 / self.stripe_size.0;
+            let stripe_remainder =
+                self.stripe_size.0 - (stripe_start.field6 - stripe_index * self.stripe_size.0);
+
+            let next_stripe_start = stripe_start.add(stripe_remainder);
+            let stripe_end = std::cmp::min(end, next_stripe_start);
+
+            // If this blocks in this stripe belong to us, add them to our count
+            if shard == self.number {
+                let start = (stripe_start.field5 as u64) << 32 | stripe_start.field6 as u64;
+                let end = (stripe_end.field5 as u64) << 32 | stripe_end.field6 as u64;
+                result += end - start;
+            }
+
+            stripe_start = next_stripe_start;
+        }
+        if result > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            result as u32
+        }
+    }
+
+    /// Break up a key range into chunks, each of which has at least one local key in it.
+    pub fn key_range_chunk(
+        &self,
+        range: &Range<Key>,
+        target_nblocks: usize,
+    ) -> Vec<(u32, Range<Key>)> {
+        let mut range = range.clone();
+        let mut result = Vec::new();
+        loop {
+            // Split off the first target_nblocks if the remainder of the range would still contain
+            // some local blocks, otherwise yield the remainder of the range and we're done.
+            let range_size = self.key_range_local_size(&range);
+
+            if range_size > target_nblocks as u32 {
+                let remainder = Range {
+                    // FIXME: this add is not advancing far enough to capture target_nblocks *local*
+                    // blocks.  So we will end up chunking our range more finely than we needed to.
+                    start: range.start.add(target_nblocks as u32),
+                    end: range.end,
+                };
+
+                let remainder_blocks = self.key_range_local_size(&remainder);
+                if remainder_blocks > 0 {
+                    // We may split the range here
+                    let mut split_off = range;
+                    split_off.end = remainder.start;
+
+                    result.push((self.key_range_local_size(&split_off), split_off));
+
+                    range = remainder;
+                } else {
+                    // We may not split because the remainder would contain no local blocks
+                    result.push((range_size, range));
+                    break;
+                }
+            } else {
+                result.push((range_size, range));
+                break;
+            }
+        }
+
+        result
     }
 }
 
@@ -951,5 +1084,75 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn shard_identity_keyspaces_one() {
+        // Configure a shard identity with small
+
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(0), ShardCount(4), DEFAULT_STRIPE_SIZE).unwrap();
+
+        let range = Range {
+            start: Key::from_hex("000000067F00000005000040100300000000").unwrap(),
+            end: Key::from_hex("000000067F00000005000040130000004000").unwrap(),
+        };
+
+        // Key range spans relations, expect MAX
+        assert_eq!(shard_identity.key_range_local_size(&range), u32::MAX);
+    }
+
+    #[test]
+    fn shard_identity_keyspaces_two() {
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(1), ShardCount(4), DEFAULT_STRIPE_SIZE).unwrap();
+
+        let range = Range {
+            start: Key::from_hex("000000067f000000010000007000ffffffff").unwrap(),
+            end: Key::from_hex("000000067f00000001000000700100000000").unwrap(),
+        };
+
+        // Single-key range on logical size key
+        assert_eq!(shard_identity.key_range_local_size(&range), 1);
+    }
+
+    #[test]
+    fn shard_identity_keyspaces_three() {
+        let shard_identity =
+            ShardIdentity::new(ShardNumber(1), ShardCount(4), DEFAULT_STRIPE_SIZE).unwrap();
+
+        let range = Range {
+            start: Key::from_hex("000000067f00000001000004df00ffffffff").unwrap(),
+            end: Key::from_hex("000000067f00000001000004df0100000003").unwrap(),
+        };
+
+        // Range spanning the end of one forkno and the start of the next, but not intersecting this shard's stripes
+        // This is technically an under-count, as the logical size key would be stored on this shard, but that's okay
+        // because key_range_local_size is allowed to under-count: it just mustn't over-count.
+        assert_eq!(shard_identity.key_range_local_size(&range), 0);
+    }
+
+    #[test]
+    fn shard_identity_keyspaces_four() {
+        let mut shard_identity =
+            ShardIdentity::new(ShardNumber(0), ShardCount(4), DEFAULT_STRIPE_SIZE).unwrap();
+
+        let range = Range {
+            start: Key::from_hex("000000067f00000001000000ae0000000000").unwrap(),
+            end: Key::from_hex("000000067f00000001000000ae0000000001").unwrap(),
+        };
+
+        // Very simple case: range covering block zero of one relation, where that block maps to shard zero
+        assert_eq!(shard_identity.key_range_local_size(&range), 1);
+
+        // Check that the other shards perceive its size as zero
+        shard_identity.number = ShardNumber(1);
+        assert_eq!(shard_identity.key_range_local_size(&range), 0);
+
+        shard_identity.number = ShardNumber(2);
+        assert_eq!(shard_identity.key_range_local_size(&range), 0);
+
+        shard_identity.number = ShardNumber(3);
+        assert_eq!(shard_identity.key_range_local_size(&range), 0);
     }
 }
