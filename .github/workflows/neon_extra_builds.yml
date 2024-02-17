@@ -20,7 +20,14 @@ env:
   COPT: '-Werror'
 
 jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
+
   check-macos-build:
+    needs: [ check-permissions ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
@@ -116,8 +123,8 @@ jobs:
         run: ./run_clippy.sh
 
   check-linux-arm-build:
+    needs: [ check-permissions ]
     timeout-minutes: 90
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: [ self-hosted, dev, arm64 ]
 
     env:
@@ -237,8 +244,8 @@ jobs:
           cargo nextest run --package remote_storage --test test_real_azure
 
   check-codestyle-rust-arm:
+    needs: [ check-permissions ]
     timeout-minutes: 90
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: [ self-hosted, dev, arm64 ]
 
     container:
@@ -309,6 +316,7 @@ jobs:
         run: cargo deny check
 
   gather-rust-build-stats:
+    needs: [ check-permissions ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
