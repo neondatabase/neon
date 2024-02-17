@@ -776,8 +776,9 @@ RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_5.tar.
 #
 #########################################################################################
 FROM build-deps AS ivm-pg-build
-ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.7.tar.gz -O pg_ivm.tar.gz && \
     echo "ebfde04f99203c7be4b0e873f91104090e2e83e5429c32ac242d00f334224d5e pg_ivm.tar.gz" | sha256sum --check && \
     mkdir pg_ivm-src && cd pg_ivm-src && tar xvzf ../pg_ivm.tar.gz --strip-components=1 -C . && \
