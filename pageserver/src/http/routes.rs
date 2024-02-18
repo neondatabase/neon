@@ -571,10 +571,16 @@ async fn timeline_list_handler(
         parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    let state = get_state(&request);
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let response_data = async {
-        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id, false)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
         let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
