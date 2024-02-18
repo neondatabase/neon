@@ -408,6 +408,13 @@ pub struct TenantLocationConfigRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
+pub struct TenantTimeTravelRequest {
+    pub current_shard_count: ShardCount,
+    pub target_shard_count: ShardCount,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct TenantShardLocation {
     pub shard_id: TenantShardId,
     pub node_id: NodeId,

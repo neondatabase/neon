@@ -90,10 +90,7 @@ impl Scheduler {
         }
     }
 
-    pub(crate) fn schedule_shard(
-        &mut self,
-        hard_exclude: &[NodeId],
-    ) -> Result<NodeId, ScheduleError> {
+    pub(crate) fn schedule_shard(&self, hard_exclude: &[NodeId]) -> Result<NodeId, ScheduleError> {
         if self.nodes.is_empty() {
             return Err(ScheduleError::NoPageservers);
         }
