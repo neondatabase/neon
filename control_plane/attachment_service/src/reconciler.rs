@@ -438,7 +438,7 @@ impl Reconciler {
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
-                    tracing::info!("Observed configuration already correct.")
+                    tracing::info!(node_id=%node_id, "Observed configuration already correct.")
                 }
                 _ => {
                     // In all cases other than a matching observed configuration, we will
@@ -449,7 +449,7 @@ impl Reconciler {
                         .increment_generation(self.tenant_shard_id, node_id)
                         .await?;
                     wanted_conf.generation = self.generation.into();
-                    tracing::info!("Observed configuration requires update.");
+                    tracing::info!(node_id=%node_id, "Observed configuration requires update.");
                     self.location_config(node_id, wanted_conf, None).await?;
                     self.compute_notify().await?;
                 }
