@@ -55,6 +55,11 @@ use crate::{
     PlacementPolicy, Sequence,
 };
 
+// For operations that should be quick, like attaching a new tenant
+const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
+
+// For operations that might be slow, like migrating a tenant with
+// some data in it.
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long [`Service::startup_reconcile`] is allowed to take before it should give
@@ -864,6 +869,16 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<TenantCreateResponse, ApiError> {
+        let (response, waiters) = self.do_tenant_create(create_req).await?;
+
+        self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await?;
+        Ok(response)
+    }
+
+    pub(crate) async fn do_tenant_create(
+        &self,
+        create_req: TenantCreateRequest,
+    ) -> Result<(TenantCreateResponse, Vec<ReconcilerWaiter>), ApiError> {
         // This service expects to handle sharding itself: it is an error to try and directly create
         // a particular shard here.
         let tenant_id = if !create_req.new_tenant_id.is_unsharded() {
@@ -1013,11 +1028,12 @@ impl Service {
             (waiters, response_shards)
         };
 
-        self.await_waiters(waiters).await?;
-
-        Ok(TenantCreateResponse {
-            shards: response_shards,
-        })
+        Ok((
+            TenantCreateResponse {
+                shards: response_shards,
+            },
+            waiters,
+        ))
     }
 
     /// Helper for functions that reconcile a number of shards, and would like to do a timeout-bounded
@@ -1025,8 +1041,9 @@ impl Service {
     async fn await_waiters(
         &self,
         waiters: Vec<ReconcilerWaiter>,
+        timeout: Duration,
     ) -> Result<(), ReconcileWaitError> {
-        let deadline = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+        let deadline = Instant::now().checked_add(timeout).unwrap();
         for waiter in waiters {
             let timeout = deadline.duration_since(Instant::now());
             waiter.wait_timeout(timeout).await?;
@@ -1164,12 +1181,8 @@ impl Service {
             }
         };
 
-        // TODO: if we timeout/fail on reconcile, we should still succeed this request,
-        // because otherwise a broken compute hook causes a feedback loop where
-        // location_config returns 500 and gets retried forever.
-
-        if let Some(create_req) = maybe_create {
-            let create_resp = self.tenant_create(create_req).await?;
+        let waiters = if let Some(create_req) = maybe_create {
+            let (create_resp, waiters) = self.do_tenant_create(create_req).await?;
             result.shards = create_resp
                 .shards
                 .into_iter()
@@ -1178,18 +1191,24 @@ impl Service {
                     shard_id: s.shard_id,
                 })
                 .collect();
+            waiters
         } else {
-            // This was an update, wait for reconciliation
-            if let Err(e) = self.await_waiters(waiters).await {
-                // Do not treat a reconcile error as fatal: we have already applied any requested
-                // Intent changes, and the reconcile can fail for external reasons like unavailable
-                // compute notification API.  In these cases, it is important that we do not
-                // cause the cloud control plane to retry forever on this API.
-                tracing::warn!(
-                    "Failed to reconcile after /location_config: {e}, returning success anyway"
-                );
-            }
+            waiters
+        };
+
+        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+            // Do not treat a reconcile error as fatal: we have already applied any requested
+            // Intent changes, and the reconcile can fail for external reasons like unavailable
+            // compute notification API.  In these cases, it is important that we do not
+            // cause the cloud control plane to retry forever on this API.
+            tracing::warn!(
+                "Failed to reconcile after /location_config: {e}, returning success anyway"
+            );
         }
+
+        // Logging the full result is useful because it lets us cross-check what the cloud control
+        // plane's tenant_shards table should contain.
+        tracing::info!("Complete, returning {result:?}");
 
         Ok(result)
     }
