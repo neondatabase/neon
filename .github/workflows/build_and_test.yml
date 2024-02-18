@@ -87,6 +87,9 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -119,6 +122,9 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -186,6 +192,9 @@ jobs:
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       # Raise locked memory limit for tokio-epoll-uring.
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
@@ -427,6 +436,9 @@ jobs:
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
@@ -474,6 +486,9 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     steps:
@@ -504,6 +519,9 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       # for changed limits, see comments on `options:` earlier in this file
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -541,6 +559,9 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -585,6 +606,9 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
     strategy:
       fail-fast: false
