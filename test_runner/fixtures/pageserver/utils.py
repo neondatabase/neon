@@ -332,7 +332,6 @@ def list_prefix(
     """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
-    assert remote.client is not None
 
     prefix_in_bucket = remote.prefix_in_bucket or ""
     if not prefix:
@@ -360,7 +359,6 @@ def remote_storage_delete_key(
     """
     # For local_fs we need to use a different implementation. As we don't need local_fs, just don't support it for now.
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
-    assert remote.client is not None
 
     prefix_in_bucket = remote.prefix_in_bucket or ""
 
@@ -383,7 +381,6 @@ def enable_remote_storage_versioning(
     """
     # local_fs has no support for versioning
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
-    assert remote.client is not None
 
     # The SDK supports enabling versioning on normal S3 as well but we don't want to change
     # these settings from a test in a live bucket (also, our access isn't enough nor should it be)
