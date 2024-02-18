@@ -14,8 +14,8 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import (
     list_prefix,
-    timeline_delete_wait_completed,
     remote_storage_delete_key,
+    timeline_delete_wait_completed,
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import LocalFsStorage, S3Storage, s3_storage
