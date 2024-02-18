@@ -32,6 +32,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
+use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
@@ -484,7 +485,7 @@ pub async fn init_tenant_mgr(
                             TenantSlot::Secondary(SecondaryTenant::new(
                                 tenant_shard_id,
                                 location_conf.shard,
-                                location_conf.tenant_conf,
+                                location_conf.tenant_conf.clone(),
                                 &SecondaryLocationConfig { warm: false },
                             )),
                         );
@@ -805,7 +806,7 @@ pub(crate) async fn set_new_tenant_config(
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
     let location_conf = LocationConf::attached_single(
-        new_tenant_conf,
+        new_tenant_conf.clone(),
         tenant.generation,
         &ShardParameters::default(),
     );
@@ -1466,7 +1467,7 @@ impl TenantManager {
                     attach_mode: AttachmentMode::Single,
                 }),
                 shard: child_shard_identity,
-                tenant_conf: parent_tenant_conf,
+                tenant_conf: parent_tenant_conf.clone(),
             };
 
             self.upsert_location(
@@ -1489,6 +1490,16 @@ impl TenantManager {
                 peek_slot.and_then(|s| s.get_attached()).cloned()
             };
             if let Some(t) = child_shard {
+                // Wait for the child shard to become active: this should be very quick because it only
+                // has to download the index_part that we just uploaded when creating it.
+                if let Err(e) = t.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await {
+                    // This is not fatal: we have durably created the child shard.  It just makes the
+                    // split operation less seamless for clients, as we will may detach the parent
+                    // shard before the child shards are fully ready to serve requests.
+                    tracing::warn!("Failed to wait for shard {child_shard_id} to activate: {e}");
+                    continue;
+                }
+
                 let timelines = t.timelines.lock().unwrap().clone();
                 for timeline in timelines.values() {
                     let Some(target_lsn) = target_lsns.get(&timeline.timeline_id) else {

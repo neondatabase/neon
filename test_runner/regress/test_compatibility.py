@@ -141,7 +141,12 @@ def test_create_snapshot(
     )
     if compatibility_snapshot_dir.exists():
         shutil.rmtree(compatibility_snapshot_dir)
-    shutil.copytree(test_output_dir, compatibility_snapshot_dir)
+
+    shutil.copytree(
+        test_output_dir,
+        compatibility_snapshot_dir,
+        ignore=shutil.ignore_patterns("pg_dynshmem"),
+    )
 
 
 @check_ondisk_data_compatibility_if_enabled

@@ -502,10 +502,12 @@ impl ShardIdentity {
     pub fn is_key_disposable(&self, key: &Key) -> bool {
         if key_is_shard0(key) {
             // Q: Why can't we dispose of shard0 content if we're not shard 0?
-            // A: because the WAL ingestion logic currently ingests some shard 0
-            //    content on all shards, even though it's only read on shard 0.  If we
-            //    dropped it, then subsequent WAL ingest to these keys would encounter
-            //    an error.
+            // A1: because the WAL ingestion logic currently ingests some shard 0
+            //     content on all shards, even though it's only read on shard 0.  If we
+            //     dropped it, then subsequent WAL ingest to these keys would encounter
+            //     an error.
+            // A2: because key_is_shard0 also covers relation size keys, which are written
+            //     on all shards even though they're only maintained accurately on shard 0.
             false
         } else {
             !self.is_key_local(key)
