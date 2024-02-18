@@ -32,6 +32,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
+use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
@@ -1489,6 +1490,16 @@ impl TenantManager {
                 peek_slot.and_then(|s| s.get_attached()).cloned()
             };
             if let Some(t) = child_shard {
+                // Wait for the child shard to become active: this should be very quick because it only
+                // has to download the index_part that we just uploaded when creating it.
+                if let Err(e) = t.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await {
+                    // This is not fatal: we have durably created the child shard.  It just makes the
+                    // split operation less seamless for clients, as we will may detach the parent
+                    // shard before the child shards are fully ready to serve requests.
+                    tracing::warn!("Failed to wait for shard {child_shard_id} to activate: {e}");
+                    continue;
+                }
+
                 let timelines = t.timelines.lock().unwrap().clone();
                 for timeline in timelines.values() {
                     let Some(target_lsn) = target_lsns.get(&timeline.timeline_id) else {
