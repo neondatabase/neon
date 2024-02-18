@@ -113,8 +113,8 @@ mod tests {
         );
     }
 
-    fn run_round_trip_test(client_password: &str) {
-        let scram_secret = ServerSecret::build("pencil").unwrap();
+    fn run_round_trip_test(server_password: &str, client_password: &str) {
+        let scram_secret = ServerSecret::build(server_password).unwrap();
         let sasl_client =
             ScramSha256::new(client_password.as_bytes(), ChannelBinding::unsupported());
 
@@ -133,12 +133,12 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        run_round_trip_test("pencil")
+        run_round_trip_test("pencil", "pencil")
     }
 
     #[test]
     #[should_panic(expected = "password doesn't match")]
     fn failure() {
-        run_round_trip_test("eraser")
+        run_round_trip_test("pencil", "eraser")
     }
 }
