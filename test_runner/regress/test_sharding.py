@@ -194,6 +194,18 @@ def test_sharding_split_smoke(
 
     assert len(pre_split_pageserver_ids) == 4
 
+    def shards_on_disk(shard_ids):
+        for pageserver in env.pageservers:
+            for shard_id in shard_ids:
+                if pageserver.tenant_dir(shard_id).exists():
+                    return True
+
+        return False
+
+    old_shard_ids = [TenantShardId(tenant_id, i, shard_count) for i in range(0, shard_count)]
+    # Before split, old shards exist
+    assert shards_on_disk(old_shard_ids)
+
     env.attachment_service.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
     post_split_pageserver_ids = [loc["node_id"] for loc in env.attachment_service.locate(tenant_id)]
@@ -201,6 +213,9 @@ def test_sharding_split_smoke(
     assert len(post_split_pageserver_ids) == split_shard_count
     assert len(set(post_split_pageserver_ids)) == shard_count
     assert set(post_split_pageserver_ids) == set(pre_split_pageserver_ids)
+
+    # The old parent shards should no longer exist on disk
+    assert not shards_on_disk(old_shard_ids)
 
     workload.validate()
 

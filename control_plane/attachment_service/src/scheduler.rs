@@ -122,12 +122,11 @@ impl Scheduler {
             return Err(ScheduleError::ImpossibleConstraint);
         }
 
-        for (node_id, count) in &tenant_counts {
-            tracing::info!("tenant_counts[{node_id}]={count}");
-        }
-
         let node_id = tenant_counts.first().unwrap().0;
-        tracing::info!("scheduler selected node {node_id}");
+        tracing::info!(
+            "scheduler selected node {node_id} (elegible nodes {:?}, exclude: {hard_exclude:?})",
+            tenant_counts.iter().map(|i| i.0 .0).collect::<Vec<_>>()
+        );
 
         // Note that we do not update shard count here to reflect the scheduling: that
         // is IntentState's job when the scheduled location is used.

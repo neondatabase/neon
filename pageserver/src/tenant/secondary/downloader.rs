@@ -486,7 +486,7 @@ impl<'a> TenantDownloader<'a> {
         let heatmap_path_bg = heatmap_path.clone();
         tokio::task::spawn_blocking(move || {
             tokio::runtime::Handle::current().block_on(async move {
-                VirtualFile::crashsafe_overwrite(&heatmap_path_bg, &temp_path, &heatmap_bytes).await
+                VirtualFile::crashsafe_overwrite(&heatmap_path_bg, &temp_path, heatmap_bytes).await
             })
         })
         .await
@@ -523,12 +523,13 @@ impl<'a> TenantDownloader<'a> {
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
+        let cancel = &self.secondary_state.cancel;
 
         let heatmap_bytes = backoff::retry(
             || async {
                 let download = self
                     .remote_storage
-                    .download(&heatmap_path)
+                    .download(&heatmap_path, cancel)
                     .await
                     .map_err(UpdateError::from)?;
                 let mut heatmap_bytes = Vec::new();
@@ -540,7 +541,7 @@ impl<'a> TenantDownloader<'a> {
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "download heatmap",
-            &self.secondary_state.cancel,
+            cancel,
         )
         .await
         .ok_or_else(|| UpdateError::Cancelled)

@@ -83,12 +83,12 @@ use utils::{
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
 // failed API calls while tenants are activating.
 #[cfg(not(feature = "testing"))]
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
+pub(crate) const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 // Tests run on slow/oversubscribed nodes, and may need to wait much longer for tenants to
 // finish attaching, if calls to remote storage are slow.
 #[cfg(feature = "testing")]
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
+pub(crate) const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 pub struct State {
     conf: &'static PageServerConf,
@@ -422,6 +422,7 @@ async fn build_timeline_info_common(
             tenant::timeline::logical_size::Accuracy::Approximate => false,
             tenant::timeline::logical_size::Accuracy::Exact => true,
         },
+        directory_entries_counts: timeline.get_directory_metrics().to_vec(),
         current_physical_size,
         current_logical_size_non_incremental: None,
         timeline_dir_layer_file_size_sum: None,
@@ -570,10 +571,16 @@ async fn timeline_list_handler(
         parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    let state = get_state(&request);
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let response_data = async {
-        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id, false)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
         let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
@@ -1135,7 +1142,7 @@ async fn tenant_shard_split_handler(
 
     let new_shards = state
         .tenant_manager
-        .shard_split(tenant_shard_id, ShardCount(req.new_shard_count), &ctx)
+        .shard_split(tenant_shard_id, ShardCount::new(req.new_shard_count), &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1950,6 +1957,7 @@ async fn put_io_engine_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
     let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
     crate::virtual_file::io_engine::set(kind);
     json_response(StatusCode::OK, ())
@@ -2213,7 +2221,7 @@ pub fn make_router(
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/keyspace",
-            |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
+            |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .any(handler_404))

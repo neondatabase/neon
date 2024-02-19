@@ -133,7 +133,7 @@ impl SecondaryTenant {
     }
 
     pub(crate) fn set_tenant_conf(&self, config: &TenantConfOpt) {
-        *(self.tenant_conf.lock().unwrap()) = *config;
+        *(self.tenant_conf.lock().unwrap()) = config.clone();
     }
 
     /// For API access: generate a LocationConfig equivalent to the one that would be used to
@@ -144,13 +144,13 @@ impl SecondaryTenant {
 
         let conf = models::LocationConfigSecondary { warm: conf.warm };
 
-        let tenant_conf = *self.tenant_conf.lock().unwrap();
+        let tenant_conf = self.tenant_conf.lock().unwrap().clone();
         models::LocationConfig {
             mode: models::LocationConfigMode::Secondary,
             generation: None,
             secondary_conf: Some(conf),
             shard_number: self.tenant_shard_id.shard_number.0,
-            shard_count: self.tenant_shard_id.shard_count.0,
+            shard_count: self.tenant_shard_id.shard_count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
             tenant_conf: tenant_conf.into(),
         }

@@ -1,4 +1,5 @@
 use crate::{
+    cancellation,
     compute::PostgresConnection,
     console::messages::MetricsAuxInfo,
     metrics::NUM_BYTES_PROXIED_COUNTER,
@@ -45,7 +46,7 @@ pub async fn proxy_pass(
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut compute).await?;
+    let _ = crate::proxy::copy_bidirectional::copy_bidirectional(&mut client, &mut compute).await?;
 
     Ok(())
 }
@@ -57,6 +58,7 @@ pub struct ProxyPassthrough<S> {
 
     pub req: IntCounterPairGuard,
     pub conn: IntCounterPairGuard,
+    pub cancel: cancellation::Session,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {

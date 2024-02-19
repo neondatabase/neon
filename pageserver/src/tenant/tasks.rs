@@ -9,6 +9,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
 use tokio_util::sync::CancellationToken;
@@ -139,6 +140,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     // How many errors we have seen consequtively
     let mut error_run_count = 0;
 
+    let mut last_throttle_flag_reset_at = Instant::now();
+
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
@@ -202,6 +205,27 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             if let Some(walredo_mgr) = &tenant.walredo_mgr {
                 walredo_mgr.maybe_quiesce(period * 10);
             }
+
+            // TODO: move this (and walredo quiesce) to a separate task that isn't affected by the back-off,
+            // so we get some upper bound guarantee on when walredo quiesce / this throttling reporting here happens.
+            info_span!(parent: None, "timeline_get_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
+                let now = Instant::now();
+                let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
+                let Stats { count_accounted, count_throttled, sum_throttled_usecs } = tenant.timeline_get_throttle.reset_stats();
+                if count_throttled == 0 {
+                    return;
+                }
+                let allowed_rps = tenant.timeline_get_throttle.steady_rps();
+                let delta = now - prev;
+                warn!(
+                    n_seconds=%format_args!("{:.3}",
+                    delta.as_secs_f64()),
+                    count_accounted,
+                    count_throttled,
+                    sum_throttled_usecs,
+                    allowed_rps=%format_args!("{allowed_rps:.0}"),
+                    "shard was throttled in the last n_seconds")
+            });
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())

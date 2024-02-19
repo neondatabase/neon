@@ -26,8 +26,8 @@ env:
 
 jobs:
   check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: ubuntu-latest
-
     steps:
     - name: Disallow PRs from forks
       if: |
@@ -253,7 +253,7 @@ jobs:
           done
 
           if [ "${FAILED}" = "true" ]; then
-            echo >&2 "Please update vendors/revisions.json if these changes are intentional"
+            echo >&2 "Please update vendor/revisions.json if these changes are intentional"
             exit 1
           fi
 

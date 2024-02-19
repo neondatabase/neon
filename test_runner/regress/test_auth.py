@@ -225,9 +225,7 @@ def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
         check_pageserver(True, password=pageserver_token)
 
-        env.pageserver.allowed_errors.append(
-            ".*SafekeeperData scope makes no sense for Pageserver.*"
-        )
+        env.pageserver.allowed_errors.append(".*JWT scope '.+' is ineligible for Pageserver auth.*")
         check_pageserver(False, password=safekeeper_token)
 
     def check_safekeeper(expect_success: bool, **conn_kwargs):

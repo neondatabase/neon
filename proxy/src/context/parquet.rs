@@ -13,7 +13,7 @@ use parquet::{
     },
     record::RecordWriter,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig};
+use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
@@ -84,8 +84,10 @@ struct RequestData {
     username: Option<String>,
     application_name: Option<String>,
     endpoint_id: Option<String>,
+    database: Option<String>,
     project: Option<String>,
     branch: Option<String>,
+    auth_method: Option<&'static str>,
     error: Option<&'static str>,
     /// Success is counted if we form a HTTP response with sql rows inside
     /// Or if we make it to proxy_pass
@@ -104,8 +106,15 @@ impl From<RequestMonitoring> for RequestData {
             username: value.user.as_deref().map(String::from),
             application_name: value.application.as_deref().map(String::from),
             endpoint_id: value.endpoint_id.as_deref().map(String::from),
+            database: value.dbname.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
             branch: value.branch.as_deref().map(String::from),
+            auth_method: value.auth_method.as_ref().map(|x| match x {
+                super::AuthMethod::Web => "web",
+                super::AuthMethod::ScramSha256 => "scram_sha_256",
+                super::AuthMethod::ScramSha256Plus => "scram_sha_256_plus",
+                super::AuthMethod::Cleartext => "cleartext",
+            }),
             protocol: value.protocol,
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
@@ -305,20 +314,23 @@ async fn upload_parquet(
     let path = RemotePath::from_string(&format!(
         "{year:04}/{month:02}/{day:02}/{hour:02}/requests_{id}.parquet"
     ))?;
+    let cancel = CancellationToken::new();
     backoff::retry(
         || async {
             let stream = futures::stream::once(futures::future::ready(Ok(data.clone())));
-            storage.upload(stream, data.len(), &path, None).await
+            storage
+                .upload(stream, data.len(), &path, None, &cancel)
+                .await
         },
-        |_e| false,
+        TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_UPLOAD_MAX_RETRIES,
         "request_data_upload",
         // we don't want cancellation to interrupt here, so we make a dummy cancel token
-        &CancellationToken::new(),
+        &cancel,
     )
     .await
-    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
     .context("request_data_upload")?;
 
@@ -404,7 +416,8 @@ mod tests {
                     )
                     .unwrap(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
-                })
+                }),
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             })
         );
         assert_eq!(parquet_upload.parquet_upload_row_group_size, 100);
@@ -431,8 +444,10 @@ mod tests {
             application_name: Some("test".to_owned()),
             username: Some(hex::encode(rng.gen::<[u8; 4]>())),
             endpoint_id: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            database: Some(hex::encode(rng.gen::<[u8; 16]>())),
             project: Some(hex::encode(rng.gen::<[u8; 16]>())),
             branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            auth_method: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
             region: "us-east-1",
             error: None,
@@ -455,6 +470,7 @@ mod tests {
     ) -> Vec<(u64, usize, i64)> {
         let remote_storage_config = RemoteStorageConfig {
             storage: RemoteStorageKind::LocalFs(tmpdir.to_path_buf()),
+            timeout: std::time::Duration::from_secs(120),
         };
         let storage = GenericRemoteStorage::from_config(&remote_storage_config).unwrap();
 
@@ -505,15 +521,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1087635, 3, 6000),
-                (1087288, 3, 6000),
-                (1087444, 3, 6000),
-                (1087572, 3, 6000),
-                (1087468, 3, 6000),
-                (1087500, 3, 6000),
-                (1087533, 3, 6000),
-                (1087566, 3, 6000),
-                (362671, 1, 2000)
+                (1313727, 3, 6000),
+                (1313720, 3, 6000),
+                (1313780, 3, 6000),
+                (1313737, 3, 6000),
+                (1313867, 3, 6000),
+                (1313709, 3, 6000),
+                (1313501, 3, 6000),
+                (1313737, 3, 6000),
+                (438118, 1, 2000)
             ],
         );
 
@@ -543,11 +559,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1028637, 5, 10000),
-                (1031969, 5, 10000),
-                (1019900, 5, 10000),
-                (1020365, 5, 10000),
-                (1025010, 5, 10000)
+                (1219459, 5, 10000),
+                (1225609, 5, 10000),
+                (1227403, 5, 10000),
+                (1226765, 5, 10000),
+                (1218043, 5, 10000)
             ],
         );
 
@@ -579,11 +595,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1210770, 6, 12000),
-                (1211036, 6, 12000),
-                (1210990, 6, 12000),
-                (1210861, 6, 12000),
-                (202073, 1, 2000)
+                (1205106, 5, 10000),
+                (1204837, 5, 10000),
+                (1205130, 5, 10000),
+                (1205118, 5, 10000),
+                (1205373, 5, 10000)
             ],
         );
 
@@ -608,15 +624,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1087635, 3, 6000),
-                (1087288, 3, 6000),
-                (1087444, 3, 6000),
-                (1087572, 3, 6000),
-                (1087468, 3, 6000),
-                (1087500, 3, 6000),
-                (1087533, 3, 6000),
-                (1087566, 3, 6000),
-                (362671, 1, 2000)
+                (1313727, 3, 6000),
+                (1313720, 3, 6000),
+                (1313780, 3, 6000),
+                (1313737, 3, 6000),
+                (1313867, 3, 6000),
+                (1313709, 3, 6000),
+                (1313501, 3, 6000),
+                (1313737, 3, 6000),
+                (438118, 1, 2000)
             ],
         );
 
@@ -653,7 +669,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(545264, 2, 3001), (545025, 2, 3000), (544857, 2, 2999)],
+            [(658383, 2, 3001), (658097, 2, 3000), (657893, 2, 2999)],
         );
 
         tmpdir.close().unwrap();

@@ -602,6 +602,15 @@ pub(crate) mod initial_logical_size {
         });
 }
 
+static DIRECTORY_ENTRIES_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_directory_entries_count",
+        "Sum of the entries in pageserver-stored directory listings",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_tenant_states_count",
@@ -1809,6 +1818,7 @@ pub(crate) struct TimelineMetrics {
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
+    pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
     pub evictions: IntCounter,
@@ -1818,12 +1828,12 @@ pub(crate) struct TimelineMetrics {
 impl TimelineMetrics {
     pub fn new(
         tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
+        timeline_id_raw: &TimelineId,
         evictions_with_low_residence_duration_builder: EvictionsWithLowResidenceDurationBuilder,
     ) -> Self {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_id = format!("{}", tenant_shard_id.shard_slug());
-        let timeline_id = timeline_id.to_string();
+        let timeline_id = timeline_id_raw.to_string();
         let flush_time_histo = StorageTimeMetrics::new(
             StorageTimeOperation::LayerFlush,
             &tenant_id,
@@ -1876,6 +1886,22 @@ impl TimelineMetrics {
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+        // TODO use impl Trait syntax here once we have ability to use it: https://github.com/rust-lang/rust/issues/63065
+        let directory_entries_count_gauge_closure = {
+            let tenant_shard_id = *tenant_shard_id;
+            let timeline_id_raw = *timeline_id_raw;
+            move || {
+                let tenant_id = tenant_shard_id.tenant_id.to_string();
+                let shard_id = format!("{}", tenant_shard_id.shard_slug());
+                let timeline_id = timeline_id_raw.to_string();
+                let gauge: UIntGauge = DIRECTORY_ENTRIES_COUNT
+                    .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+                    .unwrap();
+                gauge
+            }
+        };
+        let directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>> =
+            Lazy::new(Box::new(directory_entries_count_gauge_closure));
         let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -1902,6 +1928,7 @@ impl TimelineMetrics {
             last_record_gauge,
             resident_physical_size_gauge,
             current_logical_size_gauge,
+            directory_entries_count_gauge,
             num_persistent_files_created,
             persistent_bytes_written,
             evictions,
@@ -1944,6 +1971,9 @@ impl Drop for TimelineMetrics {
                 RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         }
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        if let Some(metric) = Lazy::get(&DIRECTORY_ENTRIES_COUNT) {
+            let _ = metric.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        }
         let _ =
             NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
@@ -2466,6 +2496,56 @@ pub mod tokio_epoll_uring {
     }
 }
 
+pub(crate) mod tenant_throttling {
+    use metrics::{register_int_counter_vec, IntCounter};
+    use once_cell::sync::Lazy;
+
+    use crate::tenant::{self, throttle::Metric};
+
+    pub(crate) struct TimelineGet {
+        wait_time: IntCounter,
+        count: IntCounter,
+    }
+
+    pub(crate) static TIMELINE_GET: Lazy<TimelineGet> = Lazy::new(|| {
+        static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+            register_int_counter_vec!(
+            "pageserver_tenant_throttling_wait_usecs_sum_global",
+            "Sum of microseconds that tenants spent waiting for a tenant throttle of a given kind.",
+            &["kind"]
+        )
+            .unwrap()
+        });
+
+        static WAIT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+            register_int_counter_vec!(
+                "pageserver_tenant_throttling_count_global",
+                "Count of tenant throttlings, by kind of throttle.",
+                &["kind"]
+            )
+            .unwrap()
+        });
+
+        let kind = "timeline_get";
+        TimelineGet {
+            wait_time: WAIT_USECS.with_label_values(&[kind]),
+            count: WAIT_COUNT.with_label_values(&[kind]),
+        }
+    });
+
+    impl Metric for &'static TimelineGet {
+        #[inline(always)]
+        fn observe_throttling(
+            &self,
+            tenant::throttle::Observation { wait_time }: &tenant::throttle::Observation,
+        ) {
+            let val = u64::try_from(wait_time.as_micros()).unwrap();
+            self.wait_time.inc_by(val);
+            self.count.inc();
+        }
+    }
+}
+
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //
@@ -2527,4 +2607,5 @@ pub fn preinitialize_metrics() {
 
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
+    Lazy::force(&tenant_throttling::TIMELINE_GET);
 }

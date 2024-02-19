@@ -30,6 +30,7 @@ use pageserver_api::{
 };
 use pageserver_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument;
 use utils::{
     backoff,
     completion::Barrier,
@@ -37,6 +38,7 @@ use utils::{
     http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
     seqwait::SeqWait,
+    sync::gate::Gate,
 };
 
 use crate::{
@@ -138,6 +140,12 @@ pub struct Service {
     config: Config,
     persistence: Arc<Persistence>,
 
+    // Process shutdown will fire this token
+    cancel: CancellationToken,
+
+    // Background tasks will hold this gate
+    gate: Gate,
+
     /// This waits for initial reconciliation with pageservers to complete.  Until this barrier
     /// passes, it isn't safe to do any actions that mutate tenants.
     pub(crate) startup_complete: Barrier,
@@ -158,17 +166,15 @@ impl Service {
         &self.config
     }
 
-    /// TODO: don't allow other API calls until this is done, don't start doing any background housekeeping
-    /// until this is done.
+    /// Called once on startup, this function attempts to contact all pageservers to build an up-to-date
+    /// view of the world, and determine which pageservers are responsive.
+    #[instrument(skip_all)]
     async fn startup_reconcile(&self) {
         // For all tenant shards, a vector of observed states on nodes (where None means
         // indeterminate, same as in [`ObservedStateLocation`])
         let mut observed = HashMap::new();
 
         let mut nodes_online = HashSet::new();
-
-        // TODO: give Service a cancellation token for clean shutdown
-        let cancel = CancellationToken::new();
 
         // TODO: issue these requests concurrently
         {
@@ -204,7 +210,7 @@ impl Service {
                     1,
                     5,
                     "Location config listing",
-                    &cancel,
+                    &self.cancel,
                 )
                 .await;
                 let Some(list_response) = list_response else {
@@ -306,7 +312,7 @@ impl Service {
                         generation: None,
                         secondary_conf: None,
                         shard_number: tenant_shard_id.shard_number.0,
-                        shard_count: tenant_shard_id.shard_count.0,
+                        shard_count: tenant_shard_id.shard_count.literal(),
                         shard_stripe_size: 0,
                         tenant_conf: models::TenantConfig::default(),
                     },
@@ -345,7 +351,7 @@ impl Service {
         let stream = futures::stream::iter(compute_notifications.into_iter())
             .map(|(tenant_shard_id, node_id)| {
                 let compute_hook = compute_hook.clone();
-                let cancel = cancel.clone();
+                let cancel = self.cancel.clone();
                 async move {
                     if let Err(e) = compute_hook.notify(tenant_shard_id, node_id, &cancel).await {
                         tracing::error!(
@@ -382,8 +388,100 @@ impl Service {
         tracing::info!("Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)");
     }
 
+    /// Long running background task that periodically wakes up and looks for shards that need
+    /// reconciliation.  Reconciliation is fallible, so any reconciliation tasks that fail during
+    /// e.g. a tenant create/attach/migrate must eventually be retried: this task is responsible
+    /// for those retries.
+    #[instrument(skip_all)]
+    async fn background_reconcile(&self) {
+        self.startup_complete.clone().wait().await;
+
+        const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
+
+        let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
+        while !self.cancel.is_cancelled() {
+            tokio::select! {
+              _ = interval.tick() => { self.reconcile_all(); }
+              _ = self.cancel.cancelled() => return
+            }
+        }
+    }
+
+    #[instrument(skip_all)]
+    async fn process_results(
+        &self,
+        mut result_rx: tokio::sync::mpsc::UnboundedReceiver<ReconcileResult>,
+    ) {
+        loop {
+            // Wait for the next result, or for cancellation
+            let result = tokio::select! {
+                r = result_rx.recv() => {
+                    match r {
+                        Some(result) => {result},
+                        None => {break;}
+                    }
+                }
+                _ = self.cancel.cancelled() => {
+                    break;
+                }
+            };
+
+            let span = tracing::span!(tracing::Level::INFO, "reconcile_result",
+                    tenant_id=%result.tenant_shard_id.tenant_id,
+                    shard_id=%result.tenant_shard_id.shard_slug(),
+                    sequence=%result.sequence,
+            );
+            let _span = span.enter();
+
+            let mut locked = self.inner.write().unwrap();
+            let Some(tenant) = locked.tenants.get_mut(&result.tenant_shard_id) else {
+                // A reconciliation result might race with removing a tenant: drop results for
+                // tenants that aren't in our map.
+                continue;
+            };
+
+            // Usually generation should only be updated via this path, so the max() isn't
+            // needed, but it is used to handle out-of-band updates via. e.g. test hook.
+            tenant.generation = std::cmp::max(tenant.generation, result.generation);
+
+            // If the reconciler signals that it failed to notify compute, set this state on
+            // the shard so that a future [`TenantState::maybe_reconcile`] will try again.
+            tenant.pending_compute_notification = result.pending_compute_notification;
+
+            match result.result {
+                Ok(()) => {
+                    for (node_id, loc) in &result.observed.locations {
+                        if let Some(conf) = &loc.conf {
+                            tracing::info!("Updating observed location {}: {:?}", node_id, conf);
+                        } else {
+                            tracing::info!("Setting observed location {} to None", node_id,)
+                        }
+                    }
+                    tenant.observed = result.observed;
+                    tenant.waiter.advance(result.sequence);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Reconcile error on tenant {}: {}",
+                        tenant.tenant_shard_id,
+                        e
+                    );
+
+                    // Ordering: populate last_error before advancing error_seq,
+                    // so that waiters will see the correct error after waiting.
+                    *(tenant.last_error.lock().unwrap()) = format!("{e}");
+                    tenant.error_waiter.advance(result.sequence);
+
+                    for (node_id, o) in result.observed.locations {
+                        tenant.observed.locations.insert(node_id, o);
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn spawn(config: Config, persistence: Arc<Persistence>) -> anyhow::Result<Arc<Self>> {
-        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
 
         tracing::info!("Loading nodes from database...");
         let nodes = persistence.list_nodes().await?;
@@ -419,14 +517,14 @@ impl Service {
             let tenant_shard_id = TenantShardId {
                 tenant_id: TenantId::from_str(tsp.tenant_id.as_str())?,
                 shard_number: ShardNumber(tsp.shard_number as u8),
-                shard_count: ShardCount(tsp.shard_count as u8),
+                shard_count: ShardCount::new(tsp.shard_count as u8),
             };
             let shard_identity = if tsp.shard_count == 0 {
                 ShardIdentity::unsharded()
             } else {
                 ShardIdentity::new(
                     ShardNumber(tsp.shard_number as u8),
-                    ShardCount(tsp.shard_count as u8),
+                    ShardCount::new(tsp.shard_count as u8),
                     ShardStripeSize(tsp.shard_stripe_size as u32),
                 )?
             };
@@ -451,6 +549,7 @@ impl Service {
                 observed: ObservedState::new(),
                 config: serde_json::from_str(&tsp.config).unwrap(),
                 reconciler: None,
+                splitting: tsp.splitting,
                 waiter: Arc::new(SeqWait::new(Sequence::initial())),
                 error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
                 last_error: Arc::default(),
@@ -473,76 +572,35 @@ impl Service {
             config,
             persistence,
             startup_complete: startup_complete.clone(),
+            cancel: CancellationToken::new(),
+            gate: Gate::default(),
         });
 
         let result_task_this = this.clone();
         tokio::task::spawn(async move {
-            while let Some(result) = result_rx.recv().await {
-                let span = tracing::span!(tracing::Level::INFO, "reconcile_result",
-                        tenant_id=%result.tenant_shard_id.tenant_id,
-                        shard_id=%result.tenant_shard_id.shard_slug(),
-                        sequence=%result.sequence,
-                );
-                let _span = span.enter();
-
-                tracing::info!("Handling ReconcileResult, ok={}", result.result.is_ok());
-                let mut locked = result_task_this.inner.write().unwrap();
-                let Some(tenant) = locked.tenants.get_mut(&result.tenant_shard_id) else {
-                    // A reconciliation result might race with removing a tenant: drop results for
-                    // tenants that aren't in our map.
-                    continue;
-                };
-
-                // Usually generation should only be updated via this path, so the max() isn't
-                // needed, but it is used to handle out-of-band updates via. e.g. test hook.
-                tenant.generation = std::cmp::max(tenant.generation, result.generation);
-
-                // If the reconciler signals that it failed to notify compute, set this state on
-                // the shard so that a future [`TenantState::maybe_reconcile`] will try again.
-                tenant.pending_compute_notification = result.pending_compute_notification;
-
-                match result.result {
-                    Ok(()) => {
-                        for (node_id, loc) in &result.observed.locations {
-                            if let Some(conf) = &loc.conf {
-                                tracing::info!(
-                                    "Updating observed location {}: {:?}",
-                                    node_id,
-                                    conf
-                                );
-                            } else {
-                                tracing::info!("Setting observed location {} to None", node_id,)
-                            }
-                        }
-                        tenant.observed = result.observed;
-                        tenant.waiter.advance(result.sequence);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Reconcile error on tenant {}: {}",
-                            tenant.tenant_shard_id,
-                            e
-                        );
-
-                        // Ordering: populate last_error before advancing error_seq,
-                        // so that waiters will see the correct error after waiting.
-                        *(tenant.last_error.lock().unwrap()) = format!("{e}");
-                        tenant.error_waiter.advance(result.sequence);
-
-                        for (node_id, o) in result.observed.locations {
-                            tenant.observed.locations.insert(node_id, o);
-                        }
-                    }
-                }
+            // Block shutdown until we're done (we must respect self.cancel)
+            if let Ok(_gate) = result_task_this.gate.enter() {
+                result_task_this.process_results(result_rx).await
             }
         });
 
-        let startup_reconcile_this = this.clone();
-        tokio::task::spawn(async move {
-            // Block the [`Service::startup_complete`] barrier until we're done
-            let _completion = startup_completion;
+        tokio::task::spawn({
+            let this = this.clone();
+            // We will block the [`Service::startup_complete`] barrier until [`Self::startup_reconcile`]
+            // is done.
+            let startup_completion = startup_completion.clone();
+            async move {
+                // Block shutdown until we're done (we must respect self.cancel)
+                let Ok(_gate) = this.gate.enter() else {
+                    return;
+                };
 
-            startup_reconcile_this.startup_reconcile().await
+                this.startup_reconcile().await;
+
+                drop(startup_completion);
+
+                this.background_reconcile().await;
+            }
         });
 
         Ok(this)
@@ -563,7 +621,7 @@ impl Service {
             let tsp = TenantShardPersistence {
                 tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
                 shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
-                shard_count: attach_req.tenant_shard_id.shard_count.0 as i32,
+                shard_count: attach_req.tenant_shard_id.shard_count.literal() as i32,
                 shard_stripe_size: 0,
                 generation: 0,
                 generation_pageserver: i64::MAX,
@@ -659,6 +717,28 @@ impl Service {
             // TODO: this is an odd number of 0xf's
             attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
         );
+
+        // Trick the reconciler into not doing anything for this tenant: this helps
+        // tests that manually configure a tenant on the pagesrever, and then call this
+        // attach hook: they don't want background reconciliation to modify what they
+        // did to the pageserver.
+        #[cfg(feature = "testing")]
+        {
+            if let Some(node_id) = attach_req.node_id {
+                tenant_state.observed.locations = HashMap::from([(
+                    node_id,
+                    ObservedStateLocation {
+                        conf: Some(attached_location_conf(
+                            tenant_state.generation,
+                            &tenant_state.shard,
+                            &tenant_state.config,
+                        )),
+                    },
+                )]);
+            } else {
+                tenant_state.observed.locations.clear();
+            }
+        }
 
         Ok(AttachHookResponse {
             gen: attach_req
@@ -766,16 +846,9 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<TenantCreateResponse, ApiError> {
-        // Shard count 0 is valid: it means create a single shard (ShardCount(0) means "unsharded")
-        let literal_shard_count = if create_req.shard_parameters.is_unsharded() {
-            1
-        } else {
-            create_req.shard_parameters.count.0
-        };
-
         // This service expects to handle sharding itself: it is an error to try and directly create
         // a particular shard here.
-        let tenant_id = if create_req.new_tenant_id.shard_count > ShardCount(1) {
+        let tenant_id = if !create_req.new_tenant_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "Attempted to create a specific shard, this API is for creating the whole tenant"
             )));
@@ -789,7 +862,7 @@ impl Service {
             create_req.shard_parameters.count,
         );
 
-        let create_ids = (0..literal_shard_count)
+        let create_ids = (0..create_req.shard_parameters.count.count())
             .map(|i| TenantShardId {
                 tenant_id,
                 shard_number: ShardNumber(i),
@@ -809,7 +882,7 @@ impl Service {
             .map(|tenant_shard_id| TenantShardPersistence {
                 tenant_id: tenant_shard_id.tenant_id.to_string(),
                 shard_number: tenant_shard_id.shard_number.0 as i32,
-                shard_count: tenant_shard_id.shard_count.0 as i32,
+                shard_count: tenant_shard_id.shard_count.literal() as i32,
                 shard_stripe_size: create_req.shard_parameters.stripe_size.0 as i32,
                 generation: create_req.generation.map(|g| g as i32).unwrap_or(0),
                 generation_pageserver: i64::MAX,
@@ -914,6 +987,8 @@ impl Service {
                         &compute_hook,
                         &self.config,
                         &self.persistence,
+                        &self.gate,
+                        &self.cancel,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -953,7 +1028,7 @@ impl Service {
         tenant_id: TenantId,
         req: TenantLocationConfigRequest,
     ) -> Result<TenantLocationConfigResponse, ApiError> {
-        if req.tenant_id.shard_count.0 > 1 {
+        if !req.tenant_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "This API is for importing single-sharded or unsharded tenants"
             )));
@@ -1011,6 +1086,8 @@ impl Service {
                     &compute_hook,
                     &self.config,
                     &self.persistence,
+                    &self.gate,
+                    &self.cancel,
                 );
                 if let Some(waiter) = maybe_waiter {
                     waiters.push(waiter);
@@ -1100,6 +1177,8 @@ impl Service {
     }
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
+        self.ensure_attached_wait(tenant_id).await?;
+
         // TODO: refactor into helper
         let targets = {
             let locked = self.inner.read().unwrap();
@@ -1120,8 +1199,6 @@ impl Service {
             }
             targets
         };
-
-        // TODO: error out if the tenant is not attached anywhere.
 
         // Phase 1: delete on the pageservers
         let mut any_pending = false;
@@ -1466,9 +1543,6 @@ impl Service {
         let mut policy = None;
         let mut shard_ident = None;
 
-        // TODO: put a cancellation token on Service for clean shutdown
-        let cancel = CancellationToken::new();
-
         // A parent shard which will be split
         struct SplitTarget {
             parent_id: TenantShardId,
@@ -1492,7 +1566,7 @@ impl Service {
                 for (tenant_shard_id, shard) in
                     locked.tenants.range(TenantShardId::tenant_range(tenant_id))
                 {
-                    match shard.shard.count.0.cmp(&split_req.new_shard_count) {
+                    match shard.shard.count.count().cmp(&split_req.new_shard_count) {
                         Ordering::Equal => {
                             //  Already split this
                             children_found.push(*tenant_shard_id);
@@ -1502,7 +1576,7 @@ impl Service {
                             return Err(ApiError::BadRequest(anyhow::anyhow!(
                                 "Requested count {} but already have shards at count {}",
                                 split_req.new_shard_count,
-                                shard.shard.count.0
+                                shard.shard.count.count()
                             )));
                         }
                         Ordering::Less => {
@@ -1532,7 +1606,7 @@ impl Service {
                         shard_ident = Some(shard.shard);
                     }
 
-                    if tenant_shard_id.shard_count == ShardCount(split_req.new_shard_count) {
+                    if tenant_shard_id.shard_count.count() == split_req.new_shard_count {
                         tracing::info!(
                             "Tenant shard {} already has shard count {}",
                             tenant_shard_id,
@@ -1554,7 +1628,8 @@ impl Service {
                     targets.push(SplitTarget {
                         parent_id: *tenant_shard_id,
                         node: node.clone(),
-                        child_ids: tenant_shard_id.split(ShardCount(split_req.new_shard_count)),
+                        child_ids: tenant_shard_id
+                            .split(ShardCount::new(split_req.new_shard_count)),
                     });
                 }
 
@@ -1601,7 +1676,7 @@ impl Service {
                 this_child_tsps.push(TenantShardPersistence {
                     tenant_id: child.tenant_id.to_string(),
                     shard_number: child.shard_number.0 as i32,
-                    shard_count: child.shard_count.0 as i32,
+                    shard_count: child.shard_count.literal() as i32,
                     shard_stripe_size: shard_ident.stripe_size.0 as i32,
                     // Note: this generation is a placeholder, [`Persistence::begin_shard_split`] will
                     // populate the correct generation as part of its transaction, to protect us
@@ -1634,6 +1709,18 @@ impl Service {
                     return Err(ApiError::Conflict("Tenant is already splitting".into()));
                 }
                 _ => return Err(ApiError::InternalServerError(e.into())),
+            }
+        }
+
+        // Now that I have persisted the splitting state, apply it in-memory.  This is infallible, so
+        // callers may assume that if splitting is set in memory, then it was persisted, and if splitting
+        // is not set in memory, then it was not persisted.
+        {
+            let mut locked = self.inner.write().unwrap();
+            for target in &targets {
+                if let Some(parent_shard) = locked.tenants.get_mut(&target.parent_id) {
+                    parent_shard.splitting = SplitState::Splitting;
+                }
             }
         }
 
@@ -1696,7 +1783,7 @@ impl Service {
             .complete_shard_split(tenant_id, old_shard_count)
             .await?;
 
-        // Replace all the shards we just split with their children
+        // Replace all the shards we just split with their children: this phase is infallible.
         let mut response = TenantShardSplitResponse {
             new_shards: Vec::new(),
         };
@@ -1740,6 +1827,10 @@ impl Service {
                     child_state.generation = generation;
                     child_state.config = config.clone();
 
+                    // The child's TenantState::splitting is intentionally left at the default value of Idle,
+                    // as at this point in the split process we have succeeded and this part is infallible:
+                    // we will never need to do any special recovery from this state.
+
                     child_locations.push((child, pageserver));
 
                     tenants.insert(child, child_state);
@@ -1751,7 +1842,7 @@ impl Service {
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
         for (child_id, child_ps) in child_locations {
-            if let Err(e) = compute_hook.notify(child_id, child_ps, &cancel).await {
+            if let Err(e) = compute_hook.notify(child_id, child_ps, &self.cancel).await {
                 tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
                         child_id, child_ps);
                 failed_notifications.push(child_id);
@@ -1828,6 +1919,8 @@ impl Service {
                 &compute_hook,
                 &self.config,
                 &self.persistence,
+                &self.gate,
+                &self.cancel,
             )
         };
 
@@ -2040,6 +2133,8 @@ impl Service {
                                     &compute_hook,
                                     &self.config,
                                     &self.persistence,
+                                    &self.gate,
+                                    &self.cancel,
                                 )
                                 .is_some()
                             {
@@ -2070,6 +2165,8 @@ impl Service {
                             &compute_hook,
                             &self.config,
                             &self.persistence,
+                            &self.gate,
+                            &self.cancel,
                         );
                     }
                 }
@@ -2105,6 +2202,8 @@ impl Service {
                 &compute_hook,
                 &self.config,
                 &self.persistence,
+                &self.gate,
+                &self.cancel,
             ) {
                 waiters.push(waiter);
             }
@@ -2115,6 +2214,17 @@ impl Service {
     async fn ensure_attached_wait(&self, tenant_id: TenantId) -> Result<(), ApiError> {
         let ensure_waiters = {
             let locked = self.inner.write().unwrap();
+
+            // Check if the tenant is splitting: in this case, even if it is attached,
+            // we must act as if it is not: this blocks e.g. timeline creation/deletion
+            // operations during the split.
+            for (_shard_id, shard) in locked.tenants.range(TenantShardId::tenant_range(tenant_id)) {
+                if !matches!(shard.splitting, SplitState::Idle) {
+                    return Err(ApiError::ResourceUnavailable(
+                        "Tenant shards are currently splitting".into(),
+                    ));
+                }
+            }
 
             self.ensure_attached_schedule(locked, tenant_id)
                 .map_err(ApiError::InternalServerError)?
@@ -2147,8 +2257,25 @@ impl Service {
                     &compute_hook,
                     &self.config,
                     &self.persistence,
+                    &self.gate,
+                    &self.cancel,
                 )
             })
             .count()
+    }
+
+    pub async fn shutdown(&self) {
+        // Note that this already stops processing any results from reconciles: so
+        // we do not expect that our [`TenantState`] objects will reach a neat
+        // final state.
+        self.cancel.cancel();
+
+        // The cancellation tokens in [`crate::reconciler::Reconciler`] are children
+        // of our cancellation token, so we do not need to explicitly cancel each of
+        // them.
+
+        // Background tasks and reconcilers hold gate guards: this waits for them all
+        // to complete.
+        self.gate.close().await;
     }
 }
