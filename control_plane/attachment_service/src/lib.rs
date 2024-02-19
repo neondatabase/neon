@@ -23,7 +23,7 @@ enum PlacementPolicy {
     Detached,
 }
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Serialize)]
 struct Sequence(u64);
 
 impl Sequence {

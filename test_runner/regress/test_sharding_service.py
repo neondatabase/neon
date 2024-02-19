@@ -403,11 +403,28 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
 
     # These APIs are intentionally not implemented as methods on NeonAttachmentService, as
     # they're just for use in unanticipated circumstances.
-    env.attachment_service.request(
+
+    # Initial tenant (1 shard) and the one we just created (2 shards) should be visible
+    response = env.attachment_service.request(
+        "GET", f"{env.attachment_service_api}/debug/v1/tenant"
+    )
+    response.raise_for_status()
+    assert len(response.json()) == 3
+
+    response = env.attachment_service.request(
         "POST", f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop"
     )
+    response.raise_for_status()
     assert len(env.attachment_service.node_list()) == 1
 
-    env.attachment_service.request(
+    response = env.attachment_service.request(
         "POST", f"{env.attachment_service_api}/debug/v1/tenant/{tenant_id}/drop"
     )
+    response.raise_for_status()
+
+    # Tenant drop should be reflected in dump output
+    response = env.attachment_service.request(
+        "GET", f"{env.attachment_service_api}/debug/v1/tenant"
+    )
+    response.raise_for_status()
+    assert len(response.json()) == 1

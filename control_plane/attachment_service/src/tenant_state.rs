@@ -6,6 +6,7 @@ use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
 };
+use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, Instrument};
@@ -27,6 +28,20 @@ use crate::{
     service, PlacementPolicy, Sequence,
 };
 
+/// Serialization helper
+fn read_mutex_content<S, T>(v: &std::sync::Mutex<T>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::ser::Serializer,
+    T: Clone + std::fmt::Display,
+{
+    serializer.collect_str(&v.lock().unwrap())
+}
+
+/// In-memory state for a particular tenant shard.
+///
+/// This struct implement Serialize for debugging purposes, but is _not_ persisted
+/// itself: see [`crate::persistence`] for the subset of tenant shard state that is persisted.
+#[derive(Serialize)]
 pub(crate) struct TenantState {
     pub(crate) tenant_shard_id: TenantShardId,
 
@@ -61,6 +76,7 @@ pub(crate) struct TenantState {
     /// If a reconcile task is currently in flight, it may be joined here (it is
     /// only safe to join if either the result has been received or the reconciler's
     /// cancellation token has been fired)
+    #[serde(skip)]
     pub(crate) reconciler: Option<ReconcilerHandle>,
 
     /// If a tenant is being split, then all shards with that TenantId will have a
@@ -70,16 +86,19 @@ pub(crate) struct TenantState {
 
     /// Optionally wait for reconciliation to complete up to a particular
     /// sequence number.
+    #[serde(skip)]
     pub(crate) waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
 
     /// Indicates sequence number for which we have encountered an error reconciling.  If
     /// this advances ahead of [`Self::waiter`] then a reconciliation error has occurred,
     /// and callers should stop waiting for `waiter` and propagate the error.
+    #[serde(skip)]
     pub(crate) error_waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
 
     /// The most recent error from a reconcile on this tenant
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
+    #[serde(serialize_with = "read_mutex_content")]
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<String>>,
 
     /// If we have a pending compute notification that for some reason we weren't able to send,
@@ -89,7 +108,7 @@ pub(crate) struct TenantState {
     pub(crate) pending_compute_notification: bool,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize)]
 pub(crate) struct IntentState {
     attached: Option<NodeId>,
     secondary: Vec<NodeId>,
@@ -194,7 +213,7 @@ impl Drop for IntentState {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize)]
 pub(crate) struct ObservedState {
     pub(crate) locations: HashMap<NodeId, ObservedStateLocation>,
 }
@@ -208,7 +227,7 @@ pub(crate) struct ObservedState {
 ///       what it is (e.g. we failed partway through configuring it)
 ///     * Instance exists with conf==Some: this tells us what we last successfully configured on this node,
 ///       and that configuration will still be present unless something external interfered.
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub(crate) struct ObservedStateLocation {
     /// If None, it means we do not know the status of this shard's location on this node, but
     /// we know that we might have some state on this node.
