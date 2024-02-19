@@ -114,7 +114,10 @@ async fn handle_tenant_create(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
-    json_response(StatusCode::OK, service.tenant_create(create_req).await?)
+    json_response(
+        StatusCode::CREATED,
+        service.tenant_create(create_req).await?,
+    )
 }
 
 // For tenant and timeline deletions, which both implement an "initially return 202, then 404 once
@@ -196,7 +199,7 @@ async fn handle_tenant_timeline_create(
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let create_req = json_request::<TimelineCreateRequest>(&mut req).await?;
     json_response(
-        StatusCode::OK,
+        StatusCode::CREATED,
         service
             .tenant_timeline_create(tenant_id, create_req)
             .await?,
