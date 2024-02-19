@@ -113,7 +113,7 @@ pub async fn task_main(
 
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
-            let (io, tls) = stream.get_ref();
+            let (io, _) = stream.get_ref();
             let client_addr = io.client_addr();
             let remote_addr = io.inner.remote_addr();
             let backend = backend.clone();
