@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
+use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
@@ -26,7 +27,7 @@ pub(super) struct Reconciler {
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
     pub(crate) generation: Generation,
-    pub(crate) intent: IntentState,
+    pub(crate) intent: TargetState,
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
 
@@ -53,8 +54,38 @@ pub(super) struct Reconciler {
     /// the tenant is changed.
     pub(crate) cancel: CancellationToken,
 
+    /// Reconcilers are registered with a Gate so that during a graceful shutdown we
+    /// can wait for all the reconcilers to respond to their cancellation tokens.
+    pub(crate) _gate_guard: GateGuard,
+
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+}
+
+/// This is a snapshot of [`crate::tenant_state::IntentState`], but it does not do any
+/// reference counting for Scheduler.  The IntentState is what the scheduler works with,
+/// and the TargetState is just the instruction for a particular Reconciler run.
+#[derive(Debug)]
+pub(crate) struct TargetState {
+    pub(crate) attached: Option<NodeId>,
+    pub(crate) secondary: Vec<NodeId>,
+}
+
+impl TargetState {
+    pub(crate) fn from_intent(intent: &IntentState) -> Self {
+        Self {
+            attached: *intent.get_attached(),
+            secondary: intent.get_secondary().clone(),
+        }
+    }
+
+    fn all_pageservers(&self) -> Vec<NodeId> {
+        let mut result = self.secondary.clone();
+        if let Some(node_id) = &self.attached {
+            result.push(*node_id);
+        }
+        result
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -263,7 +294,7 @@ impl Reconciler {
                 secondary_conf,
                 tenant_conf: config.clone(),
                 shard_number: shard.number.0,
-                shard_count: shard.count.0,
+                shard_count: shard.count.literal(),
                 shard_stripe_size: shard.stripe_size.0,
             }
         }
@@ -458,7 +489,7 @@ impl Reconciler {
                     generation: None,
                     secondary_conf: None,
                     shard_number: self.shard.number.0,
-                    shard_count: self.shard.count.0,
+                    shard_count: self.shard.count.literal(),
                     shard_stripe_size: self.shard.stripe_size.0,
                     tenant_conf: self.config.clone(),
                 },
@@ -506,7 +537,7 @@ pub(crate) fn attached_location_conf(
         generation: generation.into(),
         secondary_conf: None,
         shard_number: shard.number.0,
-        shard_count: shard.count.0,
+        shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
         tenant_conf: config.clone(),
     }
@@ -521,7 +552,7 @@ pub(crate) fn secondary_location_conf(
         generation: None,
         secondary_conf: Some(LocationConfigSecondary { warm: true }),
         shard_number: shard.number.0,
-        shard_count: shard.count.0,
+        shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
         tenant_conf: config.clone(),
     }

@@ -324,7 +324,8 @@ impl ComputeNode {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Instant::now();
 
-        let mut config = postgres::Config::from_str(&spec.pageserver_connstr)?;
+        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
+        let mut config = postgres::Config::from_str(shard0_connstr)?;
 
         // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.

@@ -7,17 +7,21 @@ use pageserver_api::{
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::{instrument, Instrument};
 use utils::{
     generation::Generation,
     id::NodeId,
     seqwait::{SeqWait, SeqWaitError},
+    sync::gate::Gate,
 };
 
 use crate::{
     compute_hook::ComputeHook,
     node::Node,
-    persistence::Persistence,
-    reconciler::{attached_location_conf, secondary_location_conf, ReconcileError, Reconciler},
+    persistence::{split_state::SplitState, Persistence},
+    reconciler::{
+        attached_location_conf, secondary_location_conf, ReconcileError, Reconciler, TargetState,
+    },
     scheduler::{ScheduleError, Scheduler},
     service, PlacementPolicy, Sequence,
 };
@@ -58,6 +62,11 @@ pub(crate) struct TenantState {
     /// cancellation token has been fired)
     pub(crate) reconciler: Option<ReconcilerHandle>,
 
+    /// If a tenant is being split, then all shards with that TenantId will have a
+    /// SplitState set, this acts as a guard against other operations such as background
+    /// reconciliation, and timeline creation.
+    pub(crate) splitting: SplitState,
+
     /// Optionally wait for reconciliation to complete up to a particular
     /// sequence number.
     pub(crate) waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
@@ -81,8 +90,107 @@ pub(crate) struct TenantState {
 
 #[derive(Default, Clone, Debug)]
 pub(crate) struct IntentState {
-    pub(crate) attached: Option<NodeId>,
-    pub(crate) secondary: Vec<NodeId>,
+    attached: Option<NodeId>,
+    secondary: Vec<NodeId>,
+}
+
+impl IntentState {
+    pub(crate) fn new() -> Self {
+        Self {
+            attached: None,
+            secondary: vec![],
+        }
+    }
+    pub(crate) fn single(scheduler: &mut Scheduler, node_id: Option<NodeId>) -> Self {
+        if let Some(node_id) = node_id {
+            scheduler.node_inc_ref(node_id);
+        }
+        Self {
+            attached: node_id,
+            secondary: vec![],
+        }
+    }
+
+    pub(crate) fn set_attached(&mut self, scheduler: &mut Scheduler, new_attached: Option<NodeId>) {
+        if self.attached != new_attached {
+            if let Some(old_attached) = self.attached.take() {
+                scheduler.node_dec_ref(old_attached);
+            }
+            if let Some(new_attached) = &new_attached {
+                scheduler.node_inc_ref(*new_attached);
+            }
+            self.attached = new_attached;
+        }
+    }
+
+    pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
+        debug_assert!(!self.secondary.contains(&new_secondary));
+        scheduler.node_inc_ref(new_secondary);
+        self.secondary.push(new_secondary);
+    }
+
+    /// It is legal to call this with a node that is not currently a secondary: that is a no-op
+    pub(crate) fn remove_secondary(&mut self, scheduler: &mut Scheduler, node_id: NodeId) {
+        let index = self.secondary.iter().position(|n| *n == node_id);
+        if let Some(index) = index {
+            scheduler.node_dec_ref(node_id);
+            self.secondary.remove(index);
+        }
+    }
+
+    pub(crate) fn clear_secondary(&mut self, scheduler: &mut Scheduler) {
+        for secondary in self.secondary.drain(..) {
+            scheduler.node_dec_ref(secondary);
+        }
+    }
+
+    pub(crate) fn clear(&mut self, scheduler: &mut Scheduler) {
+        if let Some(old_attached) = self.attached.take() {
+            scheduler.node_dec_ref(old_attached);
+        }
+
+        self.clear_secondary(scheduler);
+    }
+
+    pub(crate) fn all_pageservers(&self) -> Vec<NodeId> {
+        let mut result = Vec::new();
+        if let Some(p) = self.attached {
+            result.push(p)
+        }
+
+        result.extend(self.secondary.iter().copied());
+
+        result
+    }
+
+    pub(crate) fn get_attached(&self) -> &Option<NodeId> {
+        &self.attached
+    }
+
+    pub(crate) fn get_secondary(&self) -> &Vec<NodeId> {
+        &self.secondary
+    }
+
+    /// When a node goes offline, we update intents to avoid using it
+    /// as their attached pageserver.
+    ///
+    /// Returns true if a change was made
+    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
+        if self.attached == Some(node_id) {
+            self.attached = None;
+            self.secondary.push(node_id);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for IntentState {
+    fn drop(&mut self) {
+        // Must clear before dropping, to avoid leaving stale refcounts in the Scheduler
+        debug_assert!(self.attached.is_none() && self.secondary.is_empty());
+    }
 }
 
 #[derive(Default, Clone)]
@@ -175,46 +283,6 @@ pub(crate) struct ReconcileResult {
     pub(crate) pending_compute_notification: bool,
 }
 
-impl IntentState {
-    pub(crate) fn new() -> Self {
-        Self {
-            attached: None,
-            secondary: vec![],
-        }
-    }
-    pub(crate) fn all_pageservers(&self) -> Vec<NodeId> {
-        let mut result = Vec::new();
-        if let Some(p) = self.attached {
-            result.push(p)
-        }
-
-        result.extend(self.secondary.iter().copied());
-
-        result
-    }
-
-    pub(crate) fn single(node_id: Option<NodeId>) -> Self {
-        Self {
-            attached: node_id,
-            secondary: vec![],
-        }
-    }
-
-    /// When a node goes offline, we update intents to avoid using it
-    /// as their attached pageserver.
-    ///
-    /// Returns true if a change was made
-    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
-        if self.attached == Some(node_id) {
-            self.attached = None;
-            self.secondary.push(node_id);
-            true
-        } else {
-            false
-        }
-    }
-}
-
 impl ObservedState {
     pub(crate) fn new() -> Self {
         Self {
@@ -238,6 +306,7 @@ impl TenantState {
             observed: ObservedState::default(),
             config: TenantConfig::default(),
             reconciler: None,
+            splitting: SplitState::Idle,
             sequence: Sequence(1),
             waiter: Arc::new(SeqWait::new(Sequence(0))),
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),
@@ -307,12 +376,12 @@ impl TenantState {
                 // Should have exactly one attached, and zero secondaries
                 if self.intent.attached.is_none() {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.attached = Some(node_id);
+                    self.intent.set_attached(scheduler, Some(node_id));
                     used_pageservers.push(node_id);
                     modified = true;
                 }
                 if !self.intent.secondary.is_empty() {
-                    self.intent.secondary.clear();
+                    self.intent.clear_secondary(scheduler);
                     modified = true;
                 }
             }
@@ -320,14 +389,14 @@ impl TenantState {
                 // Should have exactly one attached, and N secondaries
                 if self.intent.attached.is_none() {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.attached = Some(node_id);
+                    self.intent.set_attached(scheduler, Some(node_id));
                     used_pageservers.push(node_id);
                     modified = true;
                 }
 
                 while self.intent.secondary.len() < secondary_count {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.secondary.push(node_id);
+                    self.intent.push_secondary(scheduler, node_id);
                     used_pageservers.push(node_id);
                     modified = true;
                 }
@@ -335,12 +404,12 @@ impl TenantState {
             Detached => {
                 // Should have no attached or secondary pageservers
                 if self.intent.attached.is_some() {
-                    self.intent.attached = None;
+                    self.intent.set_attached(scheduler, None);
                     modified = true;
                 }
 
                 if !self.intent.secondary.is_empty() {
-                    self.intent.secondary.clear();
+                    self.intent.clear_secondary(scheduler);
                     modified = true;
                 }
             }
@@ -415,6 +484,8 @@ impl TenantState {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn maybe_reconcile(
         &mut self,
         result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
@@ -422,6 +493,8 @@ impl TenantState {
         compute_hook: &Arc<ComputeHook>,
         service_config: &service::Config,
         persistence: &Arc<Persistence>,
+        gate: &Gate,
+        cancel: &CancellationToken,
     ) -> Option<ReconcilerWaiter> {
         // If there are any ambiguous observed states, and the nodes they refer to are available,
         // we should reconcile to clean them up.
@@ -443,6 +516,14 @@ impl TenantState {
             return None;
         }
 
+        // If we are currently splitting, then never start a reconciler task: the splitting logic
+        // requires that shards are not interfered with while it runs. Do this check here rather than
+        // up top, so that we only log this message if we would otherwise have done a reconciliation.
+        if !matches!(self.splitting, SplitState::Idle) {
+            tracing::info!("Refusing to reconcile, splitting in progress");
+            return None;
+        }
+
         // Reconcile already in flight for the current sequence?
         if let Some(handle) = &self.reconciler {
             if handle.sequence == self.sequence {
@@ -460,70 +541,82 @@ impl TenantState {
         // doing our sequence's work.
         let old_handle = self.reconciler.take();
 
-        let cancel = CancellationToken::new();
+        let Ok(gate_guard) = gate.enter() else {
+            // Shutting down, don't start a reconciler
+            return None;
+        };
+
+        let reconciler_cancel = cancel.child_token();
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
             generation: self.generation,
-            intent: self.intent.clone(),
+            intent: TargetState::from_intent(&self.intent),
             config: self.config.clone(),
             observed: self.observed.clone(),
             pageservers: pageservers.clone(),
             compute_hook: compute_hook.clone(),
             service_config: service_config.clone(),
-            cancel: cancel.clone(),
+            _gate_guard: gate_guard,
+            cancel: reconciler_cancel.clone(),
             persistence: persistence.clone(),
             compute_notify_failure: false,
         };
 
         let reconcile_seq = self.sequence;
 
-        tracing::info!("Spawning Reconciler for sequence {}", self.sequence);
+        tracing::info!(seq=%reconcile_seq, "Spawning Reconciler for sequence {}", self.sequence);
         let must_notify = self.pending_compute_notification;
-        let join_handle = tokio::task::spawn(async move {
-            // Wait for any previous reconcile task to complete before we start
-            if let Some(old_handle) = old_handle {
-                old_handle.cancel.cancel();
-                if let Err(e) = old_handle.handle.await {
-                    // We can't do much with this other than log it: the task is done, so
-                    // we may proceed with our work.
-                    tracing::error!("Unexpected join error waiting for reconcile task: {e}");
+        let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
+                                                        tenant_id=%reconciler.tenant_shard_id.tenant_id,
+                                                        shard_id=%reconciler.tenant_shard_id.shard_slug());
+        let join_handle = tokio::task::spawn(
+            async move {
+                // Wait for any previous reconcile task to complete before we start
+                if let Some(old_handle) = old_handle {
+                    old_handle.cancel.cancel();
+                    if let Err(e) = old_handle.handle.await {
+                        // We can't do much with this other than log it: the task is done, so
+                        // we may proceed with our work.
+                        tracing::error!("Unexpected join error waiting for reconcile task: {e}");
+                    }
                 }
+
+                // Early check for cancellation before doing any work
+                // TODO: wrap all remote API operations in cancellation check
+                // as well.
+                if reconciler.cancel.is_cancelled() {
+                    return;
+                }
+
+                // Attempt to make observed state match intent state
+                let result = reconciler.reconcile().await;
+
+                // If we know we had a pending compute notification from some previous action, send a notification irrespective
+                // of whether the above reconcile() did any work
+                if result.is_ok() && must_notify {
+                    // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
+                    reconciler.compute_notify().await.ok();
+                }
+
+                result_tx
+                    .send(ReconcileResult {
+                        sequence: reconcile_seq,
+                        result,
+                        tenant_shard_id: reconciler.tenant_shard_id,
+                        generation: reconciler.generation,
+                        observed: reconciler.observed,
+                        pending_compute_notification: reconciler.compute_notify_failure,
+                    })
+                    .ok();
             }
-
-            // Early check for cancellation before doing any work
-            // TODO: wrap all remote API operations in cancellation check
-            // as well.
-            if reconciler.cancel.is_cancelled() {
-                return;
-            }
-
-            // Attempt to make observed state match intent state
-            let result = reconciler.reconcile().await;
-
-            // If we know we had a pending compute notification from some previous action, send a notification irrespective
-            // of whether the above reconcile() did any work
-            if result.is_ok() && must_notify {
-                // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
-                reconciler.compute_notify().await.ok();
-            }
-
-            result_tx
-                .send(ReconcileResult {
-                    sequence: reconcile_seq,
-                    result,
-                    tenant_shard_id: reconciler.tenant_shard_id,
-                    generation: reconciler.generation,
-                    observed: reconciler.observed,
-                    pending_compute_notification: reconciler.compute_notify_failure,
-                })
-                .ok();
-        });
+            .instrument(reconciler_span),
+        );
 
         self.reconciler = Some(ReconcilerHandle {
             sequence: self.sequence,
             handle: join_handle,
-            cancel,
+            cancel: reconciler_cancel,
         });
 
         Some(ReconcilerWaiter {

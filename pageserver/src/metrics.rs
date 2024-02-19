@@ -2496,6 +2496,56 @@ pub mod tokio_epoll_uring {
     }
 }
 
+pub(crate) mod tenant_throttling {
+    use metrics::{register_int_counter_vec, IntCounter};
+    use once_cell::sync::Lazy;
+
+    use crate::tenant::{self, throttle::Metric};
+
+    pub(crate) struct TimelineGet {
+        wait_time: IntCounter,
+        count: IntCounter,
+    }
+
+    pub(crate) static TIMELINE_GET: Lazy<TimelineGet> = Lazy::new(|| {
+        static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+            register_int_counter_vec!(
+            "pageserver_tenant_throttling_wait_usecs_sum_global",
+            "Sum of microseconds that tenants spent waiting for a tenant throttle of a given kind.",
+            &["kind"]
+        )
+            .unwrap()
+        });
+
+        static WAIT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+            register_int_counter_vec!(
+                "pageserver_tenant_throttling_count_global",
+                "Count of tenant throttlings, by kind of throttle.",
+                &["kind"]
+            )
+            .unwrap()
+        });
+
+        let kind = "timeline_get";
+        TimelineGet {
+            wait_time: WAIT_USECS.with_label_values(&[kind]),
+            count: WAIT_COUNT.with_label_values(&[kind]),
+        }
+    });
+
+    impl Metric for &'static TimelineGet {
+        #[inline(always)]
+        fn observe_throttling(
+            &self,
+            tenant::throttle::Observation { wait_time }: &tenant::throttle::Observation,
+        ) {
+            let val = u64::try_from(wait_time.as_micros()).unwrap();
+            self.wait_time.inc_by(val);
+            self.count.inc();
+        }
+    }
+}
+
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //
@@ -2557,4 +2607,5 @@ pub fn preinitialize_metrics() {
 
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
+    Lazy::force(&tenant_throttling::TIMELINE_GET);
 }
