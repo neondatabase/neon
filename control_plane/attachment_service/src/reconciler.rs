@@ -27,7 +27,7 @@ pub(super) struct Reconciler {
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
     pub(crate) generation: Generation,
-    pub(crate) intent: IntentState,
+    pub(crate) intent: TargetState,
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
 
@@ -60,6 +60,32 @@ pub(super) struct Reconciler {
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+}
+
+/// This is a snapshot of [`crate::tenant_state::IntentState`], but it does not do any
+/// reference counting for Scheduler.  The IntentState is what the scheduler works with,
+/// and the TargetState is just the instruction for a particular Reconciler run.
+#[derive(Debug)]
+pub(crate) struct TargetState {
+    pub(crate) attached: Option<NodeId>,
+    pub(crate) secondary: Vec<NodeId>,
+}
+
+impl TargetState {
+    pub(crate) fn from_intent(intent: &IntentState) -> Self {
+        Self {
+            attached: *intent.get_attached(),
+            secondary: intent.get_secondary().clone(),
+        }
+    }
+
+    fn all_pageservers(&self) -> Vec<NodeId> {
+        let mut result = self.secondary.clone();
+        if let Some(node_id) = &self.attached {
+            result.push(*node_id);
+        }
+        result
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
