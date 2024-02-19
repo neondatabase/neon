@@ -1,0 +1,18 @@
+ARG REPOSITORY=neondatabase
+ARG IMAGE=build-tools
+ARG TAG=pinned
+ARG BUILD_TAG
+#########################################################################################
+#
+# Compile and run the Neon-specific `compute_ctl` binary
+#
+#########################################################################################
+FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
+ARG BUILD_TAG
+ENV BUILD_TAG=$BUILD_TAG
+
+USER nonroot
+# Copy entire project to get Cargo.* files with proper dependencies for the whole project
+COPY --chown=nonroot . .
+RUN cd compute_tools && cargo build --locked --profile release-line-debug-size-lto
+
