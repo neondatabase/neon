@@ -294,17 +294,6 @@ pub enum LoadMetadataError {
     Decode(#[from] anyhow::Error),
 }
 
-pub fn load_metadata(
-    conf: &'static PageServerConf,
-    tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
-) -> Result<TimelineMetadata, LoadMetadataError> {
-    let metadata_path = conf.metadata_path(tenant_shard_id, timeline_id);
-    let metadata_bytes = std::fs::read(metadata_path)?;
-
-    Ok(TimelineMetadata::from_bytes(&metadata_bytes)?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

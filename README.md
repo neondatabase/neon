@@ -249,6 +249,16 @@ testing locally, it is convenient to run just one set of permutations, like this
 DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest
 ```
 
+## Flamegraphs
+
+You may find yourself in need of flamegraphs for software in this repository.
+You can use [`flamegraph-rs`](https://github.com/flamegraph-rs/flamegraph) or the original [`flamegraph.pl`](https://github.com/brendangregg/FlameGraph). Your choice!
+
+>[!IMPORTANT]
+> If you're using `lld` or `mold`, you need the `--no-rosegment` linker argument.
+> It's a [general thing with Rust / lld / mold](https://crbug.com/919499#c16), not specific to this repository.
+> See [this PR for further instructions](https://github.com/neondatabase/neon/pull/6764).
+
 ## Documentation
 
 [docs](/docs) Contains a top-level overview of all available markdown documentation.

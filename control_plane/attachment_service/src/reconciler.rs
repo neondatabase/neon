@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
+use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
@@ -52,6 +53,10 @@ pub(super) struct Reconciler {
     /// example when a pageserver node goes offline, or the PlacementPolicy for
     /// the tenant is changed.
     pub(crate) cancel: CancellationToken,
+
+    /// Reconcilers are registered with a Gate so that during a graceful shutdown we
+    /// can wait for all the reconcilers to respond to their cancellation tokens.
+    pub(crate) _gate_guard: GateGuard,
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
@@ -263,7 +268,7 @@ impl Reconciler {
                 secondary_conf,
                 tenant_conf: config.clone(),
                 shard_number: shard.number.0,
-                shard_count: shard.count.0,
+                shard_count: shard.count.literal(),
                 shard_stripe_size: shard.stripe_size.0,
             }
         }
@@ -458,7 +463,7 @@ impl Reconciler {
                     generation: None,
                     secondary_conf: None,
                     shard_number: self.shard.number.0,
-                    shard_count: self.shard.count.0,
+                    shard_count: self.shard.count.literal(),
                     shard_stripe_size: self.shard.stripe_size.0,
                     tenant_conf: self.config.clone(),
                 },
@@ -506,7 +511,7 @@ pub(crate) fn attached_location_conf(
         generation: generation.into(),
         secondary_conf: None,
         shard_number: shard.number.0,
-        shard_count: shard.count.0,
+        shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
         tenant_conf: config.clone(),
     }
@@ -521,7 +526,7 @@ pub(crate) fn secondary_location_conf(
         generation: None,
         secondary_conf: Some(LocationConfigSecondary { warm: true }),
         shard_number: shard.number.0,
-        shard_count: shard.count.0,
+        shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
         tenant_conf: config.clone(),
     }
