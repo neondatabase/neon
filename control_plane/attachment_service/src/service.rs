@@ -1460,6 +1460,11 @@ impl Service {
         // TODO: should use the ID last published to compute_hook, rather than the intent: the intent might
         // point to somewhere we haven't attached yet.
         let Some(node_id) = shard.intent.get_attached() else {
+            tracing::warn!(
+                tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
+                shard.policy
+            );
             return Err(ApiError::Conflict(
                 "Cannot call timeline API on non-attached tenant".to_string(),
             ));
