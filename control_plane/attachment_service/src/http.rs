@@ -198,7 +198,7 @@ async fn handle_tenant_time_travel_remote_storage(
         ))
     })?;
 
-    let response = service
+    service
         .tenant_time_travel_remote_storage(
             &time_travel_req,
             tenant_id,
@@ -207,7 +207,7 @@ async fn handle_tenant_time_travel_remote_storage(
         )
         .await?;
 
-    json_response(StatusCode::OK, response)
+    json_response(StatusCode::OK, ())
 }
 
 async fn handle_tenant_delete(
