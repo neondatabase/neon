@@ -79,7 +79,7 @@ jobs:
 
   build-buildtools-image:
     needs: [ check-permissions ]
-    uses: ./.github/workflows/build_and_push_docker_image.yml
+    uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
   check-codestyle-python:
