@@ -230,6 +230,10 @@ postgres=# select * from t;
 > cargo neon stop
 ```
 
+#### Handling build failures
+
+If you encounter build failures during the initialization steps, it's best to stop everything (`cargo neon stop`) and remove the `.neon` directory.
+
 ## Running tests
 
 Ensure your dependencies are installed as described [here](https://github.com/neondatabase/neon#dependency-installation-notes).
@@ -258,6 +262,12 @@ You can use [`flamegraph-rs`](https://github.com/flamegraph-rs/flamegraph) or th
 > If you're using `lld` or `mold`, you need the `--no-rosegment` linker argument.
 > It's a [general thing with Rust / lld / mold](https://crbug.com/919499#c16), not specific to this repository.
 > See [this PR for further instructions](https://github.com/neondatabase/neon/pull/6764).
+
+## Cleanup
+
+For cleaning up the source tree from build artifacts, run `make clean` in the source directory.
+
+For removing every artifact from build and configure steps, run `make distclean`, and also consider removing the cargo repository in `.neon`. Note that removing the `.neon` directorz will remove your database, with all data in it. You have been warned!
 
 ## Documentation
 
