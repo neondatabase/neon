@@ -7,6 +7,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
+    poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
@@ -224,9 +225,8 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     Test the sequence of location states that are used in a live migration.
     """
     neon_env_builder.num_pageservers = 2
-    neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-    )
+    remote_storage_kind = RemoteStorageKind.MOCK_S3
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind=remote_storage_kind)
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
     tenant_id = env.initial_tenant
@@ -342,6 +342,11 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
 
     workload.churn_rows(64, pageserver_b.id)
     workload.validate(pageserver_b.id)
+
+    # Check that deletion works properly on a tenant that was live-migrated
+    # (reproduce https://github.com/neondatabase/neon/issues/6802)
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
+    tenant_delete_wait_completed(pageserver_b.http_client(), tenant_id, iterations)
 
 
 def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
