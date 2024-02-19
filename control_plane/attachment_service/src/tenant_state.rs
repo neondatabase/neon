@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use crate::metrics;
 use control_plane::attachment_service::NodeAvailability;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
@@ -570,6 +571,7 @@ impl TenantState {
         let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
                                                         shard_id=%reconciler.tenant_shard_id.shard_slug());
+        metrics::RECONCILER.spawned.inc();
         let join_handle = tokio::task::spawn(
             async move {
                 // Wait for any previous reconcile task to complete before we start
@@ -586,6 +588,10 @@ impl TenantState {
                 // TODO: wrap all remote API operations in cancellation check
                 // as well.
                 if reconciler.cancel.is_cancelled() {
+                    metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL])
+                        .inc();
                     return;
                 }
 
@@ -598,6 +604,20 @@ impl TenantState {
                     // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
                     reconciler.compute_notify().await.ok();
                 }
+
+                // Update result counter
+                match &result {
+                    Ok(_) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::SUCCESS]),
+                    Err(ReconcileError::Cancel) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL]),
+                    Err(_) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::ERROR]),
+                }
+                .inc();
 
                 result_tx
                     .send(ReconcileResult {

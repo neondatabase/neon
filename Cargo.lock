@@ -286,6 +286,7 @@ dependencies = [
  "git-version",
  "hyper",
  "metrics",
+ "once_cell",
  "pageserver_api",
  "pageserver_client",
  "postgres_connection",

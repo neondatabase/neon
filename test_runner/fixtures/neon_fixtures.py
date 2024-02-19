@@ -46,6 +46,7 @@ from urllib3.util.retry import Retry
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
+from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
     DEFAULT_PAGESERVER_ALLOWED_ERRORS,
     scan_pageserver_log_for_errors,
@@ -1913,7 +1914,7 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
-class NeonAttachmentService:
+class NeonAttachmentService(MetricsGetter):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
@@ -1950,6 +1951,11 @@ class NeonAttachmentService:
             headers["Authorization"] = f"Bearer {jwt_token}"
 
         return headers
+
+    def get_metrics(self) -> Metrics:
+        res = self.request("GET", f"{self.env.attachment_service_api}/metrics")
+        res.raise_for_status()
+        return parse_metrics(res.text)
 
     def ready(self) -> bool:
         resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
