@@ -45,6 +45,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use compute_tools::lr_monitor::launch_lr_monitor;
 use nix::sys::signal::{kill, Signal};
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
@@ -278,6 +279,7 @@ fn main() -> Result<()> {
 
     // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute);
+    let _lr_monitor_handle = launch_lr_monitor(compute.clone());
     let _configurator_handle = launch_configurator(&compute);
 
     // Start Postgres

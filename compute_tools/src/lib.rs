@@ -10,6 +10,7 @@ pub mod http;
 pub mod logger;
 pub mod compute;
 pub mod extension_server;
+pub mod lr_monitor;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
