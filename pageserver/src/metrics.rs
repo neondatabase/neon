@@ -1284,22 +1284,6 @@ static REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::
     .expect("failed to define a metric")
 });
 
-static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_remote_timeline_client_calls_started",
-        "When calling a remote timeline client method, we record the current value \
-         of the calls_unfinished gauge in this histogram. Plot the histogram \
-         over time in a heatmap to visualize how many operations were ongoing \
-         at a given instant. It gives you a better idea of the queue depth \
-         than plotting the gauge directly, since operations may complete faster \
-         than the sampling interval.",
-        &["file_kind", "op_kind"],
-        // The calls_unfinished gauge is an integer gauge, hence we have integer buckets.
-        vec![0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 40.0, 60.0, 80.0, 100.0, 500.0],
-    )
-    .expect("failed to define a metric")
-});
-
 static REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER: Lazy<IntCounterVec> =
     Lazy::new(|| {
         register_int_counter_vec!(
@@ -2150,17 +2134,6 @@ impl RemoteTimelineClientMetrics {
         metric.clone()
     }
 
-    fn calls_started_hist(
-        &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-    ) -> Histogram {
-        let key = (file_kind.as_str(), op_kind.as_str());
-        REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST
-            .get_metric_with_label_values(&[key.0, key.1])
-            .unwrap()
-    }
-
     fn bytes_started_counter(
         &self,
         file_kind: &RemoteOpFileKind,
@@ -2289,8 +2262,6 @@ impl RemoteTimelineClientMetrics {
         size: RemoteTimelineClientMetricsCallTrackSize,
     ) -> RemoteTimelineClientCallMetricGuard {
         let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
-        self.calls_started_hist(file_kind, op_kind)
-            .observe(calls_unfinished_metric.get() as f64);
         calls_unfinished_metric.inc(); // NB: inc after the histogram, see comment on underlying metric
 
         let bytes_finished = match size {
