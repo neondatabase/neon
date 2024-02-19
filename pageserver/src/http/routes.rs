@@ -622,7 +622,7 @@ async fn timeline_preserve_initdb_handler(
     // location where timeline recreation cand find it.
 
     async {
-        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+        let tenant = mgr::get_tenant(tenant_shard_id, false)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)

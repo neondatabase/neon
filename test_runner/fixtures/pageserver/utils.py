@@ -2,6 +2,7 @@ import time
 from typing import Any, Dict, List, Optional, Union
 
 from mypy_boto3_s3.type_defs import (
+    DeleteObjectOutputTypeDef,
     EmptyResponseMetadataTypeDef,
     ListObjectsV2OutputTypeDef,
     ObjectTypeDef,
@@ -331,7 +332,6 @@ def list_prefix(
     """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
-    assert remote.client is not None
 
     prefix_in_bucket = remote.prefix_in_bucket or ""
     if not prefix:
@@ -350,6 +350,29 @@ def list_prefix(
     return response
 
 
+def remote_storage_delete_key(
+    remote: RemoteStorage,
+    key: str,
+) -> DeleteObjectOutputTypeDef:
+    """
+    Note that this function takes into account prefix_in_bucket.
+    """
+    # For local_fs we need to use a different implementation. As we don't need local_fs, just don't support it for now.
+    assert isinstance(remote, S3Storage), "localfs is currently not supported"
+
+    prefix_in_bucket = remote.prefix_in_bucket or ""
+
+    # real s3 tests have uniqie per test prefix
+    # mock_s3 tests use special pageserver prefix for pageserver stuff
+    key = "/".join((prefix_in_bucket, key))
+
+    response = remote.client.delete_object(
+        Bucket=remote.bucket_name,
+        Key=key,
+    )
+    return response
+
+
 def enable_remote_storage_versioning(
     remote: RemoteStorage,
 ) -> EmptyResponseMetadataTypeDef:
@@ -358,7 +381,6 @@ def enable_remote_storage_versioning(
     """
     # local_fs has no support for versioning
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
-    assert remote.client is not None
 
     # The SDK supports enabling versioning on normal S3 as well but we don't want to change
     # these settings from a test in a live bucket (also, our access isn't enough nor should it be)
