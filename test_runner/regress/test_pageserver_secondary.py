@@ -342,6 +342,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
 
     workload.churn_rows(64, pageserver_b.id)
     workload.validate(pageserver_b.id)
+    del workload
 
     # Check that deletion works properly on a tenant that was live-migrated
     # (reproduce https://github.com/neondatabase/neon/issues/6802)
