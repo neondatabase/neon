@@ -2810,6 +2810,16 @@ impl Timeline {
 
         let mut completed_keyspace = KeySpace::default();
 
+        // Hold the layer map whilst visiting the timeline to prevent
+        // compaction, eviction and flushes from rendering the layers unreadable.
+        //
+        // TODO: Do we actually need to do this? In theory holding on
+        // to [`tenant::storage_layer::Layer`] should be enough. However,
+        // [`Timeline::get`] also holds the lock during IO, so more investigation
+        // is needed.
+        let guard = timeline.layers.read().await;
+        let layers = guard.layer_map();
+
         'outer: loop {
             if self.cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
@@ -2818,9 +2828,6 @@ impl Timeline {
             let keys_done_last_step = reconstruct_state.consume_done_keys();
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
-
-            let guard = timeline.layers.read().await;
-            let layers = guard.layer_map();
 
             let in_memory_layer = layers.find_in_memory_layer(|l| {
                 let start_lsn = l.get_lsn_range().start;
