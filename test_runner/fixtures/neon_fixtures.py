@@ -27,6 +27,7 @@ from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
+import httpx
 import jwt
 import psycopg2
 import pytest
@@ -2841,6 +2842,33 @@ class NeonProxy(PgProtocol):
         if expected_code is not None:
             assert response.status_code == kwargs["expected_code"], f"response: {response.json()}"
         return response.json()
+
+    async def http2_query(self, query, args, **kwargs):
+        # TODO maybe use default values if not provided
+        user = kwargs["user"]
+        password = kwargs["password"]
+        expected_code = kwargs.get("expected_code")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        async with httpx.AsyncClient(
+            http2=True, verify=str(self.test_output_dir / "proxy.crt")
+        ) as client:
+            response = await client.post(
+                f"https://{self.domain}:{self.external_http_port}/sql",
+                json={"query": query, "params": args},
+                headers={
+                    "Content-Type": "application/sql",
+                    "Neon-Connection-String": connstr,
+                    "Neon-Pool-Opt-In": "true",
+                },
+            )
+            assert response.http_version == "HTTP/2"
+
+            if expected_code is not None:
+                assert (
+                    response.status_code == kwargs["expected_code"]
+                ), f"response: {response.json()}"
+            return response.json()
 
     def get_metrics(self) -> str:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
