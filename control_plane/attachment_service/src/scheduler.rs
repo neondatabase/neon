@@ -31,11 +31,11 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    pub(crate) fn new(nodes: &HashMap<NodeId, Node>) -> Self {
+    pub(crate) fn new<'a>(nodes: impl Iterator<Item = &'a Node>) -> Self {
         let mut scheduler_nodes = HashMap::new();
-        for (node_id, node) in nodes {
+        for node in nodes {
             scheduler_nodes.insert(
-                *node_id,
+                node.id,
                 SchedulerNode {
                     shard_count: 0,
                     may_schedule: node.may_schedule(),
@@ -174,7 +174,7 @@ mod tests {
             },
         );
 
-        let mut scheduler = Scheduler::new(&nodes);
+        let mut scheduler = Scheduler::new(nodes.values());
         let mut t1_intent = IntentState::new();
         let mut t2_intent = IntentState::new();
 

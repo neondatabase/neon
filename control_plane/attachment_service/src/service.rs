@@ -497,7 +497,7 @@ impl Service {
 
         let mut tenants = BTreeMap::new();
 
-        let mut scheduler = Scheduler::new(&nodes);
+        let mut scheduler = Scheduler::new(nodes.values());
 
         #[cfg(feature = "testing")]
         {
