@@ -3,6 +3,7 @@ use utils::seqwait::MonotonicCounter;
 
 mod compute_hook;
 pub mod http;
+pub mod metrics;
 mod node;
 pub mod persistence;
 mod reconciler;

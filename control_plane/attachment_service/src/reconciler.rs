@@ -66,6 +66,8 @@ pub(super) struct Reconciler {
 pub(crate) enum ReconcileError {
     #[error(transparent)]
     Notify(#[from] NotifyError),
+    #[error("Cancelled")]
+    Cancel,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -471,6 +473,9 @@ impl Reconciler {
         }
 
         for (node_id, conf) in changes {
+            if self.cancel.is_cancelled() {
+                return Err(ReconcileError::Cancel);
+            }
             self.location_config(node_id, conf, None).await?;
         }
 
