@@ -83,6 +83,8 @@ def test_sharding_smoke(
         )
         assert timelines == {env.initial_timeline, timeline_b}
 
+    env.attachment_service.consistency_check()
+
 
 def test_sharding_split_unsharded(
     neon_env_builder: NeonEnvBuilder,
@@ -112,6 +114,8 @@ def test_sharding_split_unsharded(
     assert env.attachment_service.inspect(TenantShardId(tenant_id, 1, 2)) is not None
 
     workload.validate()
+
+    env.attachment_service.consistency_check()
 
 
 def test_sharding_split_smoke(
@@ -278,3 +282,5 @@ def test_sharding_split_smoke(
         )
         is None
     )
+
+    env.attachment_service.consistency_check()

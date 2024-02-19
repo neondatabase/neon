@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use control_plane::attachment_service::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse, NodeAvailability,
     NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, TenantCreateResponse,
@@ -44,10 +45,7 @@ use utils::{
 use crate::{
     compute_hook::{self, ComputeHook},
     node::Node,
-    persistence::{
-        split_state::SplitState, DatabaseError, NodePersistence, Persistence,
-        TenantShardPersistence,
-    },
+    persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
     scheduler::Scheduler,
     tenant_state::{
@@ -505,7 +503,9 @@ impl Service {
             // after when pageservers start up and register.
             let mut node_ids = HashSet::new();
             for tsp in &tenant_shard_persistence {
-                node_ids.insert(tsp.generation_pageserver);
+                if tsp.generation_pageserver != i64::MAX {
+                    node_ids.insert(tsp.generation_pageserver);
+                }
             }
             for node_id in node_ids {
                 tracing::info!("Creating node {} in scheduler for tests", node_id);
@@ -1460,6 +1460,11 @@ impl Service {
         // TODO: should use the ID last published to compute_hook, rather than the intent: the intent might
         // point to somewhere we haven't attached yet.
         let Some(node_id) = shard.intent.get_attached() else {
+            tracing::warn!(
+                tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
+                shard.policy
+            );
             return Err(ApiError::Conflict(
                 "Cannot call timeline API on non-attached tenant".to_string(),
             ));
@@ -1972,6 +1977,104 @@ impl Service {
         Ok(())
     }
 
+    /// For debug/support: a full JSON dump of TenantStates.  Returns a response so that
+    /// we don't have to make TenantState clonable in the return path.
+    pub(crate) fn tenants_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
+        let serialized = {
+            let locked = self.inner.read().unwrap();
+            let result = locked.tenants.values().collect::<Vec<_>>();
+            serde_json::to_string(&result).map_err(|e| ApiError::InternalServerError(e.into()))?
+        };
+
+        hyper::Response::builder()
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(hyper::Body::from(serialized))
+            .map_err(|e| ApiError::InternalServerError(e.into()))
+    }
+
+    /// Check the consistency of in-memory state vs. persistent state, and check that the
+    /// scheduler's statistics are up to date.
+    ///
+    /// These consistency checks expect an **idle** system.  If changes are going on while
+    /// we run, then we can falsely indicate a consistency issue.  This is sufficient for end-of-test
+    /// checks, but not suitable for running continuously in the background in the field.
+    pub(crate) async fn consistency_check(&self) -> Result<(), ApiError> {
+        let (mut expect_nodes, mut expect_shards) = {
+            let locked = self.inner.read().unwrap();
+
+            locked
+                .scheduler
+                .consistency_check(locked.nodes.values(), locked.tenants.values())
+                .context("Scheduler checks")
+                .map_err(ApiError::InternalServerError)?;
+
+            let expect_nodes = locked.nodes.values().cloned().collect::<Vec<_>>();
+
+            let expect_shards = locked
+                .tenants
+                .values()
+                .map(|t| t.to_persistent())
+                .collect::<Vec<_>>();
+
+            (expect_nodes, expect_shards)
+        };
+
+        let mut nodes = self.persistence.list_nodes().await?;
+        expect_nodes.sort_by_key(|n| n.id);
+        nodes.sort_by_key(|n| n.id);
+
+        if nodes != expect_nodes {
+            tracing::error!("Consistency check failed on nodes.");
+            tracing::error!(
+                "Nodes in memory: {}",
+                serde_json::to_string(&expect_nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+            tracing::error!(
+                "Nodes in database: {}",
+                serde_json::to_string(&nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+        }
+
+        let mut shards = self.persistence.list_tenant_shards().await?;
+        shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+        expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+
+        if shards != expect_shards {
+            tracing::error!("Consistency check failed on shards.");
+            tracing::error!(
+                "Shards in memory: {}",
+                serde_json::to_string(&expect_nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+            tracing::error!(
+                "Shards in database: {}",
+                serde_json::to_string(&nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+        }
+
+        Ok(())
+    }
+
+    /// For debug/support: a JSON dump of the [`Scheduler`].  Returns a response so that
+    /// we don't have to make TenantState clonable in the return path.
+    pub(crate) fn scheduler_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
+        let serialized = {
+            let locked = self.inner.read().unwrap();
+            serde_json::to_string(&locked.scheduler)
+                .map_err(|e| ApiError::InternalServerError(e.into()))?
+        };
+
+        hyper::Response::builder()
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(hyper::Body::from(serialized))
+            .map_err(|e| ApiError::InternalServerError(e.into()))
+    }
+
     /// This is for debug/support only: we simply drop all state for a tenant, without
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.
@@ -1990,19 +2093,21 @@ impl Service {
         nodes.remove(&node_id);
         locked.nodes = Arc::new(nodes);
 
+        locked.scheduler.node_remove(node_id);
+
         Ok(())
     }
 
-    pub(crate) async fn node_list(&self) -> Result<Vec<NodePersistence>, ApiError> {
-        // It is convenient to avoid taking the big lock and converting Node to a serializable
-        // structure, by fetching from storage instead of reading in-memory state.
-        let nodes = self
-            .persistence
-            .list_nodes()
-            .await?
-            .into_iter()
-            .map(|n| n.to_persistent())
-            .collect();
+    pub(crate) async fn node_list(&self) -> Result<Vec<Node>, ApiError> {
+        let nodes = {
+            self.inner
+                .read()
+                .unwrap()
+                .nodes
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
 
         Ok(nodes)
     }
