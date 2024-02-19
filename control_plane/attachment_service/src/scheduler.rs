@@ -48,7 +48,13 @@ impl Scheduler {
         }
     }
 
-    pub(crate) fn node_ref(&mut self, node_id: NodeId) {
+    /// Increment the reference count of a node.  This reference count is used to guide scheduling
+    /// decisions, not for memory management: it represents one tenant shard whose IntentState targets
+    /// this node.
+    ///
+    /// It is an error to call this for a node that is not known to the scheduler (i.e. passed into
+    /// [`Self::new`] or [`Self::node_upsert`])
+    pub(crate) fn node_inc_ref(&mut self, node_id: NodeId) {
         let Some(node) = self.nodes.get_mut(&node_id) else {
             tracing::error!("Scheduler missing node {node_id}");
             debug_assert!(false);
@@ -58,7 +64,8 @@ impl Scheduler {
         node.shard_count += 1;
     }
 
-    pub(crate) fn node_deref(&mut self, node_id: NodeId) {
+    /// Decrement a node's reference count.  Inverse of [`Self::node_inc_ref`].
+    pub(crate) fn node_dec_ref(&mut self, node_id: NodeId) {
         let Some(node) = self.nodes.get_mut(&node_id) else {
             debug_assert!(false);
             tracing::error!("Scheduler missing node {node_id}");

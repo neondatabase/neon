@@ -103,7 +103,7 @@ impl IntentState {
     }
     pub(crate) fn single(scheduler: &mut Scheduler, node_id: Option<NodeId>) -> Self {
         if let Some(node_id) = node_id {
-            scheduler.node_ref(node_id);
+            scheduler.node_inc_ref(node_id);
         }
         Self {
             attached: node_id,
@@ -114,10 +114,10 @@ impl IntentState {
     pub(crate) fn set_attached(&mut self, scheduler: &mut Scheduler, new_attached: Option<NodeId>) {
         if self.attached != new_attached {
             if let Some(old_attached) = self.attached.take() {
-                scheduler.node_deref(old_attached);
+                scheduler.node_dec_ref(old_attached);
             }
             if let Some(new_attached) = &new_attached {
-                scheduler.node_ref(*new_attached);
+                scheduler.node_inc_ref(*new_attached);
             }
             self.attached = new_attached;
         }
@@ -125,7 +125,7 @@ impl IntentState {
 
     pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
         debug_assert!(!self.secondary.contains(&new_secondary));
-        scheduler.node_ref(new_secondary);
+        scheduler.node_inc_ref(new_secondary);
         self.secondary.push(new_secondary);
     }
 
@@ -133,20 +133,20 @@ impl IntentState {
     pub(crate) fn remove_secondary(&mut self, scheduler: &mut Scheduler, node_id: NodeId) {
         let index = self.secondary.iter().position(|n| *n == node_id);
         if let Some(index) = index {
-            scheduler.node_deref(node_id);
+            scheduler.node_dec_ref(node_id);
             self.secondary.remove(index);
         }
     }
 
     pub(crate) fn clear_secondary(&mut self, scheduler: &mut Scheduler) {
         for secondary in self.secondary.drain(..) {
-            scheduler.node_deref(secondary);
+            scheduler.node_dec_ref(secondary);
         }
     }
 
     pub(crate) fn clear(&mut self, scheduler: &mut Scheduler) {
         if let Some(old_attached) = self.attached.take() {
-            scheduler.node_deref(old_attached);
+            scheduler.node_dec_ref(old_attached);
         }
 
         self.clear_secondary(scheduler);
