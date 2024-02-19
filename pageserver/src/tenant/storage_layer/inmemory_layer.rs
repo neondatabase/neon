@@ -72,13 +72,6 @@ pub struct InMemoryLayerInner {
     file: EphemeralFile,
 }
 
-#[derive(Eq, PartialEq, Ord, PartialOrd)]
-struct BlockRead {
-    key: Key,
-    lsn: Lsn,
-    block_offset: u64,
-}
-
 impl std::fmt::Debug for InMemoryLayerInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InMemoryLayerInner").finish()
@@ -231,24 +224,29 @@ impl InMemoryLayer {
             .build();
 
         let inner = self.inner.read().await;
-
         let reader = inner.file.block_cursor();
 
-        let mut completed_keys = HashSet::new();
-        let mut min_heap = BinaryHeap::new();
+        #[derive(Eq, PartialEq, Ord, PartialOrd)]
+        struct BlockRead {
+            key: Key,
+            lsn: Lsn,
+            block_offset: u64,
+        }
+
+        let mut planned_block_reads = BinaryHeap::new();
 
         for range in keyspace.ranges.iter() {
             let mut key = range.start;
             while key < range.end {
                 if let Some(vec_map) = inner.index.get(&key) {
-                    let range = match reconstruct_state.get_cached_lsn(&key) {
+                    let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
                         Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
                         None => self.start_lsn..end_lsn,
                     };
 
-                    let slice = vec_map.slice_range(range);
+                    let slice = vec_map.slice_range(lsn_range);
                     for (entry_lsn, pos) in slice.iter().rev() {
-                        min_heap.push(BlockRead {
+                        planned_block_reads.push(BlockRead {
                             key,
                             lsn: *entry_lsn,
                             block_offset: *pos,
@@ -262,8 +260,9 @@ impl InMemoryLayer {
 
         let keyspace_size = keyspace.total_size();
 
-        while completed_keys.len() < keyspace_size && !min_heap.is_empty() {
-            let block_read = min_heap.pop().unwrap();
+        let mut completed_keys = HashSet::new();
+        while completed_keys.len() < keyspace_size && !planned_block_reads.is_empty() {
+            let block_read = planned_block_reads.pop().unwrap();
             if completed_keys.contains(&block_read.key) {
                 continue;
             }

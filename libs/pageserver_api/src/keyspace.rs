@@ -92,9 +92,8 @@ impl KeySpace {
         self.ranges = accum.to_keyspace().ranges;
     }
 
-    /// Update the keyspace such that it doesn't contain any range
-    /// that is overlapping with `other`. This can involve splitting or
-    /// removing of existing ranges.
+    /// Remove all keys in `other` from `self`.
+    /// This can involve splitting or removing of existing ranges.
     pub fn remove_overlapping_with(&mut self, other: &KeySpace) {
         let (self_start, self_end) = match (self.start(), self.end()) {
             (Some(start), Some(end)) => (start, end),
@@ -249,16 +248,7 @@ impl KeySpaceAccum {
     }
 
     pub fn consume_keyspace(&mut self) -> KeySpace {
-        if let Some(accum) = self.accum.take() {
-            self.ranges.push(accum);
-        }
-
-        let mut prev_accum = KeySpaceAccum::new();
-        std::mem::swap(self, &mut prev_accum);
-
-        KeySpace {
-            ranges: prev_accum.ranges,
-        }
+        std::mem::take(self).to_keyspace()
     }
 
     pub fn size(&self) -> u64 {

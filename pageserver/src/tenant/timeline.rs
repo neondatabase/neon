@@ -2731,7 +2731,7 @@ impl Timeline {
     ///
     /// The algorithm is as follows:
     /// 1.   While some keys are still not done and there's a timeline to visit:
-    /// 2.   Visit the timeline (see [`Timeline::get_vectored_reconstruct_data_inner`]:
+    /// 2.   Visit the timeline (see [`Timeline::get_vectored_reconstruct_data_timeline`]:
     /// 2.1: Build the fringe for the current keyspace
     /// 2.2  Visit the newest layer from the fringe to collect all values for the range it
     ///      intersects
@@ -2755,7 +2755,7 @@ impl Timeline {
             }
 
             let completed = self
-                .get_vectored_reconstruct_data_inner(
+                .get_vectored_reconstruct_data_timeline(
                     timeline,
                     keyspace.clone(),
                     cont_lsn,
@@ -2792,9 +2792,12 @@ impl Timeline {
     /// any keys for which we couldn't find an intersecting layer. It's not tracked explicitly,
     /// but if you merge all the keyspaces in the fringe, you get the "current keyspace".
     ///
+    /// This is basically a depth-first search visitor implementation where a vertex
+    /// is the (layer, lsn range, key space) tuple. The fringe acts as the stack.
+    ///
     /// At each iteration pop the top of the fringe (the layer with the highest Lsn)
     /// and get all the required reconstruct data from the layer in one go.
-    async fn get_vectored_reconstruct_data_inner(
+    async fn get_vectored_reconstruct_data_timeline(
         &self,
         timeline: &Timeline,
         keyspace: KeySpace,
@@ -2805,7 +2808,7 @@ impl Timeline {
         let mut unmapped_keyspace = keyspace.clone();
         let mut fringe = LayerFringe::new();
 
-        let mut completed_keyspace = KeySpace { ranges: Vec::new() };
+        let mut completed_keyspace = KeySpace::default();
 
         'outer: loop {
             if self.cancel.is_cancelled() {
@@ -2846,14 +2849,14 @@ impl Timeline {
                         results
                             .found
                             .into_iter()
-                            .map(|(res, accum)| {
+                            .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
                                 (
                                     ReadableLayerDesc::Persistent {
-                                        desc: (*res.layer).clone(),
-                                        lsn_floor: res.lsn_floor,
+                                        desc: (*layer).clone(),
+                                        lsn_floor,
                                         lsn_ceil: cont_lsn,
                                     },
-                                    accum.to_keyspace(),
+                                    keyspace_accum.to_keyspace(),
                                 )
                             })
                             .for_each(|(layer, keyspace)| fringe.update(layer, keyspace));

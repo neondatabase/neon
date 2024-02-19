@@ -252,7 +252,7 @@ impl LayerFringe {
         let removed = self.layers.remove_entry(&handle.0);
         match removed {
             Some((layer, keyspace)) => Some((layer, keyspace)),
-            None => panic!(),
+            None => unreachable!("fringe internals are always consistent"),
         }
     }
 

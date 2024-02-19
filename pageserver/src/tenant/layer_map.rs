@@ -152,6 +152,12 @@ pub struct SearchResult {
     pub lsn_floor: Lsn,
 }
 
+/// Return value of [`LayerMap::range_search`]
+///
+/// Contains a mapping from a layer description to a keyspace
+/// accumulator that contains all the keys which intersect the layer
+/// from the original search space. Keys that were not found are accumulated
+/// in a separate key space accumulator.
 #[derive(Debug)]
 pub struct RangeSearchResult {
     pub found: HashMap<SearchResult, KeySpaceAccum>,

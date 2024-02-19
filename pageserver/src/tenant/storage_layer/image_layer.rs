@@ -452,28 +452,25 @@ impl ImageLayerInner {
         let file = &self.file;
         let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
 
-        let mut blocks = Vec::new();
+        let mut offsets = Vec::new();
 
         for range in keyspace.ranges.iter() {
-            let mut raw_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-            range.start.write_to_byte_slice(&mut raw_key);
+            let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+            range.start.write_to_byte_slice(&mut search_key);
 
             tree_reader
                 .visit(
-                    &raw_key,
+                    &search_key,
                     VisitDirection::Forwards,
                     |raw_key, value| {
                         let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                        assert!(key >= range.start);
 
-                        if key < range.start {
-                            return true;
-                        }
-
-                        if key >= range.end {
+                        if !range.contains(&key) {
                             return false;
                         }
 
-                        blocks.push((key, value));
+                        offsets.push((key, value));
 
                         true
                     },
@@ -491,7 +488,7 @@ impl ImageLayerInner {
 
         let cursor = file.block_cursor();
         let mut buf = Vec::new();
-        for (key, offset) in blocks {
+        for (key, offset) in offsets {
             let res = cursor.read_blob_into_buf(offset, &mut buf, ctx).await;
             if let Err(e) = res {
                 reconstruct_state.on_key_error(
