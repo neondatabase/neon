@@ -68,16 +68,16 @@ impl Scheduler {
         node.shard_count -= 1;
     }
 
-    pub(crate) fn node_upsert(&mut self, node_id: NodeId, may_schedule: bool) {
+    pub(crate) fn node_upsert(&mut self, node: &Node) {
         use std::collections::hash_map::Entry::*;
-        match self.nodes.entry(node_id) {
+        match self.nodes.entry(node.id) {
             Occupied(mut entry) => {
-                entry.get_mut().may_schedule = may_schedule;
+                entry.get_mut().may_schedule = node.may_schedule();
             }
             Vacant(entry) => {
                 entry.insert(SchedulerNode {
                     shard_count: 0,
-                    may_schedule,
+                    may_schedule: node.may_schedule(),
                 });
             }
         }

@@ -255,7 +255,7 @@ impl Service {
             for (node_id, node) in new_nodes.iter_mut() {
                 if nodes_online.contains(node_id) {
                     node.availability = NodeAvailability::Active;
-                    scheduler.node_upsert(*node_id, node.may_schedule());
+                    scheduler.node_upsert(node);
                 }
             }
             *nodes = Arc::new(new_nodes);
@@ -510,7 +510,17 @@ impl Service {
             }
             for node_id in node_ids {
                 tracing::info!("Creating node {} in scheduler for tests", node_id);
-                scheduler.node_upsert(NodeId(node_id as u64), true);
+                let node = Node {
+                    id: NodeId(node_id as u64),
+                    availability: NodeAvailability::Active,
+                    scheduling: NodeSchedulingPolicy::Active,
+                    listen_http_addr: "".to_string(),
+                    listen_http_port: 123,
+                    listen_pg_addr: "".to_string(),
+                    listen_pg_port: 123,
+                };
+
+                scheduler.node_upsert(&node);
             }
         }
         for tsp in tenant_shard_persistence {
@@ -2043,9 +2053,7 @@ impl Service {
         let mut locked = self.inner.write().unwrap();
         let mut new_nodes = (*locked.nodes).clone();
 
-        locked
-            .scheduler
-            .node_upsert(register_req.node_id, new_node.may_schedule());
+        locked.scheduler.node_upsert(&new_node);
         new_nodes.insert(register_req.node_id, new_node);
 
         locked.nodes = Arc::new(new_nodes);
@@ -2101,7 +2109,7 @@ impl Service {
         }
 
         // Update the scheduler, in case the elegibility of the node for new shards has changed
-        scheduler.node_upsert(node.id, node.may_schedule());
+        scheduler.node_upsert(node);
 
         let new_nodes = Arc::new(new_nodes);
 
