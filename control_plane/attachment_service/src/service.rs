@@ -44,10 +44,7 @@ use utils::{
 use crate::{
     compute_hook::{self, ComputeHook},
     node::Node,
-    persistence::{
-        split_state::SplitState, DatabaseError, NodePersistence, Persistence,
-        TenantShardPersistence,
-    },
+    persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
     scheduler::Scheduler,
     tenant_state::{
@@ -2014,16 +2011,16 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) async fn node_list(&self) -> Result<Vec<NodePersistence>, ApiError> {
-        // It is convenient to avoid taking the big lock and converting Node to a serializable
-        // structure, by fetching from storage instead of reading in-memory state.
-        let nodes = self
-            .persistence
-            .list_nodes()
-            .await?
-            .into_iter()
-            .map(|n| n.to_persistent())
-            .collect();
+    pub(crate) async fn node_list(&self) -> Result<Vec<Node>, ApiError> {
+        let nodes = {
+            self.inner
+                .read()
+                .unwrap()
+                .nodes
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
 
         Ok(nodes)
     }

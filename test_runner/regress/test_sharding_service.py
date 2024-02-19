@@ -51,13 +51,13 @@ def test_sharding_service_smoke(
     # The pageservers we started should have registered with the sharding service on startup
     nodes = env.attachment_service.node_list()
     assert len(nodes) == 2
-    assert set(n["node_id"] for n in nodes) == {env.pageservers[0].id, env.pageservers[1].id}
+    assert set(n["id"] for n in nodes) == {env.pageservers[0].id, env.pageservers[1].id}
 
     # Starting an additional pageserver should register successfully
     env.pageservers[2].start()
     nodes = env.attachment_service.node_list()
     assert len(nodes) == 3
-    assert set(n["node_id"] for n in nodes) == {ps.id for ps in env.pageservers}
+    assert set(n["id"] for n in nodes) == {ps.id for ps in env.pageservers}
 
     # Use a multiple of pageservers to get nice even number of shards on each one
     tenant_shard_count = len(env.pageservers) * 4
