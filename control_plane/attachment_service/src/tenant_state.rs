@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use crate::metrics;
+use crate::{metrics, persistence::TenantShardPersistence};
 use control_plane::attachment_service::NodeAvailability;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
@@ -679,5 +679,19 @@ impl TenantState {
         self.observed.locations.remove(&node_id);
 
         debug_assert!(!self.intent.all_pageservers().contains(&node_id));
+    }
+
+    pub(crate) fn to_persistent(&self) -> TenantShardPersistence {
+        TenantShardPersistence {
+            tenant_id: self.tenant_shard_id.tenant_id.to_string(),
+            shard_number: self.tenant_shard_id.shard_number.0 as i32,
+            shard_count: self.tenant_shard_id.shard_count.literal() as i32,
+            shard_stripe_size: self.shard.stripe_size.0 as i32,
+            generation: self.generation.into().unwrap_or(0) as i32,
+            generation_pageserver: i64::MAX,
+            placement_policy: serde_json::to_string(&self.policy).unwrap(),
+            config: serde_json::to_string(&self.config).unwrap(),
+            splitting: SplitState::default(),
+        }
     }
 }

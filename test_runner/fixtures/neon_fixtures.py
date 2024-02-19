@@ -2100,6 +2100,17 @@ class NeonAttachmentService(MetricsGetter):
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
 
+    def consistency_check(self):
+        """
+        Throw an exception if the service finds any inconsistencies in its state
+        """
+        response = self.request(
+            "POST",
+            f"{self.env.attachment_service_api}/debug/v1/consistency_check",
+        )
+        response.raise_for_status()
+        log.info("Attachment service passed consistency check")
+
     def __enter__(self) -> "NeonAttachmentService":
         return self
 

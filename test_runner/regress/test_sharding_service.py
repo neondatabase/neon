@@ -127,6 +127,8 @@ def test_sharding_service_smoke(
     assert counts[env.pageservers[0].id] == tenant_shard_count // 2
     assert counts[env.pageservers[2].id] == tenant_shard_count // 2
 
+    env.attachment_service.consistency_check()
+
 
 def test_node_status_after_restart(
     neon_env_builder: NeonEnvBuilder,
@@ -159,6 +161,8 @@ def test_node_status_after_restart(
     # should have had its availabilty state set to Active.
     env.attachment_service.tenant_create(TenantId.generate())
 
+    env.attachment_service.consistency_check()
+
 
 def test_sharding_service_passthrough(
     neon_env_builder: NeonEnvBuilder,
@@ -183,6 +187,8 @@ def test_sharding_service_passthrough(
         env.initial_timeline,
     }
     assert status["state"]["slug"] == "Active"
+
+    env.attachment_service.consistency_check()
 
 
 def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
@@ -215,6 +221,8 @@ def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
     observed = set(TenantId(tenant["id"]) for tenant in env.pageserver.http_client().tenant_list())
     assert tenant_a not in observed
     assert tenant_b in observed
+
+    env.attachment_service.consistency_check()
 
 
 def test_sharding_service_onboarding(
@@ -318,6 +326,8 @@ def test_sharding_service_onboarding(
     dest_ps.stop()
     dest_ps.start()
 
+    env.attachment_service.consistency_check()
+
 
 def test_sharding_service_compute_hook(
     httpserver: HTTPServer,
@@ -388,6 +398,8 @@ def test_sharding_service_compute_hook(
 
     wait_until(10, 1, received_restart_notification)
 
+    env.attachment_service.consistency_check()
+
 
 def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     """
@@ -400,6 +412,9 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
 
     tenant_id = TenantId.generate()
     env.attachment_service.tenant_create(tenant_id, shard_count=2, shard_stripe_size=8192)
+
+    # Check that the consistency check passes on a freshly setup system
+    env.attachment_service.consistency_check()
 
     # These APIs are intentionally not implemented as methods on NeonAttachmentService, as
     # they're just for use in unanticipated circumstances.
@@ -438,3 +453,7 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     )
     response.raise_for_status()
     assert len(response.json()) == 1
+
+    # Check that the 'drop' APIs didn't leave things in a state that would fail a consistency check: they're
+    # meant to be unclean wrt the pageserver state, but not leave a broken storage controller behind.
+    env.attachment_service.consistency_check()

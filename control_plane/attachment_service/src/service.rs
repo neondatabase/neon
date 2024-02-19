@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use control_plane::attachment_service::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse, NodeAvailability,
     NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, TenantCreateResponse,
@@ -502,7 +503,9 @@ impl Service {
             // after when pageservers start up and register.
             let mut node_ids = HashSet::new();
             for tsp in &tenant_shard_persistence {
-                node_ids.insert(tsp.generation_pageserver);
+                if tsp.generation_pageserver != i64::MAX {
+                    node_ids.insert(tsp.generation_pageserver);
+                }
             }
             for node_id in node_ids {
                 tracing::info!("Creating node {} in scheduler for tests", node_id);
@@ -1990,6 +1993,72 @@ impl Service {
             .map_err(|e| ApiError::InternalServerError(e.into()))
     }
 
+    /// Check the consistency of in-memory state vs. persistent state, and check that the
+    /// scheduler's statistics are up to date.
+    ///
+    /// These consistency checks expect an **idle** system.  If changes are going on while
+    /// we run, then we can falsely indicate a consistency issue.  This is sufficient for end-of-test
+    /// checks, but not suitable for running continuously in the background in the field.
+    pub(crate) async fn consistency_check(&self) -> Result<(), ApiError> {
+        let (mut expect_nodes, mut expect_shards) = {
+            let locked = self.inner.read().unwrap();
+
+            locked
+                .scheduler
+                .consistency_check(locked.nodes.values(), locked.tenants.values())
+                .context("Scheduler checks")
+                .map_err(ApiError::InternalServerError)?;
+
+            let expect_nodes = locked.nodes.values().cloned().collect::<Vec<_>>();
+
+            let expect_shards = locked
+                .tenants
+                .values()
+                .map(|t| t.to_persistent())
+                .collect::<Vec<_>>();
+
+            (expect_nodes, expect_shards)
+        };
+
+        let mut nodes = self.persistence.list_nodes().await?;
+        expect_nodes.sort_by_key(|n| n.id);
+        nodes.sort_by_key(|n| n.id);
+
+        if nodes != expect_nodes {
+            tracing::error!("Consistency check failed on nodes.");
+            tracing::error!(
+                "Nodes in memory: {}",
+                serde_json::to_string(&expect_nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+            tracing::error!(
+                "Nodes in database: {}",
+                serde_json::to_string(&nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+        }
+
+        let mut shards = self.persistence.list_tenant_shards().await?;
+        shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+        expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+
+        if shards != expect_shards {
+            tracing::error!("Consistency check failed on shards.");
+            tracing::error!(
+                "Shards in memory: {}",
+                serde_json::to_string(&expect_nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+            tracing::error!(
+                "Shards in database: {}",
+                serde_json::to_string(&nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+        }
+
+        Ok(())
+    }
+
     /// For debug/support: a JSON dump of the [`Scheduler`].  Returns a response so that
     /// we don't have to make TenantState clonable in the return path.
     pub(crate) fn scheduler_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
@@ -2023,6 +2092,8 @@ impl Service {
         let mut nodes = (*locked.nodes).clone();
         nodes.remove(&node_id);
         locked.nodes = Arc::new(nodes);
+
+        locked.scheduler.node_remove(node_id);
 
         Ok(())
     }
