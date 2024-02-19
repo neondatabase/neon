@@ -274,9 +274,17 @@ def test_remote_storage_upload_queue_retries(
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
-        return client.get_remote_timeline_client_queue_count(
-            tenant_id, timeline_id, file_kind, op_kind
+        tpl = client.get_remote_timeline_client_metric_pair(
+            "pageserver_remote_timeline_client_calls_started_total",
+            "pageserver_remote_timeline_client_calls_finished_total",
+            tenant_id,
+            timeline_id,
+            file_kind,
+            op_kind,
         )
+        assert tpl is not None, "expecting metric to be present"
+        started, finished = tpl
+        return int(started) - int(finished)
 
     # create some layers & wait for uploads to finish
     overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
@@ -909,7 +917,17 @@ def get_queued_count(
     file_kind: str,
     op_kind: str,
 ):
-    return client.get_remote_timeline_client_queue_count(tenant_id, timeline_id, file_kind, op_kind)
+    tpl = client.get_remote_timeline_client_metric_pair(
+        "pageserver_remote_timeline_client_calls_started_total",
+        "pageserver_remote_timeline_client_calls_finished_total",
+        tenant_id,
+        timeline_id,
+        file_kind,
+        op_kind,
+    )
+    if tpl is None:
+        return None
+    return int(tpl[0]) - int(tpl[1])
 
 
 def assert_nothing_to_upload(
