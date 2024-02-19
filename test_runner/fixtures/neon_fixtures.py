@@ -2840,7 +2840,7 @@ class NeonProxy(PgProtocol):
         )
 
         if expected_code is not None:
-            assert response.status_code == kwargs["expected_code"], f"response: {response.json()}"
+            assert response.status_code == expected_code, f"response: {response.json()}"
         return response.json()
 
     async def http2_query(self, query, args, **kwargs):
@@ -2865,9 +2865,7 @@ class NeonProxy(PgProtocol):
             assert response.http_version == "HTTP/2"
 
             if expected_code is not None:
-                assert (
-                    response.status_code == kwargs["expected_code"]
-                ), f"response: {response.json()}"
+                assert response.status_code == expected_code, f"response: {response.json()}"
             return response.json()
 
     def get_metrics(self) -> str:
