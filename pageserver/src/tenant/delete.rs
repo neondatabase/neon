@@ -246,6 +246,8 @@ async fn cleanup_remaining_fs_traces(
 
     rm(conf.tenant_deleted_mark_file_path(tenant_shard_id), false).await?;
 
+    rm(conf.tenant_heatmap_path(tenant_shard_id), false).await?;
+
     fail::fail_point!("tenant-delete-before-remove-tenant-dir", |_| {
         Err(anyhow::anyhow!(
             "failpoint: tenant-delete-before-remove-tenant-dir"
