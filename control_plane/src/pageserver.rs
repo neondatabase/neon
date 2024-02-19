@@ -350,6 +350,11 @@ impl PageServerNode {
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
                 .transpose()?,
+            compaction_algorithm: settings
+                .remove("compaction_algorithm")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Failed to parse 'compaction_algorithm' json")?,
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
@@ -458,6 +463,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'compaction_threshold' as an integer")?,
+                compaction_algorithm: settings
+                    .remove("compactin_algorithm")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("Failed to parse 'compaction_algorithm' json")?,
                 gc_horizon: settings
                     .remove("gc_horizon")
                     .map(|x| x.parse::<u64>())

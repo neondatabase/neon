@@ -269,6 +269,8 @@ pub struct TenantConfig {
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
+    // defer parsing compaction_algorithm, like eviction_policy
+    pub compaction_algorithm: Option<CompactionAlgorithm>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -300,6 +302,13 @@ impl EvictionPolicy {
             EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum CompactionAlgorithm {
+    Legacy,
+    Tiered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

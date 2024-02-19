@@ -160,6 +160,9 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
+        "compaction_algorithm": {
+            "kind": "Tiered",
+        },
         "eviction_policy": {
             "kind": "LayerAccessThreshold",
             "period": "20s",

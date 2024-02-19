@@ -3671,6 +3671,7 @@ pub(crate) mod harness {
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
+                compaction_algorithm: Some(tenant_conf.compaction_algorithm),
                 gc_horizon: Some(tenant_conf.gc_horizon),
                 gc_period: Some(tenant_conf.gc_period),
                 image_creation_threshold: Some(tenant_conf.image_creation_threshold),
