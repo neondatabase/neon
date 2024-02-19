@@ -351,7 +351,6 @@ pub enum IterationOutcome<U> {
     Finished(IterationOutcomeFinished<U>),
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct IterationOutcomeFinished<U> {
     /// The actual usage observed before we started the iteration.
@@ -366,7 +365,6 @@ pub struct IterationOutcomeFinished<U> {
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 struct AssumedUsage<U> {
     /// The expected value for `after`, after phase 2.
     projected_after: U,
@@ -374,14 +372,12 @@ struct AssumedUsage<U> {
     failed: LayerCount,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct PlannedUsage<U> {
     respecting_tenant_min_resident_size: U,
     fallback_to_global_lru: Option<U>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Serialize)]
 struct LayerCount {
     file_sizes: u64,
@@ -565,7 +561,6 @@ pub(crate) struct EvictionSecondaryLayer {
 #[derive(Clone)]
 pub(crate) enum EvictionLayer {
     Attached(Layer),
-    #[allow(dead_code)]
     Secondary(EvictionSecondaryLayer),
 }
 
@@ -1105,7 +1100,6 @@ mod filesystem_level_usage {
     use super::DiskUsageEvictionTaskConfig;
 
     #[derive(Debug, Clone, Copy)]
-    #[allow(dead_code)]
     pub struct Usage<'a> {
         config: &'a DiskUsageEvictionTaskConfig,
 

@@ -21,10 +21,12 @@
 #include "miscadmin.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
 #include "utils/rel.h"
 #include "utils/varlena.h"
+#include "utils/wait_event.h"
 #include "../neon/pagestore_client.h"
 
 PG_MODULE_MAGIC;
@@ -32,6 +34,9 @@ PG_MODULE_MAGIC;
 extern void _PG_init(void);
 
 PG_FUNCTION_INFO_V1(test_consume_xids);
+PG_FUNCTION_INFO_V1(test_consume_cpu);
+PG_FUNCTION_INFO_V1(test_consume_memory);
+PG_FUNCTION_INFO_V1(test_release_memory);
 PG_FUNCTION_INFO_V1(clear_buffer_cache);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
@@ -92,6 +97,119 @@ test_consume_xids(PG_FUNCTION_ARGS)
 		fullxid = GetNewTransactionId(true);
 		xid = XidFromFullTransactionId(fullxid);
 		elog(DEBUG1, "topxid: %u xid: %u", topxid, xid);
+	}
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * test_consume_cpu(seconds int). Keeps one CPU busy for the given number of seconds.
+ */
+Datum
+test_consume_cpu(PG_FUNCTION_ARGS)
+{
+	int32		seconds = PG_GETARG_INT32(0);
+	TimestampTz start;
+	uint64		total_iterations = 0;
+
+	start = GetCurrentTimestamp();
+
+	for (;;)
+	{
+		TimestampTz elapsed;
+
+		elapsed = GetCurrentTimestamp() - start;
+		if (elapsed > (TimestampTz) seconds * USECS_PER_SEC)
+			break;
+
+		/* keep spinning */
+		for (int i = 0; i < 1000000; i++)
+			total_iterations++;
+		elog(DEBUG2, "test_consume_cpu(): %lu iterations in total", total_iterations);
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	PG_RETURN_VOID();
+}
+
+static MemoryContext consume_cxt = NULL;
+static slist_head consumed_memory_chunks;
+static int64 num_memory_chunks;
+
+/*
+ * test_consume_memory(megabytes int).
+ *
+ * Consume given amount of memory. The allocation is made in TopMemoryContext,
+ * so it outlives the function, until you call test_release_memory to
+ * explicitly release it, or close the session.
+ */
+Datum
+test_consume_memory(PG_FUNCTION_ARGS)
+{
+	int32		megabytes = PG_GETARG_INT32(0);
+
+	/*
+	 * Consume the memory in a new memory context, so that it's convenient to
+	 * release and to display it separately in a possible memory context dump.
+	 */
+	if (consume_cxt == NULL)
+		consume_cxt = AllocSetContextCreate(TopMemoryContext,
+											"test_consume_memory",
+											ALLOCSET_DEFAULT_SIZES);
+
+	for (int32 i = 0; i < megabytes; i++)
+	{
+		char	   *p;
+
+		p = MemoryContextAllocZero(consume_cxt, 1024 * 1024);
+
+		/* touch the memory, so that it's really allocated by the kernel */
+		for (int j = 0; j < 1024 * 1024; j += 1024)
+			p[j] = j % 0xFF;
+
+		slist_push_head(&consumed_memory_chunks, (slist_node *) p);
+		num_memory_chunks++;
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * test_release_memory(megabytes int). NULL releases all
+ */
+Datum
+test_release_memory(PG_FUNCTION_ARGS)
+{
+	TimestampTz start;
+
+	if (PG_ARGISNULL(0))
+	{
+		if (consume_cxt)
+		{
+			MemoryContextDelete(consume_cxt);
+			consume_cxt = NULL;
+			num_memory_chunks = 0;
+		}
+	}
+	else
+	{
+		int32		chunks_to_release = PG_GETARG_INT32(0);
+
+		if (chunks_to_release > num_memory_chunks)
+		{
+			elog(WARNING, "only %lu MB is consumed, releasing it all", num_memory_chunks);
+			chunks_to_release = num_memory_chunks;
+		}
+
+		for (int32 i = 0; i < chunks_to_release; i++)
+		{
+			slist_node *chunk = slist_pop_head_node(&consumed_memory_chunks);
+
+			pfree(chunk);
+			num_memory_chunks--;
+		}
 	}
 
 	PG_RETURN_VOID();

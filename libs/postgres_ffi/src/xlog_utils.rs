@@ -431,11 +431,11 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
 #[repr(C)]
 #[derive(Serialize)]
-struct XlLogicalMessage {
-    db_id: Oid,
-    transactional: uint32, // bool, takes 4 bytes due to alignment in C structures
-    prefix_size: uint64,
-    message_size: uint64,
+pub struct XlLogicalMessage {
+    pub db_id: Oid,
+    pub transactional: uint32, // bool, takes 4 bytes due to alignment in C structures
+    pub prefix_size: uint64,
+    pub message_size: uint64,
 }
 
 impl XlLogicalMessage {

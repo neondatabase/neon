@@ -214,14 +214,14 @@ impl ShardParameters {
     pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 
     pub fn is_unsharded(&self) -> bool {
-        self.count == ShardCount(0)
+        self.count.is_unsharded()
     }
 }
 
 impl Default for ShardParameters {
     fn default() -> Self {
         Self {
-            count: ShardCount(0),
+            count: ShardCount::new(0),
             stripe_size: Self::DEFAULT_STRIPE_SIZE,
         }
     }
@@ -283,6 +283,7 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
+    pub timeline_get_throttle: Option<ThrottleConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,6 +308,35 @@ pub struct EvictionPolicyLayerAccessThreshold {
     pub period: Duration,
     #[serde(with = "humantime_serde")]
     pub threshold: Duration,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ThrottleConfig {
+    pub task_kinds: Vec<String>, // TaskKind
+    pub initial: usize,
+    #[serde(with = "humantime_serde")]
+    pub refill_interval: Duration,
+    pub refill_amount: NonZeroUsize,
+    pub max: usize,
+    pub fair: bool,
+}
+
+impl ThrottleConfig {
+    pub fn disabled() -> Self {
+        Self {
+            task_kinds: vec![], // effectively disables the throttle
+            // other values don't matter with emtpy `task_kinds`.
+            initial: 0,
+            refill_interval: Duration::from_millis(1),
+            refill_amount: NonZeroUsize::new(1).unwrap(),
+            max: 1,
+            fair: true,
+        }
+    }
+    /// The requests per second allowed  by the given config.
+    pub fn steady_rps(&self) -> f64 {
+        (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64()) / 1e3
+    }
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
@@ -493,6 +523,8 @@ pub struct TimelineInfo {
 
     pub current_logical_size: u64,
     pub current_logical_size_is_accurate: bool,
+
+    pub directory_entries_counts: Vec<u64>,
 
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.

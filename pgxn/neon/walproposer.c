@@ -688,7 +688,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->greetResponse))
 		return;
 
-	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s", sk->host, sk->port);
+	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s, term=" INT64_FORMAT, sk->host, sk->port, sk->greetResponse.term);
 
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
@@ -922,6 +922,7 @@ static void
 DetermineEpochStartLsn(WalProposer *wp)
 {
 	TermHistory *dth;
+	int          n_ready = 0;
 
 	wp->propEpochStartLsn = InvalidXLogRecPtr;
 	wp->donorEpoch = 0;
@@ -932,6 +933,8 @@ DetermineEpochStartLsn(WalProposer *wp)
 	{
 		if (wp->safekeeper[i].state == SS_IDLE)
 		{
+			n_ready++;
+
 			if (GetEpoch(&wp->safekeeper[i]) > wp->donorEpoch ||
 				(GetEpoch(&wp->safekeeper[i]) == wp->donorEpoch &&
 				 wp->safekeeper[i].voteResponse.flushLsn > wp->propEpochStartLsn))
@@ -956,6 +959,16 @@ DetermineEpochStartLsn(WalProposer *wp)
 				wp->timelineStartLsn = wp->safekeeper[i].voteResponse.timelineStartLsn;
 			}
 		}
+	}
+
+	if (n_ready < wp->quorum)
+	{
+		/*
+		 * This is a rare case that can be triggered if safekeeper has voted and disconnected.
+		 * In this case, its state will not be SS_IDLE and its vote cannot be used, because
+		 * we clean up `voteResponse` in `ShutdownConnection`.
+		 */
+		wp_log(FATAL, "missing majority of votes, collected %d, expected %d, got %d", wp->n_votes, wp->quorum, n_ready);
 	}
 
 	/*
