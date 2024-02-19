@@ -694,15 +694,16 @@ class PageserverHttpClient(requests.Session):
             },
         ).value
 
-    def get_remote_timeline_client_metric(
-        self,
+    @classmethod
+    def _get_remote_timeline_client_metric(
+        _cls,
+        metrics,
         metric_name: str,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         file_kind: str,
         op_kind: str,
     ) -> Optional[float]:
-        metrics = self.get_metrics()
         matches = metrics.query_all(
             name=metric_name,
             filter={
@@ -720,6 +721,39 @@ class PageserverHttpClient(requests.Session):
         else:
             assert len(matches) < 2, "above filter should uniquely identify metric"
         return value
+
+    def get_remote_timeline_client_metric(
+        self,
+        metric_name: str,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        file_kind: str,
+        op_kind: str,
+    ) -> Optional[float]:
+        metrics = self.get_metrics()
+        return PageserverHttpClient._get_remote_timeline_client_metric(
+            metrics, metric_name, tenant_id, timeline_id, file_kind, op_kind
+        )
+
+    def get_remote_timeline_client_metric_pair(
+        self,
+        metric_inc: str,
+        metric_dec: str,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        file_kind: str,
+        op_kind: str,
+    ) -> Optional[Tuple[float, float]]:
+        metrics = self.get_metrics()
+        inc = PageserverHttpClient._get_remote_timeline_client_metric(
+            metrics, metric_inc, tenant_id, timeline_id, file_kind, op_kind
+        )
+        dec = PageserverHttpClient._get_remote_timeline_client_metric(
+            metrics, metric_dec, tenant_id, timeline_id, file_kind, op_kind
+        )
+        if inc is None or dec is None:
+            return None
+        return (inc, dec)
 
     def get_metric_value(
         self, name: str, filter: Optional[Dict[str, str]] = None

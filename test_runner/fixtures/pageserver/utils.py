@@ -221,16 +221,32 @@ def wait_for_upload_queue_empty(
 ):
     while True:
         all_metrics = pageserver_http.get_metrics()
-        tl = all_metrics.query_all(
-            "pageserver_remote_timeline_client_calls_unfinished",
+        started = all_metrics.query_all(
+            "pageserver_remote_timeline_client_calls_started_total",
             {
                 "tenant_id": str(tenant_id),
                 "timeline_id": str(timeline_id),
             },
         )
-        assert len(tl) > 0
+        finished = all_metrics.query_all(
+            "pageserver_remote_timeline_client_calls_started_total",
+            {
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+            },
+        )
+        assert len(started) == len(finished)
+        # inner join on remaining labels, subtracting start from finished, resulting in queue depth
+        remaining_labels = ["shard_id", "file_kind", "op_kind"]
+        tl = [
+            (s.labels, int(s.value) - int(f.value))
+            for s in started
+            for f in finished
+            if all(s.labels[label] == f.labels[label] for label in remaining_labels)
+        ]
+        assert len(tl) == len(started), "something broken with join logic"
         log.info(f"upload queue for {tenant_id}/{timeline_id}: {tl}")
-        if all(m.value == 0 for m in tl):
+        if all(delta == 0 for (what, delta) in tl):
             return
         time.sleep(0.2)
 
