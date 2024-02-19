@@ -1,4 +1,5 @@
 use crate::node::Node;
+use serde::Serialize;
 use std::collections::HashMap;
 use utils::{http::error::ApiError, id::NodeId};
 
@@ -17,6 +18,7 @@ impl From<ScheduleError> for ApiError {
     }
 }
 
+#[derive(Serialize)]
 struct SchedulerNode {
     /// How many shards are currently scheduled on this node, via their [`crate::tenant_state::IntentState`].
     shard_count: usize,
@@ -26,6 +28,12 @@ struct SchedulerNode {
     may_schedule: bool,
 }
 
+/// This type is responsible for selecting which node is used when a tenant shard needs to choose a pageserver
+/// on which to run.
+///
+/// The type has no persistent state of its own: this is all populated at startup.  The Serialize
+/// impl is only for debug dumps.
+#[derive(Serialize)]
 pub(crate) struct Scheduler {
     nodes: HashMap<NodeId, SchedulerNode>,
 }

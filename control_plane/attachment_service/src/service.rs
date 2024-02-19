@@ -1990,6 +1990,22 @@ impl Service {
             .map_err(|e| ApiError::InternalServerError(e.into()))
     }
 
+    /// For debug/support: a JSON dump of the [`Scheduler`].  Returns a response so that
+    /// we don't have to make TenantState clonable in the return path.
+    pub(crate) fn scheduler_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
+        let serialized = {
+            let locked = self.inner.read().unwrap();
+            serde_json::to_string(&locked.scheduler)
+                .map_err(|e| ApiError::InternalServerError(e.into()))?
+        };
+
+        hyper::Response::builder()
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(hyper::Body::from(serialized))
+            .map_err(|e| ApiError::InternalServerError(e.into()))
+    }
+
     /// This is for debug/support only: we simply drop all state for a tenant, without
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.

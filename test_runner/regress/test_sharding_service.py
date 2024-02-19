@@ -411,6 +411,16 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     response.raise_for_status()
     assert len(response.json()) == 3
 
+    # Scheduler should report the expected nodes and shard counts
+    response = env.attachment_service.request(
+        "GET", f"{env.attachment_service_api}/debug/v1/scheduler"
+    )
+    response.raise_for_status()
+    # Two nodes, in a dict of node_id->node
+    assert len(response.json()["nodes"]) == 2
+    assert sum(v["shard_count"] for v in response.json()["nodes"].values()) == 3
+    assert all(v["may_schedule"] for v in response.json()["nodes"].values())
+
     response = env.attachment_service.request(
         "POST", f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop"
     )
