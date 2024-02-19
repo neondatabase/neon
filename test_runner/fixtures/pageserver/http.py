@@ -12,7 +12,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from fixtures.log_helper import log
-from fixtures.metrics import Metrics, parse_metrics
+from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import Fn
@@ -125,7 +125,7 @@ class TenantConfig:
         )
 
 
-class PageserverHttpClient(requests.Session):
+class PageserverHttpClient(requests.Session, MetricsGetter):
     def __init__(
         self,
         port: int,
@@ -694,47 +694,6 @@ class PageserverHttpClient(requests.Session):
             },
         ).value
 
-    @classmethod
-    def _get_remote_timeline_client_metric(
-        _cls,
-        metrics,
-        metric_name: str,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        file_kind: str,
-        op_kind: str,
-    ) -> Optional[float]:
-        matches = metrics.query_all(
-            name=metric_name,
-            filter={
-                "tenant_id": str(tenant_id),
-                "timeline_id": str(timeline_id),
-                "file_kind": str(file_kind),
-                "op_kind": str(op_kind),
-            },
-        )
-        if len(matches) == 0:
-            value = None
-        elif len(matches) == 1:
-            value = matches[0].value
-            assert value is not None
-        else:
-            assert len(matches) < 2, "above filter should uniquely identify metric"
-        return value
-
-    def get_remote_timeline_client_metric(
-        self,
-        metric_name: str,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        file_kind: str,
-        op_kind: str,
-    ) -> Optional[float]:
-        metrics = self.get_metrics()
-        return PageserverHttpClient._get_remote_timeline_client_metric(
-            metrics, metric_name, tenant_id, timeline_id, file_kind, op_kind
-        )
-
     def get_remote_timeline_client_metric_pair(
         self,
         metric_inc: str,
@@ -744,55 +703,17 @@ class PageserverHttpClient(requests.Session):
         file_kind: str,
         op_kind: str,
     ) -> Optional[Tuple[float, float]]:
-        metrics = self.get_metrics()
-        inc = PageserverHttpClient._get_remote_timeline_client_metric(
-            metrics, metric_inc, tenant_id, timeline_id, file_kind, op_kind
+        res = self.get_metrics_values(
+            [metric_inc, metric_dec],
+            filter={
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+                "file_kind": str(file_kind),
+                "op_kind": str(op_kind),
+            },
         )
-        dec = PageserverHttpClient._get_remote_timeline_client_metric(
-            metrics, metric_dec, tenant_id, timeline_id, file_kind, op_kind
-        )
-        if inc is None or dec is None:
-            return None
+        inc, dec = res[metric_inc], res[metric_dec]
         return (inc, dec)
-
-    def get_metric_value(
-        self, name: str, filter: Optional[Dict[str, str]] = None
-    ) -> Optional[float]:
-        metrics = self.get_metrics()
-        results = metrics.query_all(name, filter=filter)
-        if not results:
-            log.info(f'could not find metric "{name}"')
-            return None
-        assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
-        return results[0].value
-
-    def get_metrics_values(
-        self, names: list[str], filter: Optional[Dict[str, str]] = None
-    ) -> Dict[str, float]:
-        """
-        When fetching multiple named metrics, it is more efficient to use this
-        than to call `get_metric_value` repeatedly.
-
-        Throws RuntimeError if no metrics matching `names` are found, or if
-        not all of `names` are found: this method is intended for loading sets
-        of metrics whose existence is coupled.
-        """
-        metrics = self.get_metrics()
-        samples = []
-        for name in names:
-            samples.extend(metrics.query_all(name, filter=filter))
-
-        result = {}
-        for sample in samples:
-            if sample.name in result:
-                raise RuntimeError(f"Multiple values found for {sample.name}")
-            result[sample.name] = sample.value
-
-        if len(result) != len(names):
-            log.info(f"Metrics found: {metrics.metrics}")
-            raise RuntimeError(f"could not find all metrics {' '.join(names)}")
-
-        return result
 
     def layer_map_info(
         self,

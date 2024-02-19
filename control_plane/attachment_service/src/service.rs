@@ -807,6 +807,15 @@ impl Service {
             };
 
             shard_state.generation = std::cmp::max(shard_state.generation, new_gen);
+            if let Some(observed) = shard_state
+                .observed
+                .locations
+                .get_mut(&reattach_req.node_id)
+            {
+                if let Some(conf) = observed.conf.as_mut() {
+                    conf.generation = new_gen.into();
+                }
+            }
 
             // TODO: cancel/restart any running reconciliation for this tenant, it might be trying
             // to call location_conf API with an old generation.  Wait for cancellation to complete

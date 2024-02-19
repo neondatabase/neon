@@ -255,3 +255,26 @@ def test_sharding_split_smoke(
         env.neon_cli.tenant_migrate(migrate_shard, destination, timeout_secs=10)
 
     workload.validate()
+
+    # Check that we didn't do any spurious reconciliations.
+    # Total number of reconciles should have been one per original shard, plus
+    # one for each shard that was migrated.
+    reconcile_ok = env.attachment_service.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+    assert reconcile_ok == shard_count + split_shard_count // 2
+
+    # Check that no cancelled or errored reconciliations occurred: this test does no
+    # failure injection and should run clean.
+    assert (
+        env.attachment_service.get_metric_value(
+            "storage_controller_reconcile_complete_total", filter={"status": "cancel"}
+        )
+        is None
+    )
+    assert (
+        env.attachment_service.get_metric_value(
+            "storage_controller_reconcile_complete_total", filter={"status": "error"}
+        )
+        is None
+    )
