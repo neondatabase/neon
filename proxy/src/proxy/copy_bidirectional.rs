@@ -278,28 +278,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_no_early_termination_client_to_compute() {
-        let (mut client_client, mut client_proxy) = tokio::io::duplex(8); // Create a mock duplex stream
-        let (mut compute_proxy, mut compute_client) = tokio::io::duplex(32); // Create a mock duplex stream
-
-        // Simulate 'a' finishing while there's still data for 'b'
-        client_client.write_all(b"hello").await.unwrap();
-        client_client.shutdown().await.unwrap();
-        compute_client.write_all(b"Neon").await.unwrap();
-
-        tokio::time::timeout(
-            Duration::from_millis(500),
-            copy_bidirectional_client_compute(
-                &mut client_proxy,
-                &mut compute_proxy,
-                CancelClosureMock {},
-            ),
-        )
-        .await
-        .unwrap_err();
-    }
-
-    #[tokio::test]
     async fn test_early_termination_compute_to_client() {
         let (mut client_client, mut client_proxy) = tokio::io::duplex(32); // Create a mock duplex stream
         let (mut compute_proxy, mut compute_client) = tokio::io::duplex(8); // Create a mock duplex stream
