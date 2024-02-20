@@ -66,14 +66,7 @@ fn get_state(request: &Request<Body>) -> &HttpState {
 async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let reattach_req = json_request::<ReAttachRequest>(&mut req).await?;
     let state = get_state(&req);
-    json_response(
-        StatusCode::OK,
-        state
-            .service
-            .re_attach(reattach_req)
-            .await
-            .map_err(ApiError::InternalServerError)?,
-    )
+    json_response(StatusCode::OK, state.service.re_attach(reattach_req).await?)
 }
 
 /// Pageserver calls into this before doing deletions, to confirm that it still

@@ -909,7 +909,15 @@ impl Service {
     pub(crate) async fn re_attach(
         &self,
         reattach_req: ReAttachRequest,
-    ) -> anyhow::Result<ReAttachResponse> {
+    ) -> Result<ReAttachResponse, ApiError> {
+        // Take a re-attach as indication that the node is available: this is a precursor to proper
+        // heartbeating in https://github.com/neondatabase/neon/issues/6844
+        self.node_configure(NodeConfigureRequest {
+            node_id: reattach_req.node_id,
+            availability: Some(NodeAvailability::Active),
+            scheduling: None,
+        })?;
+
         // Ordering: we must persist generation number updates before making them visible in the in-memory state
         let incremented_generations = self.persistence.re_attach(reattach_req.node_id).await?;
 
