@@ -700,7 +700,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         file_kind: str,
         op_kind: str,
-    ) -> int:
+    ) -> Optional[int]:
         metrics = [
             "pageserver_remote_timeline_client_calls_started_total",
             "pageserver_remote_timeline_client_calls_finished_total",
@@ -713,7 +713,10 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),
             },
+            absence_ok=True,
         )
+        if len(res) != 2:
+            return None
         inc, dec = [res[metric] for metric in metrics]
         queue_count = int(inc) - int(dec)
         assert queue_count >= 0

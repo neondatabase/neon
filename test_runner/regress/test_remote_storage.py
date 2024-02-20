@@ -909,6 +909,7 @@ def get_queued_count(
     file_kind: str,
     op_kind: str,
 ):
+    """The most important aspect of this function is shorter name & no return type so asserts are more concise."""
     return client.get_remote_timeline_client_queue_count(tenant_id, timeline_id, file_kind, op_kind)
 
 
