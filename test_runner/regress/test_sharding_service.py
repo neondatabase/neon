@@ -1,13 +1,29 @@
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
+from typing import List
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PgBin,
+    last_flush_lsn_upload,
+)
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.utils import tenant_delete_wait_completed, timeline_delete_wait_completed
+from fixtures.pageserver.utils import (
+    list_prefix,
+    remote_storage_delete_key,
+    tenant_delete_wait_completed,
+    timeline_delete_wait_completed,
+)
 from fixtures.pg_version import PgVersion
+from fixtures.remote_storage import s3_storage
 from fixtures.types import TenantId, TimelineId
-from fixtures.utils import wait_until
+from fixtures.utils import run_pg_bench_small, wait_until
+from mypy_boto3_s3.type_defs import (
+    ObjectTypeDef,
+)
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -456,4 +472,91 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
 
     # Check that the 'drop' APIs didn't leave things in a state that would fail a consistency check: they're
     # meant to be unclean wrt the pageserver state, but not leave a broken storage controller behind.
+    env.attachment_service.consistency_check()
+
+
+def test_sharding_service_s3_time_travel_recovery(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    """
+    Test for S3 time travel
+    """
+
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    neon_env_builder.num_pageservers = 1
+
+    env = neon_env_builder.init_start()
+    virtual_ps_http = PageserverHttpClient(env.attachment_service_port, lambda: True)
+
+    tenant_id = TenantId.generate()
+    env.attachment_service.tenant_create(tenant_id, shard_count=2, shard_stripe_size=8192)
+
+    # Check that the consistency check passes
+    env.attachment_service.consistency_check()
+
+    branch_name = "main"
+    timeline_id = env.neon_cli.create_timeline(
+        branch_name,
+        tenant_id=tenant_id,
+    )
+    # Write some nontrivial amount of data into the endpoint and wait until it is uploaded
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        run_pg_bench_small(pg_bin, endpoint.connstr())
+        #last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+
+    # Give the data time to be uploaded
+    time.sleep(4)
+
+    # Detach the tenant
+    virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+
+    time.sleep(4)
+    ts_before_disaster = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    time.sleep(4)
+
+    # Simulate a "disaster": delete some random files from remote storage
+    assert env.pageserver_remote_storage
+    objects: List[ObjectTypeDef] = list_prefix(
+        env.pageserver_remote_storage, f"tenants/{tenant_id}"
+    ).get("Contents", [])
+    for obj in objects:
+        obj_key = obj["Key"]
+        if "initdb-preserved.tar.zst" in obj_key:
+            continue
+        log.info(f"Deleting key from remote storage: {obj_key}")
+        remote_storage_delete_key(env.pageserver_remote_storage, obj_key)
+        pass
+
+    time.sleep(4)
+    ts_after_disaster = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    time.sleep(4)
+
+    # Do time travel recovery
+    virtual_ps_http.tenant_time_travel_remote_storage(
+        tenant_id, ts_before_disaster, ts_after_disaster, shard_counts=[2]
+    )
+    time.sleep(4)
+
+    # Attach the tenant again
+    virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "AttachedSingle",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": 100,
+        },
+    )
+
     env.attachment_service.consistency_check()

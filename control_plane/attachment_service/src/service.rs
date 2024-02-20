@@ -1215,20 +1215,19 @@ impl Service {
                         "We want tenant to be attached in shard with tenant_shard_id={shard_id}"
                     )));
                 }
-                let maybe_attached =
-                    shard
-                        .observed
-                        .locations
-                        .iter()
-                        .find(|(_node_id, observed_location)| {
-                            observed_location
-                                .conf
-                                .as_ref()
-                                .map(|loc| loc.mode != LocationConfigMode::Detached)
-                                .unwrap_or_default()
-                        });
-                if let Some((node_id, _observed_location)) = maybe_attached {
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!("We observed attached tenant in node_id={node_id} shard with tenant_shard_id={shard_id}")));
+                let maybe_attached = shard
+                    .observed
+                    .locations
+                    .iter()
+                    .filter_map(|(node_id, observed_location)| {
+                        observed_location
+                            .conf
+                            .as_ref()
+                            .map(|loc| (node_id, observed_location, loc.mode))
+                    })
+                    .find(|(_, _, mode)| *mode != LocationConfigMode::Detached);
+                if let Some((node_id, _observed_location, mode)) = maybe_attached {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!("We observed attached={mode:?} tenant in node_id={node_id} shard with tenant_shard_id={shard_id}")));
                 }
             }
             let scheduler = &locked.scheduler;
@@ -1242,15 +1241,15 @@ impl Service {
             node.clone()
         };
 
-        // The shard count is encoded in the remote storage's URL, so we need to handle both the old and new shard counts
-        let counts = if time_travel_req.current_shard_count == time_travel_req.target_shard_count {
-            vec![time_travel_req.current_shard_count]
-        } else {
-            vec![
-                time_travel_req.target_shard_count,
-                time_travel_req.current_shard_count,
-            ]
-        };
+        // The shard count is encoded in the remote storage's URL, so we need to handle all historically used shard counts
+        let mut counts = time_travel_req
+            .shard_counts
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        counts.sort_unstable();
 
         for count in counts {
             let shard_ids = (0..count.count())

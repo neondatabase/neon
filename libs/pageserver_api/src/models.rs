@@ -342,7 +342,7 @@ impl ThrottleConfig {
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
 /// lists out all possible states (and the virtual "Detached" state)
 /// in a flat form rather than using rust-style enums.
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LocationConfigMode {
     AttachedSingle,
     AttachedMulti,
@@ -409,8 +409,7 @@ pub struct TenantLocationConfigRequest {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantTimeTravelRequest {
-    pub current_shard_count: ShardCount,
-    pub target_shard_count: ShardCount,
+    pub shard_counts: Vec<ShardCount>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
