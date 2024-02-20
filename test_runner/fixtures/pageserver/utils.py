@@ -229,7 +229,7 @@ def wait_for_upload_queue_empty(
             },
         )
         finished = all_metrics.query_all(
-            "pageserver_remote_timeline_client_calls_started_total",
+            "pageserver_remote_timeline_client_calls_finished_total",
             {
                 "tenant_id": str(tenant_id),
                 "timeline_id": str(timeline_id),
