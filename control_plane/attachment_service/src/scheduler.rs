@@ -252,43 +252,44 @@ impl Scheduler {
 }
 
 #[cfg(test)]
+pub(crate) mod test_utils {
+
+    use crate::node::Node;
+    use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
+    use std::collections::HashMap;
+    use utils::id::NodeId;
+    /// Test helper: synthesize the requested number of nodes, all in active state.
+    ///
+    /// Node IDs start at one.
+    pub(crate) fn make_test_nodes(n: u64) -> HashMap<NodeId, Node> {
+        (1..n + 1)
+            .map(|i| {
+                (
+                    NodeId(i),
+                    Node {
+                        id: NodeId(i),
+                        availability: NodeAvailability::Active,
+                        scheduling: NodeSchedulingPolicy::Active,
+                        listen_http_addr: format!("httphost-{i}"),
+                        listen_http_port: 80 + i as u16,
+                        listen_pg_addr: format!("pghost-{i}"),
+                        listen_pg_port: 5432 + i as u16,
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
     use utils::id::NodeId;
 
-    use crate::{node::Node, tenant_state::IntentState};
-
+    use crate::tenant_state::IntentState;
     #[test]
     fn scheduler_basic() -> anyhow::Result<()> {
-        let mut nodes = HashMap::new();
-        nodes.insert(
-            NodeId(1),
-            Node {
-                id: NodeId(1),
-                availability: NodeAvailability::Active,
-                scheduling: NodeSchedulingPolicy::Active,
-                listen_http_addr: String::new(),
-                listen_http_port: 0,
-                listen_pg_addr: String::new(),
-                listen_pg_port: 0,
-            },
-        );
-
-        nodes.insert(
-            NodeId(2),
-            Node {
-                id: NodeId(2),
-                availability: NodeAvailability::Active,
-                scheduling: NodeSchedulingPolicy::Active,
-                listen_http_addr: String::new(),
-                listen_http_port: 0,
-                listen_pg_addr: String::new(),
-                listen_pg_port: 0,
-            },
-        );
+        let nodes = test_utils::make_test_nodes(2);
 
         let mut scheduler = Scheduler::new(nodes.values());
         let mut t1_intent = IntentState::new();

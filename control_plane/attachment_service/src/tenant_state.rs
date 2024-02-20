@@ -726,3 +726,83 @@ impl TenantState {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use utils::id::TenantId;
+
+    use crate::scheduler::test_utils::make_test_nodes;
+
+    use super::*;
+
+    fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantState {
+        let tenant_id = TenantId::generate();
+        let shard_number = ShardNumber(0);
+        let shard_count = ShardCount::new(1);
+
+        let tenant_shard_id = TenantShardId {
+            tenant_id,
+            shard_number,
+            shard_count,
+        };
+        TenantState::new(
+            tenant_shard_id,
+            ShardIdentity::new(
+                shard_number,
+                shard_count,
+                pageserver_api::shard::ShardStripeSize(32768),
+            )
+            .unwrap(),
+            policy,
+        )
+    }
+
+    /// Test the scheduling behaviors used when a tenant configured for HA is subject
+    /// to nodes being marked offline.
+    #[test]
+    fn tenant_ha_scheduling() -> anyhow::Result<()> {
+        // Start with three nodes.  Our tenant will only use two.  The third one is
+        // expected to remain unused.
+        let mut nodes = make_test_nodes(3);
+
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+        tenant_state
+            .schedule(&mut scheduler)
+            .expect("we have enough nodes, scheduling should work");
+
+        // Expect to initially be schedule on to different nodes
+        assert_eq!(tenant_state.intent.secondary.len(), 1);
+        assert!(tenant_state.intent.attached.is_some());
+
+        let attached_node_id = tenant_state.intent.attached.unwrap();
+        let secondary_node_id = *tenant_state.intent.secondary.iter().last().unwrap();
+        assert_ne!(attached_node_id, secondary_node_id);
+
+        // Notifying the attached node is offline should demote it to a secondary
+        let changed = tenant_state.intent.notify_offline(attached_node_id);
+        assert!(changed);
+
+        // Update the scheduler state to indicate the node is offline
+        nodes.get_mut(&attached_node_id).unwrap().availability = NodeAvailability::Offline;
+        scheduler.node_upsert(nodes.get(&attached_node_id).unwrap());
+
+        // Scheduling the node should promote the still-available secondary node to attached
+        tenant_state
+            .schedule(&mut scheduler)
+            .expect("active nodes are available");
+        assert_eq!(tenant_state.intent.attached.unwrap(), secondary_node_id);
+
+        // The original attached node should have been retained as a secondary
+        assert_eq!(
+            *tenant_state.intent.secondary.iter().last().unwrap(),
+            attached_node_id
+        );
+
+        tenant_state.intent.clear(&mut scheduler);
+
+        Ok(())
+    }
+}
