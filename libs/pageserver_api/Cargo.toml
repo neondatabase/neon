@@ -18,6 +18,7 @@ enum-map.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 hex.workspace = true
+humantime.workspace = true
 thiserror.workspace = true
 humantime-serde.workspace = true
 chrono.workspace = true
