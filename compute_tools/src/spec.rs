@@ -684,6 +684,14 @@ pub fn handle_grants(
         );
         db_client.simple_query(&grant_query)?;
 
+        for entity in ["TABLES", "SEQUENCES"] {
+            let grant_query = format!(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON {} TO neon_superuser",
+                entity
+            );
+            db_client.simple_query(&grant_query)?;
+        }
+
         // it is important to run this after all grants
         if enable_anon_extension {
             handle_extension_anon(spec, &db.owner, &mut db_client, false)?;
