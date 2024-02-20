@@ -99,6 +99,10 @@ pub mod errors {
                 {
                     crate::error::ErrorKind::User
                 }
+                ApiError::Console {
+                    status: http::StatusCode::TOO_MANY_REQUESTS,
+                    ..
+                } => crate::error::ErrorKind::ServiceRateLimit,
                 ApiError::Console { .. } => crate::error::ErrorKind::ControlPlane,
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
