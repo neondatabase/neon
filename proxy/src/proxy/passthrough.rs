@@ -16,7 +16,7 @@ use utils::measured_stream::MeasuredStream;
 pub async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
-    cancel_closure: CancelClosure,
+    cancel_closure: Option<CancelClosure>,
     aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let usage = USAGE_METRICS.register(Ids {
@@ -72,7 +72,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
         proxy_pass(
             self.client,
             self.compute.stream,
-            self.compute.cancel_closure,
+            Some(self.compute.cancel_closure),
             self.aux,
         )
         .await

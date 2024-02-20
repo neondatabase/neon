@@ -44,14 +44,13 @@ where
 pub(super) async fn copy_bidirectional_client_compute<Client, Compute, Cancel>(
     client: &mut Client,
     compute: &mut Compute,
-    cancel_closure: Cancel,
+    mut cancel_closure: Option<Cancel>,
 ) -> Result<(u64, u64), std::io::Error>
 where
     Client: AsyncRead + AsyncWrite + Unpin + ?Sized,
     Compute: AsyncRead + AsyncWrite + Unpin + ?Sized,
     Cancel: CancelClosureExt + Send + Sync + 'static,
 {
-    let mut cancel_closure = Some(cancel_closure);
     let mut client_to_compute = TransferState::Running(CopyBuffer::new());
     let mut compute_to_client = TransferState::Running(CopyBuffer::new());
 
@@ -264,7 +263,7 @@ mod tests {
             copy_bidirectional_client_compute(
                 &mut client_proxy,
                 &mut compute_proxy,
-                CancelClosureMock {},
+                Some(CancelClosureMock {}),
             ),
         )
         .await
@@ -295,7 +294,7 @@ mod tests {
             copy_bidirectional_client_compute(
                 &mut client_proxy,
                 &mut compute_proxy,
-                CancelClosureMock {},
+                Some(CancelClosureMock {}),
             ),
         )
         .await
