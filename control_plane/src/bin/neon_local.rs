@@ -652,6 +652,10 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
             let name = import_match
                 .get_one::<String>("node-name")
                 .ok_or_else(|| anyhow!("No node name provided"))?;
+            let update_catalog = import_match
+                .get_one::<bool>("update-catalog")
+                .cloned()
+                .unwrap_or_default();
 
             // Parse base inputs
             let base_tarfile = import_match
@@ -694,6 +698,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 None,
                 pg_version,
                 ComputeMode::Primary,
+                !update_catalog,
             )?;
             println!("Done");
         }
@@ -831,6 +836,10 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .get_one::<String>("endpoint_id")
                 .map(String::to_string)
                 .unwrap_or_else(|| format!("ep-{branch_name}"));
+            let update_catalog = sub_args
+                .get_one::<bool>("update-catalog")
+                .cloned()
+                .unwrap_or_default();
 
             let lsn = sub_args
                 .get_one::<String>("lsn")
@@ -880,6 +889,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 http_port,
                 pg_version,
                 mode,
+                !update_catalog,
             )?;
         }
         "start" => {
@@ -917,6 +927,11 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .endpoints
                 .get(endpoint_id.as_str())
                 .ok_or_else(|| anyhow::anyhow!("endpoint {endpoint_id} not found"))?;
+
+            let create_test_user = sub_args
+                .get_one::<bool>("create-test-user")
+                .cloned()
+                .unwrap_or_default();
 
             cplane.check_conflicting_endpoints(
                 endpoint.mode,
@@ -972,6 +987,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                     pageservers,
                     remote_ext_config,
                     stripe_size.0 as usize,
+                    create_test_user
                 )
                 .await?;
         }
@@ -1457,6 +1473,18 @@ fn cli() -> Command {
         .required(false)
         .default_value("1");
 
+    let update_catalog = Arg::new("update-catalog")
+        .value_parser(value_parser!(bool))
+        .long("update-catalog")
+        .help("If set, will set up the catalog for neon_superuser")
+        .required(false);
+
+    let create_test_user = Arg::new("create-test-user")
+        .value_parser(value_parser!(bool))
+        .long("create-test-user")
+        .help("If set, will create test user `user` and `neondb` database. Requires `update-catalog = true`")
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1517,6 +1545,7 @@ fn cli() -> Command {
                 .arg(Arg::new("end-lsn").long("end-lsn")
                     .help("Lsn the basebackup ends at"))
                 .arg(pg_version_arg.clone())
+                .arg(update_catalog.clone())
             )
         ).subcommand(
             Command::new("tenant")
@@ -1630,6 +1659,7 @@ fn cli() -> Command {
                             .required(false))
                     .arg(pg_version_arg.clone())
                     .arg(hot_standby_arg.clone())
+                    .arg(update_catalog)
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
@@ -1637,6 +1667,7 @@ fn cli() -> Command {
                     .arg(endpoint_pageserver_id_arg.clone())
                     .arg(safekeepers_arg)
                     .arg(remote_ext_config_args)
+                    .arg(create_test_user)
                 )
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")

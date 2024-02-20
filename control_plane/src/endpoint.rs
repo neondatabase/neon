@@ -41,11 +41,15 @@ use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::spec::Database;
+use compute_api::spec::PgIdent;
 use compute_api::spec::RemoteExtSpec;
+use compute_api::spec::Role;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
 use serde::{Deserialize, Serialize};
@@ -122,6 +126,7 @@ impl ComputeControlPlane {
         http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
+        skip_pg_catalog_updates: bool,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -140,7 +145,7 @@ impl ComputeControlPlane {
             // before and after start are the same. So, skip catalog updates,
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
-            skip_pg_catalog_updates: true,
+            skip_pg_catalog_updates,
             features: vec![],
         });
 
@@ -155,7 +160,7 @@ impl ComputeControlPlane {
                 http_port,
                 pg_port,
                 pg_version,
-                skip_pg_catalog_updates: true,
+                skip_pg_catalog_updates,
                 features: vec![],
             })?,
         )?;
@@ -500,6 +505,7 @@ impl Endpoint {
         pageservers: Vec<(Host, u16)>,
         remote_ext_config: Option<&String>,
         shard_stripe_size: usize,
+        create_test_user: bool,
     ) -> Result<()> {
         if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
@@ -551,8 +557,26 @@ impl Endpoint {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
                 state: None,
-                roles: vec![],
-                databases: vec![],
+                roles: if create_test_user {
+                    vec![Role {
+                        name: PgIdent::from_str("test").unwrap(),
+                        encrypted_password: None,
+                        options: None,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                databases: if create_test_user {
+                    vec![Database {
+                        name: PgIdent::from_str("neondb").unwrap(),
+                        owner: PgIdent::from_str("test").unwrap(),
+                        options: None,
+                        restrict_conn: false,
+                        invalid: false,
+                    }]
+                } else {
+                    Vec::new()
+                },
                 settings: None,
                 postgresql_conf: Some(postgresql_conf),
             },
@@ -577,11 +601,16 @@ impl Endpoint {
             .open(self.endpoint_path().join("compute.log"))?;
 
         // Launch compute_ctl
-        println!("Starting postgres node at '{}'", self.connstr());
+        let conn_str = self.connstr("cloud_admin", "postgres");
+        println!("Starting postgres node at '{}'", conn_str);
+        if create_test_user {
+            let conn_str = self.connstr("user", "neondb");
+            println!("Also at '{}'", conn_str);
+        }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
         cmd.args(["--http-port", &self.http_address.port().to_string()])
             .args(["--pgdata", self.pgdata().to_str().unwrap()])
-            .args(["--connstr", &self.connstr()])
+            .args(["--connstr", &conn_str])
             .args([
                 "--spec-path",
                 self.endpoint_path().join("spec.json").to_str().unwrap(),
@@ -785,13 +814,13 @@ impl Endpoint {
         Ok(())
     }
 
-    pub fn connstr(&self) -> String {
+    pub fn connstr(&self, user: &str, db_name: &str) -> String {
         format!(
             "postgresql://{}@{}:{}/{}",
-            "cloud_admin",
+            user,
             self.pg_address.ip(),
             self.pg_address.port(),
-            "postgres"
+            db_name
         )
     }
 }
