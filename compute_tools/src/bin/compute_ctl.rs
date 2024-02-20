@@ -397,11 +397,11 @@ fn main() -> Result<()> {
 
     let mut state = compute.state.lock().unwrap();
     if state.status == ComputeStatus::TerminationPending {
+        state.status = ComputeStatus::Terminated;
+        compute.state_changed.notify_all();
         // we were asked to terminate gracefully, don't exit to avoid restart
         delay_exit = true
     }
-    state.status = ComputeStatus::Terminated;
-    compute.state_changed.notify_all();
     drop(state);
 
     if let Err(err) = compute.check_for_core_dumps() {
