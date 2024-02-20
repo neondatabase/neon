@@ -684,14 +684,6 @@ pub fn handle_grants(
         );
         db_client.simple_query(&grant_query)?;
 
-        for entity in ["TABLES", "SEQUENCES"] {
-            let grant_query = format!(
-                "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON {} TO neon_superuser",
-                entity
-            );
-            db_client.simple_query(&grant_query)?;
-        }
-
         // it is important to run this after all grants
         if enable_anon_extension {
             handle_extension_anon(spec, &db.owner, &mut db_client, false)?;
@@ -785,6 +777,9 @@ BEGIN
 END
 $$;"#,
         "GRANT pg_monitor TO neon_superuser WITH ADMIN OPTION",
+        // ensure tables created by superusers (i.e., when creating extensions) can be used by neon_superuser.
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser",
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser",
     ];
 
     let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
