@@ -715,10 +715,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             },
             absence_ok=True,
         )
-        if len(res) != 2:
-            return None
-        inc, dec = [res[metric] for metric in metrics]
-        queue_count = int(inc) - int(dec)
+        inc, dec = [res.get(metric) for metric in metrics]
+        assert inc is not None
+        queue_count = int(inc) - (int(dec) if dec is not None else 0)
         assert queue_count >= 0
         return queue_count
 

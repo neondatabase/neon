@@ -227,11 +227,14 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     # ensure the upload queue looks like we expect it to
     def upload_queue_has_delete_and_upload_queued():
         rtc_layer_deletions = ps_http.get_remote_timeline_client_queue_count(tenant_id, timeline_id, "layer", "delete")
-        layer_uploads = ps_http.get_remote_timeline_client_queue_count(tenant_id, timeline_id, "layer", "upload")
-        assert rtc_layer_deletions == 1 and layer_uploads == 1, f"unexpected: {rtc_layer_deletions} {layer_uploads}"
+        layer_upload = ps_http.get_remote_timeline_client_queue_count(tenant_id, timeline_id, "layer", "upload")
+        layer_upload_md_update = ps_http.get_remote_timeline_client_queue_count(tenant_id, timeline_id, "index", "upload")
+        assert rtc_layer_deletions == 1 and layer_upload == 1 and layer_upload_md_update == 1, f"unexpected: {rtc_layer_deletions} {layer_upload} {layer_upload_md_update}"
     wait_until(10, 0.5, upload_queue_has_delete_and_upload_queued)
 
-    # Window has passed, unstuck the delete, let upload queue drain.
+    assert future_layer_path.exists()
+
+    # unstuck the delete, let upload queue drain.
     log.info("unstuck the DELETE")
     ps_http.configure_failpoints(("before-delete-layer-pausable", "off"))
 
@@ -239,6 +242,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     # deletions aren't done when the remote timeline client metric is 0, they're only queued to deletion queue
     # so, force the flushing now
     ps_http.deletion_queue_flush(execute=True)
+    assert not future_layer_path.exists(), "the deletion queue flush should have removed it"
 
     # Examine the resulting S3 state.
     log.info("integrity-check the remote storage")
