@@ -3856,27 +3856,6 @@ impl Timeline {
                 // Remember size of key value because at next iteration we will access next item
                 key_values_total_size = next_key_size;
             }
-            if writer.is_none() {
-                // Create writer if not initiaized yet
-                writer = Some(
-                    DeltaLayerWriter::new(
-                        self.conf,
-                        self.timeline_id,
-                        self.tenant_shard_id,
-                        key,
-                        if dup_end_lsn.is_valid() {
-                            // this is a layer containing slice of values of the same key
-                            debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
-                            dup_start_lsn..dup_end_lsn
-                        } else {
-                            debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
-                            lsn_range.clone()
-                        },
-                    )
-                    .await?,
-                );
-            }
-
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
                 Err(CompactionError::Other(anyhow::anyhow!(
                     "failpoint delta-layer-writer-fail-before-finish"
@@ -3884,6 +3863,27 @@ impl Timeline {
             });
 
             if !self.shard_identity.is_key_disposable(&key) {
+                if writer.is_none() {
+                    // Create writer if not initiaized yet
+                    writer = Some(
+                        DeltaLayerWriter::new(
+                            self.conf,
+                            self.timeline_id,
+                            self.tenant_shard_id,
+                            key,
+                            if dup_end_lsn.is_valid() {
+                                // this is a layer containing slice of values of the same key
+                                debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
+                                dup_start_lsn..dup_end_lsn
+                            } else {
+                                debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
+                                lsn_range.clone()
+                            },
+                        )
+                        .await?,
+                    );
+                }
+
                 writer.as_mut().unwrap().put_value(key, lsn, value).await?;
             } else {
                 debug!(

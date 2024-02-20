@@ -180,7 +180,7 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
     #[serde(default)]

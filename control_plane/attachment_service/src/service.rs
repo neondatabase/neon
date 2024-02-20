@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use control_plane::attachment_service::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse, NodeAvailability,
     NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, TenantCreateResponse,
@@ -14,7 +15,7 @@ use control_plane::attachment_service::{
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
 use diesel::result::DatabaseErrorKind;
-use futures::StreamExt;
+use futures::{stream::FuturesUnordered, StreamExt};
 use hyper::StatusCode;
 use pageserver_api::{
     control_api::{
@@ -45,10 +46,7 @@ use utils::{
 use crate::{
     compute_hook::{self, ComputeHook},
     node::Node,
-    persistence::{
-        split_state::SplitState, DatabaseError, NodePersistence, Persistence,
-        TenantShardPersistence,
-    },
+    persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
     scheduler::Scheduler,
     tenant_state::{
@@ -506,7 +504,9 @@ impl Service {
             // after when pageservers start up and register.
             let mut node_ids = HashSet::new();
             for tsp in &tenant_shard_persistence {
-                node_ids.insert(tsp.generation_pageserver);
+                if tsp.generation_pageserver != i64::MAX {
+                    node_ids.insert(tsp.generation_pageserver);
+                }
             }
             for node_id in node_ids {
                 tracing::info!("Creating node {} in scheduler for tests", node_id);
@@ -808,6 +808,15 @@ impl Service {
             };
 
             shard_state.generation = std::cmp::max(shard_state.generation, new_gen);
+            if let Some(observed) = shard_state
+                .observed
+                .locations
+                .get_mut(&reattach_req.node_id)
+            {
+                if let Some(conf) = observed.conf.as_mut() {
+                    conf.generation = new_gen.into();
+                }
+            }
 
             // TODO: cancel/restart any running reconciliation for this tenant, it might be trying
             // to call location_conf API with an old generation.  Wait for cancellation to complete
@@ -1369,8 +1378,6 @@ impl Service {
         tenant_id: TenantId,
         mut create_req: TimelineCreateRequest,
     ) -> Result<TimelineInfo, ApiError> {
-        let mut timeline_info = None;
-
         tracing::info!(
             "Creating timeline {}/{}",
             tenant_id,
@@ -1381,7 +1388,7 @@ impl Service {
 
         // TODO: refuse to do this if shard splitting is in progress
         // (https://github.com/neondatabase/neon/issues/6676)
-        let targets = {
+        let mut targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
 
@@ -1405,21 +1412,24 @@ impl Service {
             return Err(ApiError::NotFound(
                 anyhow::anyhow!("Tenant not found").into(),
             ));
-        }
+        };
+        let shard_zero = targets.remove(0);
 
-        for (tenant_shard_id, node) in targets {
-            // TODO: issue shard timeline creates in parallel, once the 0th is done.
-
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
-
+        async fn create_one(
+            tenant_shard_id: TenantShardId,
+            node: Node,
+            jwt: Option<String>,
+            create_req: TimelineCreateRequest,
+        ) -> Result<TimelineInfo, ApiError> {
             tracing::info!(
                 "Creating timeline on shard {}/{}, attached to node {}",
                 tenant_shard_id,
                 create_req.new_timeline_id,
                 node.id
             );
+            let client = mgmt_api::Client::new(node.base_url(), jwt.as_deref());
 
-            let shard_timeline_info = client
+            client
                 .timeline_create(tenant_shard_id, &create_req)
                 .await
                 .map_err(|e| match e {
@@ -1432,23 +1442,66 @@ impl Service {
                         ApiError::InternalServerError(anyhow::anyhow!(msg))
                     }
                     _ => ApiError::Conflict(format!("Failed to create timeline: {e}")),
-                })?;
-
-            if timeline_info.is_none() {
-                // If the caller specified an ancestor but no ancestor LSN, we are responsible for
-                // propagating the LSN chosen by the first shard to the other shards: it is important
-                // that all shards end up with the same ancestor_start_lsn.
-                if create_req.ancestor_timeline_id.is_some()
-                    && create_req.ancestor_start_lsn.is_none()
-                {
-                    create_req.ancestor_start_lsn = shard_timeline_info.ancestor_lsn;
-                }
-
-                // We will return the TimelineInfo from the first shard
-                timeline_info = Some(shard_timeline_info);
-            }
+                })
         }
-        Ok(timeline_info.expect("targets cannot be empty"))
+
+        // Because the caller might not provide an explicit LSN, we must do the creation first on a single shard, and then
+        // use whatever LSN that shard picked when creating on subsequent shards.  We arbitrarily use shard zero as the shard
+        // that will get the first creation request, and propagate the LSN to all the >0 shards.
+        let timeline_info = create_one(
+            shard_zero.0,
+            shard_zero.1,
+            self.config.jwt_token.clone(),
+            create_req.clone(),
+        )
+        .await?;
+
+        // Propagate the LSN that shard zero picked, if caller didn't provide one
+        if create_req.ancestor_timeline_id.is_some() && create_req.ancestor_start_lsn.is_none() {
+            create_req.ancestor_start_lsn = timeline_info.ancestor_lsn;
+        }
+
+        // Create timeline on remaining shards with number >0
+        if !targets.is_empty() {
+            // If we had multiple shards, issue requests for the remainder now.
+            let jwt = self.config.jwt_token.clone();
+            self.tenant_for_shards(targets, |tenant_shard_id: TenantShardId, node: Node| {
+                let create_req = create_req.clone();
+                Box::pin(create_one(tenant_shard_id, node, jwt.clone(), create_req))
+            })
+            .await?;
+        }
+
+        Ok(timeline_info)
+    }
+
+    /// Helper for concurrently calling a pageserver API on a number of shards, such as timeline creation.
+    ///
+    /// On success, the returned vector contains exactly the same number of elements as the input `locations`.
+    async fn tenant_for_shards<F, R>(
+        &self,
+        locations: Vec<(TenantShardId, Node)>,
+        mut req_fn: F,
+    ) -> Result<Vec<R>, ApiError>
+    where
+        F: FnMut(
+            TenantShardId,
+            Node,
+        )
+            -> std::pin::Pin<Box<dyn futures::Future<Output = Result<R, ApiError>> + Send>>,
+    {
+        let mut futs = FuturesUnordered::new();
+        let mut results = Vec::with_capacity(locations.len());
+
+        for (tenant_shard_id, node) in locations {
+            futs.push(req_fn(tenant_shard_id, node));
+        }
+
+        while let Some(r) = futs.next().await {
+            results.push(r?);
+        }
+
+        Ok(results)
     }
 
     pub(crate) async fn tenant_timeline_delete(
@@ -1462,7 +1515,7 @@ impl Service {
 
         // TODO: refuse to do this if shard splitting is in progress
         // (https://github.com/neondatabase/neon/issues/6676)
-        let targets = {
+        let mut targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
 
@@ -1487,12 +1540,14 @@ impl Service {
                 anyhow::anyhow!("Tenant not found").into(),
             ));
         }
+        let shard_zero = targets.remove(0);
 
-        // TODO: call into shards concurrently
-        let mut any_pending = false;
-        for (tenant_shard_id, node) in targets {
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
-
+        async fn delete_one(
+            tenant_shard_id: TenantShardId,
+            timeline_id: TimelineId,
+            node: Node,
+            jwt: Option<String>,
+        ) -> Result<StatusCode, ApiError> {
             tracing::info!(
                 "Deleting timeline on shard {}/{}, attached to node {}",
                 tenant_shard_id,
@@ -1500,7 +1555,8 @@ impl Service {
                 node.id
             );
 
-            let status = client
+            let client = mgmt_api::Client::new(node.base_url(), jwt.as_deref());
+            client
                 .timeline_delete(tenant_shard_id, timeline_id)
                 .await
                 .map_err(|e| {
@@ -1508,18 +1564,36 @@ impl Service {
                     "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {}: {e}",
                     node.id
                 ))
-                })?;
-
-            if status == StatusCode::ACCEPTED {
-                any_pending = true;
-            }
+                })
         }
 
-        if any_pending {
-            Ok(StatusCode::ACCEPTED)
-        } else {
-            Ok(StatusCode::NOT_FOUND)
+        let statuses = self
+            .tenant_for_shards(targets, |tenant_shard_id: TenantShardId, node: Node| {
+                Box::pin(delete_one(
+                    tenant_shard_id,
+                    timeline_id,
+                    node,
+                    self.config.jwt_token.clone(),
+                ))
+            })
+            .await?;
+
+        // If any shards >0 haven't finished deletion yet, don't start deletion on shard zero
+        if statuses.iter().any(|s| s != &StatusCode::NOT_FOUND) {
+            return Ok(StatusCode::ACCEPTED);
         }
+
+        // Delete shard zero last: this is not strictly necessary, but since a caller's GET on a timeline will be routed
+        // to shard zero, it gives a more obvious behavior that a GET returns 404 once the deletion is done.
+        let shard_zero_status = delete_one(
+            shard_zero.0,
+            timeline_id,
+            shard_zero.1,
+            self.config.jwt_token.clone(),
+        )
+        .await?;
+
+        Ok(shard_zero_status)
     }
 
     /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
@@ -1542,6 +1616,11 @@ impl Service {
         // TODO: should use the ID last published to compute_hook, rather than the intent: the intent might
         // point to somewhere we haven't attached yet.
         let Some(node_id) = shard.intent.get_attached() else {
+            tracing::warn!(
+                tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
+                shard.policy
+            );
             return Err(ApiError::Conflict(
                 "Cannot call timeline API on non-attached tenant".to_string(),
             ));
@@ -2054,6 +2133,104 @@ impl Service {
         Ok(())
     }
 
+    /// For debug/support: a full JSON dump of TenantStates.  Returns a response so that
+    /// we don't have to make TenantState clonable in the return path.
+    pub(crate) fn tenants_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
+        let serialized = {
+            let locked = self.inner.read().unwrap();
+            let result = locked.tenants.values().collect::<Vec<_>>();
+            serde_json::to_string(&result).map_err(|e| ApiError::InternalServerError(e.into()))?
+        };
+
+        hyper::Response::builder()
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(hyper::Body::from(serialized))
+            .map_err(|e| ApiError::InternalServerError(e.into()))
+    }
+
+    /// Check the consistency of in-memory state vs. persistent state, and check that the
+    /// scheduler's statistics are up to date.
+    ///
+    /// These consistency checks expect an **idle** system.  If changes are going on while
+    /// we run, then we can falsely indicate a consistency issue.  This is sufficient for end-of-test
+    /// checks, but not suitable for running continuously in the background in the field.
+    pub(crate) async fn consistency_check(&self) -> Result<(), ApiError> {
+        let (mut expect_nodes, mut expect_shards) = {
+            let locked = self.inner.read().unwrap();
+
+            locked
+                .scheduler
+                .consistency_check(locked.nodes.values(), locked.tenants.values())
+                .context("Scheduler checks")
+                .map_err(ApiError::InternalServerError)?;
+
+            let expect_nodes = locked.nodes.values().cloned().collect::<Vec<_>>();
+
+            let expect_shards = locked
+                .tenants
+                .values()
+                .map(|t| t.to_persistent())
+                .collect::<Vec<_>>();
+
+            (expect_nodes, expect_shards)
+        };
+
+        let mut nodes = self.persistence.list_nodes().await?;
+        expect_nodes.sort_by_key(|n| n.id);
+        nodes.sort_by_key(|n| n.id);
+
+        if nodes != expect_nodes {
+            tracing::error!("Consistency check failed on nodes.");
+            tracing::error!(
+                "Nodes in memory: {}",
+                serde_json::to_string(&expect_nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+            tracing::error!(
+                "Nodes in database: {}",
+                serde_json::to_string(&nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+        }
+
+        let mut shards = self.persistence.list_tenant_shards().await?;
+        shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+        expect_shards.sort_by_key(|tsp| (tsp.tenant_id.clone(), tsp.shard_number, tsp.shard_count));
+
+        if shards != expect_shards {
+            tracing::error!("Consistency check failed on shards.");
+            tracing::error!(
+                "Shards in memory: {}",
+                serde_json::to_string(&expect_nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+            tracing::error!(
+                "Shards in database: {}",
+                serde_json::to_string(&nodes)
+                    .map_err(|e| ApiError::InternalServerError(e.into()))?
+            );
+        }
+
+        Ok(())
+    }
+
+    /// For debug/support: a JSON dump of the [`Scheduler`].  Returns a response so that
+    /// we don't have to make TenantState clonable in the return path.
+    pub(crate) fn scheduler_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
+        let serialized = {
+            let locked = self.inner.read().unwrap();
+            serde_json::to_string(&locked.scheduler)
+                .map_err(|e| ApiError::InternalServerError(e.into()))?
+        };
+
+        hyper::Response::builder()
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(hyper::Body::from(serialized))
+            .map_err(|e| ApiError::InternalServerError(e.into()))
+    }
+
     /// This is for debug/support only: we simply drop all state for a tenant, without
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.
@@ -2072,19 +2249,21 @@ impl Service {
         nodes.remove(&node_id);
         locked.nodes = Arc::new(nodes);
 
+        locked.scheduler.node_remove(node_id);
+
         Ok(())
     }
 
-    pub(crate) async fn node_list(&self) -> Result<Vec<NodePersistence>, ApiError> {
-        // It is convenient to avoid taking the big lock and converting Node to a serializable
-        // structure, by fetching from storage instead of reading in-memory state.
-        let nodes = self
-            .persistence
-            .list_nodes()
-            .await?
-            .into_iter()
-            .map(|n| n.to_persistent())
-            .collect();
+    pub(crate) async fn node_list(&self) -> Result<Vec<Node>, ApiError> {
+        let nodes = {
+            self.inner
+                .read()
+                .unwrap()
+                .nodes
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
 
         Ok(nodes)
     }

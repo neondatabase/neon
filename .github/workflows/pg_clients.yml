@@ -28,7 +28,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - uses: actions/setup-python@v4
       with:
@@ -38,7 +38,7 @@ jobs:
       uses: snok/install-poetry@v1
 
     - name: Cache poetry deps
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pypoetry/virtualenvs
         key: v2-${{ runner.os }}-python-deps-ubunutu-latest-${{ hashFiles('poetry.lock') }}
@@ -82,7 +82,7 @@ jobs:
     # It will be fixed after switching to gen2 runner
     - name: Upload python test logs
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         retention-days: 7
         name: python-test-pg_clients-${{ runner.os }}-stage-logs

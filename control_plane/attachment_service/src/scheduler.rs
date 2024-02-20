@@ -1,4 +1,5 @@
-use crate::node::Node;
+use crate::{node::Node, tenant_state::TenantState};
+use serde::Serialize;
 use std::collections::HashMap;
 use utils::{http::error::ApiError, id::NodeId};
 
@@ -17,6 +18,7 @@ impl From<ScheduleError> for ApiError {
     }
 }
 
+#[derive(Serialize, Eq, PartialEq)]
 struct SchedulerNode {
     /// How many shards are currently scheduled on this node, via their [`crate::tenant_state::IntentState`].
     shard_count: usize,
@@ -26,6 +28,12 @@ struct SchedulerNode {
     may_schedule: bool,
 }
 
+/// This type is responsible for selecting which node is used when a tenant shard needs to choose a pageserver
+/// on which to run.
+///
+/// The type has no persistent state of its own: this is all populated at startup.  The Serialize
+/// impl is only for debug dumps.
+#[derive(Serialize)]
 pub(crate) struct Scheduler {
     nodes: HashMap<NodeId, SchedulerNode>,
 }
@@ -46,6 +54,77 @@ impl Scheduler {
         Self {
             nodes: scheduler_nodes,
         }
+    }
+
+    /// For debug/support: check that our internal statistics are in sync with the state of
+    /// the nodes & tenant shards.
+    ///
+    /// If anything is inconsistent, log details and return an error.
+    pub(crate) fn consistency_check<'a>(
+        &self,
+        nodes: impl Iterator<Item = &'a Node>,
+        shards: impl Iterator<Item = &'a TenantState>,
+    ) -> anyhow::Result<()> {
+        let mut expect_nodes: HashMap<NodeId, SchedulerNode> = HashMap::new();
+        for node in nodes {
+            expect_nodes.insert(
+                node.id,
+                SchedulerNode {
+                    shard_count: 0,
+                    may_schedule: node.may_schedule(),
+                },
+            );
+        }
+
+        for shard in shards {
+            if let Some(node_id) = shard.intent.get_attached() {
+                match expect_nodes.get_mut(node_id) {
+                    Some(node) => node.shard_count += 1,
+                    None => anyhow::bail!(
+                        "Tenant {} references nonexistent node {}",
+                        shard.tenant_shard_id,
+                        node_id
+                    ),
+                }
+            }
+
+            for node_id in shard.intent.get_secondary() {
+                match expect_nodes.get_mut(node_id) {
+                    Some(node) => node.shard_count += 1,
+                    None => anyhow::bail!(
+                        "Tenant {} references nonexistent node {}",
+                        shard.tenant_shard_id,
+                        node_id
+                    ),
+                }
+            }
+        }
+
+        for (node_id, expect_node) in &expect_nodes {
+            let Some(self_node) = self.nodes.get(node_id) else {
+                anyhow::bail!("Node {node_id} not found in Self")
+            };
+
+            if self_node != expect_node {
+                tracing::error!("Inconsistency detected in scheduling state for node {node_id}");
+                tracing::error!("Expected state: {}", serde_json::to_string(expect_node)?);
+                tracing::error!("Self state: {}", serde_json::to_string(self_node)?);
+
+                anyhow::bail!("Inconsistent state on {node_id}");
+            }
+        }
+
+        if expect_nodes.len() != self.nodes.len() {
+            // We just checked that all the expected nodes are present.  If the lengths don't match,
+            // it means that we have nodes in Self that are unexpected.
+            for node_id in self.nodes.keys() {
+                if !expect_nodes.contains_key(node_id) {
+                    anyhow::bail!("Node {node_id} found in Self but not in expected nodes");
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Increment the reference count of a node.  This reference count is used to guide scheduling
@@ -87,6 +166,12 @@ impl Scheduler {
                     may_schedule: node.may_schedule(),
                 });
             }
+        }
+    }
+
+    pub(crate) fn node_remove(&mut self, node_id: NodeId) {
+        if self.nodes.remove(&node_id).is_none() {
+            tracing::warn!(node_id=%node_id, "Removed non-existent node from scheduler");
         }
     }
 

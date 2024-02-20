@@ -114,7 +114,10 @@ async fn handle_tenant_create(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
-    json_response(StatusCode::OK, service.tenant_create(create_req).await?)
+    json_response(
+        StatusCode::CREATED,
+        service.tenant_create(create_req).await?,
+    )
 }
 
 // For tenant and timeline deletions, which both implement an "initially return 202, then 404 once
@@ -229,7 +232,7 @@ async fn handle_tenant_timeline_create(
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let create_req = json_request::<TimelineCreateRequest>(&mut req).await?;
     json_response(
-        StatusCode::OK,
+        StatusCode::CREATED,
         service
             .tenant_timeline_create(tenant_id, create_req)
             .await?,
@@ -366,6 +369,22 @@ async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiErr
     json_response(StatusCode::OK, state.service.tenant_drop(tenant_id).await?)
 }
 
+async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+    state.service.tenants_dump()
+}
+
+async fn handle_scheduler_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+    state.service.scheduler_dump()
+}
+
+async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+
+    json_response(StatusCode::OK, state.service.consistency_check().await?)
+}
+
 /// Status endpoint is just used for checking that our HTTP listener is up
 async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, ())
@@ -453,6 +472,13 @@ pub fn make_router(
         })
         .post("/debug/v1/node/:node_id/drop", |r| {
             request_span(r, handle_node_drop)
+        })
+        .get("/debug/v1/tenant", |r| request_span(r, handle_tenants_dump))
+        .get("/debug/v1/scheduler", |r| {
+            request_span(r, handle_scheduler_dump)
+        })
+        .post("/debug/v1/consistency_check", |r| {
+            request_span(r, handle_consistency_check)
         })
         .get("/control/v1/tenant/:tenant_id/locate", |r| {
             tenant_service_handler(r, handle_tenant_locate)

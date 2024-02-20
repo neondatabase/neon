@@ -166,9 +166,12 @@ fn get_conn_info(
     let mut options = Option::None;
 
     for (key, value) in pairs {
-        if key == "options" {
-            options = Some(NeonOptions::parse_options_raw(&value));
-            break;
+        match &*key {
+            "options" => {
+                options = Some(NeonOptions::parse_options_raw(&value));
+            }
+            "application_name" => ctx.set_application(Some(value.into())),
+            _ => {}
         }
     }
 

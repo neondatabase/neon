@@ -1,10 +1,12 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use crate::{metrics, persistence::TenantShardPersistence};
 use control_plane::attachment_service::NodeAvailability;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
 };
+use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, Instrument};
@@ -26,6 +28,20 @@ use crate::{
     service, PlacementPolicy, Sequence,
 };
 
+/// Serialization helper
+fn read_mutex_content<S, T>(v: &std::sync::Mutex<T>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::ser::Serializer,
+    T: Clone + std::fmt::Display,
+{
+    serializer.collect_str(&v.lock().unwrap())
+}
+
+/// In-memory state for a particular tenant shard.
+///
+/// This struct implement Serialize for debugging purposes, but is _not_ persisted
+/// itself: see [`crate::persistence`] for the subset of tenant shard state that is persisted.
+#[derive(Serialize)]
 pub(crate) struct TenantState {
     pub(crate) tenant_shard_id: TenantShardId,
 
@@ -60,6 +76,7 @@ pub(crate) struct TenantState {
     /// If a reconcile task is currently in flight, it may be joined here (it is
     /// only safe to join if either the result has been received or the reconciler's
     /// cancellation token has been fired)
+    #[serde(skip)]
     pub(crate) reconciler: Option<ReconcilerHandle>,
 
     /// If a tenant is being split, then all shards with that TenantId will have a
@@ -69,16 +86,19 @@ pub(crate) struct TenantState {
 
     /// Optionally wait for reconciliation to complete up to a particular
     /// sequence number.
+    #[serde(skip)]
     pub(crate) waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
 
     /// Indicates sequence number for which we have encountered an error reconciling.  If
     /// this advances ahead of [`Self::waiter`] then a reconciliation error has occurred,
     /// and callers should stop waiting for `waiter` and propagate the error.
+    #[serde(skip)]
     pub(crate) error_waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
 
     /// The most recent error from a reconcile on this tenant
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
+    #[serde(serialize_with = "read_mutex_content")]
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<String>>,
 
     /// If we have a pending compute notification that for some reason we weren't able to send,
@@ -88,7 +108,7 @@ pub(crate) struct TenantState {
     pub(crate) pending_compute_notification: bool,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize)]
 pub(crate) struct IntentState {
     attached: Option<NodeId>,
     secondary: Vec<NodeId>,
@@ -193,7 +213,7 @@ impl Drop for IntentState {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize)]
 pub(crate) struct ObservedState {
     pub(crate) locations: HashMap<NodeId, ObservedStateLocation>,
 }
@@ -207,7 +227,7 @@ pub(crate) struct ObservedState {
 ///       what it is (e.g. we failed partway through configuring it)
 ///     * Instance exists with conf==Some: this tells us what we last successfully configured on this node,
 ///       and that configuration will still be present unless something external interfered.
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub(crate) struct ObservedStateLocation {
     /// If None, it means we do not know the status of this shard's location on this node, but
     /// we know that we might have some state on this node.
@@ -570,6 +590,7 @@ impl TenantState {
         let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
                                                         shard_id=%reconciler.tenant_shard_id.shard_slug());
+        metrics::RECONCILER.spawned.inc();
         let join_handle = tokio::task::spawn(
             async move {
                 // Wait for any previous reconcile task to complete before we start
@@ -586,6 +607,10 @@ impl TenantState {
                 // TODO: wrap all remote API operations in cancellation check
                 // as well.
                 if reconciler.cancel.is_cancelled() {
+                    metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL])
+                        .inc();
                     return;
                 }
 
@@ -598,6 +623,20 @@ impl TenantState {
                     // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
                     reconciler.compute_notify().await.ok();
                 }
+
+                // Update result counter
+                match &result {
+                    Ok(_) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::SUCCESS]),
+                    Err(ReconcileError::Cancel) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL]),
+                    Err(_) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::ERROR]),
+                }
+                .inc();
 
                 result_tx
                     .send(ReconcileResult {
@@ -640,5 +679,19 @@ impl TenantState {
         self.observed.locations.remove(&node_id);
 
         debug_assert!(!self.intent.all_pageservers().contains(&node_id));
+    }
+
+    pub(crate) fn to_persistent(&self) -> TenantShardPersistence {
+        TenantShardPersistence {
+            tenant_id: self.tenant_shard_id.tenant_id.to_string(),
+            shard_number: self.tenant_shard_id.shard_number.0 as i32,
+            shard_count: self.tenant_shard_id.shard_count.literal() as i32,
+            shard_stripe_size: self.shard.stripe_size.0 as i32,
+            generation: self.generation.into().unwrap_or(0) as i32,
+            generation_pageserver: i64::MAX,
+            placement_policy: serde_json::to_string(&self.policy).unwrap(),
+            config: serde_json::to_string(&self.config).unwrap(),
+            splitting: SplitState::default(),
+        }
     }
 }

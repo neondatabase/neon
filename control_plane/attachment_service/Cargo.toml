@@ -19,6 +19,7 @@ futures.workspace = true
 git-version.workspace = true
 hyper.workspace = true
 humantime.workspace = true
+once_cell.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true
