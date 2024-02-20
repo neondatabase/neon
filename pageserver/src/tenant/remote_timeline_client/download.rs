@@ -81,15 +81,7 @@ pub async fn download_layer_file<'a>(
                 .with_context(|| format!("create a destination file for layer '{temp_file_path}'"))
                 .map_err(DownloadError::Other)?;
 
-            let download = storage
-                .download(&remote_path, cancel)
-                .await
-                .with_context(|| {
-                    format!(
-                        "open a download stream for layer with remote storage path '{remote_path:?}'"
-                    )
-                })
-                .map_err(DownloadError::Other)?;
+            let download = storage.download(&remote_path, cancel).await?;
 
             let mut destination_file =
                 tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, destination_file);
@@ -98,9 +90,11 @@ pub async fn download_layer_file<'a>(
 
             let bytes_amount = tokio::io::copy_buf(&mut reader, &mut destination_file)
                 .await
-                .with_context(|| format!(
+                .with_context(|| {
+                    format!(
                     "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
-                ))
+                )
+                })
                 .map_err(DownloadError::Other);
 
             match bytes_amount {
