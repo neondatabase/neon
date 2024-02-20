@@ -1973,13 +1973,13 @@ async fn get_utilization(
     let mut g = state.latest_utilization.lock().await;
 
     let regenerate_every = Duration::from_secs(1);
-    let regenerate = g
+    let still_valid = g
         .as_ref()
-        .is_some_and(|(captured_at, _)| captured_at.elapsed() >= regenerate_every);
+        .is_some_and(|(captured_at, _)| captured_at.elapsed() < regenerate_every);
 
     // avoid needless statvfs calls even though those should be non-blocking fast.
     // regenerate at most 1Hz to allow polling at any rate.
-    if regenerate {
+    if !still_valid {
         let path = state.conf.tenants_path();
         let doc = crate::utilization::regenerate(path.as_std_path())
             .map_err(ApiError::InternalServerError)?;
