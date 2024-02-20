@@ -1488,7 +1488,7 @@ impl Service {
             .await?;
 
         // If any shards >0 haven't finished deletion yet, don't start deletion on shard zero
-        if statuses.iter().any(|s| s != StatusCode::NotFound) {
+        if statuses.iter().any(|s| s != &StatusCode::NOT_FOUND) {
             return Ok(StatusCode::ACCEPTED);
         }
 
