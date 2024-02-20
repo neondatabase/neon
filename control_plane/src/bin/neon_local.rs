@@ -987,7 +987,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                     pageservers,
                     remote_ext_config,
                     stripe_size.0 as usize,
-                    create_test_user
+                    create_test_user,
                 )
                 .await?;
         }
