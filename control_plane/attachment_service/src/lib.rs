@@ -12,7 +12,7 @@ mod schema;
 pub mod service;
 mod tenant_state;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 enum PlacementPolicy {
     /// Cheapest way to attach a tenant: just one pageserver, no secondary
     Single,
@@ -23,7 +23,7 @@ enum PlacementPolicy {
     Detached,
 }
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Serialize)]
 struct Sequence(u64);
 
 impl Sequence {
