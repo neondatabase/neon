@@ -1354,8 +1354,9 @@ impl Service {
                 })
         }
 
-        // Create on shard zero before other shards, in case caller didn't provide an explicit LSN: whichever LSN we used
-        // on the first shard will be used on later shards as well.
+        // Because the caller might not provide an explicit LSN, we must do the creation first on a single shard, and then
+        // use whatever LSN that shard picked when creating on subsequent shards.  We arbitrarily use shard zero as the shard
+        // that will get the first creation request, and propagate the LSN to all the >0 shards.
         let timeline_info = create_one(
             shard_zero.0,
             shard_zero.1,
@@ -1364,13 +1365,12 @@ impl Service {
         )
         .await?;
 
-        // If the caller specified an ancestor but no ancestor LSN, we are responsible for
-        // propagating the LSN chosen by the first shard to the other shards: it is important
-        // that all shards end up with the same ancestor_start_lsn.
+        // Propagate the LSN that shard zero picked, if caller didn't provide one
         if create_req.ancestor_timeline_id.is_some() && create_req.ancestor_start_lsn.is_none() {
             create_req.ancestor_start_lsn = timeline_info.ancestor_lsn;
         }
 
+        // Create timeline on remaining shards with number >0
         if !targets.is_empty() {
             // If we had multiple shards, issue requests for the remainder now.
             let jwt = self.config.jwt_token.clone();
