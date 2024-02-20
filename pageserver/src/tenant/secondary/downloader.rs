@@ -438,6 +438,12 @@ impl From<std::io::Error> for UpdateError {
     fn from(value: std::io::Error) -> Self {
         if let Some(nix::errno::Errno::ENOSPC) = value.raw_os_error().map(nix::errno::from_i32) {
             UpdateError::NoSpace
+        } else if value
+            .get_ref()
+            .and_then(|x| x.downcast_ref::<DownloadError>())
+            .is_some()
+        {
+            UpdateError::from(DownloadError::from(value))
         } else {
             // An I/O error from e.g. tokio::io::copy is most likely a remote storage issue
             UpdateError::Other(anyhow::anyhow!(value))
