@@ -73,6 +73,8 @@ where
         if !*this.hit {
             if let Poll::Ready(e) = this.cancellation.poll(cx) {
                 *this.hit = true;
+
+                // most likely this will be a std::io::Error wrapping a DownloadError
                 let e = Err(std::io::Error::from(e));
                 return Poll::Ready(Some(e));
             }

@@ -445,7 +445,7 @@ impl From<std::io::Error> for UpdateError {
         {
             UpdateError::from(DownloadError::from(value))
         } else {
-            // An I/O error from e.g. tokio::io::copy is most likely a remote storage issue
+            // An I/O error from e.g. tokio::io::copy_buf is most likely a remote storage issue
             UpdateError::Other(anyhow::anyhow!(value))
         }
     }
