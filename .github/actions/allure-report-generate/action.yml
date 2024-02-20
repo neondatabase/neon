@@ -76,8 +76,8 @@ runs:
           rm -f ${ALLURE_ZIP}
         fi
       env:
-        ALLURE_VERSION: 2.24.0
-        ALLURE_ZIP_SHA256: 60b1d6ce65d9ef24b23cf9c2c19fd736a123487c38e54759f1ed1a7a77353c90
+        ALLURE_VERSION: 2.27.0
+        ALLURE_ZIP_SHA256: b071858fb2fa542c65d8f152c5c40d26267b2dfb74df1f1608a589ecca38e777
 
     # Potentially we could have several running build for the same key (for example, for the main branch), so we use improvised lock for this
     - name: Acquire lock
