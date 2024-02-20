@@ -142,13 +142,12 @@ impl std::fmt::Display for TimeoutOrCancel {
 impl std::error::Error for TimeoutOrCancel {}
 
 impl TimeoutOrCancel {
-    pub fn caused(error: &anyhow::Error) -> Option<&Self> {
-        error.root_cause().downcast_ref()
-    }
-
     /// Returns true if the error was caused by [`TimeoutOrCancel::Cancel`].
     pub fn caused_by_cancel(error: &anyhow::Error) -> bool {
-        Self::caused(error).is_some_and(Self::is_cancel)
+        error
+            .root_cause()
+            .downcast_ref::<Self>()
+            .is_some_and(Self::is_cancel)
     }
 
     pub fn is_cancel(&self) -> bool {
