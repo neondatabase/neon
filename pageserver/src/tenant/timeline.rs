@@ -2727,15 +2727,15 @@ impl Timeline {
                 return Err(GetVectoredError::Cancelled);
             }
 
-            let completed = self
-                .get_vectored_reconstruct_data_timeline(
-                    timeline,
-                    keyspace.clone(),
-                    cont_lsn,
-                    reconstruct_state,
-                    ctx,
-                )
-                .await?;
+            let completed = Self::get_vectored_reconstruct_data_timeline(
+                timeline,
+                keyspace.clone(),
+                cont_lsn,
+                reconstruct_state,
+                &self.cancel,
+                ctx,
+            )
+            .await?;
 
             keyspace.remove_overlapping_with(&completed);
             if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
@@ -2771,11 +2771,11 @@ impl Timeline {
     /// At each iteration pop the top of the fringe (the layer with the highest Lsn)
     /// and get all the required reconstruct data from the layer in one go.
     async fn get_vectored_reconstruct_data_timeline(
-        &self,
         timeline: &Timeline,
         keyspace: KeySpace,
         mut cont_lsn: Lsn,
         reconstruct_state: &mut ValuesReconstructState,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<KeySpace, GetVectoredError> {
         let mut unmapped_keyspace = keyspace.clone();
@@ -2794,7 +2794,7 @@ impl Timeline {
         let layers = guard.layer_map();
 
         'outer: loop {
-            if self.cancel.is_cancelled() {
+            if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
             }
 
