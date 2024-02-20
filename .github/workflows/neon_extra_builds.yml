@@ -57,21 +57,21 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
@@ -82,7 +82,7 @@ jobs:
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
       - name: Cache cargo deps
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -172,21 +172,21 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
@@ -356,7 +356,7 @@ jobs:
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
       - name: Publish build stats report
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         env:
           REPORT_URL: ${{ steps.upload-stats.outputs.report-url }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}

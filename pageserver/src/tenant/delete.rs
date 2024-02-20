@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::{models::TenantState, shard::TenantShardId};
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, Instrument};
@@ -84,17 +84,17 @@ async fn create_remote_delete_mark(
             let data = bytes::Bytes::from_static(data);
             let stream = futures::stream::once(futures::future::ready(Ok(data)));
             remote_storage
-                .upload(stream, 0, &remote_mark_path, None)
+                .upload(stream, 0, &remote_mark_path, None, cancel)
                 .await
         },
-        |_e| false,
+        TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
         cancel,
     )
     .await
-    .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
     .context("mark_upload")?;
 
@@ -184,15 +184,15 @@ async fn remove_tenant_remote_delete_mark(
     if let Some(remote_storage) = remote_storage {
         let path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
         backoff::retry(
-            || async { remote_storage.delete(&path).await },
-            |_e| false,
+            || async { remote_storage.delete(&path, cancel).await },
+            TimeoutOrCancel::caused_by_cancel,
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
             cancel,
         )
         .await
-        .ok_or_else(|| anyhow::anyhow!("Cancelled"))
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
         .and_then(|x| x)
         .context("remove_tenant_remote_delete_mark")?;
     }
@@ -245,6 +245,8 @@ async fn cleanup_remaining_fs_traces(
     }
 
     rm(conf.tenant_deleted_mark_file_path(tenant_shard_id), false).await?;
+
+    rm(conf.tenant_heatmap_path(tenant_shard_id), false).await?;
 
     fail::fail_point!("tenant-delete-before-remove-tenant-dir", |_| {
         Err(anyhow::anyhow!(

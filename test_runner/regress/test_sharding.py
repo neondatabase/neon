@@ -83,6 +83,8 @@ def test_sharding_smoke(
         )
         assert timelines == {env.initial_timeline, timeline_b}
 
+    env.attachment_service.consistency_check()
+
 
 def test_sharding_split_unsharded(
     neon_env_builder: NeonEnvBuilder,
@@ -112,6 +114,8 @@ def test_sharding_split_unsharded(
     assert env.attachment_service.inspect(TenantShardId(tenant_id, 1, 2)) is not None
 
     workload.validate()
+
+    env.attachment_service.consistency_check()
 
 
 def test_sharding_split_smoke(
@@ -194,6 +198,18 @@ def test_sharding_split_smoke(
 
     assert len(pre_split_pageserver_ids) == 4
 
+    def shards_on_disk(shard_ids):
+        for pageserver in env.pageservers:
+            for shard_id in shard_ids:
+                if pageserver.tenant_dir(shard_id).exists():
+                    return True
+
+        return False
+
+    old_shard_ids = [TenantShardId(tenant_id, i, shard_count) for i in range(0, shard_count)]
+    # Before split, old shards exist
+    assert shards_on_disk(old_shard_ids)
+
     env.attachment_service.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
     post_split_pageserver_ids = [loc["node_id"] for loc in env.attachment_service.locate(tenant_id)]
@@ -201,6 +217,9 @@ def test_sharding_split_smoke(
     assert len(post_split_pageserver_ids) == split_shard_count
     assert len(set(post_split_pageserver_ids)) == shard_count
     assert set(post_split_pageserver_ids) == set(pre_split_pageserver_ids)
+
+    # The old parent shards should no longer exist on disk
+    assert not shards_on_disk(old_shard_ids)
 
     workload.validate()
 
@@ -240,3 +259,28 @@ def test_sharding_split_smoke(
         env.neon_cli.tenant_migrate(migrate_shard, destination, timeout_secs=10)
 
     workload.validate()
+
+    # Check that we didn't do any spurious reconciliations.
+    # Total number of reconciles should have been one per original shard, plus
+    # one for each shard that was migrated.
+    reconcile_ok = env.attachment_service.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+    assert reconcile_ok == shard_count + split_shard_count // 2
+
+    # Check that no cancelled or errored reconciliations occurred: this test does no
+    # failure injection and should run clean.
+    assert (
+        env.attachment_service.get_metric_value(
+            "storage_controller_reconcile_complete_total", filter={"status": "cancel"}
+        )
+        is None
+    )
+    assert (
+        env.attachment_service.get_metric_value(
+            "storage_controller_reconcile_complete_total", filter={"status": "error"}
+        )
+        is None
+    )
+
+    env.attachment_service.consistency_check()

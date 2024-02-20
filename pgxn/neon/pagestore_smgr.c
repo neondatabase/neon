@@ -3079,14 +3079,6 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	XLogRecGetBlockTag(record, block_id, &rinfo, &forknum, &blkno);
 #endif
 
-	/*
-	 * Out of an abundance of caution, we always run redo on shared catalogs,
-	 * regardless of whether the block is stored in shared buffers. See also
-	 * this function's top comment.
-	 */
-	if (!OidIsValid(NInfoGetDbOid(rinfo)))
-		return false;
-
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forknum;
 	tag.blockNum = blkno;
@@ -3100,17 +3092,28 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	 */
 	LWLockAcquire(partitionLock, LW_SHARED);
 
-	/* Try to find the relevant buffer */
-	buffer = BufTableLookup(&tag, hash);
+	/*
+	 * Out of an abundance of caution, we always run redo on shared catalogs,
+	 * regardless of whether the block is stored in shared buffers. See also
+	 * this function's top comment.
+	 */
+	if (!OidIsValid(NInfoGetDbOid(rinfo)))
+	{
+		no_redo_needed = false;
+	}
+	else
+	{
+		/* Try to find the relevant buffer */
+		buffer = BufTableLookup(&tag, hash);
 
-	no_redo_needed = buffer < 0;
-
+		no_redo_needed = buffer < 0;
+	}
 	/* In both cases st lwlsn past this WAL record */
 	SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
 
 	/*
 	 * we don't have the buffer in memory, update lwLsn past this record, also
-	 * evict page fro file cache
+	 * evict page from file cache
 	 */
 	if (no_redo_needed)
 		lfc_evict(rinfo, forknum, blkno);

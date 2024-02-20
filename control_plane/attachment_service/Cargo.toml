@@ -4,6 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Enables test-only APIs and behaviors
+testing = []
+
 [dependencies]
 anyhow.workspace = true
 aws-config.workspace = true
@@ -13,6 +18,7 @@ clap.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hyper.workspace = true
+once_cell.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true

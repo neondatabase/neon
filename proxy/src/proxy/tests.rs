@@ -132,9 +132,8 @@ struct Scram(scram::ServerSecret);
 
 impl Scram {
     fn new(password: &str) -> anyhow::Result<Self> {
-        let salt = rand::random::<[u8; 16]>();
-        let secret = scram::ServerSecret::build(password, &salt, 256)
-            .context("failed to generate scram secret")?;
+        let secret =
+            scram::ServerSecret::build(password).context("failed to generate scram secret")?;
         Ok(Scram(secret))
     }
 
@@ -375,8 +374,6 @@ enum ConnectAction {
     Connect,
     Retry,
     Fail,
-    RetryPg,
-    FailPg,
 }
 
 #[derive(Clone)]
@@ -465,14 +462,6 @@ impl ConnectMechanism for TestConnectMechanism {
             ConnectAction::Fail => Err(TestConnectError {
                 retryable: false,
                 kind: ErrorKind::Compute,
-            }),
-            ConnectAction::FailPg => Err(TestConnectError {
-                retryable: false,
-                kind: ErrorKind::Postgres,
-            }),
-            ConnectAction::RetryPg => Err(TestConnectError {
-                retryable: true,
-                kind: ErrorKind::Postgres,
             }),
             x => panic!("expecting action {:?}, connect is called instead", x),
         }
@@ -569,32 +558,6 @@ async fn connect_to_compute_retry() {
     connect_to_compute(&mut ctx, &mechanism, &user_info, false)
         .await
         .unwrap();
-    mechanism.verify();
-}
-
-#[tokio::test]
-async fn connect_to_compute_retry_pg() {
-    let _ = env_logger::try_init();
-    use ConnectAction::*;
-    let mut ctx = RequestMonitoring::test();
-    let mechanism = TestConnectMechanism::new(vec![Wake, RetryPg, Connect]);
-    let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
-        .await
-        .unwrap();
-    mechanism.verify();
-}
-
-#[tokio::test]
-async fn connect_to_compute_fail_pg() {
-    let _ = env_logger::try_init();
-    use ConnectAction::*;
-    let mut ctx = RequestMonitoring::test();
-    let mechanism = TestConnectMechanism::new(vec![Wake, FailPg]);
-    let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
-        .await
-        .unwrap_err();
     mechanism.verify();
 }
 

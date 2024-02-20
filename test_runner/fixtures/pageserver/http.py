@@ -12,7 +12,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from fixtures.log_helper import log
-from fixtures.metrics import Metrics, parse_metrics
+from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import Fn
@@ -125,7 +125,7 @@ class TenantConfig:
         )
 
 
-class PageserverHttpClient(requests.Session):
+class PageserverHttpClient(requests.Session, MetricsGetter):
     def __init__(
         self,
         port: int,
@@ -720,45 +720,6 @@ class PageserverHttpClient(requests.Session):
         else:
             assert len(matches) < 2, "above filter should uniquely identify metric"
         return value
-
-    def get_metric_value(
-        self, name: str, filter: Optional[Dict[str, str]] = None
-    ) -> Optional[float]:
-        metrics = self.get_metrics()
-        results = metrics.query_all(name, filter=filter)
-        if not results:
-            log.info(f'could not find metric "{name}"')
-            return None
-        assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
-        return results[0].value
-
-    def get_metrics_values(
-        self, names: list[str], filter: Optional[Dict[str, str]] = None
-    ) -> Dict[str, float]:
-        """
-        When fetching multiple named metrics, it is more efficient to use this
-        than to call `get_metric_value` repeatedly.
-
-        Throws RuntimeError if no metrics matching `names` are found, or if
-        not all of `names` are found: this method is intended for loading sets
-        of metrics whose existence is coupled.
-        """
-        metrics = self.get_metrics()
-        samples = []
-        for name in names:
-            samples.extend(metrics.query_all(name, filter=filter))
-
-        result = {}
-        for sample in samples:
-            if sample.name in result:
-                raise RuntimeError(f"Multiple values found for {sample.name}")
-            result[sample.name] = sample.value
-
-        if len(result) != len(names):
-            log.info(f"Metrics found: {metrics.metrics}")
-            raise RuntimeError(f"could not find all metrics {' '.join(names)}")
-
-        return result
 
     def layer_map_info(
         self,

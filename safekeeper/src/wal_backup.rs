@@ -511,7 +511,11 @@ async fn backup_object(
 
     let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
 
-    storage.upload_storage_object(file, size, target_file).await
+    let cancel = CancellationToken::new();
+
+    storage
+        .upload_storage_object(file, size, target_file, &cancel)
+        .await
 }
 
 pub async fn read_object(
@@ -526,8 +530,10 @@ pub async fn read_object(
 
     info!("segment download about to start from remote path {file_path:?} at offset {offset}");
 
+    let cancel = CancellationToken::new();
+
     let download = storage
-        .download_storage_object(Some((offset, None)), file_path)
+        .download_storage_object(Some((offset, None)), file_path, &cancel)
         .await
         .with_context(|| {
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")
@@ -559,7 +565,8 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     // Note: listing segments might take a long time if there are many of them.
     // We don't currently have http requests timeout cancellation, but if/once
     // we have listing should get streaming interface to make progress.
-    let token = CancellationToken::new(); // not really used
+
+    let cancel = CancellationToken::new(); // not really used
     backoff::retry(
         || async {
             // Do list-delete in batch_size batches to make progress even if there a lot of files.
@@ -567,7 +574,7 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
             // I'm not sure deleting while iterating is expected in s3.
             loop {
                 let files = storage
-                    .list_files(Some(&remote_path), Some(batch_size))
+                    .list_files(Some(&remote_path), Some(batch_size), &cancel)
                     .await?;
                 if files.is_empty() {
                     return Ok(()); // done
@@ -580,14 +587,15 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
                     files.first().unwrap().object_name().unwrap_or(""),
                     files.last().unwrap().object_name().unwrap_or("")
                 );
-                storage.delete_objects(&files).await?;
+                storage.delete_objects(&files, &cancel).await?;
             }
         },
+        // consider TimeoutOrCancel::caused_by_cancel when using cancellation
         |_| false,
         3,
         10,
         "executing WAL segments deletion batch",
-        &token,
+        &cancel,
     )
     .await
     .ok_or_else(|| anyhow::anyhow!("canceled"))
@@ -617,7 +625,12 @@ pub async fn copy_s3_segments(
 
     let remote_path = RemotePath::new(&relative_dst_path)?;
 
-    let files = storage.list_files(Some(&remote_path), None).await?;
+    let cancel = CancellationToken::new();
+
+    let files = storage
+        .list_files(Some(&remote_path), None, &cancel)
+        .await?;
+
     let uploaded_segments = &files
         .iter()
         .filter_map(|file| file.object_name().map(ToOwned::to_owned))
@@ -645,7 +658,7 @@ pub async fn copy_s3_segments(
         let from = RemotePath::new(&relative_src_path.join(&segment_name))?;
         let to = RemotePath::new(&relative_dst_path.join(&segment_name))?;
 
-        storage.copy_object(&from, &to).await?;
+        storage.copy_object(&from, &to, &cancel).await?;
     }
 
     info!(

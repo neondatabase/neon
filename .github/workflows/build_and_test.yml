@@ -69,7 +69,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -106,13 +106,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: 1
 
       - name: Cache poetry deps
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
           key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
@@ -138,7 +138,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 1
@@ -146,7 +146,7 @@ jobs:
 #      Disabled for now
 #      - name: Restore cargo deps cache
 #        id: cache_cargo
-#        uses: actions/cache@v3
+#        uses: actions/cache@v4
 #        with:
 #          path: |
 #            !~/.cargo/registry/src
@@ -231,7 +231,7 @@ jobs:
           done
 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 1
@@ -253,7 +253,7 @@ jobs:
           done
 
           if [ "${FAILED}" = "true" ]; then
-            echo >&2 "Please update vendors/revisions.json if these changes are intentional"
+            echo >&2 "Please update vendor/revisions.json if these changes are intentional"
             exit 1
           fi
 
@@ -303,7 +303,7 @@ jobs:
       # compressed crates.
 #      - name: Cache cargo deps
 #        id: cache_cargo
-#        uses: actions/cache@v3
+#        uses: actions/cache@v4
 #        with:
 #          path: |
 #            ~/.cargo/registry/
@@ -317,21 +317,21 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
@@ -451,7 +451,7 @@ jobs:
         pg_version: [ v14, v15, v16 ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 1
@@ -473,8 +473,12 @@ jobs:
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
 
+      # Temporary disable this step until we figure out why it's so flaky
+      # Ref https://github.com/neondatabase/neon/issues/4540
       - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
+        if: |
+          false &&
+          matrix.build_type == 'debug' && matrix.pg_version == 'v14'
         uses: ./.github/actions/save-coverage-data
 
   get-benchmarks-durations:
@@ -488,10 +492,10 @@ jobs:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Cache poetry deps
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
           key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
@@ -525,7 +529,7 @@ jobs:
         build_type: [ release ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
@@ -554,7 +558,7 @@ jobs:
       options: --init
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create Allure report
         if: ${{ !cancelled() }}
@@ -565,7 +569,7 @@ jobs:
         env:
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
-      - uses: actions/github-script@v6
+      - uses: actions/github-script@v7
         if: ${{ !cancelled() }}
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
@@ -605,7 +609,7 @@ jobs:
         coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
@@ -674,7 +678,7 @@ jobs:
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/summary.json
           echo "summary-json=${REPORT_URL}" >> $GITHUB_OUTPUT
 
-      - uses: actions/github-script@v6
+      - uses: actions/github-script@v7
         env:
           REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -900,7 +904,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -1114,7 +1118,7 @@ jobs:
           done
 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: 0
@@ -1137,7 +1141,7 @@ jobs:
 
       - name: Create git tag
         if: github.ref_name == 'release'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
@@ -1151,7 +1155,7 @@ jobs:
 
       - name: Create GitHub release
         if: github.ref_name == 'release'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5

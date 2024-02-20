@@ -1,4 +1,5 @@
 use crate::{
+    cancellation,
     compute::PostgresConnection,
     console::messages::MetricsAuxInfo,
     metrics::NUM_BYTES_PROXIED_COUNTER,
@@ -57,6 +58,7 @@ pub struct ProxyPassthrough<S> {
 
     pub req: IntCounterPairGuard,
     pub conn: IntCounterPairGuard,
+    pub cancel: cancellation::Session,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {

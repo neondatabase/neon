@@ -51,13 +51,13 @@ def test_sharding_service_smoke(
     # The pageservers we started should have registered with the sharding service on startup
     nodes = env.attachment_service.node_list()
     assert len(nodes) == 2
-    assert set(n["node_id"] for n in nodes) == {env.pageservers[0].id, env.pageservers[1].id}
+    assert set(n["id"] for n in nodes) == {env.pageservers[0].id, env.pageservers[1].id}
 
     # Starting an additional pageserver should register successfully
     env.pageservers[2].start()
     nodes = env.attachment_service.node_list()
     assert len(nodes) == 3
-    assert set(n["node_id"] for n in nodes) == {ps.id for ps in env.pageservers}
+    assert set(n["id"] for n in nodes) == {ps.id for ps in env.pageservers}
 
     # Use a multiple of pageservers to get nice even number of shards on each one
     tenant_shard_count = len(env.pageservers) * 4
@@ -127,6 +127,8 @@ def test_sharding_service_smoke(
     assert counts[env.pageservers[0].id] == tenant_shard_count // 2
     assert counts[env.pageservers[2].id] == tenant_shard_count // 2
 
+    env.attachment_service.consistency_check()
+
 
 def test_node_status_after_restart(
     neon_env_builder: NeonEnvBuilder,
@@ -159,6 +161,8 @@ def test_node_status_after_restart(
     # should have had its availabilty state set to Active.
     env.attachment_service.tenant_create(TenantId.generate())
 
+    env.attachment_service.consistency_check()
+
 
 def test_sharding_service_passthrough(
     neon_env_builder: NeonEnvBuilder,
@@ -183,6 +187,8 @@ def test_sharding_service_passthrough(
         env.initial_timeline,
     }
     assert status["state"]["slug"] == "Active"
+
+    env.attachment_service.consistency_check()
 
 
 def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
@@ -215,6 +221,8 @@ def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
     observed = set(TenantId(tenant["id"]) for tenant in env.pageserver.http_client().tenant_list())
     assert tenant_a not in observed
     assert tenant_b in observed
+
+    env.attachment_service.consistency_check()
 
 
 def test_sharding_service_onboarding(
@@ -318,6 +326,8 @@ def test_sharding_service_onboarding(
     dest_ps.stop()
     dest_ps.start()
 
+    env.attachment_service.consistency_check()
+
 
 def test_sharding_service_compute_hook(
     httpserver: HTTPServer,
@@ -388,6 +398,8 @@ def test_sharding_service_compute_hook(
 
     wait_until(10, 1, received_restart_notification)
 
+    env.attachment_service.consistency_check()
+
 
 def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     """
@@ -401,13 +413,47 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     tenant_id = TenantId.generate()
     env.attachment_service.tenant_create(tenant_id, shard_count=2, shard_stripe_size=8192)
 
+    # Check that the consistency check passes on a freshly setup system
+    env.attachment_service.consistency_check()
+
     # These APIs are intentionally not implemented as methods on NeonAttachmentService, as
     # they're just for use in unanticipated circumstances.
-    env.attachment_service.request(
+
+    # Initial tenant (1 shard) and the one we just created (2 shards) should be visible
+    response = env.attachment_service.request(
+        "GET", f"{env.attachment_service_api}/debug/v1/tenant"
+    )
+    response.raise_for_status()
+    assert len(response.json()) == 3
+
+    # Scheduler should report the expected nodes and shard counts
+    response = env.attachment_service.request(
+        "GET", f"{env.attachment_service_api}/debug/v1/scheduler"
+    )
+    response.raise_for_status()
+    # Two nodes, in a dict of node_id->node
+    assert len(response.json()["nodes"]) == 2
+    assert sum(v["shard_count"] for v in response.json()["nodes"].values()) == 3
+    assert all(v["may_schedule"] for v in response.json()["nodes"].values())
+
+    response = env.attachment_service.request(
         "POST", f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop"
     )
+    response.raise_for_status()
     assert len(env.attachment_service.node_list()) == 1
 
-    env.attachment_service.request(
+    response = env.attachment_service.request(
         "POST", f"{env.attachment_service_api}/debug/v1/tenant/{tenant_id}/drop"
     )
+    response.raise_for_status()
+
+    # Tenant drop should be reflected in dump output
+    response = env.attachment_service.request(
+        "GET", f"{env.attachment_service_api}/debug/v1/tenant"
+    )
+    response.raise_for_status()
+    assert len(response.json()) == 1
+
+    # Check that the 'drop' APIs didn't leave things in a state that would fail a consistency check: they're
+    # meant to be unclean wrt the pageserver state, but not leave a broken storage controller behind.
+    env.attachment_service.consistency_check()
