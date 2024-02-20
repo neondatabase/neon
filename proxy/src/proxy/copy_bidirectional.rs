@@ -74,11 +74,11 @@ where
         if let TransferState::Done(_) = client_to_compute {
             if let TransferState::Running(buf) = &compute_to_client {
                 // Make this closure async internally
-                cancel_closure.take().map(|cancel_closure| {
+                if let Some(cancel_closure) = cancel_closure.take() {
                     tokio::spawn(async move {
                         let _ = cancel_closure.try_cancel_query().await;
                     });
-                });
+                }
                 // Initiate shutdown
                 compute_to_client = TransferState::ShuttingDown(buf.amt);
                 compute_to_client_result =
