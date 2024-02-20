@@ -823,6 +823,10 @@ impl RemoteTimelineClient {
         }
 
         // schedule the actual deletions
+        if with_metadata.is_empty() {
+            // avoid scheduling the op & bumping the metric
+            return;
+        }
         let op = UploadOp::Delete(Delete {
             layers: with_metadata,
         });
