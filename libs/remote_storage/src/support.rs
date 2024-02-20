@@ -148,7 +148,7 @@ mod tests {
         let stream = DownloadStream::new(cancel_or_timeout(timeout, cancel.clone()), inner);
         let mut stream = std::pin::pin!(stream);
 
-        // because the stream uses 120s timeout we are paused, we advance to 120s right away.
+        // because the stream uses 120s timeout and we are paused, we advance to 120s right away.
         let first = stream.next();
 
         let e = first.await.expect("there must be some").unwrap_err();
