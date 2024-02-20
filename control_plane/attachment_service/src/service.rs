@@ -358,8 +358,8 @@ impl Service {
                 async move {
                     if let Err(e) = compute_hook.notify(tenant_shard_id, node_id, &cancel).await {
                         tracing::error!(
-                            tenant_shard_id=%tenant_shard_id,
-                            node_id=%node_id,
+                            %tenant_shard_id,
+                            %node_id,
                             "Failed to notify compute on startup for shard: {e}"
                         );
                         Some(tenant_shard_id)
