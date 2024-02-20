@@ -274,15 +274,9 @@ def test_remote_storage_upload_queue_retries(
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
-        val = client.get_remote_timeline_client_metric(
-            "pageserver_remote_timeline_client_calls_unfinished",
-            tenant_id,
-            timeline_id,
-            file_kind,
-            op_kind,
+        return client.get_remote_timeline_client_queue_count(
+            tenant_id, timeline_id, file_kind, op_kind
         )
-        assert val is not None, "expecting metric to be present"
-        return int(val)
 
     # create some layers & wait for uploads to finish
     overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
@@ -434,7 +428,7 @@ def test_remote_timeline_client_calls_started_metric(
         assert timeline_id is not None
         for (file_kind, op_kind), observations in calls_started.items():
             val = client.get_metric_value(
-                name="pageserver_remote_timeline_client_calls_started_count",
+                name="pageserver_remote_timeline_client_calls_started_total",
                 filter={
                     "file_kind": str(file_kind),
                     "op_kind": str(op_kind),
@@ -537,16 +531,6 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 
     client = env.pageserver.http_client()
 
-    def get_queued_count(file_kind, op_kind):
-        val = client.get_remote_timeline_client_metric(
-            "pageserver_remote_timeline_client_calls_unfinished",
-            tenant_id,
-            timeline_id,
-            file_kind,
-            op_kind,
-        )
-        return int(val) if val is not None else val
-
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
     client.configure_failpoints(("before-upload-layer", "return"))
@@ -580,7 +564,10 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     def assert_compacted_and_uploads_queued():
         assert timeline_path.exists()
         assert len(list(timeline_path.glob("*"))) >= 8
-        assert get_queued_count(file_kind="index", op_kind="upload") > 0
+        assert (
+            get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload")
+            > 0
+        )
 
     wait_until(20, 0.1, assert_compacted_and_uploads_queued)
 
@@ -618,7 +605,10 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     assert len(filtered) == 0
 
     # timeline deletion should kill ongoing uploads, so, the metric will be gone
-    assert get_queued_count(file_kind="index", op_kind="upload") is None
+    assert (
+        get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload")
+        is None
+    )
 
     # timeline deletion should be unblocking checkpoint ops
     checkpoint_thread.join(2.0)
@@ -919,16 +909,8 @@ def get_queued_count(
     file_kind: str,
     op_kind: str,
 ):
-    val = client.get_remote_timeline_client_metric(
-        "pageserver_remote_timeline_client_calls_unfinished",
-        tenant_id,
-        timeline_id,
-        file_kind,
-        op_kind,
-    )
-    if val is None:
-        return val
-    return int(val)
+    """The most important aspect of this function is shorter name & no return type so asserts are more concise."""
+    return client.get_remote_timeline_client_queue_count(tenant_id, timeline_id, file_kind, op_kind)
 
 
 def assert_nothing_to_upload(
