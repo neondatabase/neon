@@ -734,8 +734,9 @@ mod tests {
             dbname: "dbname".into(),
             password: "password".as_bytes().into(),
         };
-        let ep_pool =
-            Arc::downgrade(&pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()));
+        let ep_pool = Arc::downgrade(
+            &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
+        );
         {
             let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
             assert_eq!(0, pool.get_global_connections_count());
@@ -791,8 +792,9 @@ mod tests {
             dbname: "dbname".into(),
             password: "password".as_bytes().into(),
         };
-        let ep_pool =
-            Arc::downgrade(&pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()));
+        let ep_pool = Arc::downgrade(
+            &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
+        );
         {
             let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
             client.do_drop().unwrap()();
