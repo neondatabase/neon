@@ -1334,6 +1334,7 @@ pub fn forward_termination_signal() {
     let pg_pid = PG_PID.load(Ordering::SeqCst);
     if pg_pid != 0 {
         let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
+        // use 'immediate' shutdown (SIGQUIT): https://www.postgresql.org/docs/current/server-shutdown.html
         kill(pg_pid, Signal::SIGQUIT).ok();
     }
 }

@@ -329,7 +329,7 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
     forward_termination_signal();
     info!("sent signal and notified waiters");
 
-    // Spawn a blocking thread to wait for compute to become Running.
+    // Spawn a blocking thread to wait for compute to become Terminated.
     // This is needed to do not block the main pool of workers and
     // be able to serve other requests while some particular request
     // is waiting for compute to finish configuration.
@@ -348,7 +348,7 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
     })
     .await
     .unwrap()?;
-    info!("terminated Postges");
+    info!("terminated Postgres");
     Ok(())
 }
 

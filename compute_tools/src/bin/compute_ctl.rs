@@ -364,15 +364,7 @@ fn main() -> Result<()> {
             .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
 
         info!("Postgres exited with code {}, shutting down", ecode);
-        exit_code = ecode.code();
-        let mut state = compute.state.lock().unwrap();
-        if state.status == ComputeStatus::TerminationPending {
-            // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = true
-        }
-        state.status = ComputeStatus::Terminated;
-        compute.state_changed.notify_all();
-        drop(state);
+        exit_code = ecode.code()
     }
 
     // Terminate the vm_monitor so it releases the file watcher on
@@ -402,6 +394,15 @@ fn main() -> Result<()> {
         let lsn = compute.sync_safekeepers(storage_auth_token)?;
         info!("synced safekeepers at lsn {lsn}");
     }
+
+    let mut state = compute.state.lock().unwrap();
+    if state.status == ComputeStatus::TerminationPending {
+        // we were asked to terminate gracefully, don't exit to avoid restart
+        delay_exit = true
+    }
+    state.status = ComputeStatus::Terminated;
+    compute.state_changed.notify_all();
+    drop(state);
 
     if let Err(err) = compute.check_for_core_dumps() {
         error!("error while checking for core dumps: {err:?}");
