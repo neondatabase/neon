@@ -130,6 +130,8 @@ mod tests {
                 .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
             "{inner:?}"
         );
+        let e = DownloadError::from(e);
+        assert!(matches!(e, DownloadError::Cancelled), "{e:?}");
 
         tokio::select! {
             _ = stream.next() => unreachable!("no timeout ever happens as we were already cancelled"),
@@ -158,6 +160,8 @@ mod tests {
                 .is_some_and(|e| matches!(e, DownloadError::Timeout)),
             "{inner:?}"
         );
+        let e = DownloadError::from(e);
+        assert!(matches!(e, DownloadError::Timeout), "{e:?}");
 
         cancel.cancel();
 

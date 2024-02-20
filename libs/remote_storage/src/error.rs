@@ -44,6 +44,26 @@ impl DownloadError {
     }
 }
 
+impl From<std::io::Error> for DownloadError {
+    fn from(value: std::io::Error) -> Self {
+        let needs_unwrap = value.kind() == std::io::ErrorKind::Other
+            && value
+                .get_ref()
+                .and_then(|x| x.downcast_ref::<DownloadError>())
+                .is_some();
+
+        if needs_unwrap {
+            *value
+                .into_inner()
+                .expect("just checked")
+                .downcast::<DownloadError>()
+                .expect("just checked")
+        } else {
+            DownloadError::Other(value.into())
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TimeTravelError {
     /// Validation or other error happened due to user input.
