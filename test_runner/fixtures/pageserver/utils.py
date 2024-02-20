@@ -252,7 +252,7 @@ def wait_for_upload_queue_empty(
                 tl.append((s.labels, int(s.value)))
         assert len(tl) == len(started), "something broken with join logic"
         log.info(f"upload queue for {tenant_id}/{timeline_id}:")
-        for (labels, queue_count) in tl:
+        for labels, queue_count in tl:
             log.info(f"  {labels}: {queue_count}")
         if all(queue_count == 0 for (_, queue_count) in tl):
             return
