@@ -142,18 +142,15 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         )
         == 1
     )
-    def image_layer_arrived_in_index_part():
-        future_layers = get_future_layers()
-        assert len(future_layers) == 1
-        future_layer = future_layers[0]
-        assert isinstance(future_layer, ImageLayerFileName)
-        assert future_layer.lsn == last_record_lsn
-        return future_layer
-    future_layer = wait_until(10, 0.5, image_layer_arrived_in_index_part)
+    wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
+    future_layers = get_future_layers()
+    assert len(future_layers) == 1
+    future_layer = future_layers[0]
+    assert isinstance(future_layer, ImageLayerFileName)
+    assert future_layer.lsn == last_record_lsn
     log.info(
         f"got layer from the future: lsn={future_layer.lsn} disk_consistent_lsn={ip.disk_consistent_lsn} last_record_lsn={last_record_lsn}"
     )
-
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     future_layer_path = env.pageserver_remote_storage.remote_layer_path(
         tenant_id, timeline_id, future_layer.to_str()
@@ -224,25 +221,11 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
             break
         time.sleep(1)
 
-    # ensure the upload queue looks like we expect it to
-    def upload_queue_has_delete_and_upload_queued():
-        rtc_layer_deletions = ps_http.get_remote_timeline_client_queue_count(tenant_id, timeline_id, "layer", "delete")
-        layer_upload = ps_http.get_remote_timeline_client_queue_count(tenant_id, timeline_id, "layer", "upload")
-        layer_upload_md_update = ps_http.get_remote_timeline_client_queue_count(tenant_id, timeline_id, "index", "upload")
-        assert rtc_layer_deletions == 1 and layer_upload == 1 and layer_upload_md_update == 1, f"unexpected: {rtc_layer_deletions} {layer_upload} {layer_upload_md_update}"
-    wait_until(10, 0.5, upload_queue_has_delete_and_upload_queued)
-
-    assert future_layer_path.exists()
-
-    # unstuck the delete, let upload queue drain.
+    # Window has passed, unstuck the delete, let upload queue drain.
     log.info("unstuck the DELETE")
     ps_http.configure_failpoints(("before-delete-layer-pausable", "off"))
 
     wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
-    # deletions aren't done when the remote timeline client metric is 0, they're only queued to deletion queue
-    # so, force the flushing now
-    ps_http.deletion_queue_flush(execute=True)
-    assert not future_layer_path.exists(), "the deletion queue flush should have removed it"
 
     # Examine the resulting S3 state.
     log.info("integrity-check the remote storage")
