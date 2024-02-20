@@ -175,6 +175,33 @@ impl Scheduler {
         }
     }
 
+    /// Where we have several nodes to choose from, for example when picking a secondary location
+    /// to promote to an attached location, this method may be used to pick the best choice based
+    /// on the scheduler's knowledge of utilization and availability.
+    ///
+    /// If the input is empty, or all the nodes are not elegible for scheduling, return None: the
+    /// caller can pick a node some other way.
+    pub(crate) fn node_preferred(&self, nodes: &[NodeId]) -> Option<NodeId> {
+        if nodes.is_empty() {
+            return None;
+        }
+
+        let node = nodes
+            .iter()
+            .map(|node_id| {
+                let may_schedule = self
+                    .nodes
+                    .get(node_id)
+                    .map(|n| n.may_schedule)
+                    .unwrap_or(false);
+                (*node_id, may_schedule)
+            })
+            .max_by_key(|(_n, may_schedule)| *may_schedule);
+
+        // If even the preferred node has may_schedule==false, return None
+        node.and_then(|(node_id, may_schedule)| if may_schedule { Some(node_id) } else { None })
+    }
+
     pub(crate) fn schedule_shard(&self, hard_exclude: &[NodeId]) -> Result<NodeId, ScheduleError> {
         if self.nodes.is_empty() {
             return Err(ScheduleError::NoPageservers);

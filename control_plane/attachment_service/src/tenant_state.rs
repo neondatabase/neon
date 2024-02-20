@@ -370,11 +370,42 @@ impl TenantState {
         // All remaining observed locations generate secondary intents.  This includes None
         // observations, as these may well have some local content on disk that is usable (this
         // is an edge case that might occur if we restarted during a migration or other change)
+        //
+        // We may leave intent.attached empty if we didn't find any attached locations: [`Self::schedule`]
+        // will take care of promoting one of these secondaries to be attached.
         self.observed.locations.keys().for_each(|node_id| {
             if Some(*node_id) != self.intent.attached {
                 self.intent.secondary.push(*node_id);
             }
         });
+    }
+
+    /// Part of [`Self::schedule`] that is used to choose exactly one node to act as the
+    /// attached pageserver for a shard.
+    ///
+    /// Returns whether we modified it, and the NodeId selected.
+    fn schedule_attached(
+        &mut self,
+        scheduler: &mut Scheduler,
+    ) -> Result<(bool, NodeId), ScheduleError> {
+        // No work to do if we already have an attached tenant
+        if let Some(node_id) = self.intent.attached {
+            return Ok((false, node_id));
+        }
+
+        if let Some(promote_secondary) = scheduler.node_preferred(&self.intent.secondary) {
+            // Promote a secondary
+            tracing::debug!("Promoted secondary {} to attached", promote_secondary);
+            self.intent.secondary.retain(|n| n != &promote_secondary);
+            self.intent.attached = Some(promote_secondary);
+            Ok((true, promote_secondary))
+        } else {
+            // Pick a fresh node: either we had no secondaries or none were schedulable
+            let node_id = scheduler.schedule_shard(&self.intent.secondary)?;
+            tracing::debug!("Selected {} as attached", node_id);
+            self.intent.set_attached(scheduler, Some(node_id));
+            Ok((true, node_id))
+        }
     }
 
     pub(crate) fn schedule(&mut self, scheduler: &mut Scheduler) -> Result<(), ScheduleError> {
@@ -387,19 +418,15 @@ impl TenantState {
 
         // Build the set of pageservers already in use by this tenant, to avoid scheduling
         // more work on the same pageservers we're already using.
-        let mut used_pageservers = self.intent.all_pageservers();
         let mut modified = false;
 
         use PlacementPolicy::*;
         match self.policy {
             Single => {
                 // Should have exactly one attached, and zero secondaries
-                if self.intent.attached.is_none() {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.set_attached(scheduler, Some(node_id));
-                    used_pageservers.push(node_id);
-                    modified = true;
-                }
+                let (modified_attached, _attached_node_id) = self.schedule_attached(scheduler)?;
+                modified |= modified_attached;
+
                 if !self.intent.secondary.is_empty() {
                     self.intent.clear_secondary(scheduler);
                     modified = true;
@@ -407,13 +434,10 @@ impl TenantState {
             }
             Double(secondary_count) => {
                 // Should have exactly one attached, and N secondaries
-                if self.intent.attached.is_none() {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.set_attached(scheduler, Some(node_id));
-                    used_pageservers.push(node_id);
-                    modified = true;
-                }
+                let (modified_attached, attached_node_id) = self.schedule_attached(scheduler)?;
+                modified |= modified_attached;
 
+                let mut used_pageservers = vec![attached_node_id];
                 while self.intent.secondary.len() < secondary_count {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
                     self.intent.push_secondary(scheduler, node_id);
