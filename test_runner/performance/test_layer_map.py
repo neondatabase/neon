@@ -1,6 +1,5 @@
 import time
 
-import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
