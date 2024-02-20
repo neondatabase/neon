@@ -485,7 +485,7 @@ pub fn make_router(
             tenant_service_handler(r, handle_tenant_location_config)
         })
         .put(
-            "/v1/tenant/:tenant_shard_id/time_travel_remote_storage",
+            "/v1/tenant/:tenant_id/time_travel_remote_storage",
             |r| tenant_service_handler(r, handle_tenant_time_travel_remote_storage),
         )
         // Timeline operations

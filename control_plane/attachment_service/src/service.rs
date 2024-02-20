@@ -1257,7 +1257,7 @@ impl Service {
 
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
 
-                let status = client
+                client
                         .tenant_time_travel_remote_storage(
                             tenant_shard_id,
                             &timestamp,
@@ -1270,13 +1270,6 @@ impl Service {
                                 node.id
                             ))
                         })?;
-
-                if status != StatusCode::OK {
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                            "Error doing time travel recovery for shard {tenant_shard_id} on node {}: received status code {status}",
-                            node.id
-                        )));
-                }
             }
         }
 

@@ -222,12 +222,13 @@ impl Client {
         tenant_shard_id: TenantShardId,
         timestamp: &str,
         done_if_after: &str,
-    ) -> Result<StatusCode> {
+    ) -> Result<()> {
         let uri = format!(
             "{}/v1/tenant/{tenant_shard_id}/time_travel_remote_storage?travel_to={timestamp}&done_if_after={done_if_after}",
             self.mgmt_api_endpoint
         );
-        Ok(self.request(Method::PUT, &uri, ()).await?.status())
+        self.request(Method::PUT, &uri, ()).await?;
+        Ok(())
     }
 
     pub async fn tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
