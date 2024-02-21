@@ -1,3 +1,4 @@
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -288,12 +289,18 @@ def test_sharding_split_smoke(
 
 def test_sharding_ingest(
     neon_env_builder: NeonEnvBuilder,
+    build_type: str,
 ):
     """
     Check behaviors related to ingest:
     - That we generate properly sized layers
     - TODO: that updates to remote_consistent_lsn are made correctly via safekeepers
     """
+
+    if build_type == "debug":
+        # The quantity of data isn't huge, but debug can be _very_ slow, and the things we're
+        # validating in this test don't benefit much from debug assertions.
+        pytest.skip("Avoid running bulkier ingest tests in debug mode")
 
     # Set a small stripe size and checkpoint distance, so that we can exercise rolling logic
     # without writing a lot of data.
@@ -319,10 +326,10 @@ def test_sharding_ingest(
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
-    workload.write_rows(512, upload=False)
-    workload.write_rows(512, upload=False)
-    workload.write_rows(512, upload=False)
-    workload.write_rows(512, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
     workload.validate()
 
     small_layer_count = 0
@@ -361,7 +368,12 @@ def test_sharding_ingest(
     # - Because we roll layers on checkpoint_distance * shard_count, we expect to obey the target
     #   layer size on average, but it is still possible to write some tiny layers.
     log.info(f"Totals: {small_layer_count} small layers, {ok_layer_count} ok layers")
-    assert float(small_layer_count) / float(ok_layer_count) < 0.25
+    if small_layer_count <= shard_count:
+        # If each shard has <= 1 small layer
+        pass
+    else:
+        # General case:
+        assert float(small_layer_count) / float(ok_layer_count) < 0.25
 
     # Each shard may emit up to one huge layer, because initdb ingest doesn't respect checkpoint_distance.
     assert huge_layer_count <= shard_count
