@@ -74,16 +74,19 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    # We will make no effort to avoid stale attachments
     for ps in env.pageservers:
         ps.allowed_errors.extend(
             [
+                # We will make no effort to avoid stale attachments
                 ".*Dropped remote consistent LSN updates.*",
                 ".*Dropping stale deletions.*",
                 # page_service_conn_main{peer_addr=[::1]:41176}: query handler for 'pagestream 3b19aec5038c796f64b430b30a555121 d07776761d44050b8aab511df1657d83' failed: Tenant 3b19aec5038c796f64b430b30a555121 not found
                 ".*query handler.*Tenant.*not found.*",
                 # page_service_conn_main{peer_addr=[::1]:45552}: query handler for 'pagestream 414ede7ad50f775a8e7d9ba0e43b9efc a43884be16f44b3626482b6981b2c745' failed: Tenant 414ede7ad50f775a8e7d9ba0e43b9efc is not active
                 ".*query handler.*Tenant.*not active.*",
+                # this shutdown case is logged at WARN severity by the time it bubbles up to logical size calculation code
+                # WARN ...: initial size calculation failed: downloading failed, possibly for shutdown
+                ".*downloading failed, possibly for shutdown",
             ]
         )
 

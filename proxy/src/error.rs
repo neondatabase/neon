@@ -37,8 +37,11 @@ pub enum ErrorKind {
     /// Network error between user and proxy. Not necessarily user error
     ClientDisconnect,
 
-    /// Proxy self-imposed rate limits
+    /// Proxy self-imposed user rate limits
     RateLimit,
+
+    /// Proxy self-imposed service-wise rate limits
+    ServiceRateLimit,
 
     /// internal errors
     Service,
@@ -54,25 +57,12 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    pub fn to_str(&self) -> &'static str {
-        match self {
-            ErrorKind::User => "request failed due to user error",
-            ErrorKind::ClientDisconnect => "client disconnected",
-            ErrorKind::RateLimit => "request cancelled due to rate limit",
-            ErrorKind::Service => "internal service error",
-            ErrorKind::ControlPlane => "non-retryable control plane error",
-            ErrorKind::Postgres => "postgres error",
-            ErrorKind::Compute => {
-                "non-retryable compute connection error (or exhausted retry capacity)"
-            }
-        }
-    }
-
     pub fn to_metric_label(&self) -> &'static str {
         match self {
             ErrorKind::User => "user",
             ErrorKind::ClientDisconnect => "clientdisconnect",
             ErrorKind::RateLimit => "ratelimit",
+            ErrorKind::ServiceRateLimit => "serviceratelimit",
             ErrorKind::Service => "service",
             ErrorKind::ControlPlane => "controlplane",
             ErrorKind::Postgres => "postgres",
@@ -83,12 +73,6 @@ impl ErrorKind {
 
 pub trait ReportableError: fmt::Display + Send + 'static {
     fn get_error_kind(&self) -> ErrorKind;
-}
-
-impl ReportableError for tokio::time::error::Elapsed {
-    fn get_error_kind(&self) -> ErrorKind {
-        ErrorKind::RateLimit
-    }
 }
 
 impl ReportableError for tokio_postgres::error::Error {
