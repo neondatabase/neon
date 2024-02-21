@@ -261,10 +261,7 @@ where
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
 
             for part in slru_partitions.parts {
-                let blocks = self
-                    .timeline
-                    .get_vectored(&part.ranges, self.lsn, self.ctx)
-                    .await?;
+                let blocks = self.timeline.get_vectored(part, self.lsn, self.ctx).await?;
 
                 for (key, block) in blocks {
                     slru_builder.add_block(&key, block?).await?;

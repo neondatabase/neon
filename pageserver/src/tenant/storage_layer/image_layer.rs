@@ -26,20 +26,22 @@
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::PAGE_SZ;
-use crate::repository::{Key, KEY_SIZE};
+use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
     LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
-use crate::tenant::Timeline;
+use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
@@ -59,7 +61,7 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer};
+use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -437,6 +439,74 @@ impl ImageLayerInner {
         } else {
             Ok(ValueReconstructResult::Missing)
         }
+    }
+
+    // Look up the keys in the provided keyspace and update
+    // the reconstruct state with whatever is found.
+    pub(super) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
+
+        let mut offsets = Vec::new();
+
+        for range in keyspace.ranges.iter() {
+            let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+            range.start.write_to_byte_slice(&mut search_key);
+
+            tree_reader
+                .visit(
+                    &search_key,
+                    VisitDirection::Forwards,
+                    |raw_key, value| {
+                        let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                        assert!(key >= range.start);
+
+                        if !range.contains(&key) {
+                            return false;
+                        }
+
+                        offsets.push((key, value));
+
+                        true
+                    },
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::ImageLayerBtreeNode)
+                        .build(),
+                )
+                .await
+                .map_err(|err| GetVectoredError::Other(anyhow!(err)))?;
+        }
+
+        let ctx = &RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::ImageLayerValue)
+            .build();
+
+        let cursor = file.block_cursor();
+        let mut buf = Vec::new();
+        for (key, offset) in offsets {
+            let res = cursor.read_blob_into_buf(offset, &mut buf, ctx).await;
+            if let Err(e) = res {
+                reconstruct_state.on_key_error(
+                    key,
+                    PageReconstructError::from(anyhow!(e).context(format!(
+                        "Failed to read blob from virtual file {}",
+                        file.file.path
+                    ))),
+                );
+
+                continue;
+            }
+
+            let blob = Bytes::copy_from_slice(buf.as_slice());
+            reconstruct_state.update_key(&key, self.lsn, Value::Image(blob));
+        }
+
+        Ok(())
     }
 }
 

@@ -73,7 +73,7 @@ class Workload:
             self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
         )
 
-    def write_rows(self, n, pageserver_id: Optional[int] = None):
+    def write_rows(self, n, pageserver_id: Optional[int] = None, upload: bool = True):
         endpoint = self.endpoint(pageserver_id)
         start = self.expect_rows
         end = start + n - 1
@@ -87,9 +87,12 @@ class Workload:
             """
         )
 
-        return last_flush_lsn_upload(
-            self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
-        )
+        if upload:
+            return last_flush_lsn_upload(
+                self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
+            )
+        else:
+            return False
 
     def churn_rows(self, n, pageserver_id: Optional[int] = None, upload=True):
         assert self.expect_rows >= n

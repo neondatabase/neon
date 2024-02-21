@@ -488,6 +488,11 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
+        self.pageserver_get_vectored_impl: Optional[str] = None
+        if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
+            self.pageserver_get_vectored_impl = "vectored"
+            log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
+
         assert test_name.startswith(
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
@@ -507,7 +512,7 @@ class NeonEnvBuilder:
 
     def init_start(
         self,
-        initial_tenant_conf: Optional[Dict[str, str]] = None,
+        initial_tenant_conf: Optional[Dict[str, Any]] = None,
         default_remote_storage_if_missing: bool = True,
         initial_tenant_shard_count: Optional[int] = None,
         initial_tenant_shard_stripe_size: Optional[int] = None,
@@ -1055,6 +1060,8 @@ class NeonEnv:
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+            if config.pageserver_get_vectored_impl is not None:
+                ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1490,7 +1497,7 @@ class NeonCli(AbstractNeonCli):
         self,
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
-        conf: Optional[Dict[str, str]] = None,
+        conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         set_default: bool = False,

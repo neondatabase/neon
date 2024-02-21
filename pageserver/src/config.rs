@@ -33,6 +33,7 @@ use utils::{
 use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
+use crate::tenant::timeline::GetVectoredImpl;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
@@ -84,6 +85,8 @@ pub mod defaults {
 
     pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
 
+    pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
+
     ///
     /// Default built-in configuration file.
     ///
@@ -120,6 +123,8 @@ pub mod defaults {
 #ingest_batch_size = {DEFAULT_INGEST_BATCH_SIZE}
 
 #virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
+
+#get_vectored_impl = '{DEFAULT_GET_VECTORED_IMPL}'
 
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -256,6 +261,8 @@ pub struct PageServerConf {
     pub ingest_batch_size: u64,
 
     pub virtual_file_io_engine: virtual_file::IoEngineKind,
+
+    pub get_vectored_impl: GetVectoredImpl,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -342,6 +349,8 @@ struct PageServerConfigBuilder {
     ingest_batch_size: BuilderValue<u64>,
 
     virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
+
+    get_vectored_impl: BuilderValue<GetVectoredImpl>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -419,6 +428,8 @@ impl Default for PageServerConfigBuilder {
             ingest_batch_size: Set(DEFAULT_INGEST_BATCH_SIZE),
 
             virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
+
+            get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
         }
     }
 }
@@ -579,6 +590,10 @@ impl PageServerConfigBuilder {
         self.virtual_file_io_engine = BuilderValue::Set(value);
     }
 
+    pub fn get_vectored_impl(&mut self, value: GetVectoredImpl) {
+        self.get_vectored_impl = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_warmup = self
             .concurrent_tenant_warmup
@@ -689,6 +704,9 @@ impl PageServerConfigBuilder {
             virtual_file_io_engine: self
                 .virtual_file_io_engine
                 .ok_or(anyhow!("missing virtual_file_io_engine"))?,
+            get_vectored_impl: self
+                .get_vectored_impl
+                .ok_or(anyhow!("missing get_vectored_impl"))?,
         })
     }
 }
@@ -943,6 +961,9 @@ impl PageServerConf {
                 "virtual_file_io_engine" => {
                     builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
                 }
+                "get_vectored_impl" => {
+                    builder.get_vectored_impl(parse_toml_from_str("get_vectored_impl", item)?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -1017,6 +1038,7 @@ impl PageServerConf {
             secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
+            get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
         }
     }
 }
@@ -1250,6 +1272,7 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
+                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1314,6 +1337,7 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: 100,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
+                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -1548,15 +1572,48 @@ threshold = "20m"
                 eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
             })
         );
+
         match &conf.default_tenant_conf.eviction_policy {
-            EvictionPolicy::NoEviction => panic!("Unexpected eviction opolicy tenant settings"),
-            EvictionPolicy::LayerAccessThreshold(eviction_thresold) => {
-                assert_eq!(eviction_thresold.period, Duration::from_secs(20 * 60));
-                assert_eq!(eviction_thresold.threshold, Duration::from_secs(20 * 60));
+            EvictionPolicy::LayerAccessThreshold(eviction_threshold) => {
+                assert_eq!(eviction_threshold.period, Duration::from_secs(20 * 60));
+                assert_eq!(eviction_threshold.threshold, Duration::from_secs(20 * 60));
             }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn parse_imitation_only_pageserver_config() {
+        let tempdir = tempdir().unwrap();
+        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir).unwrap();
+
+        let pageserver_conf_toml = format!(
+            r#"pg_distrib_dir = "{pg_distrib_dir}"
+metric_collection_endpoint = "http://sample.url"
+metric_collection_interval = "10min"
+id = 222
+
+[tenant_config]
+evictions_low_residence_duration_metric_threshold = "20m"
+
+[tenant_config.eviction_policy]
+kind = "OnlyImitiate"
+period = "20m"
+threshold = "20m"
+"#,
+        );
+        let toml: Document = pageserver_conf_toml.parse().unwrap();
+        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+
+        match &conf.default_tenant_conf.eviction_policy {
+            EvictionPolicy::OnlyImitiate(t) => {
+                assert_eq!(t.period, Duration::from_secs(20 * 60));
+                assert_eq!(t.threshold, Duration::from_secs(20 * 60));
+            }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
+        }
     }
 
     fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {

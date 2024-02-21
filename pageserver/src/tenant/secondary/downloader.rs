@@ -438,8 +438,14 @@ impl From<std::io::Error> for UpdateError {
     fn from(value: std::io::Error) -> Self {
         if let Some(nix::errno::Errno::ENOSPC) = value.raw_os_error().map(nix::errno::from_i32) {
             UpdateError::NoSpace
+        } else if value
+            .get_ref()
+            .and_then(|x| x.downcast_ref::<DownloadError>())
+            .is_some()
+        {
+            UpdateError::from(DownloadError::from(value))
         } else {
-            // An I/O error from e.g. tokio::io::copy is most likely a remote storage issue
+            // An I/O error from e.g. tokio::io::copy_buf is most likely a remote storage issue
             UpdateError::Other(anyhow::anyhow!(value))
         }
     }
@@ -672,20 +678,17 @@ impl<'a> TenantDownloader<'a> {
             .await
             {
                 Ok(bytes) => bytes,
-                Err(e) => {
-                    if let DownloadError::NotFound = e {
-                        // A heatmap might be out of date and refer to a layer that doesn't exist any more.
-                        // This is harmless: continue to download the next layer. It is expected during compaction
-                        // GC.
-                        tracing::debug!(
-                            "Skipped downloading missing layer {}, raced with compaction/gc?",
-                            layer.name
-                        );
-                        continue;
-                    } else {
-                        return Err(e.into());
-                    }
+                Err(DownloadError::NotFound) => {
+                    // A heatmap might be out of date and refer to a layer that doesn't exist any more.
+                    // This is harmless: continue to download the next layer. It is expected during compaction
+                    // GC.
+                    tracing::debug!(
+                        "Skipped downloading missing layer {}, raced with compaction/gc?",
+                        layer.name
+                    );
+                    continue;
                 }
+                Err(e) => return Err(e.into()),
             };
 
             if downloaded_bytes != layer.metadata.file_size {
