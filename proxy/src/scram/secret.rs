@@ -50,13 +50,10 @@ impl ServerSecret {
     /// To avoid revealing information to an attacker, we use a
     /// mocked server secret even if the user doesn't exist.
     /// See `auth-scram.c : mock_scram_secret` for details.
-    pub fn mock(user: &str, nonce: [u8; 32]) -> Self {
-        // Refer to `auth-scram.c : scram_mock_salt`.
-        let mocked_salt = super::sha256([user.as_bytes(), &nonce]);
-
+    pub fn mock(nonce: [u8; 32]) -> Self {
         Self {
             iterations: 4096,
-            salt_base64: base64::encode(mocked_salt),
+            salt_base64: base64::encode(nonce),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
             doomed: true,

@@ -12,6 +12,7 @@ use crate::console::errors::GetAuthInfoError;
 use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::{AuthSecret, NodeInfo};
 use crate::context::RequestMonitoring;
+use crate::intern::EndpointIdInt;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::stream::Stream;
@@ -28,7 +29,7 @@ use crate::{
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -214,14 +215,32 @@ async fn auth_quirks(
         Some(secret) => secret,
         None => api.get_role_secret(ctx, &info).await?,
     };
+    let (cached_entry, secret) = cached_secret.take_value();
 
-    let secret = cached_secret.value.clone().unwrap_or_else(|| {
-        // If we don't have an authentication secret, we mock one to
-        // prevent malicious probing (possible due to missing protocol steps).
-        // This mocked secret will never lead to successful authentication.
-        info!("authentication info not found, mocking it");
-        AuthSecret::Scram(scram::ServerSecret::mock(&info.user, rand::random()))
-    });
+    let secret = match secret {
+        Some(secret) => {
+            // we have validated the endpoint exists, so let's intern it.
+            let endpoint = EndpointIdInt::from(&info.endpoint);
+
+            if config.rate_limiter.check((endpoint, ctx.peer_addr)) {
+                secret
+            } else {
+                // If we don't have an authentication secret, we mock one to
+                // prevent malicious probing (possible due to missing protocol steps).
+                // This mocked secret will never lead to successful authentication.
+                warn!("rate limiting authentication, mocking it");
+                AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
+            }
+        }
+        None => {
+            // If we don't have an authentication secret, we mock one to
+            // prevent malicious probing (possible due to missing protocol steps).
+            // This mocked secret will never lead to successful authentication.
+            info!("authentication info not found, mocking it");
+            AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
+        }
+    };
+
     match authenticate_with_secret(
         ctx,
         secret,
@@ -237,7 +256,7 @@ async fn auth_quirks(
         Err(e) => {
             if e.is_auth_failed() {
                 // The password could have been changed, so we invalidate the cache.
-                cached_secret.invalidate();
+                cached_entry.invalidate();
             }
             Err(e)
         }
@@ -415,6 +434,7 @@ mod tests {
 
     use bytes::BytesMut;
     use fallible_iterator::FallibleIterator;
+    use once_cell::sync::Lazy;
     use postgres_protocol::{
         authentication::sasl::{ChannelBinding, ScramSha256},
         message::{backend::Message as PgMessage, frontend},
@@ -432,6 +452,7 @@ mod tests {
         },
         context::RequestMonitoring,
         proxy::NeonOptions,
+        rate_limiter::{AuthRateLimiter, RateBucketInfo},
         scram::ServerSecret,
         stream::{PqStream, Stream},
     };
@@ -473,9 +494,10 @@ mod tests {
         }
     }
 
-    static CONFIG: &AuthenticationConfig = &AuthenticationConfig {
+    static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
         scram_protocol_timeout: std::time::Duration::from_secs(5),
-    };
+        rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
+    });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
         loop {
@@ -544,7 +566,7 @@ mod tests {
             }
         });
 
-        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, false, CONFIG)
+        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, false, &CONFIG)
             .await
             .unwrap();
 
@@ -584,7 +606,7 @@ mod tests {
             client.write_all(&write).await.unwrap();
         });
 
-        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
+        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, &CONFIG)
             .await
             .unwrap();
 
@@ -624,7 +646,7 @@ mod tests {
             client.write_all(&write).await.unwrap();
         });
 
-        let creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
+        let creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, &CONFIG)
             .await
             .unwrap();
 
