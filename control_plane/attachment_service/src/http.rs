@@ -299,7 +299,10 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
     }
     let state = get_state(&req);
 
-    json_response(StatusCode::OK, state.service.node_configure(config_req)?)
+    json_response(
+        StatusCode::OK,
+        state.service.node_configure(config_req).await?,
+    )
 }
 
 async fn handle_tenant_shard_split(

@@ -2404,7 +2404,18 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) fn node_configure(&self, config_req: NodeConfigureRequest) -> Result<(), ApiError> {
+    pub(crate) async fn node_configure(
+        &self,
+        config_req: NodeConfigureRequest,
+    ) -> Result<(), ApiError> {
+        if let Some(scheduling) = config_req.scheduling {
+            // Scheduling is a persistent part of Node: we must write updates to the database before
+            // applying them in memory
+            self.persistence
+                .update_node(config_req.node_id, scheduling)
+                .await?;
+        }
+
         let mut locked = self.inner.write().unwrap();
         let result_tx = locked.result_tx.clone();
         let compute_hook = locked.compute_hook.clone();

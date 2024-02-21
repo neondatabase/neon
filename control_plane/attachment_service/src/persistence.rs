@@ -6,6 +6,7 @@ use std::time::Duration;
 use self::split_state::SplitState;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
+use control_plane::attachment_service::NodeSchedulingPolicy;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
@@ -139,6 +140,31 @@ impl Persistence {
         tracing::info!("list_nodes: loaded {} nodes", nodes.len());
 
         Ok(nodes)
+    }
+
+    pub(crate) async fn update_node(
+        &self,
+        input_node_id: NodeId,
+        input_scheduling: NodeSchedulingPolicy,
+    ) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        let updated = self
+            .with_conn(move |conn| {
+                let updated = diesel::update(nodes)
+                    .filter(node_id.eq(input_node_id.0 as i64))
+                    .set((scheduling_policy.eq(String::from(input_scheduling)),))
+                    .execute(conn)?;
+                Ok(updated)
+            })
+            .await?;
+
+        if updated != 1 {
+            Err(DatabaseError::Logical(format!(
+                "Node {node_id:?} not found for update",
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// At startup, load the high level state for shards, such as their config + policy.  This will
