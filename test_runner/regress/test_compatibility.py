@@ -226,6 +226,10 @@ def test_forward_compatibility(
     )
 
     try:
+        # TODO: remove this once the previous pageserrver version understands
+        # the 'get_vectored_impl' config
+        neon_env_builder.pageserver_get_vectored_impl = None
+
         neon_env_builder.num_safekeepers = 3
         neon_local_binpath = neon_env_builder.neon_binpath
         env = neon_env_builder.from_repo_dir(
