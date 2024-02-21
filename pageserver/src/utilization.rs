@@ -17,7 +17,7 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
 
     let blocksz = statvfs.block_size();
 
-    #[allow(clippy::unnecessary_cast)] // the cast is for macos
+    #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_cast))]
     let free = statvfs.blocks_available() as u64 * blocksz;
     let used = crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.get();
     let captured_at = std::time::SystemTime::now();
