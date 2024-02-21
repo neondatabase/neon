@@ -75,7 +75,7 @@ pub mod errors {
                     }
                     http::StatusCode::LOCKED => {
                         // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
-                        format!("{REQUEST_FAILED}: endpoint is temporarily unavailable. check your quotas and/or contact our support")
+                        format!("{REQUEST_FAILED}: endpoint is temporarily unavailable. Check your quotas and/or contact our support.")
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 },
