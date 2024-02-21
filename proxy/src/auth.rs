@@ -63,7 +63,8 @@ pub enum AuthErrorImpl {
 
     #[error(
         "This IP address {0} is not allowed to connect to this endpoint. \
-        Please add it to the allowed list in the Neon console."
+        Please add it to the allowed list in the Neon console. \
+        Make sure to check for IPv4 or IPv6 addresses."
     )]
     IpAddressNotAllowed(IpAddr),
 
