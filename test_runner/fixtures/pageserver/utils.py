@@ -237,11 +237,6 @@ def wait_for_upload_queue_empty(
             },
         )
 
-        # If some label sets are present in started but not finished, evidently we aren't finished yet.
-        if len(started) != len(finished):
-            time.sleep(wait_period_secs)
-            continue
-
         # this is `started left join finished`; if match, subtracting start from finished, resulting in queue depth
         remaining_labels = ["shard_id", "file_kind", "op_kind"]
         tl: List[Tuple[Any, float]] = []
