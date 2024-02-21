@@ -87,6 +87,22 @@ pub mod errors {
     impl ReportableError for ApiError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
+                ApiError::Console {
+                    status: http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
+                    ..
+                } => crate::error::ErrorKind::User,
+                ApiError::Console {
+                    status: http::StatusCode::LOCKED,
+                    text,
+                } if text.contains("quota exceeded")
+                    || text.contains("the limit for current plan reached") =>
+                {
+                    crate::error::ErrorKind::User
+                }
+                ApiError::Console {
+                    status: http::StatusCode::TOO_MANY_REQUESTS,
+                    ..
+                } => crate::error::ErrorKind::ServiceRateLimit,
                 ApiError::Console { .. } => crate::error::ErrorKind::ControlPlane,
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
@@ -222,7 +238,7 @@ pub mod errors {
             match self {
                 WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
                 WakeComputeError::ApiError(e) => e.get_error_kind(),
-                WakeComputeError::TimeoutError => crate::error::ErrorKind::RateLimit,
+                WakeComputeError::TimeoutError => crate::error::ErrorKind::ServiceRateLimit,
             }
         }
     }
