@@ -211,7 +211,6 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
     wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
     client.deletion_queue_flush(execute=True)
-    del current_lsn
     env.pageserver.stop()
     env.pageserver.start()
     # We've shut down the SKs, then restarted the PSes to sever all walreceiver connections;
