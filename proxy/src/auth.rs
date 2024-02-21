@@ -21,7 +21,7 @@ use crate::{
     console,
     error::{ReportableError, UserFacingError},
 };
-use std::io;
+use std::{io, net::IpAddr};
 use thiserror::Error;
 
 /// Convenience wrapper for the authentication error.
@@ -62,10 +62,10 @@ pub enum AuthErrorImpl {
     Io(#[from] io::Error),
 
     #[error(
-        "This IP address is not allowed to connect to this endpoint. \
+        "This IP address {0} is not allowed to connect to this endpoint. \
         Please add it to the allowed list in the Neon console."
     )]
-    IpAddressNotAllowed,
+    IpAddressNotAllowed(IpAddr),
 
     #[error("Too many connections to this endpoint. Please try again later.")]
     TooManyConnections,
@@ -87,8 +87,8 @@ impl AuthError {
         AuthErrorImpl::AuthFailed(user.into()).into()
     }
 
-    pub fn ip_address_not_allowed() -> Self {
-        AuthErrorImpl::IpAddressNotAllowed.into()
+    pub fn ip_address_not_allowed(ip: IpAddr) -> Self {
+        AuthErrorImpl::IpAddressNotAllowed(ip).into()
     }
 
     pub fn too_many_connections() -> Self {
@@ -122,7 +122,7 @@ impl UserFacingError for AuthError {
             MalformedPassword(_) => self.to_string(),
             MissingEndpointName => self.to_string(),
             Io(_) => "Internal error".to_string(),
-            IpAddressNotAllowed => self.to_string(),
+            IpAddressNotAllowed(_) => self.to_string(),
             TooManyConnections => self.to_string(),
             UserTimeout(_) => self.to_string(),
         }
@@ -141,7 +141,7 @@ impl ReportableError for AuthError {
             MalformedPassword(_) => crate::error::ErrorKind::User,
             MissingEndpointName => crate::error::ErrorKind::User,
             Io(_) => crate::error::ErrorKind::ClientDisconnect,
-            IpAddressNotAllowed => crate::error::ErrorKind::User,
+            IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
             TooManyConnections => crate::error::ErrorKind::RateLimit,
             UserTimeout(_) => crate::error::ErrorKind::User,
         }
