@@ -56,7 +56,7 @@ where
         let mut client_to_compute_result =
             transfer_one_direction(cx, &mut client_to_compute, client, compute)?;
         let mut compute_to_client_result =
-            transfer_one_direction(cx, &mut compute_to_client, client, compute)?;
+            transfer_one_direction(cx, &mut compute_to_client, compute, client)?;
 
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
@@ -84,10 +84,7 @@ where
         let client_to_compute = ready!(client_to_compute_result);
         let compute_to_client = ready!(compute_to_client_result);
 
-        Poll::Ready(Ok::<(u64, u64), std::io::Error>((
-            client_to_compute,
-            compute_to_client,
-        )))
+        Poll::Ready(Ok((client_to_compute, compute_to_client)))
     })
     .await
 }
