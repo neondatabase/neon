@@ -1,10 +1,13 @@
+import os
+
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     tenant_get_shards,
 )
 from fixtures.remote_storage import s3_storage
-from fixtures.types import TenantShardId, TimelineId
+from fixtures.types import Lsn, TenantShardId, TimelineId
 from fixtures.workload import Workload
 
 
@@ -284,3 +287,95 @@ def test_sharding_split_smoke(
     )
 
     env.attachment_service.consistency_check()
+
+
+@pytest.mark.skipif(
+    # The quantity of data isn't huge, but debug can be _very_ slow, and the things we're
+    # validating in this test don't benefit much from debug assertions.
+    os.getenv("BUILD_TYPE") == "debug",
+    reason="Avoid running bulkier ingest tests in debug mode",
+)
+def test_sharding_ingest(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Check behaviors related to ingest:
+    - That we generate properly sized layers
+    - TODO: that updates to remote_consistent_lsn are made correctly via safekeepers
+    """
+
+    # Set a small stripe size and checkpoint distance, so that we can exercise rolling logic
+    # without writing a lot of data.
+    expect_layer_size = 131072
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{expect_layer_size}",
+        "compaction_target_size": f"{expect_layer_size}",
+    }
+    shard_count = 4
+    neon_env_builder.num_pageservers = shard_count
+    env = neon_env_builder.init_start(
+        initial_tenant_conf=TENANT_CONF,
+        initial_tenant_shard_count=shard_count,
+        # A stripe size the same order of magnitude as layer size: this ensures that
+        # within checkpoint_distance some shards will have no data to ingest, if LSN
+        # contains sequential page writes.  This test checks that this kind of
+        # scenario doesn't result in some shards emitting empty/tiny layers.
+        initial_tenant_shard_stripe_size=expect_layer_size // 8192,
+    )
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.validate()
+
+    small_layer_count = 0
+    ok_layer_count = 0
+    huge_layer_count = 0
+
+    # Inspect the resulting layer map, count how many layers are undersized.
+    for shard in env.attachment_service.locate(tenant_id):
+        pageserver = env.get_pageserver(shard["node_id"])
+        shard_id = shard["shard_id"]
+        layer_map = pageserver.http_client().layer_map_info(shard_id, timeline_id)
+
+        for layer in layer_map.historic_layers:
+            assert layer.layer_file_size is not None
+            if layer.layer_file_size < expect_layer_size // 2:
+                classification = "Small"
+                small_layer_count += 1
+            elif layer.layer_file_size > expect_layer_size * 2:
+                classification = "Huge "
+                huge_layer_count += 1
+            else:
+                classification = "OK   "
+                ok_layer_count += 1
+
+            if layer.kind == "Delta":
+                assert layer.lsn_end is not None
+                lsn_size = Lsn(layer.lsn_end) - Lsn(layer.lsn_start)
+            else:
+                lsn_size = 0
+
+            log.info(
+                f"{classification} layer[{pageserver.id}]: {layer.layer_file_name} (size {layer.layer_file_size}, LSN distance {lsn_size})"
+            )
+
+    # Why an inexact check?
+    # - Because we roll layers on checkpoint_distance * shard_count, we expect to obey the target
+    #   layer size on average, but it is still possible to write some tiny layers.
+    log.info(f"Totals: {small_layer_count} small layers, {ok_layer_count} ok layers")
+    if small_layer_count <= shard_count:
+        # If each shard has <= 1 small layer
+        pass
+    else:
+        # General case:
+        assert float(small_layer_count) / float(ok_layer_count) < 0.25
+
+    # Each shard may emit up to one huge layer, because initdb ingest doesn't respect checkpoint_distance.
+    assert huge_layer_count <= shard_count

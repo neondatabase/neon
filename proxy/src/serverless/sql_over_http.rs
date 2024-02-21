@@ -12,7 +12,7 @@ use hyper::StatusCode;
 use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Value;
-use tokio::join;
+use tokio::try_join;
 use tokio_postgres::error::DbError;
 use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::GenericClient;
@@ -32,11 +32,9 @@ use crate::auth::ComputeUserInfoParseError;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
-use crate::error::ReportableError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
-use crate::serverless::backend::HttpConnError;
 use crate::DbName;
 use crate::RoleName;
 
@@ -166,9 +164,12 @@ fn get_conn_info(
     let mut options = Option::None;
 
     for (key, value) in pairs {
-        if key == "options" {
-            options = Some(NeonOptions::parse_options_raw(&value));
-            break;
+        match &*key {
+            "options" => {
+                options = Some(NeonOptions::parse_options_raw(&value));
+            }
+            "application_name" => ctx.set_application(Some(value.into())),
+            _ => {}
         }
     }
 
@@ -284,8 +285,10 @@ pub async fn handle(
                 )?
             }
         },
-        Err(e) => {
-            ctx.set_error_kind(e.get_error_kind());
+        Err(_) => {
+            // TODO: when http error classification is done, distinguish between
+            // timeout on sql vs timeout in proxy/cplane
+            // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
 
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
@@ -399,16 +402,11 @@ async fn handle_inner(
         // not strictly necessary to mark success here,
         // but it's just insurance for if we forget it somewhere else
         ctx.latency_timer.success();
-        Ok::<_, HttpConnError>(client)
+        Ok::<_, anyhow::Error>(client)
     };
 
     // Run both operations in parallel
-    let (payload_result, auth_and_connect_result) =
-        join!(fetch_and_process_request, authenticate_and_connect,);
-
-    // Handle the results
-    let payload = payload_result?; // Handle errors appropriately
-    let mut client = auth_and_connect_result?; // Handle errors appropriately
+    let (payload, mut client) = try_join!(fetch_and_process_request, authenticate_and_connect)?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)

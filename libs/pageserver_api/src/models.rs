@@ -180,7 +180,7 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
     #[serde(default)]
@@ -293,6 +293,7 @@ pub struct TenantConfig {
 pub enum EvictionPolicy {
     NoEviction,
     LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+    OnlyImitiate(EvictionPolicyLayerAccessThreshold),
 }
 
 impl EvictionPolicy {
@@ -300,6 +301,7 @@ impl EvictionPolicy {
         match self {
             EvictionPolicy::NoEviction => "NoEviction",
             EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+            EvictionPolicy::OnlyImitiate(_) => "OnlyImitiate",
         }
     }
 }
@@ -351,7 +353,7 @@ impl ThrottleConfig {
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
 /// lists out all possible states (and the virtual "Detached" state)
 /// in a flat form rather than using rust-style enums.
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LocationConfigMode {
     AttachedSingle,
     AttachedMulti,
@@ -413,6 +415,12 @@ pub struct TenantLocationConfigRequest {
     pub tenant_id: TenantShardId,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantTimeTravelRequest {
+    pub shard_counts: Vec<ShardCount>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
