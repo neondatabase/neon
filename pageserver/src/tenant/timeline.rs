@@ -4404,7 +4404,7 @@ impl Timeline {
         guard.finish_compact_l0(&remove_layers, &insert_layers, &self.metrics);
 
         if let Some(remote_client) = self.remote_client.as_ref() {
-            remote_client.schedule_compaction_update(&remove_layers, &new_deltas)?;
+            remote_client.schedule_compaction_update(&remove_layers, new_deltas)?;
         }
 
         drop_wlock(guard);

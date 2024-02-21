@@ -379,7 +379,7 @@ pub struct OwnArc<T>(pub Arc<T>);
 impl<T> Deref for OwnArc<T> {
     type Target = <Arc<T> as Deref>::Target;
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        &self.0
     }
 }
 

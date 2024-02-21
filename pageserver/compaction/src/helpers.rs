@@ -120,8 +120,7 @@ impl<'a, E: CompactionJobExecutor> LazyLoadLayer<'a, E> {
 }
 impl<'a, E: CompactionJobExecutor> PartialOrd for LazyLoadLayer<'a, E> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        // reverse order so that we get a min-heap
-        other.key().partial_cmp(&self.key())
+        Some(self.cmp(other))
     }
 }
 impl<'a, E: CompactionJobExecutor> Ord for LazyLoadLayer<'a, E> {
