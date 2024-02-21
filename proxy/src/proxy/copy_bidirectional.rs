@@ -1,4 +1,5 @@
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tracing::info;
 
 use std::future::poll_fn;
 use std::io;
@@ -63,6 +64,7 @@ where
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
             if let TransferState::Running(buf) = &client_to_compute {
+                info!("Compute is done, early termination");
                 // Initiate shutdown
                 client_to_compute = TransferState::ShuttingDown(buf.amt);
                 client_to_compute_result =
@@ -73,10 +75,15 @@ where
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = client_to_compute {
             if let TransferState::Running(buf) = &compute_to_client {
+                info!("Client is done, aerly termination");
                 // Make this closure async internally
                 if let Some(cancel_closure) = cancel_closure.take() {
                     tokio::spawn(async move {
-                        let _ = cancel_closure.try_cancel_query().await;
+                        let e = cancel_closure.try_cancel_query().await;
+                        match e {
+                            Ok(_) => info!("Query cancelled successfully"),
+                            Err(e) => info!("Failed to cancel query: {:?}", e),
+                        }
                     });
                 }
                 // Initiate shutdown
