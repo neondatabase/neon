@@ -688,7 +688,12 @@ impl TenantState {
             shard_count: self.tenant_shard_id.shard_count.literal() as i32,
             shard_stripe_size: self.shard.stripe_size.0 as i32,
             generation: self.generation.into().unwrap_or(0) as i32,
-            generation_pageserver: i64::MAX,
+            generation_pageserver: self
+                .intent
+                .get_attached()
+                .map(|n| n.0 as i64)
+                .unwrap_or(i64::MAX),
+
             placement_policy: serde_json::to_string(&self.policy).unwrap(),
             config: serde_json::to_string(&self.config).unwrap(),
             splitting: SplitState::default(),
