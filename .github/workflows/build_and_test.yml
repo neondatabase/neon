@@ -472,6 +472,7 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
+          PAGESERVER_GET_VECTORED_IMPL: vectored
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540

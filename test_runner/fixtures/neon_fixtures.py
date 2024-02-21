@@ -27,6 +27,7 @@ from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
+import httpx
 import jwt
 import psycopg2
 import pytest
@@ -487,6 +488,11 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
+        self.pageserver_get_vectored_impl: Optional[str] = None
+        if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
+            self.pageserver_get_vectored_impl = "vectored"
+            log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
+
         assert test_name.startswith(
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
@@ -506,7 +512,7 @@ class NeonEnvBuilder:
 
     def init_start(
         self,
-        initial_tenant_conf: Optional[Dict[str, str]] = None,
+        initial_tenant_conf: Optional[Dict[str, Any]] = None,
         default_remote_storage_if_missing: bool = True,
         initial_tenant_shard_count: Optional[int] = None,
         initial_tenant_shard_stripe_size: Optional[int] = None,
@@ -1054,6 +1060,8 @@ class NeonEnv:
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+            if config.pageserver_get_vectored_impl is not None:
+                ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1489,7 +1497,7 @@ class NeonCli(AbstractNeonCli):
         self,
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
-        conf: Optional[Dict[str, str]] = None,
+        conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         set_default: bool = False,
@@ -2856,8 +2864,33 @@ class NeonProxy(PgProtocol):
         )
 
         if expected_code is not None:
-            assert response.status_code == kwargs["expected_code"], f"response: {response.json()}"
+            assert response.status_code == expected_code, f"response: {response.json()}"
         return response.json()
+
+    async def http2_query(self, query, args, **kwargs):
+        # TODO maybe use default values if not provided
+        user = kwargs["user"]
+        password = kwargs["password"]
+        expected_code = kwargs.get("expected_code")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        async with httpx.AsyncClient(
+            http2=True, verify=str(self.test_output_dir / "proxy.crt")
+        ) as client:
+            response = await client.post(
+                f"https://{self.domain}:{self.external_http_port}/sql",
+                json={"query": query, "params": args},
+                headers={
+                    "Content-Type": "application/sql",
+                    "Neon-Connection-String": connstr,
+                    "Neon-Pool-Opt-In": "true",
+                },
+            )
+            assert response.http_version == "HTTP/2"
+
+            if expected_code is not None:
+                assert response.status_code == expected_code, f"response: {response.json()}"
+            return response.json()
 
     def get_metrics(self) -> str:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
