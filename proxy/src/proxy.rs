@@ -135,7 +135,7 @@ pub async fn task_main(
                     Ok(Some(p)) => {
                         ctx.set_success();
                         ctx.log();
-                        p.proxy_pass(true).await
+                        p.proxy_pass().await
                     }
                 }
             }

@@ -172,7 +172,7 @@ impl CancelClosure {
     pub async fn try_cancel_query(self) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
         self.cancel_token.cancel_query_raw(socket, NoTls).await?;
-        info!("query cancelled");
+        info!("query was cancelled");
         Ok(())
     }
 }

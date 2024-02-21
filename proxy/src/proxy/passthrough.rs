@@ -66,11 +66,9 @@ pub struct ProxyPassthrough<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
-    pub async fn proxy_pass(self, ensure_cancellation: bool) -> anyhow::Result<()> {
+    pub async fn proxy_pass(self) -> anyhow::Result<()> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
-        if ensure_cancellation {
-            self.compute.cancel_closure.try_cancel_query().await?;
-        }
+        self.compute.cancel_closure.try_cancel_query().await?;
         res
     }
 }
