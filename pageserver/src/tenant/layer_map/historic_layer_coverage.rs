@@ -413,6 +413,8 @@ fn test_persistent_overlapping() {
 /// See this for more on persistent and retroactive techniques:
 /// <https://www.youtube.com/watch?v=WqCWghETNDc&t=581s>
 pub struct BufferedHistoricLayerCoverage<Value> {
+    rebuild_version: RebuildVersion,
+
     /// A persistent layer map that we rebuild when we need to retroactively update
     historic_coverage: HistoricLayerCoverage<Value>,
 
@@ -438,9 +440,33 @@ impl<T: Clone> Default for BufferedHistoricLayerCoverage<T> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RebuildVersion(u64);
+
+impl RebuildVersion {
+    fn inc(&mut self) {
+        self.0
+            .checked_add(1)
+            .expect("at current clock cycles, we won't hit this");
+    }
+}
+
+impl Default for RebuildVersion {
+    fn default() -> Self {
+        RebuildVersion(1)
+    }
+}
+
+impl std::fmt::Display for RebuildVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     pub fn new() -> Self {
         Self {
+            rebuild_version: RebuildVersion::default(),
             historic_coverage: HistoricLayerCoverage::<Value>::new(),
             buffer: BTreeMap::new(),
             layers: BTreeMap::new(),
@@ -461,6 +487,8 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
             Some((LayerKey { lsn, .. }, _)) => lsn.start,
             None => return, // No need to rebuild if buffer is empty
         };
+
+        self.rebuild_version.inc();
 
         // Apply buffered updates to self.layers
         let num_updates = self.buffer.len();
@@ -493,8 +521,10 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
 
         // TODO maybe only warn if ratio is at least 10
         info!(
+            version = %self.rebuild_version,
             "Rebuilt layer map. Did {} insertions to process a batch of {} updates.",
-            num_inserted, num_updates,
+            num_inserted,
+            num_updates,
         )
     }
 

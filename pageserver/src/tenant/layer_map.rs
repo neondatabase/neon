@@ -500,7 +500,7 @@ impl LayerMap {
     ///
     /// Helper function for BatchedUpdates::remove_historic
     ///
-    pub fn remove_historic_noflush(&mut self, layer_desc: &PersistentLayerDesc) {
+    pub(self) fn remove_historic_noflush(&mut self, layer_desc: &PersistentLayerDesc) {
         self.historic
             .remove(historic_layer_coverage::LayerKey::from(layer_desc));
         let layer_key = layer_desc.key();
