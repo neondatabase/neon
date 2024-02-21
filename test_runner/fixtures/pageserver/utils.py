@@ -219,6 +219,7 @@ def wait_for_last_record_lsn(
 def wait_for_upload_queue_empty(
     pageserver_http: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
+    wait_period_secs = 0.2
     while True:
         all_metrics = pageserver_http.get_metrics()
         started = all_metrics.query_all(
@@ -235,7 +236,12 @@ def wait_for_upload_queue_empty(
                 "timeline_id": str(timeline_id),
             },
         )
-        assert len(started) == len(finished)
+
+        # If some label sets are present in started but not finished, evidently we aren't finished yet.
+        if len(started) != len(finished):
+            time.sleep(wait_period_secs)
+            continue
+
         # this is `started left join finished`; if match, subtracting start from finished, resulting in queue depth
         remaining_labels = ["shard_id", "file_kind", "op_kind"]
         tl: List[Tuple[Any, float]] = []
@@ -256,7 +262,7 @@ def wait_for_upload_queue_empty(
             log.info(f"  {labels}: {queue_count}")
         if all(queue_count == 0 for (_, queue_count) in tl):
             return
-        time.sleep(0.2)
+        time.sleep(wait_period_secs)
 
 
 def wait_timeline_detail_404(
