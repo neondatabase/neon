@@ -307,6 +307,7 @@ impl KeySpaceRandomAccum {
     }
 }
 
+#[inline(always)]
 pub fn key_range_size(key_range: &Range<Key>) -> u32 {
     let start = key_range.start;
     let end = key_range.end;

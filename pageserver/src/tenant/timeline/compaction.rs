@@ -347,7 +347,7 @@ impl TimelineAdaptor {
                         }
                     }
                 };
-                image_layer_writer.put_image(key, &img).await?;
+                image_layer_writer.put_image(key, img).await?;
                 key = key.next();
             }
         }

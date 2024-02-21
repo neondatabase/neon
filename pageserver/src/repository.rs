@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::AddAssign;
 use std::time::Duration;
 
-pub use pageserver_api::key::{key_range_size, Key, KEY_SIZE};
+pub use pageserver_api::key::{Key, KEY_SIZE};
 
 /// A 'value' stored for a one Key.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1516,7 +1516,7 @@ impl Timeline {
     }
 
     fn get_compaction_algorithm(&self) -> CompactionAlgorithm {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf;
         tenant_conf
             .compaction_algorithm
             .unwrap_or(self.conf.default_tenant_conf.compaction_algorithm)

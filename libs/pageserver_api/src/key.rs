@@ -523,30 +523,6 @@ pub fn is_slru_block_key(key: Key) -> bool {
 }
 
 #[inline(always)]
-pub fn key_range_size(key_range: &Range<Key>) -> u32 {
-    let start = key_range.start;
-    let end = key_range.end;
-
-    if end.field1 != start.field1
-        || end.field2 != start.field2
-        || end.field3 != start.field3
-        || end.field4 != start.field4
-    {
-        return u32::MAX;
-    }
-
-    let start = (start.field5 as u64) << 32 | start.field6 as u64;
-    let end = (end.field5 as u64) << 32 | end.field6 as u64;
-
-    let diff = end - start;
-    if diff > u32::MAX as u64 {
-        u32::MAX
-    } else {
-        diff as u32
-    }
-}
-
-#[inline(always)]
 pub fn is_rel_block_key(key: &Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0 && key.field6 != 0xffffffff
 }
