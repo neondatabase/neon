@@ -1398,17 +1398,20 @@ paths:
                   properties:
                     disk_usage_bytes:
                       type: integer
+                      format: int64
                       minimum: 0
                       description: The amount of disk space currently utilized by layer files.
                     free_space_bytes:
                       type: integer
+                      format: int64
                       minimum: 0
                       description: The amount of usable disk space left.
                     utilization_score:
                       type: integer
+                      format: int64
                       minimum: 0
-                      maximum: 9007199254740991
-                      default: 9007199254740991
+                      maximum: 9223372036854775807
+                      default: 9223372036854775807
                       description: |
                         Lower is better score for how good this pageserver would be for the next tenant.
 

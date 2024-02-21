@@ -8,10 +8,6 @@ use std::path::Path;
 
 use pageserver_api::models::PageserverUtilization;
 
-/// u64 in json is problematic for many parsers. This is 2**53 - 1, which will be equal when parsed
-/// as u64 or f64.
-const MAX_JSON_INTEGER: u64 = 9007199254740991;
-
 pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtilization> {
     // TODO: currently the http api ratelimits this to 1Hz at most, which is probably good enough
 
@@ -30,7 +26,9 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
         disk_usage_bytes: used,
         free_space_bytes: free,
         // lower is better; start with a constant
-        utilization_score: MAX_JSON_INTEGER,
+        //
+        // note that u64::MAX will be output as i64::MAX as u64, but that should not matter
+        utilization_score: u64::MAX,
         captured_at,
     };
 
