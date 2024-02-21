@@ -52,6 +52,10 @@ pub enum ComputeStatus {
     // compute will exit soon or is waiting for
     // control-plane to terminate it.
     Failed,
+    // Termination requested
+    TerminationPending,
+    // Terminated Postgres
+    Terminated,
 }
 
 fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>

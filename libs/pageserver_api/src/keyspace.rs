@@ -2,6 +2,7 @@ use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 
 use crate::key::Key;
+use itertools::Itertools;
 
 ///
 /// Represents a set of Keys, in a compact form.
@@ -63,9 +64,36 @@ impl KeySpace {
         KeyPartitioning { parts }
     }
 
-    /// Update the keyspace such that it doesn't contain any range
-    /// that is overlapping with `other`. This can involve splitting or
-    /// removing of existing ranges.
+    /// Merge another keyspace into the current one.
+    /// Note: the keyspaces must not ovelap (enforced via assertions)
+    pub fn merge(&mut self, other: &KeySpace) {
+        let all_ranges = self
+            .ranges
+            .iter()
+            .merge_by(other.ranges.iter(), |lhs, rhs| lhs.start < rhs.start);
+
+        let mut accum = KeySpaceAccum::new();
+        let mut prev: Option<&Range<Key>> = None;
+        for range in all_ranges {
+            if let Some(prev) = prev {
+                let overlap =
+                    std::cmp::max(range.start, prev.start) < std::cmp::min(range.end, prev.end);
+                assert!(
+                    !overlap,
+                    "Attempt to merge ovelapping keyspaces: {:?} overlaps {:?}",
+                    prev, range
+                );
+            }
+
+            accum.add_range(range.clone());
+            prev = Some(range);
+        }
+
+        self.ranges = accum.to_keyspace().ranges;
+    }
+
+    /// Remove all keys in `other` from `self`.
+    /// This can involve splitting or removing of existing ranges.
     pub fn remove_overlapping_with(&mut self, other: &KeySpace) {
         let (self_start, self_end) = match (self.start(), self.end()) {
             (Some(start), Some(end)) => (start, end),
@@ -220,16 +248,7 @@ impl KeySpaceAccum {
     }
 
     pub fn consume_keyspace(&mut self) -> KeySpace {
-        if let Some(accum) = self.accum.take() {
-            self.ranges.push(accum);
-        }
-
-        let mut prev_accum = KeySpaceAccum::new();
-        std::mem::swap(self, &mut prev_accum);
-
-        KeySpace {
-            ranges: prev_accum.ranges,
-        }
+        std::mem::take(self).to_keyspace()
     }
 
     pub fn size(&self) -> u64 {
@@ -278,6 +297,13 @@ impl KeySpaceRandomAccum {
             ranges.push(start..end);
         }
         KeySpace { ranges }
+    }
+
+    pub fn consume_keyspace(&mut self) -> KeySpace {
+        let mut prev_accum = KeySpaceRandomAccum::new();
+        std::mem::swap(self, &mut prev_accum);
+
+        prev_accum.to_keyspace()
     }
 }
 

@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from mypy_boto3_s3.type_defs import (
     DeleteObjectOutputTypeDef,
@@ -221,16 +221,40 @@ def wait_for_upload_queue_empty(
 ):
     while True:
         all_metrics = pageserver_http.get_metrics()
-        tl = all_metrics.query_all(
-            "pageserver_remote_timeline_client_calls_unfinished",
+        started = all_metrics.query_all(
+            "pageserver_remote_timeline_client_calls_started_total",
             {
                 "tenant_id": str(tenant_id),
                 "timeline_id": str(timeline_id),
             },
         )
-        assert len(tl) > 0
-        log.info(f"upload queue for {tenant_id}/{timeline_id}: {tl}")
-        if all(m.value == 0 for m in tl):
+        finished = all_metrics.query_all(
+            "pageserver_remote_timeline_client_calls_finished_total",
+            {
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+            },
+        )
+        assert len(started) == len(finished)
+        # this is `started left join finished`; if match, subtracting start from finished, resulting in queue depth
+        remaining_labels = ["shard_id", "file_kind", "op_kind"]
+        tl: List[Tuple[Any, float]] = []
+        for s in started:
+            found = False
+            for f in finished:
+                if all([s.labels[label] == f.labels[label] for label in remaining_labels]):
+                    assert (
+                        not found
+                    ), "duplicate match, remaining_labels don't uniquely identify sample"
+                    tl.append((s.labels, int(s.value) - int(f.value)))
+                    found = True
+            if not found:
+                tl.append((s.labels, int(s.value)))
+        assert len(tl) == len(started), "something broken with join logic"
+        log.info(f"upload queue for {tenant_id}/{timeline_id}:")
+        for labels, queue_count in tl:
+            log.info(f"  {labels}: {queue_count}")
+        if all(queue_count == 0 for (_, queue_count) in tl):
             return
         time.sleep(0.2)
 

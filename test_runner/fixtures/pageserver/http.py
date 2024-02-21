@@ -702,32 +702,33 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             },
         ).value
 
-    def get_remote_timeline_client_metric(
+    def get_remote_timeline_client_queue_count(
         self,
-        metric_name: str,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         file_kind: str,
         op_kind: str,
-    ) -> Optional[float]:
-        metrics = self.get_metrics()
-        matches = metrics.query_all(
-            name=metric_name,
+    ) -> Optional[int]:
+        metrics = [
+            "pageserver_remote_timeline_client_calls_started_total",
+            "pageserver_remote_timeline_client_calls_finished_total",
+        ]
+        res = self.get_metrics_values(
+            metrics,
             filter={
                 "tenant_id": str(tenant_id),
                 "timeline_id": str(timeline_id),
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),
             },
+            absence_ok=True,
         )
-        if len(matches) == 0:
-            value = None
-        elif len(matches) == 1:
-            value = matches[0].value
-            assert value is not None
-        else:
-            assert len(matches) < 2, "above filter should uniquely identify metric"
-        return value
+        if len(res) != 2:
+            return None
+        inc, dec = [res[metric] for metric in metrics]
+        queue_count = int(inc) - int(dec)
+        assert queue_count >= 0
+        return queue_count
 
     def layer_map_info(
         self,
