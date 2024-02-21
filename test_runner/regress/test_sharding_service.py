@@ -8,17 +8,18 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
+    MANY_SMALL_LAYERS_TENANT_CONFIG,
+    enable_remote_storage_versioning,
     list_prefix,
     remote_storage_delete_key,
     tenant_delete_wait_completed,
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.remote_storage import s3_storage
+from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
 from mypy_boto3_s3.type_defs import (
@@ -486,13 +487,25 @@ def test_sharding_service_s3_time_travel_recovery(
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
+    # Mock S3 doesn't have versioning enabled by default, enable it
+    # (also do it before there is any writes to the bucket)
+    if remote_storage_kind == RemoteStorageKind.MOCK_S3:
+        remote_storage = neon_env_builder.pageserver_remote_storage
+        assert remote_storage, "remote storage not configured"
+        enable_remote_storage_versioning(remote_storage)
+
     neon_env_builder.num_pageservers = 1
 
     env = neon_env_builder.init_start()
     virtual_ps_http = PageserverHttpClient(env.attachment_service_port, lambda: True)
 
     tenant_id = TenantId.generate()
-    env.attachment_service.tenant_create(tenant_id, shard_count=2, shard_stripe_size=8192)
+    env.attachment_service.tenant_create(
+        tenant_id,
+        shard_count=2,
+        shard_stripe_size=8192,
+        tenant_config=MANY_SMALL_LAYERS_TENANT_CONFIG,
+    )
 
     # Check that the consistency check passes
     env.attachment_service.consistency_check()
@@ -505,7 +518,7 @@ def test_sharding_service_s3_time_travel_recovery(
     # Write some nontrivial amount of data into the endpoint and wait until it is uploaded
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         run_pg_bench_small(pg_bin, endpoint.connstr())
-        #last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+        # last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
     # Give the data time to be uploaded
     time.sleep(4)
@@ -525,14 +538,21 @@ def test_sharding_service_s3_time_travel_recovery(
     ts_before_disaster = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     time.sleep(4)
 
-    # Simulate a "disaster": delete some random files from remote storage
+    # Simulate a "disaster": delete some random files from remote storage for one of the shards
     assert env.pageserver_remote_storage
+    shard_id_for_list = "0002"
     objects: List[ObjectTypeDef] = list_prefix(
-        env.pageserver_remote_storage, f"tenants/{tenant_id}"
+        env.pageserver_remote_storage,
+        f"tenants/{tenant_id}-{shard_id_for_list}/timelines/{timeline_id}/",
     ).get("Contents", [])
+    assert len(objects) > 1
+    log.info(f"Found {len(objects)} objects in remote storage")
+    should_delete = False
     for obj in objects:
         obj_key = obj["Key"]
-        if "initdb-preserved.tar.zst" in obj_key:
+        should_delete = not should_delete
+        if not should_delete:
+            log.info(f"Keeping key on remote storage: {obj_key}")
             continue
         log.info(f"Deleting key from remote storage: {obj_key}")
         remote_storage_delete_key(env.pageserver_remote_storage, obj_key)
