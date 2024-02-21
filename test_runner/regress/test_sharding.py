@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -287,20 +289,20 @@ def test_sharding_split_smoke(
     env.attachment_service.consistency_check()
 
 
+@pytest.mark.skipif(
+    # The quantity of data isn't huge, but debug can be _very_ slow, and the things we're
+    # validating in this test don't benefit much from debug assertions.
+    os.getenv("BUILD_TYPE") == "debug",
+    reason="Avoid running bulkier ingest tests in debug mode",
+)
 def test_sharding_ingest(
     neon_env_builder: NeonEnvBuilder,
-    build_type: str,
 ):
     """
     Check behaviors related to ingest:
     - That we generate properly sized layers
     - TODO: that updates to remote_consistent_lsn are made correctly via safekeepers
     """
-
-    if build_type == "debug":
-        # The quantity of data isn't huge, but debug can be _very_ slow, and the things we're
-        # validating in this test don't benefit much from debug assertions.
-        pytest.skip("Avoid running bulkier ingest tests in debug mode")
 
     # Set a small stripe size and checkpoint distance, so that we can exercise rolling logic
     # without writing a lot of data.
