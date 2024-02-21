@@ -66,7 +66,6 @@ FALLBACK_DURATION = {
     "test_runner/performance/test_compare_pg_stats.py::test_compare_pg_stats_wo_with_pgbench_simple_update[vanilla-5-10-100]": 16.434,
     "test_runner/performance/test_copy.py::test_copy[neon]": 13.817,
     "test_runner/performance/test_copy.py::test_copy[vanilla]": 11.736,
-    "test_runner/performance/test_gc_feedback.py::test_gc_feedback": 575.735,
     "test_runner/performance/test_gist_build.py::test_gist_buffering_build[neon]": 14.868,
     "test_runner/performance/test_gist_build.py::test_gist_buffering_build[vanilla]": 14.393,
     "test_runner/performance/test_latency.py::test_measure_read_latency_heavy_write_workload[neon-1]": 20.588,

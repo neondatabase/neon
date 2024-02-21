@@ -339,7 +339,6 @@ pub struct TenantConf {
     // See the corresponding metric's help string.
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
-    pub gc_feedback: bool,
 
     /// If non-zero, the period between uploads of a heatmap from attached tenants.  This
     /// may be disabled if a Tenant will not have secondary locations: only secondary
@@ -428,10 +427,6 @@ pub struct TenantConfOpt {
     pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub gc_feedback: Option<bool>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub heatmap_period: Option<Duration>,
@@ -485,7 +480,6 @@ impl TenantConfOpt {
             evictions_low_residence_duration_metric_threshold: self
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
-            gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
             heatmap_period: self.heatmap_period.unwrap_or(global_conf.heatmap_period),
             lazy_slru_download: self
                 .lazy_slru_download
@@ -530,7 +524,6 @@ impl Default for TenantConf {
                 DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
-            gc_feedback: false,
             heatmap_period: Duration::ZERO,
             lazy_slru_download: false,
             timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
@@ -603,7 +596,6 @@ impl From<TenantConfOpt> for models::TenantConfig {
             evictions_low_residence_duration_metric_threshold: value
                 .evictions_low_residence_duration_metric_threshold
                 .map(humantime),
-            gc_feedback: value.gc_feedback,
             heatmap_period: value.heatmap_period.map(humantime),
             lazy_slru_download: value.lazy_slru_download,
             timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),

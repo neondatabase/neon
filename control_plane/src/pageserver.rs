@@ -389,11 +389,6 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
-            gc_feedback: settings
-                .remove("gc_feedback")
-                .map(|x| x.parse::<bool>())
-                .transpose()
-                .context("Failed to parse 'gc_feedback' as bool")?,
             heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
             lazy_slru_download: settings
                 .remove("lazy_slru_download")
@@ -499,11 +494,6 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-                gc_feedback: settings
-                    .remove("gc_feedback")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'gc_feedback' as bool")?,
                 heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
                 lazy_slru_download: settings
                     .remove("lazy_slru_download")
