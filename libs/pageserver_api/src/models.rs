@@ -291,6 +291,7 @@ pub struct TenantConfig {
 pub enum EvictionPolicy {
     NoEviction,
     LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+    OnlyImitiate(EvictionPolicyLayerAccessThreshold),
 }
 
 impl EvictionPolicy {
@@ -298,6 +299,7 @@ impl EvictionPolicy {
         match self {
             EvictionPolicy::NoEviction => "NoEviction",
             EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+            EvictionPolicy::OnlyImitiate(_) => "OnlyImitiate",
         }
     }
 }
