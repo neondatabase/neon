@@ -313,7 +313,7 @@ impl MockTimeline {
         Ok(())
     }
 
-    pub fn print_stats(&self) -> anyhow::Result<String> {
+    pub fn stats(&self) -> anyhow::Result<String> {
         let mut s = String::new();
 
         writeln!(s, "STATISTICS:")?;

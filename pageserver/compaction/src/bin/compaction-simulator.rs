@@ -83,7 +83,7 @@ async fn simulate(cmd: &SimulateCmd, results_path: &Path) -> anyhow::Result<()> 
             }
         }
         Distribution::HotCold => {
-            let splitpoint = key_range.end / 10;
+            let splitpoint = key_range.start + (key_range.end - key_range.start) / 10;
             let hot_key_range = 0..splitpoint;
             let cold_key_range = splitpoint..key_range.end;
 
@@ -103,10 +103,10 @@ async fn simulate(cmd: &SimulateCmd, results_path: &Path) -> anyhow::Result<()> 
     println!("done!");
     executor.flush_l0();
     executor.compact_if_needed().await?;
-    let stats = executor.print_stats()?;
+    let stats = executor.stats()?;
 
     // Print the stats to stdout, and also to a file
-    print!("{}", stats);
+    print!("{stats}");
     std::fs::write(results_path.join("stats.txt"), stats)?;
 
     let animation_path = results_path.join("compaction-animation.html");

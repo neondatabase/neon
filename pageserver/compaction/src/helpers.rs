@@ -18,11 +18,7 @@ pub fn keyspace_total_size<K>(keyspace: &CompactionKeySpace<K>) -> u64
 where
     K: CompactionKey,
 {
-    let mut total = 0;
-    for r in keyspace.iter() {
-        total += K::key_range_size(r) as u64;
-    }
-    total
+    keyspace.iter().map(|r| K::key_range_size(r) as u64).sum()
 }
 
 pub fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
