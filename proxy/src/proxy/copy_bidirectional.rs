@@ -66,6 +66,7 @@ where
                     if let TransferState::Running(buf) = &compute_to_client {
                         info!("Client is done, early termination");
                         // Make this closure async internally
+                        let span  = tracing::Span::current();
                         if let Some(cancel_closure) = cancel_closure.take() {
                             tokio::spawn(async move {
                                 let e = cancel_closure.try_cancel_query().instrument(span).await;
