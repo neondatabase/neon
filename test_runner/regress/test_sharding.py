@@ -340,7 +340,7 @@ def test_sharding_ingest(
             if layer.layer_file_size < expect_layer_size // 2:
                 classification = "Small"
                 small_layer_count += 1
-            elif layer.layer_file_size >> expect_layer_size * 2:
+            elif layer.layer_file_size > expect_layer_size * 2:
                 classification = "Huge "
                 huge_layer_count += 1
             else:
