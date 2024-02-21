@@ -175,6 +175,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         pg_tenant_only_auth: None,
         http_auth: None,
         current_thread_runtime: false,
+        walsenders_keep_horizon: false,
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;

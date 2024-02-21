@@ -136,6 +136,21 @@ impl WalSenders {
         self.mutex.lock().slots.iter().flatten().cloned().collect()
     }
 
+    /// Get LSN of the most lagging pageserver receiver. Return None if there are no
+    /// active walsenders.
+    pub fn laggard_lsn(self: &Arc<WalSenders>) -> Option<Lsn> {
+        self.mutex
+            .lock()
+            .slots
+            .iter()
+            .flatten()
+            .filter_map(|s| match s.feedback {
+                ReplicationFeedback::Pageserver(feedback) => Some(feedback.last_received_lsn),
+                ReplicationFeedback::Standby(_) => None,
+            })
+            .min()
+    }
+
     /// Get aggregated pageserver feedback.
     pub fn get_ps_feedback(self: &Arc<WalSenders>) -> PageserverFeedback {
         self.mutex.lock().agg_ps_feedback
