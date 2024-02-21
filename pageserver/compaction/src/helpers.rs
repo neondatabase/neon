@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{DerefMut, Range};
 use std::pin::Pin;
-use std::task::Poll;
+use std::task::{ready, Poll};
 
 pub fn keyspace_total_size<K>(keyspace: &CompactionKeySpace<K>) -> u64
 where
@@ -161,17 +161,14 @@ where
         loop {
             if let Some(mut load_future) = this.load_future.as_mut().as_pin_mut() {
                 // We are waiting for loading the keys to finish
-                match load_future.as_mut().poll(cx) {
-                    Poll::Ready(Ok(entries)) => {
+                match ready!(load_future.as_mut().poll(cx)) {
+                    Ok(entries) => {
                         this.load_future.set(None);
                         *this.heap.peek_mut().unwrap() =
                             LazyLoadLayer::Loaded(VecDeque::from(entries));
                     }
-                    Poll::Ready(Err(e)) => {
+                    Err(e) => {
                         return Poll::Ready(Some(Err(e)));
-                    }
-                    Poll::Pending => {
-                        return Poll::Pending;
                     }
                 }
             }
@@ -184,7 +181,7 @@ where
                 match top.deref_mut() {
                     LazyLoadLayer::Unloaded(ref mut l) => {
                         let fut = l.load_keys(this.ctx);
-                        this.load_future.set(Some(Box::pin(fut)));
+                        this.load_future.set(Some(fut));
                         continue;
                     }
                     LazyLoadLayer::Loaded(ref mut entries) => {

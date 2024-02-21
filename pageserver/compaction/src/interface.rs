@@ -85,7 +85,7 @@ pub trait CompactionJobExecutor {
     /// all the create_image() or create_delta() calls that deletion of this
     /// layer depends on have finished. But if the implementor has extra lazy
     /// background tasks, like uploading the index json file to remote storage,
-    /// it is the implemenation's responsibility to track those.
+    /// it is the implementation's responsibility to track those.
     async fn delete_layer(
         &mut self,
         layer: &Self::Layer,
