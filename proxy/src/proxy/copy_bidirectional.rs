@@ -1,6 +1,6 @@
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc::error;
-use tracing::info;
+use tracing::{info, Instrument};
 
 use std::future::poll_fn;
 use std::io;
@@ -43,6 +43,7 @@ where
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub(super) async fn copy_bidirectional_client_compute<Client, Compute, Cancel>(
     client: &mut Client,
     compute: &mut Compute,
@@ -67,7 +68,7 @@ where
                         // Make this closure async internally
                         if let Some(cancel_closure) = cancel_closure.take() {
                             tokio::spawn(async move {
-                                let e = cancel_closure.try_cancel_query().await;
+                                let e = cancel_closure.try_cancel_query().instrument(span).await;
                                 match e {
                                     Ok(_) => info!("Query cancelled successfully"),
                                     Err(e) => info!("Failed to cancel query: {:?}", e),
@@ -115,8 +116,9 @@ where
                 info!("Client is done, early termination");
                 // Make this closure async internally
                 if let Some(cancel_closure) = cancel_closure.take() {
+                    let span = tracing::Span::current();
                     tokio::spawn(async move {
-                        let e = cancel_closure.try_cancel_query().await;
+                        let e = cancel_closure.try_cancel_query().instrument(span).await;
                         match e {
                             Ok(_) => info!("Query cancelled successfully"),
                             Err(e) => info!("Failed to cancel query: {:?}", e),
