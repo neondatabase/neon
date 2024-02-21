@@ -776,7 +776,6 @@ async fn init_timeline_state(
         .await
         .fatal_err(&format!("Listing {timeline_path}"))
     {
-        let dentry_file_name = dentry.file_name();
         let Ok(file_path) = Utf8PathBuf::from_path_buf(dentry.path()) else {
             tracing::warn!("Malformed filename at {}", dentry.path().to_string_lossy());
             continue;
@@ -802,7 +801,7 @@ async fn init_timeline_state(
             continue;
         }
 
-        match LayerFileName::from_str(&file_name) {
+        match LayerFileName::from_str(file_name) {
             Ok(name) => {
                 let remote_meta = heatmap_metadata.get(&name);
                 match remote_meta {
