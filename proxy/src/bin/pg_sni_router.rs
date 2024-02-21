@@ -279,5 +279,5 @@ async fn handle_client(
     ctx.set_success();
     ctx.log();
 
-    proxy::proxy::passthrough::proxy_pass(tls_stream, client, None, metrics_aux).await
+    proxy::proxy::passthrough::proxy_pass(tls_stream, client, metrics_aux).await
 }

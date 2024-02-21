@@ -1,5 +1,5 @@
 use crate::{
-    cancellation::{self, CancelClosure},
+    cancellation,
     compute::PostgresConnection,
     console::messages::MetricsAuxInfo,
     metrics::NUM_BYTES_PROXIED_COUNTER,
@@ -16,7 +16,6 @@ use utils::measured_stream::MeasuredStream;
 pub async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
-    cancel_closure: Option<CancelClosure>,
     aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let usage = USAGE_METRICS.register(Ids {
@@ -50,7 +49,6 @@ pub async fn proxy_pass(
     let _ = crate::proxy::copy_bidirectional::copy_bidirectional_client_compute(
         &mut client,
         &mut compute,
-        cancel_closure,
     )
     .await?;
 
@@ -68,13 +66,11 @@ pub struct ProxyPassthrough<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
-    pub async fn proxy_pass(self) -> anyhow::Result<()> {
-        proxy_pass(
-            self.client,
-            self.compute.stream,
-            Some(self.compute.cancel_closure),
-            self.aux,
-        )
-        .await
+    pub async fn proxy_pass(self, ensure_cancellation: bool) -> anyhow::Result<()> {
+        let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
+        if ensure_cancellation {
+            self.compute.cancel_closure.try_cancel_query().await?;
+        }
+        res
     }
 }

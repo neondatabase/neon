@@ -163,7 +163,7 @@ pub async fn serve_websocket(
         Ok(Some(p)) => {
             ctx.set_success();
             ctx.log();
-            p.proxy_pass().await
+            p.proxy_pass(true).await
         }
     }
 }

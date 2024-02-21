@@ -1,13 +1,10 @@
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc::error;
-use tracing::{info, Instrument};
+use tracing::info;
 
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
-
-use crate::cancellation::CancelClosureExt;
 
 #[derive(Debug)]
 enum TransferState {
@@ -44,66 +41,27 @@ where
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) async fn copy_bidirectional_client_compute<Client, Compute, Cancel>(
+pub(super) async fn copy_bidirectional_client_compute<Client, Compute>(
     client: &mut Client,
     compute: &mut Compute,
-    mut cancel_closure: Option<Cancel>,
 ) -> Result<(u64, u64), std::io::Error>
 where
     Client: AsyncRead + AsyncWrite + Unpin + ?Sized,
     Compute: AsyncRead + AsyncWrite + Unpin + ?Sized,
-    Cancel: CancelClosureExt + Send + Sync + 'static,
 {
     let mut client_to_compute = TransferState::Running(CopyBuffer::new());
     let mut compute_to_client = TransferState::Running(CopyBuffer::new());
 
     poll_fn(|cx| {
         let mut client_to_compute_result =
-            match transfer_one_direction(cx, &mut client_to_compute, client, compute) {
-                Poll::Ready(Ok(count)) => Poll::Ready(count),
-                Poll::Ready(Err(e)) => {
-                    tracing::error!("Error transferring from client to compute: {:?}", e);
-                    if let TransferState::Running(buf) = &compute_to_client {
-                        info!("Client is done, early termination");
-                        // Make this closure async internally
-                        let span = tracing::Span::current();
-                        if let Some(cancel_closure) = cancel_closure.take() {
-                            tokio::spawn(async move {
-                                let e = cancel_closure.try_cancel_query().instrument(span).await;
-                                match e {
-                                    Ok(_) => info!("Query cancelled successfully"),
-                                    Err(e) => info!("Failed to cancel query: {:?}", e),
-                                }
-                            });
-                        }
-                        // Initiate shutdown
-                        compute_to_client = TransferState::ShuttingDown(buf.amt);
-                    }
-                    Poll::Ready(0)
-                }
-                Poll::Pending => Poll::Pending,
-            };
+            transfer_one_direction(cx, &mut client_to_compute, client, compute)?;
         let mut compute_to_client_result =
-            match transfer_one_direction(cx, &mut compute_to_client, compute, client) {
-                Poll::Ready(Ok(count)) => Poll::Ready(count),
-                Poll::Ready(Err(e)) => {
-                    tracing::error!("Error transferring from compute to client: {:?}", e);
-                    if let TransferState::Running(buf) = &client_to_compute {
-                        info!("Compute is done, early termination");
-                        // Initiate shutdown
-                        client_to_compute = TransferState::ShuttingDown(buf.amt);
-                        client_to_compute_result =
-                            transfer_one_direction(cx, &mut client_to_compute, client, compute)?;
-                    }
-                    Poll::Ready(0)
-                }
-                Poll::Pending => Poll::Pending,
-            };
+            transfer_one_direction(cx, &mut compute_to_client, client, compute)?;
 
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
             if let TransferState::Running(buf) = &client_to_compute {
-                info!("Compute is done, early termination");
+                info!("Compute is done, terminate client");
                 // Initiate shutdown
                 client_to_compute = TransferState::ShuttingDown(buf.amt);
                 client_to_compute_result =
@@ -114,18 +72,7 @@ where
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = client_to_compute {
             if let TransferState::Running(buf) = &compute_to_client {
-                info!("Client is done, early termination");
-                // Make this closure async internally
-                if let Some(cancel_closure) = cancel_closure.take() {
-                    let span = tracing::Span::current();
-                    tokio::spawn(async move {
-                        let e = cancel_closure.try_cancel_query().instrument(span).await;
-                        match e {
-                            Ok(_) => info!("Query cancelled successfully"),
-                            Err(e) => info!("Failed to cancel query: {:?}", e),
-                        }
-                    });
-                }
+                info!("Client is done, terminate compute");
                 // Initiate shutdown
                 compute_to_client = TransferState::ShuttingDown(buf.amt);
                 compute_to_client_result =
@@ -286,14 +233,6 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
 
-    struct CancelClosureMock;
-    #[async_trait::async_trait]
-    impl CancelClosureExt for CancelClosureMock {
-        async fn try_cancel_query(self) -> Result<(), crate::cancellation::CancelError> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn test_client_to_compute() {
         let (mut client_client, mut client_proxy) = tokio::io::duplex(8); // Create a mock duplex stream
@@ -307,11 +246,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(500),
-            copy_bidirectional_client_compute(
-                &mut client_proxy,
-                &mut compute_proxy,
-                Some(CancelClosureMock {}),
-            ),
+            copy_bidirectional_client_compute(&mut client_proxy, &mut compute_proxy),
         )
         .await
         .unwrap()
@@ -324,7 +259,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_early_termination_compute_to_client() {
+    async fn test_compute_to_client() {
         let (mut client_client, mut client_proxy) = tokio::io::duplex(32); // Create a mock duplex stream
         let (mut compute_proxy, mut compute_client) = tokio::io::duplex(8); // Create a mock duplex stream
 
@@ -338,11 +273,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(500),
-            copy_bidirectional_client_compute(
-                &mut client_proxy,
-                &mut compute_proxy,
-                Some(CancelClosureMock {}),
-            ),
+            copy_bidirectional_client_compute(&mut client_proxy, &mut compute_proxy),
         )
         .await
         .unwrap()
