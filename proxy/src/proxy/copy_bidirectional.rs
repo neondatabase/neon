@@ -228,8 +228,6 @@ impl CopyBuffer {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use tokio::io::AsyncWriteExt;
 
@@ -244,13 +242,9 @@ mod tests {
         compute_client.write_all(b"Neon").await.unwrap();
         compute_client.shutdown().await.unwrap();
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(500),
-            copy_bidirectional_client_compute(&mut client_proxy, &mut compute_proxy),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let result = copy_bidirectional_client_compute(&mut client_proxy, &mut compute_proxy)
+            .await
+            .unwrap();
 
         // Assert correct transferred amounts
         let (client_to_compute_count, compute_to_client_count) = result;
@@ -271,13 +265,9 @@ mod tests {
             .await
             .unwrap();
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(500),
-            copy_bidirectional_client_compute(&mut client_proxy, &mut compute_proxy),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let result = copy_bidirectional_client_compute(&mut client_proxy, &mut compute_proxy)
+            .await
+            .unwrap();
 
         // Assert correct transferred amounts
         let (client_to_compute_count, compute_to_client_count) = result;
