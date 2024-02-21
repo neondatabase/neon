@@ -512,7 +512,7 @@ class NeonEnvBuilder:
 
     def init_start(
         self,
-        initial_tenant_conf: Optional[Dict[str, str]] = None,
+        initial_tenant_conf: Optional[Dict[str, Any]] = None,
         default_remote_storage_if_missing: bool = True,
         initial_tenant_shard_count: Optional[int] = None,
         initial_tenant_shard_stripe_size: Optional[int] = None,
@@ -1497,7 +1497,7 @@ class NeonCli(AbstractNeonCli):
         self,
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
-        conf: Optional[Dict[str, str]] = None,
+        conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         set_default: bool = False,

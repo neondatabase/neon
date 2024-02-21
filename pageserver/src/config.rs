@@ -1572,15 +1572,48 @@ threshold = "20m"
                 eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
             })
         );
+
         match &conf.default_tenant_conf.eviction_policy {
-            EvictionPolicy::NoEviction => panic!("Unexpected eviction opolicy tenant settings"),
-            EvictionPolicy::LayerAccessThreshold(eviction_thresold) => {
-                assert_eq!(eviction_thresold.period, Duration::from_secs(20 * 60));
-                assert_eq!(eviction_thresold.threshold, Duration::from_secs(20 * 60));
+            EvictionPolicy::LayerAccessThreshold(eviction_threshold) => {
+                assert_eq!(eviction_threshold.period, Duration::from_secs(20 * 60));
+                assert_eq!(eviction_threshold.threshold, Duration::from_secs(20 * 60));
             }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn parse_imitation_only_pageserver_config() {
+        let tempdir = tempdir().unwrap();
+        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir).unwrap();
+
+        let pageserver_conf_toml = format!(
+            r#"pg_distrib_dir = "{pg_distrib_dir}"
+metric_collection_endpoint = "http://sample.url"
+metric_collection_interval = "10min"
+id = 222
+
+[tenant_config]
+evictions_low_residence_duration_metric_threshold = "20m"
+
+[tenant_config.eviction_policy]
+kind = "OnlyImitiate"
+period = "20m"
+threshold = "20m"
+"#,
+        );
+        let toml: Document = pageserver_conf_toml.parse().unwrap();
+        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+
+        match &conf.default_tenant_conf.eviction_policy {
+            EvictionPolicy::OnlyImitiate(t) => {
+                assert_eq!(t.period, Duration::from_secs(20 * 60));
+                assert_eq!(t.threshold, Duration::from_secs(20 * 60));
+            }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
+        }
     }
 
     fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {

@@ -44,6 +44,26 @@ impl DownloadError {
     }
 }
 
+impl From<std::io::Error> for DownloadError {
+    fn from(value: std::io::Error) -> Self {
+        let needs_unwrap = value.kind() == std::io::ErrorKind::Other
+            && value
+                .get_ref()
+                .and_then(|x| x.downcast_ref::<DownloadError>())
+                .is_some();
+
+        if needs_unwrap {
+            *value
+                .into_inner()
+                .expect("just checked")
+                .downcast::<DownloadError>()
+                .expect("just checked")
+        } else {
+            DownloadError::Other(value.into())
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TimeTravelError {
     /// Validation or other error happened due to user input.
@@ -142,13 +162,12 @@ impl std::fmt::Display for TimeoutOrCancel {
 impl std::error::Error for TimeoutOrCancel {}
 
 impl TimeoutOrCancel {
-    pub fn caused(error: &anyhow::Error) -> Option<&Self> {
-        error.root_cause().downcast_ref()
-    }
-
     /// Returns true if the error was caused by [`TimeoutOrCancel::Cancel`].
     pub fn caused_by_cancel(error: &anyhow::Error) -> bool {
-        Self::caused(error).is_some_and(Self::is_cancel)
+        error
+            .root_cause()
+            .downcast_ref::<Self>()
+            .is_some_and(Self::is_cancel)
     }
 
     pub fn is_cancel(&self) -> bool {

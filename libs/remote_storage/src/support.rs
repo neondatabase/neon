@@ -73,6 +73,8 @@ where
         if !*this.hit {
             if let Poll::Ready(e) = this.cancellation.poll(cx) {
                 *this.hit = true;
+
+                // most likely this will be a std::io::Error wrapping a DownloadError
                 let e = Err(std::io::Error::from(e));
                 return Poll::Ready(Some(e));
             }
@@ -130,6 +132,8 @@ mod tests {
                 .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
             "{inner:?}"
         );
+        let e = DownloadError::from(e);
+        assert!(matches!(e, DownloadError::Cancelled), "{e:?}");
 
         tokio::select! {
             _ = stream.next() => unreachable!("no timeout ever happens as we were already cancelled"),
@@ -146,7 +150,7 @@ mod tests {
         let stream = DownloadStream::new(cancel_or_timeout(timeout, cancel.clone()), inner);
         let mut stream = std::pin::pin!(stream);
 
-        // because the stream uses 120s timeout we are paused, we advance to 120s right away.
+        // because the stream uses 120s timeout and we are paused, we advance to 120s right away.
         let first = stream.next();
 
         let e = first.await.expect("there must be some").unwrap_err();
@@ -158,6 +162,8 @@ mod tests {
                 .is_some_and(|e| matches!(e, DownloadError::Timeout)),
             "{inner:?}"
         );
+        let e = DownloadError::from(e);
+        assert!(matches!(e, DownloadError::Timeout), "{e:?}");
 
         cancel.cancel();
 
