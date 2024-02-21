@@ -4,7 +4,7 @@ use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
     TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
-    TimelineCreateRequest,
+    TenantTimeTravelRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use utils::auth::SwappableJwtAuth;
 use utils::http::endpoint::{auth_middleware, request_span};
-use utils::http::request::parse_request_param;
+use utils::http::request::{must_get_query_param, parse_request_param};
 use utils::id::{TenantId, TimelineId};
 
 use utils::{
@@ -178,6 +178,39 @@ async fn handle_tenant_location_config(
             .tenant_location_config(tenant_id, config_req)
             .await?,
     )
+}
+
+async fn handle_tenant_time_travel_remote_storage(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let time_travel_req = json_request::<TenantTimeTravelRequest>(&mut req).await?;
+
+    let timestamp_raw = must_get_query_param(&req, "travel_to")?;
+    let _timestamp = humantime::parse_rfc3339(&timestamp_raw).map_err(|_e| {
+        ApiError::BadRequest(anyhow::anyhow!(
+            "Invalid time for travel_to: {timestamp_raw:?}"
+        ))
+    })?;
+
+    let done_if_after_raw = must_get_query_param(&req, "done_if_after")?;
+    let _done_if_after = humantime::parse_rfc3339(&done_if_after_raw).map_err(|_e| {
+        ApiError::BadRequest(anyhow::anyhow!(
+            "Invalid time for done_if_after: {done_if_after_raw:?}"
+        ))
+    })?;
+
+    service
+        .tenant_time_travel_remote_storage(
+            &time_travel_req,
+            tenant_id,
+            timestamp_raw,
+            done_if_after_raw,
+        )
+        .await?;
+
+    json_response(StatusCode::OK, ())
 }
 
 async fn handle_tenant_delete(
@@ -476,6 +509,9 @@ pub fn make_router(
         })
         .put("/v1/tenant/:tenant_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
+        })
+        .put("/v1/tenant/:tenant_id/time_travel_remote_storage", |r| {
+            tenant_service_handler(r, handle_tenant_time_travel_remote_storage)
         })
         // Timeline operations
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {

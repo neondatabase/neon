@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
     str::FromStr,
@@ -25,7 +26,7 @@ use pageserver_api::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode, ShardParameters,
         TenantConfig, TenantCreateRequest, TenantLocationConfigRequest,
         TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
-        TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
+        TenantShardSplitResponse, TenantTimeTravelRequest, TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
 };
@@ -1327,6 +1328,95 @@ impl Service {
         }
 
         Ok(result)
+    }
+
+    pub(crate) async fn tenant_time_travel_remote_storage(
+        &self,
+        time_travel_req: &TenantTimeTravelRequest,
+        tenant_id: TenantId,
+        timestamp: Cow<'_, str>,
+        done_if_after: Cow<'_, str>,
+    ) -> Result<(), ApiError> {
+        let node = {
+            let locked = self.inner.read().unwrap();
+            // Just a sanity check to prevent misuse: the API expects that the tenant is fully
+            // detached everywhere, and nothing writes to S3 storage. Here, we verify that,
+            // but only at the start of the process, so it's really just to prevent operator
+            // mistakes.
+            for (shard_id, shard) in locked.tenants.range(TenantShardId::tenant_range(tenant_id)) {
+                if shard.intent.get_attached().is_some() || !shard.intent.get_secondary().is_empty()
+                {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "We want tenant to be attached in shard with tenant_shard_id={shard_id}"
+                    )));
+                }
+                let maybe_attached = shard
+                    .observed
+                    .locations
+                    .iter()
+                    .filter_map(|(node_id, observed_location)| {
+                        observed_location
+                            .conf
+                            .as_ref()
+                            .map(|loc| (node_id, observed_location, loc.mode))
+                    })
+                    .find(|(_, _, mode)| *mode != LocationConfigMode::Detached);
+                if let Some((node_id, _observed_location, mode)) = maybe_attached {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!("We observed attached={mode:?} tenant in node_id={node_id} shard with tenant_shard_id={shard_id}")));
+                }
+            }
+            let scheduler = &locked.scheduler;
+            // Right now we only perform the operation on a single node without parallelization
+            // TODO fan out the operation to multiple nodes for better performance
+            let node_id = scheduler.schedule_shard(&[])?;
+            let node = locked
+                .nodes
+                .get(&node_id)
+                .expect("Pageservers may not be deleted while lock is active");
+            node.clone()
+        };
+
+        // The shard count is encoded in the remote storage's URL, so we need to handle all historically used shard counts
+        let mut counts = time_travel_req
+            .shard_counts
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        counts.sort_unstable();
+
+        for count in counts {
+            let shard_ids = (0..count.count())
+                .map(|i| TenantShardId {
+                    tenant_id,
+                    shard_number: ShardNumber(i),
+                    shard_count: count,
+                })
+                .collect::<Vec<_>>();
+            for tenant_shard_id in shard_ids {
+                let client =
+                    mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+
+                tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
+
+                client
+                        .tenant_time_travel_remote_storage(
+                            tenant_shard_id,
+                            &timestamp,
+                            &done_if_after,
+                        )
+                        .await
+                        .map_err(|e| {
+                            ApiError::InternalServerError(anyhow::anyhow!(
+                                "Error doing time travel recovery for shard {tenant_shard_id} on node {}: {e}",
+                                node.id
+                            ))
+                        })?;
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {

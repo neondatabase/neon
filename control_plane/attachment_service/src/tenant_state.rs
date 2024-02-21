@@ -495,6 +495,13 @@ impl TenantState {
             }
         }
 
+        for node_id in self.observed.locations.keys() {
+            if self.intent.attached != Some(*node_id) && !self.intent.secondary.contains(node_id) {
+                // We have observed state that isn't part of our intent: need to clean it up.
+                return true;
+            }
+        }
+
         // Even if there is no pageserver work to be done, if we have a pending notification to computes,
         // wake up a reconciler to send it.
         if self.pending_compute_notification {
