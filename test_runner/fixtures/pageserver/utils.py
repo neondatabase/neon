@@ -482,8 +482,8 @@ def tenant_delete_wait_completed(
 MANY_SMALL_LAYERS_TENANT_CONFIG = {
     "gc_period": "0s",
     "compaction_period": "0s",
-    "checkpoint_distance": f"{1024**2}",
-    "image_creation_threshold": "100",
+    "checkpoint_distance": 1024**2,
+    "image_creation_threshold": 100,
 }
 
 
