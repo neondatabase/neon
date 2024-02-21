@@ -1,4 +1,5 @@
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::mpsc::error;
 use tracing::info;
 
 use std::future::poll_fn;
@@ -57,9 +58,45 @@ where
 
     poll_fn(|cx| {
         let mut client_to_compute_result =
-            transfer_one_direction(cx, &mut client_to_compute, client, compute)?;
+            match transfer_one_direction(cx, &mut client_to_compute, client, compute) {
+                Poll::Ready(Ok(count)) => Poll::Ready(count),
+                Poll::Ready(Err(e)) => {
+                    tracing::error!("Error transferring from client to compute: {:?}", e);
+                    if let TransferState::Running(buf) = &compute_to_client {
+                        info!("Client is done, early termination");
+                        // Make this closure async internally
+                        if let Some(cancel_closure) = cancel_closure.take() {
+                            tokio::spawn(async move {
+                                let e = cancel_closure.try_cancel_query().await;
+                                match e {
+                                    Ok(_) => info!("Query cancelled successfully"),
+                                    Err(e) => info!("Failed to cancel query: {:?}", e),
+                                }
+                            });
+                        }
+                        // Initiate shutdown
+                        compute_to_client = TransferState::ShuttingDown(buf.amt);
+                    }
+                    Poll::Ready(0)
+                }
+                Poll::Pending => Poll::Pending,
+            };
         let mut compute_to_client_result =
-            transfer_one_direction(cx, &mut compute_to_client, compute, client)?;
+            match transfer_one_direction(cx, &mut compute_to_client, compute, client) {
+                Poll::Ready(Ok(count)) => Poll::Ready(count),
+                Poll::Ready(Err(e)) => {
+                    tracing::error!("Error transferring from compute to client: {:?}", e);
+                    if let TransferState::Running(buf) = &client_to_compute {
+                        info!("Compute is done, early termination");
+                        // Initiate shutdown
+                        client_to_compute = TransferState::ShuttingDown(buf.amt);
+                        client_to_compute_result =
+                            transfer_one_direction(cx, &mut client_to_compute, client, compute)?;
+                    }
+                    Poll::Ready(0)
+                }
+                Poll::Pending => Poll::Pending,
+            };
 
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
@@ -75,7 +112,7 @@ where
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = client_to_compute {
             if let TransferState::Running(buf) = &compute_to_client {
-                info!("Client is done, aerly termination");
+                info!("Client is done, early termination");
                 // Make this closure async internally
                 if let Some(cancel_closure) = cancel_closure.take() {
                     tokio::spawn(async move {
