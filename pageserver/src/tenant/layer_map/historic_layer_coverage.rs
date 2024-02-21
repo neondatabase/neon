@@ -528,6 +528,10 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         )
     }
 
+    pub fn get_rebuild_version(&self) -> RebuildVersion {
+        self.rebuild_version
+    }
+
     /// Iterate all the layers
     pub fn iter(&self) -> impl '_ + Iterator<Item = Value> {
         // NOTE we can actually perform this without rebuilding,

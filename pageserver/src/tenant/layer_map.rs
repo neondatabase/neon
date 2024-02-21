@@ -61,6 +61,8 @@ use utils::lsn::Lsn;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::LayerKey;
 
+pub(crate) use self::historic_layer_coverage::RebuildVersion;
+
 use super::storage_layer::PersistentLayerDesc;
 
 ///
@@ -523,6 +525,10 @@ impl LayerMap {
     /// Helper function for BatchedUpdates::drop.
     pub(self) fn flush_updates(&mut self) {
         self.historic.rebuild();
+    }
+
+    pub fn get_rebuild_version(&self) -> RebuildVersion {
+        self.historic.get_rebuild_version()
     }
 
     /// Is there a newer image layer for given key- and LSN-range? Or a set
