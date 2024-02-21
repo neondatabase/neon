@@ -518,7 +518,7 @@ def test_sharding_service_s3_time_travel_recovery(
     # Write some nontrivial amount of data into the endpoint and wait until it is uploaded
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         run_pg_bench_small(pg_bin, endpoint.connstr())
-        endpoint.safe_psql(f"CREATE TABLE created_foo(id integer);")
+        endpoint.safe_psql("CREATE TABLE created_foo(id integer);")
         # last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
     # Give the data time to be uploaded
@@ -581,6 +581,6 @@ def test_sharding_service_s3_time_travel_recovery(
     )
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-        endpoint.safe_psql(f"SELECT * FROM created_foo;")
+        endpoint.safe_psql("SELECT * FROM created_foo;")
 
     env.attachment_service.consistency_check()
