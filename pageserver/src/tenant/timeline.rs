@@ -5192,11 +5192,15 @@ impl<'a> TimelineWriter<'a> {
 
         // Rolling the open layer can be triggered by:
         // 1. The distance from the last LSN we rolled at. This bounds the amount of WAL that
-        //    the safekeepers need to store.
+        //    the safekeepers need to store.  For sharded tenants, we multiply by shard count to
+        //    account for how writes are distributed across shards: we expect each node to consume
+        //    1/count of the LSN on average.
         // 2. The size of the currently open layer.
         // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
         //    up and suspend activity.
-        if distance >= self.get_checkpoint_distance().into() {
+        if distance
+            >= self.get_checkpoint_distance() as i128 * self.shard_identity.count.count() as i128
+        {
             info!(
                 "Will roll layer at {} with layer size {} due to LSN distance ({})",
                 lsn, state.current_size, distance
