@@ -28,7 +28,6 @@ use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
-use hex::FromHex;
 use tracing::*;
 use utils::failpoint_support;
 
@@ -357,13 +356,7 @@ impl WalIngest {
                         // a particular string, for example, but this is enough for now.
                         failpoint_support::sleep_millis_async!("wal-ingest-logical-message-sleep");
                     } else if let Some(path) = prefix.strip_prefix("neon-file:") {
-                        // one off hack: disable aux file ingestion for this tenant
-                        if modification.tline.tenant_shard_id.tenant_id
-                            != utils::id::TenantId::from_hex("94dfb564f25964764b19763f337730ce")
-                                .unwrap()
-                        {
-                            modification.put_file(path, message, ctx).await?;
-                        }
+                        modification.put_file(path, message, ctx).await?;
                     }
                 }
             }
