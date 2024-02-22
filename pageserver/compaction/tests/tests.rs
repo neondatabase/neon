@@ -18,7 +18,7 @@ async fn test_many_updates_for_single_key() {
     for _ in 1..1000 {
         executor.ingest_uniform(100, 10, &(0..100_000)).unwrap();
         executor.ingest_uniform(10_000, 10, &(0..1)).unwrap();
-        executor.compact().await?;
+        executor.compact().await.unwrap();
     }
 
     // Check that all the layers are smaller than the target size (with some slop)
