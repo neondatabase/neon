@@ -6,7 +6,7 @@ use std::time::Duration;
 use self::split_state::SplitState;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
-use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
+use control_plane::attachment_service::NodeSchedulingPolicy;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
@@ -130,30 +130,41 @@ impl Persistence {
     }
 
     /// At startup, populate the list of nodes which our shards may be placed on
-    pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<Node>> {
-        let nodes: Vec<Node> = self
+    pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
+        let nodes: Vec<NodePersistence> = self
             .with_conn(move |conn| -> DatabaseResult<_> {
-                Ok(crate::schema::nodes::table
-                    .load::<NodePersistence>(conn)?
-                    .into_iter()
-                    .map(|n| Node {
-                        id: NodeId(n.node_id as u64),
-                        // At startup we consider a node offline until proven otherwise.
-                        availability: NodeAvailability::Offline,
-                        scheduling: NodeSchedulingPolicy::from_str(&n.scheduling_policy)
-                            .expect("Bad scheduling policy in DB"),
-                        listen_http_addr: n.listen_http_addr,
-                        listen_http_port: n.listen_http_port as u16,
-                        listen_pg_addr: n.listen_pg_addr,
-                        listen_pg_port: n.listen_pg_port as u16,
-                    })
-                    .collect::<Vec<Node>>())
+                Ok(crate::schema::nodes::table.load::<NodePersistence>(conn)?)
             })
             .await?;
 
         tracing::info!("list_nodes: loaded {} nodes", nodes.len());
 
         Ok(nodes)
+    }
+
+    pub(crate) async fn update_node(
+        &self,
+        input_node_id: NodeId,
+        input_scheduling: NodeSchedulingPolicy,
+    ) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        let updated = self
+            .with_conn(move |conn| {
+                let updated = diesel::update(nodes)
+                    .filter(node_id.eq(input_node_id.0 as i64))
+                    .set((scheduling_policy.eq(String::from(input_scheduling)),))
+                    .execute(conn)?;
+                Ok(updated)
+            })
+            .await?;
+
+        if updated != 1 {
+            Err(DatabaseError::Logical(format!(
+                "Node {node_id:?} not found for update",
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// At startup, load the high level state for shards, such as their config + policy.  This will
@@ -506,7 +517,7 @@ pub(crate) struct TenantShardPersistence {
 }
 
 /// Parts of [`crate::node::Node`] that are stored durably
-#[derive(Serialize, Deserialize, Queryable, Selectable, Insertable)]
+#[derive(Serialize, Deserialize, Queryable, Selectable, Insertable, Eq, PartialEq)]
 #[diesel(table_name = crate::schema::nodes)]
 pub(crate) struct NodePersistence {
     pub(crate) node_id: i64,

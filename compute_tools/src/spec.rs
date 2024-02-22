@@ -777,6 +777,11 @@ BEGIN
 END
 $$;"#,
         "GRANT pg_monitor TO neon_superuser WITH ADMIN OPTION",
+        // ensure tables created by superusers (i.e., when creating extensions) can be used by neon_superuser.
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser", // to-be removed in the future
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser", // to-be removed in the future
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser WITH GRANT OPTION",
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser WITH GRANT OPTION",
     ];
 
     let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";

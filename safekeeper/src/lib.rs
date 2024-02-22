@@ -78,6 +78,7 @@ pub struct SafeKeeperConf {
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
     pub current_thread_runtime: bool,
+    pub walsenders_keep_horizon: bool,
 }
 
 impl SafeKeeperConf {
@@ -121,6 +122,7 @@ impl SafeKeeperConf {
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,
+            walsenders_keep_horizon: false,
         }
     }
 }

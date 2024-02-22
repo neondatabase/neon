@@ -100,6 +100,7 @@ pub struct State {
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
     secondary_controller: SecondaryController,
+    latest_utilization: tokio::sync::Mutex<Option<(std::time::Instant, bytes::Bytes)>>,
 }
 
 impl State {
@@ -128,6 +129,7 @@ impl State {
             disk_usage_eviction_state,
             deletion_queue_client,
             secondary_controller,
+            latest_utilization: Default::default(),
         })
     }
 }
@@ -1963,6 +1965,54 @@ async fn put_io_engine_handler(
     json_response(StatusCode::OK, ())
 }
 
+/// Polled by control plane.
+///
+/// See [`crate::utilization`].
+async fn get_utilization(
+    r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // this probably could be completely public, but lets make that change later.
+    check_permission(&r, None)?;
+
+    let state = get_state(&r);
+    let mut g = state.latest_utilization.lock().await;
+
+    let regenerate_every = Duration::from_secs(1);
+    let still_valid = g
+        .as_ref()
+        .is_some_and(|(captured_at, _)| captured_at.elapsed() < regenerate_every);
+
+    // avoid needless statvfs calls even though those should be non-blocking fast.
+    // regenerate at most 1Hz to allow polling at any rate.
+    if !still_valid {
+        let path = state.conf.tenants_path();
+        let doc = crate::utilization::regenerate(path.as_std_path())
+            .map_err(ApiError::InternalServerError)?;
+
+        let mut buf = Vec::new();
+        serde_json::to_writer(&mut buf, &doc)
+            .context("serialize")
+            .map_err(ApiError::InternalServerError)?;
+
+        let body = bytes::Bytes::from(buf);
+
+        *g = Some((std::time::Instant::now(), body));
+    }
+
+    // hyper 0.14 doesn't yet have Response::clone so this is a bit of extra legwork
+    let cached = g.as_ref().expect("just set").1.clone();
+
+    Response::builder()
+        .header(hyper::http::header::CONTENT_TYPE, "application/json")
+        // thought of using http date header, but that is second precision which does not give any
+        // debugging aid
+        .status(StatusCode::OK)
+        .body(hyper::Body::from(cached))
+        .context("build response")
+        .map_err(ApiError::InternalServerError)
+}
+
 /// Common functionality of all the HTTP API handlers.
 ///
 /// - Adds a tracing span to each request (by `request_span`)
@@ -2224,5 +2274,6 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .get("/v1/utilization", |r| api_handler(r, get_utilization))
         .any(handler_404))
 }

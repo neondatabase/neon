@@ -56,6 +56,11 @@ use crate::{
     PlacementPolicy, Sequence,
 };
 
+// For operations that should be quick, like attaching a new tenant
+const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
+
+// For operations that might be slow, like migrating a tenant with
+// some data in it.
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long [`Service::startup_reconcile`] is allowed to take before it should give
@@ -479,8 +484,8 @@ impl Service {
                 async move {
                     if let Err(e) = compute_hook.notify(tenant_shard_id, node_id, &cancel).await {
                         tracing::error!(
-                            tenant_shard_id=%tenant_shard_id,
-                            node_id=%node_id,
+                            %tenant_shard_id,
+                            %node_id,
                             "Failed to notify compute on startup for shard: {e}"
                         );
                         None
@@ -617,7 +622,22 @@ impl Service {
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
 
         tracing::info!("Loading nodes from database...");
-        let nodes = persistence.list_nodes().await?;
+        let nodes = persistence
+            .list_nodes()
+            .await?
+            .into_iter()
+            .map(|n| Node {
+                id: NodeId(n.node_id as u64),
+                // At startup we consider a node offline until proven otherwise.
+                availability: NodeAvailability::Offline,
+                scheduling: NodeSchedulingPolicy::from_str(&n.scheduling_policy)
+                    .expect("Bad scheduling policy in DB"),
+                listen_http_addr: n.listen_http_addr,
+                listen_http_port: n.listen_http_port as u16,
+                listen_pg_addr: n.listen_pg_addr,
+                listen_pg_port: n.listen_pg_port as u16,
+            })
+            .collect::<Vec<_>>();
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.id, n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
 
@@ -909,7 +929,16 @@ impl Service {
     pub(crate) async fn re_attach(
         &self,
         reattach_req: ReAttachRequest,
-    ) -> anyhow::Result<ReAttachResponse> {
+    ) -> Result<ReAttachResponse, ApiError> {
+        // Take a re-attach as indication that the node is available: this is a precursor to proper
+        // heartbeating in https://github.com/neondatabase/neon/issues/6844
+        self.node_configure(NodeConfigureRequest {
+            node_id: reattach_req.node_id,
+            availability: Some(NodeAvailability::Active),
+            scheduling: None,
+        })
+        .await?;
+
         // Ordering: we must persist generation number updates before making them visible in the in-memory state
         let incremented_generations = self.persistence.re_attach(reattach_req.node_id).await?;
 
@@ -1000,6 +1029,16 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<TenantCreateResponse, ApiError> {
+        let (response, waiters) = self.do_tenant_create(create_req).await?;
+
+        self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await?;
+        Ok(response)
+    }
+
+    pub(crate) async fn do_tenant_create(
+        &self,
+        create_req: TenantCreateRequest,
+    ) -> Result<(TenantCreateResponse, Vec<ReconcilerWaiter>), ApiError> {
         // This service expects to handle sharding itself: it is an error to try and directly create
         // a particular shard here.
         let tenant_id = if !create_req.new_tenant_id.is_unsharded() {
@@ -1149,11 +1188,12 @@ impl Service {
             (waiters, response_shards)
         };
 
-        self.await_waiters(waiters).await?;
-
-        Ok(TenantCreateResponse {
-            shards: response_shards,
-        })
+        Ok((
+            TenantCreateResponse {
+                shards: response_shards,
+            },
+            waiters,
+        ))
     }
 
     /// Helper for functions that reconcile a number of shards, and would like to do a timeout-bounded
@@ -1161,8 +1201,9 @@ impl Service {
     async fn await_waiters(
         &self,
         waiters: Vec<ReconcilerWaiter>,
+        timeout: Duration,
     ) -> Result<(), ReconcileWaitError> {
-        let deadline = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+        let deadline = Instant::now().checked_add(timeout).unwrap();
         for waiter in waiters {
             let timeout = deadline.duration_since(Instant::now());
             waiter.wait_timeout(timeout).await?;
@@ -1300,12 +1341,8 @@ impl Service {
             }
         };
 
-        // TODO: if we timeout/fail on reconcile, we should still succeed this request,
-        // because otherwise a broken compute hook causes a feedback loop where
-        // location_config returns 500 and gets retried forever.
-
-        if let Some(create_req) = maybe_create {
-            let create_resp = self.tenant_create(create_req).await?;
+        let waiters = if let Some(create_req) = maybe_create {
+            let (create_resp, waiters) = self.do_tenant_create(create_req).await?;
             result.shards = create_resp
                 .shards
                 .into_iter()
@@ -1314,18 +1351,24 @@ impl Service {
                     shard_id: s.shard_id,
                 })
                 .collect();
+            waiters
         } else {
-            // This was an update, wait for reconciliation
-            if let Err(e) = self.await_waiters(waiters).await {
-                // Do not treat a reconcile error as fatal: we have already applied any requested
-                // Intent changes, and the reconcile can fail for external reasons like unavailable
-                // compute notification API.  In these cases, it is important that we do not
-                // cause the cloud control plane to retry forever on this API.
-                tracing::warn!(
-                    "Failed to reconcile after /location_config: {e}, returning success anyway"
-                );
-            }
+            waiters
+        };
+
+        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+            // Do not treat a reconcile error as fatal: we have already applied any requested
+            // Intent changes, and the reconcile can fail for external reasons like unavailable
+            // compute notification API.  In these cases, it is important that we do not
+            // cause the cloud control plane to retry forever on this API.
+            tracing::warn!(
+                "Failed to reconcile after /location_config: {e}, returning success anyway"
+            );
         }
+
+        // Logging the full result is useful because it lets us cross-check what the cloud control
+        // plane's tenant_shards table should contain.
+        tracing::info!("Complete, returning {result:?}");
 
         Ok(result)
     }
@@ -2299,7 +2342,11 @@ impl Service {
                 .context("Scheduler checks")
                 .map_err(ApiError::InternalServerError)?;
 
-            let expect_nodes = locked.nodes.values().cloned().collect::<Vec<_>>();
+            let expect_nodes = locked
+                .nodes
+                .values()
+                .map(|n| n.to_persistent())
+                .collect::<Vec<_>>();
 
             let expect_shards = locked
                 .tenants
@@ -2311,8 +2358,8 @@ impl Service {
         };
 
         let mut nodes = self.persistence.list_nodes().await?;
-        expect_nodes.sort_by_key(|n| n.id);
-        nodes.sort_by_key(|n| n.id);
+        expect_nodes.sort_by_key(|n| n.node_id);
+        nodes.sort_by_key(|n| n.node_id);
 
         if nodes != expect_nodes {
             tracing::error!("Consistency check failed on nodes.");
@@ -2326,6 +2373,9 @@ impl Service {
                 serde_json::to_string(&nodes)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Node consistency failure"
+            )));
         }
 
         let mut shards = self.persistence.list_tenant_shards().await?;
@@ -2336,14 +2386,17 @@ impl Service {
             tracing::error!("Consistency check failed on shards.");
             tracing::error!(
                 "Shards in memory: {}",
-                serde_json::to_string(&expect_nodes)
+                serde_json::to_string(&expect_shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
             tracing::error!(
                 "Shards in database: {}",
-                serde_json::to_string(&nodes)
+                serde_json::to_string(&shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Shard consistency failure"
+            )));
         }
 
         Ok(())
@@ -2469,7 +2522,18 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) fn node_configure(&self, config_req: NodeConfigureRequest) -> Result<(), ApiError> {
+    pub(crate) async fn node_configure(
+        &self,
+        config_req: NodeConfigureRequest,
+    ) -> Result<(), ApiError> {
+        if let Some(scheduling) = config_req.scheduling {
+            // Scheduling is a persistent part of Node: we must write updates to the database before
+            // applying them in memory
+            self.persistence
+                .update_node(config_req.node_id, scheduling)
+                .await?;
+        }
+
         let mut locked = self.inner.write().unwrap();
         let result_tx = locked.result_tx.clone();
         let compute_hook = locked.compute_hook.clone();

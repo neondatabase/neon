@@ -175,6 +175,33 @@ impl Scheduler {
         }
     }
 
+    /// Where we have several nodes to choose from, for example when picking a secondary location
+    /// to promote to an attached location, this method may be used to pick the best choice based
+    /// on the scheduler's knowledge of utilization and availability.
+    ///
+    /// If the input is empty, or all the nodes are not elegible for scheduling, return None: the
+    /// caller can pick a node some other way.
+    pub(crate) fn node_preferred(&self, nodes: &[NodeId]) -> Option<NodeId> {
+        if nodes.is_empty() {
+            return None;
+        }
+
+        let node = nodes
+            .iter()
+            .map(|node_id| {
+                let may_schedule = self
+                    .nodes
+                    .get(node_id)
+                    .map(|n| n.may_schedule)
+                    .unwrap_or(false);
+                (*node_id, may_schedule)
+            })
+            .max_by_key(|(_n, may_schedule)| *may_schedule);
+
+        // If even the preferred node has may_schedule==false, return None
+        node.and_then(|(node_id, may_schedule)| if may_schedule { Some(node_id) } else { None })
+    }
+
     pub(crate) fn schedule_shard(&self, hard_exclude: &[NodeId]) -> Result<NodeId, ScheduleError> {
         if self.nodes.is_empty() {
             return Err(ScheduleError::NoPageservers);
@@ -225,43 +252,44 @@ impl Scheduler {
 }
 
 #[cfg(test)]
+pub(crate) mod test_utils {
+
+    use crate::node::Node;
+    use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
+    use std::collections::HashMap;
+    use utils::id::NodeId;
+    /// Test helper: synthesize the requested number of nodes, all in active state.
+    ///
+    /// Node IDs start at one.
+    pub(crate) fn make_test_nodes(n: u64) -> HashMap<NodeId, Node> {
+        (1..n + 1)
+            .map(|i| {
+                (
+                    NodeId(i),
+                    Node {
+                        id: NodeId(i),
+                        availability: NodeAvailability::Active,
+                        scheduling: NodeSchedulingPolicy::Active,
+                        listen_http_addr: format!("httphost-{i}"),
+                        listen_http_port: 80 + i as u16,
+                        listen_pg_addr: format!("pghost-{i}"),
+                        listen_pg_port: 5432 + i as u16,
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
     use utils::id::NodeId;
 
-    use crate::{node::Node, tenant_state::IntentState};
-
+    use crate::tenant_state::IntentState;
     #[test]
     fn scheduler_basic() -> anyhow::Result<()> {
-        let mut nodes = HashMap::new();
-        nodes.insert(
-            NodeId(1),
-            Node {
-                id: NodeId(1),
-                availability: NodeAvailability::Active,
-                scheduling: NodeSchedulingPolicy::Active,
-                listen_http_addr: String::new(),
-                listen_http_port: 0,
-                listen_pg_addr: String::new(),
-                listen_pg_port: 0,
-            },
-        );
-
-        nodes.insert(
-            NodeId(2),
-            Node {
-                id: NodeId(2),
-                availability: NodeAvailability::Active,
-                scheduling: NodeSchedulingPolicy::Active,
-                listen_http_addr: String::new(),
-                listen_http_port: 0,
-                listen_pg_addr: String::new(),
-                listen_pg_port: 0,
-            },
-        );
+        let nodes = test_utils::make_test_nodes(2);
 
         let mut scheduler = Scheduler::new(nodes.values());
         let mut t1_intent = IntentState::new();

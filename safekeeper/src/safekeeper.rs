@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use postgres_ffi::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
+use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -946,28 +946,12 @@ where
         }
         Ok(())
     }
-
-    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
-    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
-    /// offloading.
-    /// While it is safe to use inmem values for determining horizon,
-    /// we use persistent to make possible normal states less surprising.
-    pub fn get_horizon_segno(&self, wal_backup_enabled: bool) -> XLogSegNo {
-        let mut horizon_lsn = min(
-            self.state.remote_consistent_lsn,
-            self.state.peer_horizon_lsn,
-        );
-        if wal_backup_enabled {
-            horizon_lsn = min(horizon_lsn, self.state.backup_lsn);
-        }
-        horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use futures::future::BoxFuture;
-    use postgres_ffi::WAL_SEGMENT_SIZE;
+    use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
 
     use super::*;
     use crate::{

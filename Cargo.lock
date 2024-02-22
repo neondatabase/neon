@@ -3553,6 +3553,7 @@ dependencies = [
  "const_format",
  "enum-map",
  "hex",
+ "humantime",
  "humantime-serde",
  "itertools",
  "postgres_ffi",

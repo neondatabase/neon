@@ -10,7 +10,7 @@ use crate::persistence::NodePersistence;
 ///
 /// The persistent subset of the Node is defined in [`crate::persistence::NodePersistence`]: the
 /// implementation of serialization on this type is only for debug dumps.
-#[derive(Clone, Serialize, Eq, PartialEq)]
+#[derive(Clone, Serialize)]
 pub(crate) struct Node {
     pub(crate) id: NodeId,
 
