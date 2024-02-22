@@ -3,7 +3,6 @@
 //!
 //! All the heavy lifting is done by the create_image and create_delta
 //! functions that the implementor provides.
-//!
 use async_trait::async_trait;
 use pageserver_api::{key::Key, keyspace::key_range_size};
 use std::ops::Range;

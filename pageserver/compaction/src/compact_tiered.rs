@@ -17,7 +17,6 @@
 //! distance of image layers in LSN dimension is roughly equal to the logical
 //! database size. For example, if the logical database size is 10 GB, we would
 //! generate new image layers every 10 GB of WAL.
-//!
 use futures::StreamExt;
 use tracing::{debug, info};
 
@@ -273,7 +272,6 @@ where
     ///
     /// Initially, the job queue consists of one Divide job over the whole
     /// level. On first call, it is divided into smaller jobs.
-    ///
     async fn execute(&mut self, ctx: &E::RequestContext) -> anyhow::Result<()> {
         // TODO: this would be pretty straightforward to parallelize with FuturesUnordered
         while let Some(next_job_id) = self.job_queue.pop() {
@@ -343,14 +341,12 @@ where
         job_id
     }
 
-    ///
     /// Take a partition of the key space, and decide how to compact it.
     ///
     /// TODO: Currently, this is called exactly once for the level, and we
     /// decide whether to create new image layers to cover the whole level, or
     /// write a new set of delta. In the future, this should try to partition
     /// the key space, and make the decision separately for each partition.
-    ///
     async fn divide_job(&mut self, job_id: JobId, ctx: &E::RequestContext) -> anyhow::Result<()> {
         let job = &self.jobs[job_id.0];
         assert!(job.strategy == CompactionStrategy::Divide);
