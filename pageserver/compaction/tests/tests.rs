@@ -10,14 +10,14 @@ use pageserver_compaction::simulator::MockTimeline;
 /// assertion currently fails, but we need to make it not fail.
 #[ignore]
 #[tokio::test]
-async fn test_many_updates_for_single_key() -> anyhow::Result<()> {
+async fn test_many_updates_for_single_key() {
     let mut executor = MockTimeline::new();
     executor.target_file_size = 10_000_000; // 10 MB
 
     // Ingest 100 MB of updates to a single key.
     for _ in 1..1000 {
-        executor.ingest_uniform(100, 10, &(0..100_000))?;
-        executor.ingest_uniform(10_000, 10, &(0..1))?;
+        executor.ingest_uniform(100, 10, &(0..100_000)).unwrap();
+        executor.ingest_uniform(10_000, 10, &(0..1)).unwrap();
         executor.compact().await?;
     }
 
@@ -32,6 +32,4 @@ async fn test_many_updates_for_single_key() -> anyhow::Result<()> {
             assert!(l.file_size() > executor.target_file_size / 2);
         }
     }
-
-    Ok(())
 }
