@@ -36,6 +36,8 @@ use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
+const MAX_AUX_FILE_DELTAS: usize = 1024;
+
 #[derive(Debug)]
 pub enum LsnForTimestamp {
     /// Found commits both before and after the given timestamp
@@ -1403,16 +1405,20 @@ impl<'a> DatadirModification<'a> {
 
         let dir = if let Some(mut dir) = self.pending_aux_files.take() {
             // We already updated aux files in `self`: emit a delta and update our latest value
-
-            self.put(
-                AUX_FILES_KEY,
-                Value::WalRecord(NeonWalRecord::AuxFile {
-                    file_path: file_path.clone(),
-                    content: content.clone(),
-                }),
-            );
-
-            dir.upsert(file_path, content);
+            dir.upsert(file_path.clone(), content.clone());
+            if dir.files.len() % MAX_AUX_FILE_DELTAS == 0 {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::Image(Bytes::from(
+                        AuxFilesDirectory::ser(&dir).context("serialize")?,
+                    )),
+                );
+            } else {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                );
+            }
             dir
         } else {
             // Check if the AUX_FILES_KEY is initialized
