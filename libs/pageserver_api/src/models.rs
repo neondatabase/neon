@@ -340,7 +340,7 @@ impl ThrottleConfig {
     }
     /// The requests per second allowed  by the given config.
     pub fn steady_rps(&self) -> f64 {
-        (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64()) / 1e3
+        (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64())
     }
 }
 
