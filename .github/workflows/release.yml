@@ -100,4 +100,4 @@ jobs:
         gh pr create --title "Proxy release ${RELEASE_DATE}}" \
                      --body-file "body.md" \
                      --head "${RELEASE_BRANCH}" \
-                     --base "release/proxy"
+                     --base "release-proxy"
