@@ -456,14 +456,6 @@ pub struct TenantConfOpt {
     pub timeline_get_throttle: Option<pageserver_api::models::ThrottleConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvictionPolicyLayerAccessThreshold {
-    #[serde(with = "humantime_serde")]
-    pub period: Duration,
-    #[serde(with = "humantime_serde")]
-    pub threshold: Duration,
-}
-
 impl TenantConfOpt {
     pub fn merge(&self, global_conf: TenantConf) -> TenantConf {
         TenantConf {
