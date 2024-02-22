@@ -693,51 +693,55 @@ jobs:
   neon-image:
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.2-debug
-    defaults:
-      run:
-        shell: sh -eu {0}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1 # v3 won't work with kaniko
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
 
-      - name: Configure ECR and Docker Hub login
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
         run: |
-          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
-          echo "::add-mask::${DOCKERHUB_AUTH}"
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+      - uses: docker/setup-buildx-action@v3
 
-          cat <<-EOF > /kaniko/.docker/config.json
-            {
-              "auths": {
-                "https://index.docker.io/v1/": {
-                  "auth": "${DOCKERHUB_AUTH}"
-                }
-              },
-              "credHelpers": {
-                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
-              }
-            }
-          EOF
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Kaniko build neon
-        run:
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
-                           --context .
-                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-                           --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-                           --build-arg TAG=${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
-                           --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
-      - name: Cleanup ECR folder
-        run: rm -rf ~/.ecr
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            TAG=${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile
+          cache-from: type=registry,ref=neondatabase/neon:cache
+          cache-to: type=registry,ref=neondatabase/neon:cache,mode=max
+          tags: |
+            369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+            neondatabase/neon:${{needs.tag.outputs.build-tag}}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
