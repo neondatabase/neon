@@ -143,6 +143,23 @@ impl IntentState {
         }
     }
 
+    /// Like set_attached, but the node is from [`Self::secondary`].  This swaps the node from
+    /// secondary to attached while maintaining the scheduler's reference counts.
+    pub(crate) fn promote_attached(
+        &mut self,
+        _scheduler: &mut Scheduler,
+        promote_secondary: NodeId,
+    ) {
+        // If we call this with a node that isn't in secondary, it would cause incorrect
+        // scheduler reference counting, since we assume the node is already referenced as a secondary.
+        debug_assert!(self.secondary.contains(&promote_secondary));
+
+        // TODO: when scheduler starts tracking attached + secondary counts separately, we will
+        // need to call into it here.
+        self.secondary.retain(|n| n != &promote_secondary);
+        self.attached = Some(promote_secondary);
+    }
+
     pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
         debug_assert!(!self.secondary.contains(&new_secondary));
         scheduler.node_inc_ref(new_secondary);
@@ -197,6 +214,8 @@ impl IntentState {
     /// Returns true if a change was made
     pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
         if self.attached == Some(node_id) {
+            // TODO: when scheduler starts tracking attached + secondary counts separately, we will
+            // need to call into it here.
             self.attached = None;
             self.secondary.push(node_id);
             true
@@ -396,8 +415,7 @@ impl TenantState {
         if let Some(promote_secondary) = scheduler.node_preferred(&self.intent.secondary) {
             // Promote a secondary
             tracing::debug!("Promoted secondary {} to attached", promote_secondary);
-            self.intent.secondary.retain(|n| n != &promote_secondary);
-            self.intent.attached = Some(promote_secondary);
+            self.intent.promote_attached(scheduler, promote_secondary);
             Ok((true, promote_secondary))
         } else {
             // Pick a fresh node: either we had no secondaries or none were schedulable
