@@ -1,4 +1,7 @@
 pub mod partitioning;
+pub mod utilization;
+
+pub use utilization::PageserverUtilization;
 
 use std::{
     collections::HashMap,
