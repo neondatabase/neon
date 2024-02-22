@@ -747,6 +747,7 @@ impl ComputeNode {
     ) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
         let pgdata_path = Path::new(&self.pgdata);
 
+        debug!("Starting postgres");
         // Run postgres as a child process.
         let mut pg = maybe_cgexec(&self.pgbin)
             .args(["-D", &self.pgdata])

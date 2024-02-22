@@ -282,10 +282,29 @@ typedef struct PageserverFeedback
 	uint32		shard_number;
 } PageserverFeedback;
 
+typedef struct
+{
+	XLogRecPtr	flushLsn;
+	SafekeeperState	state;
+
+	/*
+	 * connection string for connecting/reconnecting.
+	 *
+	 * May contain private information like password and should not be logged.
+	 */
+	char	conninfo[MAXCONNINFO];
+	char const *host;
+	char const *port;
+} SafekeeperShmemState;
+
 typedef struct WalproposerShmemState
 {
+	int n_safekeepers;
+	XLogRecPtr	commitLsn;
+	SafekeeperShmemState	safekeeper[MAX_SAFEKEEPERS];
 	slock_t		mutex;
 	term_t		mineLastElectedTerm;
+	XLogRecPtr	epochStartLsn;
 	pg_atomic_uint64 backpressureThrottlingTime;
 	pg_atomic_uint64 currentClusterSize;
 
@@ -334,16 +353,7 @@ typedef struct WalProposer WalProposer;
 typedef struct Safekeeper
 {
 	WalProposer *wp;
-
-	char const *host;
-	char const *port;
-
-	/*
-	 * connection string for connecting/reconnecting.
-	 *
-	 * May contain private information like password and should not be logged.
-	 */
-	char		conninfo[MAXCONNINFO];
+	SafekeeperShmemState	*shared;
 
 	/*
 	 * Temporary buffer for the message being sent to the safekeeper.
@@ -358,8 +368,7 @@ typedef struct Safekeeper
 	XLogRecPtr	streamingAt;	/* current streaming position */
 	AppendRequestHeader appendRequest;	/* request for sending to safekeeper */
 
-	SafekeeperState state;		/* safekeeper state machine state */
-	SafekeeperActiveState active_state;
+	SafekeeperActiveState active_state;	/* state if shared->state is SS_ACTIVE */
 	TimestampTz latestMsgReceivedAt;	/* when latest msg is received */
 	AcceptorGreeting greetResponse; /* acceptor greeting */
 	VoteResponse voteResponse;	/* the vote */
@@ -716,12 +725,17 @@ extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPt
 extern void WalProposerPoll(WalProposer *wp);
 extern void WalProposerFree(WalProposer *wp);
 
+extern WalproposerShmemState *GetWalpropShmemState();
+
+
 /*
  * WaitEventSet API doesn't allow to remove socket, so walproposer_pg uses it to
  * recreate set from scratch, hence the export.
  */
 extern void SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_events);
 extern Safekeeper *GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn);
+extern SafekeeperShmemState *GetDonorShmem(XLogRecPtr *donor_lsn);
+extern TimeLineID walprop_pg_get_timeline_id(void);
 
 
 #define WPEVENT		1337		/* special log level for walproposer internal

@@ -203,6 +203,74 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
 
 
+# Tests that walsender correctly blocks until WAL is downloaded from safekeepers
+def test_lr_with_slow_safekeeper(neon_simple_env: NeonEnv, vanilla_pg):
+    env = neon_simple_env
+
+    env.neon_cli.create_branch("init")
+    endpoint = env.endpoints.create_start("init")
+    sk = env.safekeepers[0]
+
+    with endpoint.connect().cursor() as cur:
+        cur.execute("create table wal_generator (id serial primary key, data text)")
+        cur.execute(
+"""
+INSERT INTO wal_generator (data)
+SELECT repeat('A', 1024) -- Generates a kilobyte of data per row
+FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of data
+""")
+        cur.execute("create table t(a int)")
+        cur.execute("create publication pub for table t")
+        cur.execute("insert into t values (1)")
+
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create table t(a int)")
+    connstr = endpoint.connstr().replace("'", "''")
+    vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub")
+    logical_replication_sync(vanilla_pg, endpoint)
+    vanilla_pg.stop()
+
+    # Pause the safekeepers so that they can't send WAL (except to pageserver)
+    for sk in env.safekeepers:
+        sk_http = sk.http_client()
+        sk_http.configure_failpoints([("sk-pause-send", "return")])
+
+    # Insert a 2
+    with endpoint.connect().cursor() as cur:
+        cur.execute("insert into t values (2)")
+
+    endpoint.stop_and_destroy()
+
+    # This new endpoint should contain [1, 2], but it can't access WAL from safekeeper
+    endpoint = env.endpoints.create_start("init")
+    with endpoint.connect().cursor() as cur:
+        cur.execute("select * from t")
+        res = [r[0] for r in cur.fetchall()]
+        assert res == [1, 2]
+
+    # Reconnect subscriber
+    vanilla_pg.start()
+    connstr = endpoint.connstr().replace("'", "''")
+    vanilla_pg.safe_psql(f"alter subscription sub1 connection '{connstr}'")
+
+    time.sleep(5)
+    # Make sure the 2 isn't replicated
+    assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1]
+
+    # Re-enable WAL download
+    for sk in env.safekeepers:
+        sk_http = sk.http_client()
+        sk_http.configure_failpoints([("sk-pause-send", "off")])
+
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1, 2]
+
+    log_path = vanilla_pg.pgdatadir / "pg.log"
+    with open(log_path, "r") as log_file:
+        logs = log_file.read()
+        assert "could not receive data from WAL stream" not in logs
+
+
 # Test compute start at LSN page of which starts with contrecord
 # https://github.com/neondatabase/neon/issues/5749
 def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
