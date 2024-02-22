@@ -235,11 +235,6 @@ def test_sharding_split_smoke(
     all_shards = tenant_get_shards(env, tenant_id)
     for tenant_shard_id, pageserver in all_shards:
         pageserver.http_client().timeline_gc(tenant_shard_id, timeline_id, None)
-
-    # Restart all nodes, to check that the newly created shards are durable
-    for ps in env.pageservers:
-        ps.restart()
-
     workload.validate()
 
     migrate_to_pageserver_ids = list(
@@ -287,6 +282,32 @@ def test_sharding_split_smoke(
     )
 
     env.attachment_service.consistency_check()
+
+    # Validate pageserver state
+    shards_exist: list[TenantShardId] = []
+    for pageserver in env.pageservers:
+        locations = pageserver.http_client().tenant_list_locations()
+        shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
+
+    log.info("Shards after split: {shards_exist}")
+    assert len(shards_exist) == split_shard_count
+
+    # Ensure post-split pageserver locations survive a restart (i.e. the child shards
+    # correctly wrote config to disk, and the storage controller responds correctly
+    # to /re-attach)
+    for pageserver in env.pageservers:
+        pageserver.stop()
+        pageserver.start()
+
+    shards_exist = []
+    for pageserver in env.pageservers:
+        locations = pageserver.http_client().tenant_list_locations()
+        shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
+
+    log.info("Shards after restart: {shards_exist}")
+    assert len(shards_exist) == split_shard_count
+
+    workload.validate()
 
 
 @pytest.mark.skipif(
