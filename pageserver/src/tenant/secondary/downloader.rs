@@ -37,6 +37,7 @@ use crate::tenant::{
     remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
 };
 
+use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
 use pageserver_api::shard::TenantShardId;
@@ -778,19 +779,32 @@ async fn init_timeline_state(
         .await
         .fatal_err(&format!("Listing {timeline_path}"))
     {
-        let dentry_file_name = dentry.file_name();
-        let file_name = dentry_file_name.to_string_lossy();
-        let local_meta = dentry.metadata().await.fatal_err(&format!(
-            "Read metadata on {}",
-            dentry.path().to_string_lossy()
-        ));
+        let Ok(file_path) = Utf8PathBuf::from_path_buf(dentry.path()) else {
+            tracing::warn!("Malformed filename at {}", dentry.path().to_string_lossy());
+            continue;
+        };
+        let local_meta = dentry
+            .metadata()
+            .await
+            .fatal_err(&format!("Read metadata on {}", file_path));
 
-        // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
+        let file_name = file_path.file_name().expect("created it from the dentry");
         if file_name == METADATA_FILE_NAME {
+            // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
+            continue;
+        } else if crate::is_temporary(&file_path) {
+            // Temporary files are frequently left behind from restarting during downloads
+            tracing::info!("Cleaning up temporary file {file_path}");
+            if let Err(e) = tokio::fs::remove_file(&file_path)
+                .await
+                .or_else(fs_ext::ignore_not_found)
+            {
+                tracing::error!("Failed to remove temporary file {file_path}: {e}");
+            }
             continue;
         }
 
-        match LayerFileName::from_str(&file_name) {
+        match LayerFileName::from_str(file_name) {
             Ok(name) => {
                 let remote_meta = heatmap_metadata.get(&name);
                 match remote_meta {
