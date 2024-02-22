@@ -3,6 +3,7 @@
 - If the key space can be perfectly partitioned at some key, perform planning on each
   partition separately. For example, if we are compacting a level with layers like this:
 
+  ```
               :
   +--+ +----+ :  +------+
   |  | |    | :  |      |
@@ -12,6 +13,7 @@
   |     | | | : |        |
   +-----+ +-+ : +--------+
               :
+  ```
 
   At the dotted line, there is a natural split in the key space, such that all
   layers are either on the left or the right of it. We can compact the
