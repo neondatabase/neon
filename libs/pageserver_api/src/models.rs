@@ -720,6 +720,7 @@ pub enum PagestreamFeMessage {
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
     GetSlruSegment(PagestreamGetSlruSegmentRequest),
+    GetVectoredPages(PagestreamGetVectoredPagesRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -731,6 +732,7 @@ pub enum PagestreamBeMessage {
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
     GetSlruSegment(PagestreamGetSlruSegmentResponse),
+    GetVectoredPages(PagestreamGetVectoredPagesResponse),
 }
 
 // Keep in sync with `pagestore_client.h`
@@ -742,6 +744,7 @@ enum PagestreamBeMessageTag {
     Error = 103,
     DbSize = 104,
     GetSlruSegment = 105,
+    GetVectoredPages = 106,
 }
 impl TryFrom<u8> for PagestreamBeMessageTag {
     type Error = u8;
@@ -753,6 +756,7 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
             103 => Ok(PagestreamBeMessageTag::Error),
             104 => Ok(PagestreamBeMessageTag::DbSize),
             105 => Ok(PagestreamBeMessageTag::GetSlruSegment),
+            106 => Ok(PagestreamBeMessageTag::GetVectoredPages),
             _ => Err(value),
         }
     }
@@ -795,6 +799,15 @@ pub struct PagestreamGetSlruSegmentRequest {
     pub segno: u32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct PagestreamGetVectoredPagesRequest {
+    pub latest: bool,
+    pub lsn: Lsn,
+    pub rel: RelTag,
+    pub blkno: u32,
+    pub count: u8,
+}
+
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
     pub exists: bool,
@@ -813,6 +826,12 @@ pub struct PagestreamGetPageResponse {
 #[derive(Debug)]
 pub struct PagestreamGetSlruSegmentResponse {
     pub segment: Bytes,
+}
+
+#[derive(Debug)]
+pub struct PagestreamGetVectoredPagesResponse {
+    pub page_count: u8,
+    pub pages: Bytes,
 }
 
 #[derive(Debug)]
@@ -886,6 +905,18 @@ impl PagestreamFeMessage {
                 bytes.put_u8(req.kind);
                 bytes.put_u32(req.segno);
             }
+
+            Self::GetVectoredPages(req) => {
+                bytes.put_u8(5);
+                bytes.put_u8(u8::from(req.latest));
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u32(req.rel.spcnode);
+                bytes.put_u32(req.rel.dbnode);
+                bytes.put_u32(req.rel.relnode);
+                bytes.put_u8(req.rel.forknum);
+                bytes.put_u32(req.blkno);
+                bytes.put_u8(req.count);
+            }
         }
 
         bytes.into()
@@ -944,6 +975,20 @@ impl PagestreamFeMessage {
                     segno: body.read_u32::<BigEndian>()?,
                 },
             )),
+            5 => Ok(PagestreamFeMessage::GetVectoredPages(
+                PagestreamGetVectoredPagesRequest {
+                    latest: body.read_u8()? != 0,
+                    lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                    rel: RelTag {
+                        spcnode: body.read_u32::<BigEndian>()?,
+                        dbnode: body.read_u32::<BigEndian>()?,
+                        relnode: body.read_u32::<BigEndian>()?,
+                        forknum: body.read_u8()?,
+                    },
+                    blkno: body.read_u32::<BigEndian>()?,
+                    count: body.read_u8()?,
+                },
+            )),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
@@ -984,6 +1029,12 @@ impl PagestreamBeMessage {
                 bytes.put_u8(Tag::GetSlruSegment as u8);
                 bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
                 bytes.put(&resp.segment[..]);
+            }
+
+            Self::GetVectoredPages(resp) => {
+                bytes.put_u8(Tag::GetVectoredPages as u8);
+                bytes.put_u8(resp.page_count);
+                bytes.put(&resp.pages[..]);
             }
         }
 
@@ -1033,6 +1084,15 @@ impl PagestreamBeMessage {
                         segment: segment.into(),
                     })
                 }
+                Tag::GetVectoredPages => {
+                    let page_count = buf.read_u8()?;
+                    let mut pages = vec![0; page_count as usize * 8192];
+                    buf.read_exact(&mut pages)?;
+                    Self::GetVectoredPages(PagestreamGetVectoredPagesResponse {
+                        page_count,
+                        pages: pages.into(),
+                    })
+                }
             };
         let remaining = buf.into_inner();
         if !remaining.is_empty() {
@@ -1052,6 +1112,7 @@ impl PagestreamBeMessage {
             Self::Error(_) => "Error",
             Self::DbSize(_) => "DbSize",
             Self::GetSlruSegment(_) => "GetSlruSegment",
+            Self::GetVectoredPages(_) => "GetVectoredPages",
         }
     }
 }

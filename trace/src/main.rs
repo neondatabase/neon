@@ -74,6 +74,7 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
                 }
                 prev = Some(req);
             }
+            PagestreamFeMessage::GetVectoredPages(_) => {}
             PagestreamFeMessage::DbSize(_) => {}
         };
     }

@@ -4,7 +4,8 @@ use futures::SinkExt;
 use pageserver_api::{
     models::{
         PagestreamBeMessage, PagestreamFeMessage, PagestreamGetPageRequest,
-        PagestreamGetPageResponse,
+        PagestreamGetPageResponse, PagestreamGetVectoredPagesRequest,
+        PagestreamGetVectoredPagesResponse,
     },
     reltag::RelTag,
 };
@@ -157,7 +158,39 @@ impl PagestreamClient {
             PagestreamBeMessage::Exists(_)
             | PagestreamBeMessage::Nblocks(_)
             | PagestreamBeMessage::DbSize(_)
-            | PagestreamBeMessage::GetSlruSegment(_) => {
+            | PagestreamBeMessage::GetSlruSegment(_)
+            | PagestreamBeMessage::GetVectoredPages(_) => {
+                anyhow::bail!(
+                    "unexpected be message kind in response to getpage request: {}",
+                    msg.kind()
+                )
+            }
+        }
+    }
+
+    pub async fn getpages(
+        &mut self,
+        req: PagestreamGetVectoredPagesRequest,
+    ) -> anyhow::Result<PagestreamGetVectoredPagesResponse> {
+        let req = PagestreamFeMessage::GetVectoredPages(req);
+        let req: bytes::Bytes = req.serialize();
+        // let mut req = tokio_util::io::ReaderStream::new(&req);
+        let mut req = tokio_stream::once(Ok(req));
+
+        self.copy_both.send_all(&mut req).await?;
+
+        let next: Option<Result<bytes::Bytes, _>> = self.copy_both.next().await;
+        let next: bytes::Bytes = next.unwrap()?;
+
+        let msg = PagestreamBeMessage::deserialize(next)?;
+        match msg {
+            PagestreamBeMessage::GetVectoredPages(p) => Ok(p),
+            PagestreamBeMessage::Error(e) => anyhow::bail!("Error: {:?}", e),
+            PagestreamBeMessage::Exists(_)
+            | PagestreamBeMessage::Nblocks(_)
+            | PagestreamBeMessage::DbSize(_)
+            | PagestreamBeMessage::GetSlruSegment(_)
+            | PagestreamBeMessage::GetPage(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",
                     msg.kind()
