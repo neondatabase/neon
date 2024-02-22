@@ -622,7 +622,22 @@ impl Service {
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
 
         tracing::info!("Loading nodes from database...");
-        let nodes = persistence.list_nodes().await?;
+        let nodes = persistence
+            .list_nodes()
+            .await?
+            .into_iter()
+            .map(|n| Node {
+                id: NodeId(n.node_id as u64),
+                // At startup we consider a node offline until proven otherwise.
+                availability: NodeAvailability::Offline,
+                scheduling: NodeSchedulingPolicy::from_str(&n.scheduling_policy)
+                    .expect("Bad scheduling policy in DB"),
+                listen_http_addr: n.listen_http_addr,
+                listen_http_port: n.listen_http_port as u16,
+                listen_pg_addr: n.listen_pg_addr,
+                listen_pg_port: n.listen_pg_port as u16,
+            })
+            .collect::<Vec<_>>();
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.id, n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
 
@@ -2326,7 +2341,11 @@ impl Service {
                 .context("Scheduler checks")
                 .map_err(ApiError::InternalServerError)?;
 
-            let expect_nodes = locked.nodes.values().cloned().collect::<Vec<_>>();
+            let expect_nodes = locked
+                .nodes
+                .values()
+                .map(|n| n.to_persistent())
+                .collect::<Vec<_>>();
 
             let expect_shards = locked
                 .tenants
@@ -2338,8 +2357,8 @@ impl Service {
         };
 
         let mut nodes = self.persistence.list_nodes().await?;
-        expect_nodes.sort_by_key(|n| n.id);
-        nodes.sort_by_key(|n| n.id);
+        expect_nodes.sort_by_key(|n| n.node_id);
+        nodes.sort_by_key(|n| n.node_id);
 
         if nodes != expect_nodes {
             tracing::error!("Consistency check failed on nodes.");
@@ -2353,6 +2372,9 @@ impl Service {
                 serde_json::to_string(&nodes)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Node consistency failure"
+            )));
         }
 
         let mut shards = self.persistence.list_tenant_shards().await?;
@@ -2363,14 +2385,17 @@ impl Service {
             tracing::error!("Consistency check failed on shards.");
             tracing::error!(
                 "Shards in memory: {}",
-                serde_json::to_string(&expect_nodes)
+                serde_json::to_string(&expect_shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
             tracing::error!(
                 "Shards in database: {}",
-                serde_json::to_string(&nodes)
+                serde_json::to_string(&shards)
                     .map_err(|e| ApiError::InternalServerError(e.into()))?
             );
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Shard consistency failure"
+            )));
         }
 
         Ok(())
@@ -2496,7 +2521,18 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) fn node_configure(&self, config_req: NodeConfigureRequest) -> Result<(), ApiError> {
+    pub(crate) async fn node_configure(
+        &self,
+        config_req: NodeConfigureRequest,
+    ) -> Result<(), ApiError> {
+        if let Some(scheduling) = config_req.scheduling {
+            // Scheduling is a persistent part of Node: we must write updates to the database before
+            // applying them in memory
+            self.persistence
+                .update_node(config_req.node_id, scheduling)
+                .await?;
+        }
+
         let mut locked = self.inner.write().unwrap();
         let result_tx = locked.result_tx.clone();
         let compute_hook = locked.compute_hook.clone();
