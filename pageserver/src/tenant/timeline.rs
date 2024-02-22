@@ -3876,7 +3876,7 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 }
 
 impl Timeline {
-    /// Level0 files first phase of compaction, explained in the [`compact_legacy`] comment.
+    /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
     async fn compact_level0_phase1(
         self: &Arc<Self>,
         guard: tokio::sync::OwnedRwLockReadGuard<LayerManager>,
