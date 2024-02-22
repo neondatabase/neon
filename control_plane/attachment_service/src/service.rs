@@ -936,7 +936,8 @@ impl Service {
             node_id: reattach_req.node_id,
             availability: Some(NodeAvailability::Active),
             scheduling: None,
-        })?;
+        })
+        .await?;
 
         // Ordering: we must persist generation number updates before making them visible in the in-memory state
         let incremented_generations = self.persistence.re_attach(reattach_req.node_id).await?;
