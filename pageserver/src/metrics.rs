@@ -642,26 +642,6 @@ pub(crate) static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|
     .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
 });
 
-// Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
-// or in testing they estimate how much we would upload if we did.
-static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_created_persistent_files_total",
-        "Number of files created that are meant to be uploaded to cloud storage",
-        &["tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
-static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_written_persistent_bytes_total",
-        "Total bytes written that are meant to be uploaded to cloud storage",
-        &["tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_eviction_iteration_duration_seconds_global",
@@ -1802,8 +1782,6 @@ pub(crate) struct TimelineMetrics {
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
-    pub num_persistent_files_created: IntCounter,
-    pub persistent_bytes_written: IntCounter,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
 }
@@ -1885,12 +1863,6 @@ impl TimelineMetrics {
         };
         let directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>> =
             Lazy::new(Box::new(directory_entries_count_gauge_closure));
-        let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-        let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -1912,8 +1884,6 @@ impl TimelineMetrics {
             resident_physical_size_gauge,
             current_logical_size_gauge,
             directory_entries_count_gauge,
-            num_persistent_files_created,
-            persistent_bytes_written,
             evictions,
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
@@ -1923,8 +1893,6 @@ impl TimelineMetrics {
 
     pub(crate) fn record_new_file_metrics(&self, sz: u64) {
         self.resident_physical_size_add(sz);
-        self.num_persistent_files_created.inc_by(1);
-        self.persistent_bytes_written.inc_by(sz);
     }
 
     pub(crate) fn resident_physical_size_sub(&self, sz: u64) {
@@ -1957,9 +1925,6 @@ impl Drop for TimelineMetrics {
         if let Some(metric) = Lazy::get(&DIRECTORY_ENTRIES_COUNT) {
             let _ = metric.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         }
-        let _ =
-            NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
-        let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         let _ = EVICTIONS.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
