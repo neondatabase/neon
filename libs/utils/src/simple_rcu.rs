@@ -221,7 +221,7 @@ impl RcuWaitList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     #[tokio::test]

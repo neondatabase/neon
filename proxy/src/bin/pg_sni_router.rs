@@ -13,7 +13,7 @@ use proxy::proxy::run_until_cancelled;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
-use clap::{self, Arg};
+use clap::Arg;
 use futures::TryFutureExt;
 use proxy::console::messages::MetricsAuxInfo;
 use proxy::stream::{PqStream, Stream};

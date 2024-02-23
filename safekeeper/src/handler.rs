@@ -2,8 +2,7 @@
 //! protocol commands.
 
 use anyhow::Context;
-use std::str::FromStr;
-use std::str::{self};
+use std::str::{self, FromStr};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, info_span, Instrument};
@@ -16,8 +15,8 @@ use crate::safekeeper::Term;
 use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
+use postgres_backend::PostgresBackend;
 use postgres_backend::QueryError;
-use postgres_backend::{self, PostgresBackend};
 use postgres_ffi::PG_TLI;
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use regex::Regex;
@@ -30,7 +29,7 @@ use utils::{
 /// Safekeeper handler of postgres commands
 pub struct SafekeeperPostgresHandler {
     pub conf: SafeKeeperConf,
-    /// assigned application name
+    /// assigned applicatioun name
     pub appname: Option<String>,
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,

@@ -300,7 +300,7 @@ mod tests {
     use super::*;
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
-    use crate::tenant::block_io::{BlockCursor, BlockReaderRef};
+    use crate::tenant::block_io::BlockReaderRef;
     use rand::{thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;

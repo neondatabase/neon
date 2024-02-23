@@ -14,7 +14,6 @@ use byteorder::{BigEndian, ReadBytesExt};
 use postgres_ffi::BLCKSZ;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use strum_macros;
 use utils::{
     completion,
     history_buffer::HistoryBufferWithDropCounter,
@@ -1069,7 +1068,6 @@ impl PagestreamBeMessage {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Buf;
     use serde_json::json;
 
     use super::*;

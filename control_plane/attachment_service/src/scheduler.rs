@@ -284,7 +284,6 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use utils::id::NodeId;
 
     use crate::tenant_state::IntentState;
     #[test]

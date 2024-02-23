@@ -9,7 +9,7 @@ use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
-use tracing::{self, debug, info, info_span, warn, Instrument};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
 use std::str::FromStr;

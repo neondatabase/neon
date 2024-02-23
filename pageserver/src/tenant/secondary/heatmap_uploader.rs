@@ -18,7 +18,6 @@ use crate::{
 };
 
 use futures::Future;
-use md5;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
 use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};

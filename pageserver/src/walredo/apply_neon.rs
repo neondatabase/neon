@@ -252,8 +252,6 @@ mod test {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::{pgdatadir_mapping::AuxFilesDirectory, walrecord::NeonWalRecord};
-
     /// Test [`apply_in_neon`]'s handling of NeonWalRecord::AuxFile
     #[test]
     fn apply_aux_file_deltas() -> anyhow::Result<()> {

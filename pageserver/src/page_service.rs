@@ -27,7 +27,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::shard::ShardNumber;
-use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, QueryError};
+use postgres_backend::{is_expected_io_error, AuthType, PostgresBackend, QueryError};
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
@@ -44,7 +44,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
-use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::sync::gate::GateGuard;

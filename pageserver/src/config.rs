@@ -20,7 +20,6 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use toml_edit;
 use toml_edit::{Document, Item};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -1166,10 +1165,7 @@ impl ConfigurableSemaphore {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        num::{NonZeroU32, NonZeroUsize},
-    };
+    use std::{fs, num::NonZeroU32};
 
     use camino_tempfile::{tempdir, Utf8TempDir};
     use pageserver_api::models::EvictionPolicy;
