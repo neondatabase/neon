@@ -32,7 +32,7 @@ impl PoolingBackend {
         let backend = self.config.auth_backend.as_ref().map(|_| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
         if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
-            return Err(AuthError::ip_address_not_allowed());
+            return Err(AuthError::ip_address_not_allowed(ctx.peer_addr));
         }
         let cached_secret = match maybe_secret {
             Some(secret) => secret,

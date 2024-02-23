@@ -113,7 +113,7 @@ pub struct TenantShardMigrateRequest {
     pub node_id: NodeId,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq)]
 pub enum NodeAvailability {
     // Normal, happy state
     Active,
@@ -137,7 +137,7 @@ impl FromStr for NodeAvailability {
 
 /// FIXME: this is a duplicate of the type in the attachment_service crate, because the
 /// type needs to be defined with diesel traits in there.
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq)]
 pub enum NodeSchedulingPolicy {
     Active,
     Filling,

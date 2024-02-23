@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
+use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
@@ -118,6 +119,17 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Ok(msg) => Response::new(Body::from(msg)),
                 Err((msg, code)) => {
                     error!("error handling /configure request: {msg}");
+                    render_json_error(&msg, code)
+                }
+            }
+        }
+
+        (&Method::POST, "/terminate") => {
+            info!("serving /terminate POST request");
+            match handle_terminate_request(compute).await {
+                Ok(()) => Response::new(Body::empty()),
+                Err((msg, code)) => {
+                    error!("error handling /terminate request: {msg}");
                     render_json_error(&msg, code)
                 }
             }
@@ -295,6 +307,49 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
         .status(status)
         .body(Body::from(serde_json::to_string(&error).unwrap()))
         .unwrap()
+}
+
+async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (String, StatusCode)> {
+    {
+        let mut state = compute.state.lock().unwrap();
+        if state.status == ComputeStatus::Terminated {
+            return Ok(());
+        }
+        if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
+            let msg = format!(
+                "invalid compute status for termination request: {:?}",
+                state.status.clone()
+            );
+            return Err((msg, StatusCode::PRECONDITION_FAILED));
+        }
+        state.status = ComputeStatus::TerminationPending;
+        compute.state_changed.notify_all();
+        drop(state);
+    }
+    forward_termination_signal();
+    info!("sent signal and notified waiters");
+
+    // Spawn a blocking thread to wait for compute to become Terminated.
+    // This is needed to do not block the main pool of workers and
+    // be able to serve other requests while some particular request
+    // is waiting for compute to finish configuration.
+    let c = compute.clone();
+    task::spawn_blocking(move || {
+        let mut state = c.state.lock().unwrap();
+        while state.status != ComputeStatus::Terminated {
+            state = c.state_changed.wait(state).unwrap();
+            info!(
+                "waiting for compute to become Terminated, current status: {:?}",
+                state.status
+            );
+        }
+
+        Ok(())
+    })
+    .await
+    .unwrap()?;
+    info!("terminated Postgres");
+    Ok(())
 }
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.

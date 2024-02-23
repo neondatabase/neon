@@ -8,19 +8,10 @@
 //!
 //! [`remote_timeline_client`]: super::remote_timeline_client
 
-use std::io::{self};
-
-use anyhow::{ensure, Context};
-use pageserver_api::shard::TenantShardId;
+use anyhow::ensure;
 use serde::{de::Error, Deserialize, Serialize, Serializer};
-use thiserror::Error;
 use utils::bin_ser::SerializeError;
-use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn};
-
-use crate::config::PageServerConf;
-use crate::virtual_file::VirtualFile;
-use crate::TEMP_FILE_SUFFIX;
 
 /// Use special format number to enable backward compatibility.
 const METADATA_FORMAT_VERSION: u16 = 4;
@@ -266,43 +257,6 @@ impl Serialize for TimelineMetadata {
             .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
         bytes.serialize(serializer)
     }
-}
-
-/// Save timeline metadata to file
-#[tracing::instrument(skip_all, fields(%tenant_id=tenant_shard_id.tenant_id, %shard_id=tenant_shard_id.shard_slug(), %timeline_id))]
-pub async fn save_metadata(
-    conf: &'static PageServerConf,
-    tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
-    data: &TimelineMetadata,
-) -> anyhow::Result<()> {
-    let path = conf.metadata_path(tenant_shard_id, timeline_id);
-    let temp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
-    let metadata_bytes = data.to_bytes().context("serialize metadata")?;
-    VirtualFile::crashsafe_overwrite(path, temp_path, metadata_bytes)
-        .await
-        .context("write metadata")?;
-    Ok(())
-}
-
-#[derive(Error, Debug)]
-pub enum LoadMetadataError {
-    #[error(transparent)]
-    Read(#[from] io::Error),
-
-    #[error(transparent)]
-    Decode(#[from] anyhow::Error),
-}
-
-pub fn load_metadata(
-    conf: &'static PageServerConf,
-    tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
-) -> Result<TimelineMetadata, LoadMetadataError> {
-    let metadata_path = conf.metadata_path(tenant_shard_id, timeline_id);
-    let metadata_bytes = std::fs::read(metadata_path)?;
-
-    Ok(TimelineMetadata::from_bytes(&metadata_bytes)?)
 }
 
 #[cfg(test)]

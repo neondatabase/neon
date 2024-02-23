@@ -1,6 +1,5 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use futures::future::join_all;
 use pageserver_api::key::{is_rel_block_key, key_to_rel_block, Key};
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::PagestreamGetPageRequest;
@@ -10,11 +9,10 @@ use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
 use rand::prelude::*;
-use tokio::sync::Barrier;
 use tokio::task::JoinSet;
-use tracing::{info, instrument};
+use tracing::info;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -38,8 +36,12 @@ pub(crate) struct Args {
     num_clients: NonZeroUsize,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
+    /// Each client sends requests at the given rate.
+    ///
+    /// If a request takes too long and we should be issuing a new request already,
+    /// we skip that request and account it as `MISSED`.
     #[clap(long)]
-    per_target_rate_limit: Option<usize>,
+    per_client_rate: Option<usize>,
     /// Probability for sending `latest=true` in the request (uniform distribution).
     #[clap(long, default_value = "1")]
     req_latest_probability: f64,
@@ -61,11 +63,15 @@ pub(crate) struct Args {
 #[derive(Debug, Default)]
 struct LiveStats {
     completed_requests: AtomicU64,
+    missed: AtomicU64,
 }
 
 impl LiveStats {
-    fn inc(&self) {
+    fn request_done(&self) {
         self.completed_requests.fetch_add(1, Ordering::Relaxed);
+    }
+    fn missed(&self, n: u64) {
+        self.missed.fetch_add(n, Ordering::Relaxed);
     }
 }
 
@@ -220,13 +226,12 @@ async fn main_impl(
 
     let live_stats = Arc::new(LiveStats::default());
 
-    let num_client_tasks = args.num_clients.get() * timelines.len();
     let num_live_stats_dump = 1;
-    let num_work_sender_tasks = 1;
+    let num_work_sender_tasks = args.num_clients.get() * timelines.len();
     let num_main_impl = 1;
 
     let start_work_barrier = Arc::new(tokio::sync::Barrier::new(
-        num_client_tasks + num_live_stats_dump + num_work_sender_tasks + num_main_impl,
+        num_live_stats_dump + num_work_sender_tasks + num_main_impl,
     ));
 
     tokio::spawn({
@@ -238,10 +243,12 @@ async fn main_impl(
                 let start = std::time::Instant::now();
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let completed_requests = stats.completed_requests.swap(0, Ordering::Relaxed);
+                let missed = stats.missed.swap(0, Ordering::Relaxed);
                 let elapsed = start.elapsed();
                 info!(
-                    "RPS: {:.0}",
-                    completed_requests as f64 / elapsed.as_secs_f64()
+                    "RPS: {:.0}   MISSED: {:.0}",
+                    completed_requests as f64 / elapsed.as_secs_f64(),
+                    missed as f64 / elapsed.as_secs_f64()
                 );
             }
         }
@@ -249,126 +256,104 @@ async fn main_impl(
 
     let cancel = CancellationToken::new();
 
-    let mut work_senders: HashMap<WorkerId, _> = HashMap::new();
-    let mut tasks = Vec::new();
+    let rps_period = args
+        .per_client_rate
+        .map(|rps_limit| Duration::from_secs_f64(1.0 / (rps_limit as f64)));
+    let make_worker: &dyn Fn(WorkerId) -> Pin<Box<dyn Send + Future<Output = ()>>> = &|worker_id| {
+        let live_stats = live_stats.clone();
+        let start_work_barrier = start_work_barrier.clone();
+        let ranges: Vec<KeyRange> = all_ranges
+            .iter()
+            .filter(|r| r.timeline == worker_id.timeline)
+            .cloned()
+            .collect();
+        let weights =
+            rand::distributions::weighted::WeightedIndex::new(ranges.iter().map(|v| v.len()))
+                .unwrap();
+
+        let cancel = cancel.clone();
+        Box::pin(async move {
+            let client =
+                pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
+                    .await
+                    .unwrap();
+            let mut client = client
+                .pagestream(worker_id.timeline.tenant_id, worker_id.timeline.timeline_id)
+                .await
+                .unwrap();
+
+            start_work_barrier.wait().await;
+            let client_start = Instant::now();
+            let mut ticks_processed = 0;
+            while !cancel.is_cancelled() {
+                // Detect if a request took longer than the RPS rate
+                if let Some(period) = &rps_period {
+                    let periods_passed_until_now =
+                        usize::try_from(client_start.elapsed().as_micros() / period.as_micros())
+                            .unwrap();
+
+                    if periods_passed_until_now > ticks_processed {
+                        live_stats.missed((periods_passed_until_now - ticks_processed) as u64);
+                    }
+                    ticks_processed = periods_passed_until_now;
+                }
+
+                let start = Instant::now();
+                let req = {
+                    let mut rng = rand::thread_rng();
+                    let r = &ranges[weights.sample(&mut rng)];
+                    let key: i128 = rng.gen_range(r.start..r.end);
+                    let key = Key::from_i128(key);
+                    assert!(is_rel_block_key(&key));
+                    let (rel_tag, block_no) =
+                        key_to_rel_block(key).expect("we filter non-rel-block keys out above");
+                    PagestreamGetPageRequest {
+                        latest: rng.gen_bool(args.req_latest_probability),
+                        lsn: r.timeline_lsn,
+                        rel: rel_tag,
+                        blkno: block_no,
+                    }
+                };
+                client.getpage(req).await.unwrap();
+                let end = Instant::now();
+                live_stats.request_done();
+                ticks_processed += 1;
+                STATS.with(|stats| {
+                    stats
+                        .borrow()
+                        .lock()
+                        .unwrap()
+                        .observe(end.duration_since(start))
+                        .unwrap();
+                });
+
+                if let Some(period) = &rps_period {
+                    let next_at = client_start
+                        + Duration::from_micros(
+                            (ticks_processed) as u64 * u64::try_from(period.as_micros()).unwrap(),
+                        );
+                    tokio::time::sleep_until(next_at.into()).await;
+                }
+            }
+        })
+    };
+
+    info!("spawning workers");
+    let mut workers = JoinSet::new();
     for timeline in timelines.iter().cloned() {
         for num_client in 0..args.num_clients.get() {
-            let (sender, receiver) = tokio::sync::mpsc::channel(10); // TODO: not sure what the implications of this are
             let worker_id = WorkerId {
                 timeline,
                 num_client,
             };
-            work_senders.insert(worker_id, sender);
-            tasks.push(tokio::spawn(client(
-                args,
-                worker_id,
-                Arc::clone(&start_work_barrier),
-                receiver,
-                Arc::clone(&live_stats),
-                cancel.clone(),
-            )));
+            workers.spawn(make_worker(worker_id));
         }
     }
-
-    let work_sender: Pin<Box<dyn Send + Future<Output = ()>>> = {
-        let start_work_barrier = start_work_barrier.clone();
-        let cancel = cancel.clone();
-        match args.per_target_rate_limit {
-            None => Box::pin(async move {
-                let weights = rand::distributions::weighted::WeightedIndex::new(
-                    all_ranges.iter().map(|v| v.len()),
-                )
-                .unwrap();
-
-                start_work_barrier.wait().await;
-
-                while !cancel.is_cancelled() {
-                    let (timeline, req) = {
-                        let mut rng = rand::thread_rng();
-                        let r = &all_ranges[weights.sample(&mut rng)];
-                        let key: i128 = rng.gen_range(r.start..r.end);
-                        let key = Key::from_i128(key);
-                        let (rel_tag, block_no) =
-                            key_to_rel_block(key).expect("we filter non-rel-block keys out above");
-                        (
-                            WorkerId {
-                                timeline: r.timeline,
-                                num_client: rng.gen_range(0..args.num_clients.get()),
-                            },
-                            PagestreamGetPageRequest {
-                                latest: rng.gen_bool(args.req_latest_probability),
-                                lsn: r.timeline_lsn,
-                                rel: rel_tag,
-                                blkno: block_no,
-                            },
-                        )
-                    };
-                    let sender = work_senders.get(&timeline).unwrap();
-                    // TODO: what if this blocks?
-                    if sender.send(req).await.is_err() {
-                        assert!(cancel.is_cancelled(), "client has gone away unexpectedly");
-                    }
-                }
-            }),
-            Some(rps_limit) => Box::pin(async move {
-                let period = Duration::from_secs_f64(1.0 / (rps_limit as f64));
-                let make_task: &dyn Fn(WorkerId) -> Pin<Box<dyn Send + Future<Output = ()>>> =
-                    &|worker_id| {
-                        let sender = work_senders.get(&worker_id).unwrap();
-                        let ranges: Vec<KeyRange> = all_ranges
-                            .iter()
-                            .filter(|r| r.timeline == worker_id.timeline)
-                            .cloned()
-                            .collect();
-                        let weights = rand::distributions::weighted::WeightedIndex::new(
-                            ranges.iter().map(|v| v.len()),
-                        )
-                        .unwrap();
-
-                        let cancel = cancel.clone();
-                        Box::pin(async move {
-                            let mut ticker = tokio::time::interval(period);
-                            ticker.set_missed_tick_behavior(
-                                /* TODO review this choice */
-                                tokio::time::MissedTickBehavior::Burst,
-                            );
-                            while !cancel.is_cancelled() {
-                                ticker.tick().await;
-                                let req = {
-                                    let mut rng = rand::thread_rng();
-                                    let r = &ranges[weights.sample(&mut rng)];
-                                    let key: i128 = rng.gen_range(r.start..r.end);
-                                    let key = Key::from_i128(key);
-                                    assert!(is_rel_block_key(&key));
-                                    let (rel_tag, block_no) = key_to_rel_block(key)
-                                        .expect("we filter non-rel-block keys out above");
-                                    PagestreamGetPageRequest {
-                                        latest: rng.gen_bool(args.req_latest_probability),
-                                        lsn: r.timeline_lsn,
-                                        rel: rel_tag,
-                                        blkno: block_no,
-                                    }
-                                };
-                                if sender.send(req).await.is_err() {
-                                    assert!(
-                                        cancel.is_cancelled(),
-                                        "client has gone away unexpectedly"
-                                    );
-                                }
-                            }
-                        })
-                    };
-
-                let tasks: Vec<_> = work_senders.keys().map(|tl| make_task(*tl)).collect();
-
-                start_work_barrier.wait().await;
-
-                join_all(tasks).await;
-            }),
+    let workers = async move {
+        while let Some(res) = workers.join_next().await {
+            res.unwrap();
         }
     };
-
-    let work_sender_task = tokio::spawn(work_sender);
 
     info!("waiting for everything to become ready");
     start_work_barrier.wait().await;
@@ -377,19 +362,12 @@ async fn main_impl(
         tokio::time::sleep(runtime.into()).await;
         info!("runtime over, signalling cancellation");
         cancel.cancel();
-        work_sender_task.await.unwrap();
+        workers.await;
         info!("work sender exited");
     } else {
-        work_sender_task.await.unwrap();
+        workers.await;
         unreachable!("work sender never terminates");
     }
-
-    info!("joining clients");
-    for t in tasks {
-        t.await.unwrap();
-    }
-
-    info!("all clients stopped");
 
     let output = Output {
         total: {
@@ -406,50 +384,4 @@ async fn main_impl(
     println!("{output}");
 
     anyhow::Ok(())
-}
-
-#[instrument(skip_all)]
-async fn client(
-    args: &'static Args,
-    id: WorkerId,
-    start_work_barrier: Arc<Barrier>,
-    mut work: tokio::sync::mpsc::Receiver<PagestreamGetPageRequest>,
-    live_stats: Arc<LiveStats>,
-    cancel: CancellationToken,
-) {
-    let WorkerId {
-        timeline,
-        num_client: _,
-    } = id;
-    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
-        .await
-        .unwrap();
-    let mut client = client
-        .pagestream(timeline.tenant_id, timeline.timeline_id)
-        .await
-        .unwrap();
-
-    let do_requests = async {
-        start_work_barrier.wait().await;
-        while let Some(req) = work.recv().await {
-            let start = Instant::now();
-            client
-                .getpage(req)
-                .await
-                .with_context(|| format!("getpage for {timeline}"))
-                .unwrap();
-            let elapsed = start.elapsed();
-            live_stats.inc();
-            STATS.with(|stats| {
-                stats.borrow().lock().unwrap().observe(elapsed).unwrap();
-            });
-        }
-    };
-    tokio::select! {
-        res = do_requests => { res },
-        _ = cancel.cancelled() => {
-            // fallthrough to shutdown
-        }
-    }
-    client.shutdown().await;
 }

@@ -284,8 +284,10 @@ dependencies = [
  "diesel_migrations",
  "futures",
  "git-version",
+ "humantime",
  "hyper",
  "metrics",
+ "once_cell",
  "pageserver_api",
  "pageserver_client",
  "postgres_connection",
@@ -1813,6 +1815,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e875f1719c16de097dee81ed675e2d9bb63096823ed3f0ca827b7dea3028bbbb"
 dependencies = [
  "enumset_derive",
+ "serde",
 ]
 
 [[package]]
@@ -2758,6 +2761,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
+name = "leaky-bucket"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eb491abd89e9794d50f93c8db610a29509123e3fbbc9c8c67a528e9391cd853"
+dependencies = [
+ "parking_lot 0.12.1",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3448,6 +3462,7 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-compression",
  "async-stream",
  "async-trait",
@@ -3475,6 +3490,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "itertools",
+ "leaky-bucket",
  "md5",
  "metrics",
  "nix 0.27.1",
@@ -3536,7 +3552,9 @@ dependencies = [
  "const_format",
  "enum-map",
  "hex",
+ "humantime",
  "humantime-serde",
+ "itertools",
  "postgres_ffi",
  "rand 0.8.5",
  "serde",
@@ -6347,6 +6365,7 @@ dependencies = [
  "hex-literal",
  "hyper",
  "jsonwebtoken",
+ "leaky-bucket",
  "metrics",
  "nix 0.27.1",
  "once_cell",

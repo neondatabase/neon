@@ -81,27 +81,14 @@ pub async fn download_layer_file<'a>(
                 .with_context(|| format!("create a destination file for layer '{temp_file_path}'"))
                 .map_err(DownloadError::Other)?;
 
-            let download = storage
-                .download(&remote_path, cancel)
-                .await
-                .with_context(|| {
-                    format!(
-                        "open a download stream for layer with remote storage path '{remote_path:?}'"
-                    )
-                })
-                .map_err(DownloadError::Other)?;
+            let download = storage.download(&remote_path, cancel).await?;
 
             let mut destination_file =
                 tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, destination_file);
 
             let mut reader = tokio_util::io::StreamReader::new(download.download_stream);
 
-            let bytes_amount = tokio::io::copy_buf(&mut reader, &mut destination_file)
-                .await
-                .with_context(|| format!(
-                    "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
-                ))
-                .map_err(DownloadError::Other);
+            let bytes_amount = tokio::io::copy_buf(&mut reader, &mut destination_file).await;
 
             match bytes_amount {
                 Ok(bytes_amount) => {
@@ -113,7 +100,7 @@ pub async fn download_layer_file<'a>(
                         on_fatal_io_error(&e, &format!("Removing temporary file {temp_file_path}"));
                     }
 
-                    Err(e)
+                    Err(e.into())
                 }
             }
         },
@@ -251,10 +238,7 @@ async fn do_download_index_part(
             let stream = download.download_stream;
             let mut stream = StreamReader::new(stream);
 
-            tokio::io::copy_buf(&mut stream, &mut bytes)
-                .await
-                .with_context(|| format!("download index part at {remote_path:?}"))
-                .map_err(DownloadError::Other)?;
+            tokio::io::copy_buf(&mut stream, &mut bytes).await?;
 
             Ok(bytes)
         },
@@ -434,14 +418,7 @@ pub(crate) async fn download_initdb_tar_zst(
             let mut download = tokio_util::io::StreamReader::new(download.download_stream);
             let mut writer = tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, file);
 
-            // TODO: this consumption of the response body should be subject to timeout + cancellation, but
-            // not without thinking carefully about how to recover safely from cancelling a write to
-            // local storage (e.g. by writing into a temp file as we do in download_layer)
-            // FIXME: flip the weird error wrapping
-            tokio::io::copy_buf(&mut download, &mut writer)
-                .await
-                .with_context(|| format!("download initdb.tar.zst at {remote_path:?}"))
-                .map_err(DownloadError::Other)?;
+            tokio::io::copy_buf(&mut download, &mut writer).await?;
 
             let mut file = writer.into_inner();
 

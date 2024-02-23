@@ -32,6 +32,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
+use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
@@ -41,7 +42,7 @@ use crate::tenant::config::{
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
-use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext::PathExt;
@@ -358,12 +359,6 @@ fn load_tenant_config(
         return Ok(None);
     }
 
-    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-    if tenant_ignore_mark_file.exists() {
-        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-        return Ok(None);
-    }
-
     let tenant_shard_id = match tenant_dir_path
         .file_name()
         .unwrap_or_default()
@@ -375,6 +370,59 @@ fn load_tenant_config(
             return Ok(None);
         }
     };
+
+    // Clean up legacy `metadata` files.
+    // Doing it here because every single tenant directory is visited here.
+    // In any later code, there's different treatment of tenant dirs
+    // ... depending on whether the tenant is in re-attach response or not
+    // ... epending on whether the tenant is ignored or not
+    assert_eq!(
+        &conf.tenant_path(&tenant_shard_id),
+        &tenant_dir_path,
+        "later use of conf....path() methods would be dubious"
+    );
+    let timelines: Vec<TimelineId> = match conf.timelines_path(&tenant_shard_id).read_dir_utf8() {
+        Ok(iter) => {
+            let mut timelines = Vec::new();
+            for res in iter {
+                let p = res?;
+                let Some(timeline_id) = p.file_name().parse::<TimelineId>().ok() else {
+                    // skip any entries that aren't TimelineId, such as
+                    // - *.___temp dirs
+                    // - unfinished initdb uploads (test_non_uploaded_root_timeline_is_deleted_after_restart)
+                    continue;
+                };
+                timelines.push(timeline_id);
+            }
+            timelines
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(anyhow::anyhow!(e)),
+    };
+    for timeline_id in timelines {
+        let timeline_path = &conf.timeline_path(&tenant_shard_id, &timeline_id);
+        let metadata_path = timeline_path.join(METADATA_FILE_NAME);
+        match std::fs::remove_file(&metadata_path) {
+            Ok(()) => {
+                crashsafe::fsync(timeline_path)
+                    .context("fsync timeline dir after removing legacy metadata file")?;
+                info!("removed legacy metadata file at {metadata_path}");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // something removed the file earlier, or it was never there
+                // We don't care, this software version doesn't write it again, so, we're good.
+            }
+            Err(e) => {
+                anyhow::bail!("remove legacy metadata file: {e}: {metadata_path}");
+            }
+        }
+    }
+
+    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+    if tenant_ignore_mark_file.exists() {
+        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+        return Ok(None);
+    }
 
     Ok(Some((
         tenant_shard_id,
@@ -484,7 +532,7 @@ pub async fn init_tenant_mgr(
                             TenantSlot::Secondary(SecondaryTenant::new(
                                 tenant_shard_id,
                                 location_conf.shard,
-                                location_conf.tenant_conf,
+                                location_conf.tenant_conf.clone(),
                                 &SecondaryLocationConfig { warm: false },
                             )),
                         );
@@ -794,7 +842,7 @@ pub(crate) async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_shard_id, true)?;
 
-    if tenant.tenant_shard_id().shard_count > ShardCount(0) {
+    if !tenant.tenant_shard_id().shard_count.is_unsharded() {
         // Note that we use ShardParameters::default below.
         return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
             "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
@@ -805,7 +853,7 @@ pub(crate) async fn set_new_tenant_config(
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
     let location_conf = LocationConf::attached_single(
-        new_tenant_conf,
+        new_tenant_conf.clone(),
         tenant.generation,
         &ShardParameters::default(),
     );
@@ -1376,7 +1424,7 @@ impl TenantManager {
         result
     }
 
-    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), new_shard_count=%new_shard_count.0))]
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), new_shard_count=%new_shard_count.literal()))]
     pub(crate) async fn shard_split(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1386,11 +1434,10 @@ impl TenantManager {
         let tenant = get_tenant(tenant_shard_id, true)?;
 
         // Plan: identify what the new child shards will be
-        let effective_old_shard_count = std::cmp::max(tenant_shard_id.shard_count.0, 1);
-        if new_shard_count <= ShardCount(effective_old_shard_count) {
+        if new_shard_count.count() <= tenant_shard_id.shard_count.count() {
             anyhow::bail!("Requested shard count is not an increase");
         }
-        let expansion_factor = new_shard_count.0 / effective_old_shard_count;
+        let expansion_factor = new_shard_count.count() / tenant_shard_id.shard_count.count();
         if !expansion_factor.is_power_of_two() {
             anyhow::bail!("Requested split is not a power of two");
         }
@@ -1467,7 +1514,7 @@ impl TenantManager {
                     attach_mode: AttachmentMode::Single,
                 }),
                 shard: child_shard_identity,
-                tenant_conf: parent_tenant_conf,
+                tenant_conf: parent_tenant_conf.clone(),
             };
 
             self.upsert_location(
@@ -1490,6 +1537,16 @@ impl TenantManager {
                 peek_slot.and_then(|s| s.get_attached()).cloned()
             };
             if let Some(t) = child_shard {
+                // Wait for the child shard to become active: this should be very quick because it only
+                // has to download the index_part that we just uploaded when creating it.
+                if let Err(e) = t.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await {
+                    // This is not fatal: we have durably created the child shard.  It just makes the
+                    // split operation less seamless for clients, as we will may detach the parent
+                    // shard before the child shards are fully ready to serve requests.
+                    tracing::warn!("Failed to wait for shard {child_shard_id} to activate: {e}");
+                    continue;
+                }
+
                 let timelines = t.timelines.lock().unwrap().clone();
                 for timeline in timelines.values() {
                     let Some(target_lsn) = target_lsns.get(&timeline.timeline_id) else {

@@ -1379,6 +1379,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
+  /v1/utilization:
+    get:
+      description: |
+        Returns the pageservers current utilization and fitness score for new tenants.
+
+      responses:
+        "200":
+            description: Pageserver utilization and fitness score
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/PageserverUtilization"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 components:
   securitySchemes:
     JWT:
@@ -1690,6 +1709,33 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
+
+    PageserverUtilization:
+      type: object
+      required:
+        - disk_usage_bytes
+        - free_space_bytes
+        - utilization_score
+      properties:
+        disk_usage_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The amount of disk space currently utilized by layer files.
+        free_space_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The amount of usable disk space left.
+        utilization_score:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854775807
+          default: 9223372036854775807
+          description: |
+            Lower is better score for how good this pageserver would be for the next tenant.
+            The default or maximum value can be returned in situations when a proper score cannot (yet) be calculated.
 
     Error:
       type: object

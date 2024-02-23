@@ -159,8 +159,8 @@ neon-pg-ext-%: postgres-%
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
 
-.PHONY: neon-pg-ext-clean-%
-neon-pg-ext-clean-%:
+.PHONY: neon-pg-clean-ext-%
+neon-pg-clean-ext-%:
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
 	-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
 	-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
@@ -216,11 +216,11 @@ neon-pg-ext: \
 	neon-pg-ext-v15 \
 	neon-pg-ext-v16
 
-.PHONY: neon-pg-ext-clean
-neon-pg-ext-clean: \
-	neon-pg-ext-clean-v14 \
-	neon-pg-ext-clean-v15 \
-	neon-pg-ext-clean-v16
+.PHONY: neon-pg-clean-ext
+neon-pg-clean-ext: \
+	neon-pg-clean-ext-v14 \
+	neon-pg-clean-ext-v15 \
+	neon-pg-clean-ext-v16
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
@@ -249,7 +249,7 @@ postgres-check: \
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
-clean: postgres-clean neon-pg-ext-clean
+clean: postgres-clean neon-pg-clean-ext
 	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything

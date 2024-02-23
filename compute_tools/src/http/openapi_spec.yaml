@@ -168,6 +168,29 @@ paths:
               schema:
                 $ref: "#/components/schemas/GenericError"
 
+  /terminate:
+    post:
+      tags:
+      - Terminate
+      summary: Terminate Postgres and wait for it to exit
+      description: ""
+      operationId: terminate
+      responses:
+        200:
+          description: Result
+        412:
+          description: "wrong state"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+        500:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
 components:
   securitySchemes:
     JWT:
