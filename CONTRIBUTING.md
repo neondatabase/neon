@@ -76,7 +76,6 @@ For details see [`approved-for-ci-run.yml`](.github/workflows/approved-for-ci-ru
 
 ## How do I make build-tools image "pinned"
 
-We don't use `build-tools:pinned` in the CI pipeline anymore, but it's convinient to keep it updated for local runs.
 It's possible to update the `pinned` tag of the `build-tools` image using the `update-build-tools-image-tag.yml` workflow.
 
 ```bash
