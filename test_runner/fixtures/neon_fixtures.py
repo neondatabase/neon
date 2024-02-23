@@ -17,6 +17,7 @@ import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from fcntl import LOCK_EX, LOCK_UN, flock
 from functools import cached_property
 from itertools import chain, product
@@ -388,7 +389,8 @@ class PgProtocol:
 class AuthKeys:
     priv: str
 
-    def generate_token(self, *, scope: str, **token_data: str) -> str:
+    def generate_token(self, *, scope: TokenScope, **token_data: Any) -> str:
+        token_data = {key: str(val) for key, val in token_data.items()}
         token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
         # cast(Any, self.priv)
 
@@ -401,14 +403,22 @@ class AuthKeys:
         return token
 
     def generate_pageserver_token(self) -> str:
-        return self.generate_token(scope="pageserverapi")
+        return self.generate_token(scope=TokenScope.PAGE_SERVER_API)
 
     def generate_safekeeper_token(self) -> str:
-        return self.generate_token(scope="safekeeperdata")
+        return self.generate_token(scope=TokenScope.SAFEKEEPER_DATA)
 
     # generate token giving access to only one tenant
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
-        return self.generate_token(scope="tenant", tenant_id=str(tenant_id))
+        return self.generate_token(scope=TokenScope.TENANT, tenant_id=str(tenant_id))
+
+
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class TokenScope(str, Enum):
+    PAGE_SERVER_API = "pageserverapi"
+    GENERATIONS_API = "generations_api"
+    SAFEKEEPER_DATA = "safekeeperdata"
+    TENANT = "tenant"
 
 
 class NeonEnvBuilder:
