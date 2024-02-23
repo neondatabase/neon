@@ -45,7 +45,7 @@ use rand::Rng;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, instrument, Instrument};
+use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, fs_ext, id::TimelineId,
 };
@@ -791,6 +791,7 @@ async fn init_timeline_state(
         let file_name = file_path.file_name().expect("created it from the dentry");
         if file_name == METADATA_FILE_NAME {
             // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
+            warn!(path=?dentry.path(), "found legacy metadata file, these should have been removed in load_tenant_config");
             continue;
         } else if crate::is_temporary(&file_path) {
             // Temporary files are frequently left behind from restarting during downloads
