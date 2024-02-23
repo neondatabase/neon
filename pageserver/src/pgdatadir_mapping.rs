@@ -1397,7 +1397,7 @@ impl<'a> DatadirModification<'a> {
             Some(Bytes::copy_from_slice(content))
         };
 
-        let mut n_files;
+        let n_files;
         let mut aux_files = self.tline.aux_files.lock().await;
         if let Some(mut dir) = aux_files.dir.take() {
             // We already updated aux files in `self`: emit a delta and update our latest value
