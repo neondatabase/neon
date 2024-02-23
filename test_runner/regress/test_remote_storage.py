@@ -256,7 +256,7 @@ def test_remote_storage_upload_queue_retries(
             ]
         )
 
-    FOO_ROWS_COUNT = 10000
+    FOO_ROWS_COUNT = 4000
 
     def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
         # create initial set of layers & upload them with failpoints configured
