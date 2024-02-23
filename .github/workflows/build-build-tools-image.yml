@@ -61,6 +61,8 @@ jobs:
   build-image:
     needs: [ check-image ]
     if: needs.check-image.outputs.build_required == 'true'
+    outputs:
+      skipped: ${{ steps.double-check-image.outputs.skip }}
 
     strategy:
       matrix:
@@ -68,27 +70,49 @@ jobs:
 
     runs-on: ${{ fromJson(format('["self-hosted", "dev", "{0}"]', matrix.arch)) }}
 
+    concurrency:
+      group: ${{ github.workflow }}-${{ needs.check-image.outputs.tag }}
+
+    env:
+      IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
+
     steps:
+      # `double-check-image` step along with `concurrency.group` is used to prevent
+      # from concurrent image building triggered by different commits in main
+      - id: double-check-image
+        run: |
+          if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
+            skip=true
+          else
+            skip=false
+          fi
+
+          echo "skip=${skip}" | tee -a $GITHUB_OUTPUT
+
       - uses: actions/checkout@v3
+        if: steps.double-check-image.outputs.skip == 'false'
 
       # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
       # The default value is ~/.docker
       - name: Set custom docker config directory
+        if: steps.double-check-image.outputs.skip == 'false'
         run: |
           mkdir -p /tmp/.docker-custom
           echo DOCKER_CONFIG=/tmp/.docker-custom >> $GITHUB_ENV
 
       - uses: docker/setup-buildx-action@v2
+        if: steps.double-check-image.outputs.skip == 'false'
 
       - uses: docker/login-action@v2
+        if: steps.double-check-image.outputs.skip == 'false'
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - uses: docker/build-push-action@v4
+        if: steps.double-check-image.outputs.skip == 'false'
         with:
           context: .
-          platforms: ${{ matrix.arch == 'x64' && 'linux/amd64' || 'linux/arm64' }}
           provenance: false
           push: true
           pull: true
@@ -98,12 +122,13 @@ jobs:
           tags: neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.arch }}
 
       - name: Remove custom docker config directory
-        if: always()
+        if: always() && steps.double-check-image.outputs.skip == 'false'
         run: |
           rm -rf /tmp/.docker-custom
 
   merge-images:
     needs: [ check-image, build-image ]
+    if: needs.build-image.outputs.skipped == 'false'
     runs-on: ubuntu-latest
 
     env:
