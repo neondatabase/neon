@@ -88,7 +88,10 @@ pub async fn task_main(
             return Ok(());
         }
     };
-    let tls_acceptor: tokio_rustls::TlsAcceptor = tls_config.to_server_config().into();
+    let mut tls_server_config = rustls::ServerConfig::clone(&tls_config.to_server_config());
+    // prefer http2, but support http/1.1
+    tls_server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let tls_acceptor: tokio_rustls::TlsAcceptor = Arc::new(tls_server_config).into();
 
     let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
     let _ = addr_incoming.set_nodelay(true);

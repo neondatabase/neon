@@ -52,8 +52,7 @@ use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use anyhow::Result;
 use pageserver_api::keyspace::KeySpaceAccum;
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
 use std::sync::Arc;
@@ -147,43 +146,28 @@ impl Drop for BatchedUpdates<'_> {
 }
 
 /// Return value of LayerMap::search
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Hash)]
 pub struct SearchResult {
     pub layer: Arc<PersistentLayerDesc>,
     pub lsn_floor: Lsn,
 }
 
-pub struct OrderedSearchResult(SearchResult);
-
-impl Ord for OrderedSearchResult {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.lsn_floor.cmp(&other.0.lsn_floor)
-    }
-}
-
-impl PartialOrd for OrderedSearchResult {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for OrderedSearchResult {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.lsn_floor == other.0.lsn_floor
-    }
-}
-
-impl Eq for OrderedSearchResult {}
-
+/// Return value of [`LayerMap::range_search`]
+///
+/// Contains a mapping from a layer description to a keyspace
+/// accumulator that contains all the keys which intersect the layer
+/// from the original search space. Keys that were not found are accumulated
+/// in a separate key space accumulator.
+#[derive(Debug)]
 pub struct RangeSearchResult {
-    pub found: BTreeMap<OrderedSearchResult, KeySpaceAccum>,
+    pub found: HashMap<SearchResult, KeySpaceAccum>,
     pub not_found: KeySpaceAccum,
 }
 
 impl RangeSearchResult {
     fn new() -> Self {
         Self {
-            found: BTreeMap::new(),
+            found: HashMap::new(),
             not_found: KeySpaceAccum::new(),
         }
     }
@@ -314,7 +298,7 @@ where
             Some(search_result) => self
                 .result
                 .found
-                .entry(OrderedSearchResult(search_result))
+                .entry(search_result)
                 .or_default()
                 .add_range(covered_range),
             None => self.pad_range(covered_range),
@@ -358,6 +342,35 @@ where
                 Some(NextLayerType::Delta(*next_delta_at))
             }
             (Some(next_delta_at), Some(_)) => Some(NextLayerType::Both(*next_delta_at)),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+pub enum InMemoryLayerHandle {
+    Open {
+        lsn_floor: Lsn,
+        end_lsn: Lsn,
+    },
+    Frozen {
+        idx: usize,
+        lsn_floor: Lsn,
+        end_lsn: Lsn,
+    },
+}
+
+impl InMemoryLayerHandle {
+    pub fn get_lsn_floor(&self) -> Lsn {
+        match self {
+            InMemoryLayerHandle::Open { lsn_floor, .. } => *lsn_floor,
+            InMemoryLayerHandle::Frozen { lsn_floor, .. } => *lsn_floor,
+        }
+    }
+
+    pub fn get_end_lsn(&self) -> Lsn {
+        match self {
+            InMemoryLayerHandle::Open { end_lsn, .. } => *end_lsn,
+            InMemoryLayerHandle::Frozen { end_lsn, .. } => *end_lsn,
         }
     }
 }
@@ -554,6 +567,43 @@ impl LayerMap {
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<PersistentLayerDesc>> {
         self.historic.iter()
+    }
+
+    /// Get a handle for the first in memory layer that matches the provided predicate.
+    /// The handle should be used with [`Self::get_in_memory_layer`] to retrieve the actual layer.
+    ///
+    /// Note: [`Self::find_in_memory_layer`] and [`Self::get_in_memory_layer`] should be called during
+    /// the same exclusive region established by holding the layer manager lock.
+    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<InMemoryLayerHandle>
+    where
+        Pred: FnMut(&Arc<InMemoryLayer>) -> bool,
+    {
+        if let Some(open) = &self.open_layer {
+            if pred(open) {
+                return Some(InMemoryLayerHandle::Open {
+                    lsn_floor: open.get_lsn_range().start,
+                    end_lsn: open.get_lsn_range().end,
+                });
+            }
+        }
+
+        let pos = self.frozen_layers.iter().rev().position(pred);
+        pos.map(|rev_idx| {
+            let idx = self.frozen_layers.len() - 1 - rev_idx;
+            InMemoryLayerHandle::Frozen {
+                idx,
+                lsn_floor: self.frozen_layers[idx].get_lsn_range().start,
+                end_lsn: self.frozen_layers[idx].get_lsn_range().end,
+            }
+        })
+    }
+
+    /// Get the layer pointed to by the provided handle.
+    pub fn get_in_memory_layer(&self, handle: &InMemoryLayerHandle) -> Option<Arc<InMemoryLayer>> {
+        match handle {
+            InMemoryLayerHandle::Open { .. } => self.open_layer.clone(),
+            InMemoryLayerHandle::Frozen { idx, .. } => self.frozen_layers.get(*idx).cloned(),
+        }
     }
 
     ///
@@ -869,6 +919,8 @@ impl LayerMap {
 
 #[cfg(test)]
 mod tests {
+    use pageserver_api::keyspace::KeySpace;
+
     use super::*;
 
     #[derive(Clone)]
@@ -895,15 +947,15 @@ mod tests {
 
     fn assert_range_search_result_eq(lhs: RangeSearchResult, rhs: RangeSearchResult) {
         assert_eq!(lhs.not_found.to_keyspace(), rhs.not_found.to_keyspace());
-        let lhs: Vec<_> = lhs
+        let lhs: HashMap<SearchResult, KeySpace> = lhs
             .found
             .into_iter()
-            .map(|(search_result, accum)| (search_result.0, accum.to_keyspace()))
+            .map(|(search_result, accum)| (search_result, accum.to_keyspace()))
             .collect();
-        let rhs: Vec<_> = rhs
+        let rhs: HashMap<SearchResult, KeySpace> = rhs
             .found
             .into_iter()
-            .map(|(search_result, accum)| (search_result.0, accum.to_keyspace()))
+            .map(|(search_result, accum)| (search_result, accum.to_keyspace()))
             .collect();
 
         assert_eq!(lhs, rhs);
@@ -923,7 +975,7 @@ mod tests {
                 Some(res) => {
                     range_search_result
                         .found
-                        .entry(OrderedSearchResult(res))
+                        .entry(res)
                         .or_default()
                         .add_key(key);
                 }

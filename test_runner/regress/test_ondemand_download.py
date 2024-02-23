@@ -17,6 +17,7 @@ from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_for_upload_queue_empty,
+    wait_until_tenant_active,
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn
@@ -165,6 +166,10 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    ####
+    # Produce layers
+    ####
+
     lsns = []
 
     table_len = 10000
@@ -194,19 +199,28 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
         # run checkpoint manually to be sure that data landed in remote storage
         client.timeline_checkpoint(tenant_id, timeline_id)
 
-    ##### Stop the first pageserver instance, erase all its data
+    # prevent new WAL from being produced, wait for layers to reach remote storage
     env.endpoints.stop_all()
-
-    # Stop safekeepers and take another checkpoint. The endpoints might
-    # have written a few more bytes during shutdown.
     for sk in env.safekeepers:
         sk.stop()
-
-    client.timeline_checkpoint(tenant_id, timeline_id)
-    current_lsn = Lsn(client.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
-
-    # wait until pageserver has successfully uploaded all the data to remote storage
+    # NB: the wait_for_upload returns as soon as remote_consistent_lsn == current_lsn.
+    # But the checkpoint also triggers a compaction
+    # => image layer generation =>
+    # => doesn't advance LSN
+    # => but we want the remote state to deterministic, so additionally, wait for upload queue to drain
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
+    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
+    client.deletion_queue_flush(execute=True)
+    env.pageserver.stop()
+    env.pageserver.start()
+    # We've shut down the SKs, then restarted the PSes to sever all walreceiver connections;
+    # This means pageserver's remote_consistent_lsn is now frozen to whatever it was after the pageserver.stop() call.
+    wait_until_tenant_active(client, tenant_id)
+
+    ###
+    # Produce layers complete;
+    # Start the actual testing.
+    ###
 
     def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
@@ -223,9 +237,7 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
     log.info(filled_size)
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
-    # Wait until generated image layers are uploaded to S3
-    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
-
+    # Stop the first pageserver instance, erase all its data
     env.pageserver.stop()
 
     # remove all the layer files

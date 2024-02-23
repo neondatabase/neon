@@ -147,15 +147,13 @@ impl RequestMonitoring {
         self.success = true;
     }
 
-    pub fn log(&mut self) {
-        if let Some(tx) = self.sender.take() {
-            let _: Result<(), _> = tx.send(self.clone());
-        }
-    }
+    pub fn log(self) {}
 }
 
 impl Drop for RequestMonitoring {
     fn drop(&mut self) {
-        self.log()
+        if let Some(tx) = self.sender.take() {
+            let _: Result<(), _> = tx.send(self.clone());
+        }
     }
 }

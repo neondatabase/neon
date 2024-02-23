@@ -1,4 +1,7 @@
 pub mod partitioning;
+pub mod utilization;
+
+pub use utilization::PageserverUtilization;
 
 use std::{
     collections::HashMap,
@@ -180,7 +183,7 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
     #[serde(default)]
@@ -214,14 +217,14 @@ impl ShardParameters {
     pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 
     pub fn is_unsharded(&self) -> bool {
-        self.count == ShardCount(0)
+        self.count.is_unsharded()
     }
 }
 
 impl Default for ShardParameters {
     fn default() -> Self {
         Self {
-            count: ShardCount(0),
+            count: ShardCount::new(0),
             stripe_size: Self::DEFAULT_STRIPE_SIZE,
         }
     }
@@ -283,6 +286,7 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
+    pub timeline_get_throttle: Option<ThrottleConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +294,7 @@ pub struct TenantConfig {
 pub enum EvictionPolicy {
     NoEviction,
     LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+    OnlyImitiate(EvictionPolicyLayerAccessThreshold),
 }
 
 impl EvictionPolicy {
@@ -297,6 +302,7 @@ impl EvictionPolicy {
         match self {
             EvictionPolicy::NoEviction => "NoEviction",
             EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+            EvictionPolicy::OnlyImitiate(_) => "OnlyImitiate",
         }
     }
 }
@@ -309,10 +315,39 @@ pub struct EvictionPolicyLayerAccessThreshold {
     pub threshold: Duration,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ThrottleConfig {
+    pub task_kinds: Vec<String>, // TaskKind
+    pub initial: usize,
+    #[serde(with = "humantime_serde")]
+    pub refill_interval: Duration,
+    pub refill_amount: NonZeroUsize,
+    pub max: usize,
+    pub fair: bool,
+}
+
+impl ThrottleConfig {
+    pub fn disabled() -> Self {
+        Self {
+            task_kinds: vec![], // effectively disables the throttle
+            // other values don't matter with emtpy `task_kinds`.
+            initial: 0,
+            refill_interval: Duration::from_millis(1),
+            refill_amount: NonZeroUsize::new(1).unwrap(),
+            max: 1,
+            fair: true,
+        }
+    }
+    /// The requests per second allowed  by the given config.
+    pub fn steady_rps(&self) -> f64 {
+        (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64())
+    }
+}
+
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
 /// lists out all possible states (and the virtual "Detached" state)
 /// in a flat form rather than using rust-style enums.
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LocationConfigMode {
     AttachedSingle,
     AttachedMulti,
@@ -374,6 +409,12 @@ pub struct TenantLocationConfigRequest {
     pub tenant_id: TenantShardId,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantTimeTravelRequest {
+    pub shard_counts: Vec<ShardCount>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

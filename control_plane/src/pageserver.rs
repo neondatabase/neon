@@ -210,6 +210,25 @@ impl PageServerNode {
         update_config: bool,
         register: bool,
     ) -> anyhow::Result<()> {
+        // Register the node with the storage controller before starting pageserver: pageserver must be registered to
+        // successfully call /re-attach and finish starting up.
+        if register {
+            let attachment_service = AttachmentService::from_env(&self.env);
+            let (pg_host, pg_port) =
+                parse_host_port(&self.conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
+            let (http_host, http_port) = parse_host_port(&self.conf.listen_http_addr)
+                .expect("Unable to parse listen_http_addr");
+            attachment_service
+                .node_register(NodeRegisterRequest {
+                    node_id: self.conf.id,
+                    listen_pg_addr: pg_host.to_string(),
+                    listen_pg_port: pg_port.unwrap_or(5432),
+                    listen_http_addr: http_host.to_string(),
+                    listen_http_port: http_port.unwrap_or(80),
+                })
+                .await?;
+        }
+
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
@@ -247,23 +266,6 @@ impl PageServerNode {
             },
         )
         .await?;
-
-        if register {
-            let attachment_service = AttachmentService::from_env(&self.env);
-            let (pg_host, pg_port) =
-                parse_host_port(&self.conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
-            let (http_host, http_port) = parse_host_port(&self.conf.listen_http_addr)
-                .expect("Unable to parse listen_http_addr");
-            attachment_service
-                .node_register(NodeRegisterRequest {
-                    node_id: self.conf.id,
-                    listen_pg_addr: pg_host.to_string(),
-                    listen_pg_port: pg_port.unwrap_or(5432),
-                    listen_http_addr: http_host.to_string(),
-                    listen_http_port: http_port.unwrap_or(80),
-                })
-                .await?;
-        }
 
         Ok(())
     }
@@ -400,6 +402,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'lazy_slru_download' as bool")?,
+            timeline_get_throttle: settings
+                .remove("timeline_get_throttle")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("parse `timeline_get_throttle` from json")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -505,6 +512,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'lazy_slru_download' as bool")?,
+                timeline_get_throttle: settings
+                    .remove("timeline_get_throttle")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("parse `timeline_get_throttle` from json")?,
             }
         };
 

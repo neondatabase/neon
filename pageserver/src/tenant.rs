@@ -167,6 +167,8 @@ pub(crate) mod timeline;
 
 pub mod size;
 
+pub(crate) mod throttle;
+
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
@@ -302,6 +304,11 @@ pub struct Tenant {
     // Users of the Tenant such as the page service must take this Gate to avoid
     // trying to use a Tenant which is shutting down.
     pub(crate) gate: Gate,
+
+    /// Throttle applied at the top of [`Timeline::get`].
+    /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
+    pub(crate) timeline_get_throttle:
+        Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -987,6 +994,7 @@ impl Tenant {
                 TimelineResources {
                     remote_client: Some(remote_client),
                     deletion_queue_client: self.deletion_queue_client.clone(),
+                    timeline_get_throttle: self.timeline_get_throttle.clone(),
                 },
                 ctx,
             )
@@ -2061,14 +2069,14 @@ impl Tenant {
         };
 
         // We have a pageserver TenantConf, we need the API-facing TenantConfig.
-        let tenant_config: models::TenantConfig = conf.tenant_conf.into();
+        let tenant_config: models::TenantConfig = conf.tenant_conf.clone().into();
 
         models::LocationConfig {
             mode: location_config_mode,
             generation: self.generation.into(),
             secondary_conf: None,
             shard_number: self.shard_identity.number.0,
-            shard_count: self.shard_identity.count.0,
+            shard_count: self.shard_identity.count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
             tenant_conf: tenant_config,
         }
@@ -2195,93 +2203,93 @@ where
 
 impl Tenant {
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
-        self.tenant_conf.read().unwrap().tenant_conf
+        self.tenant_conf.read().unwrap().tenant_conf.clone()
     }
 
     pub fn effective_config(&self) -> TenantConf {
         self.tenant_specific_overrides()
-            .merge(self.conf.default_tenant_conf)
+            .merge(self.conf.default_tenant_conf.clone())
     }
 
     pub fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     pub fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     pub fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     pub fn get_compaction_period(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_period
             .unwrap_or(self.conf.default_tenant_conf.compaction_period)
     }
 
     pub fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     pub fn get_gc_horizon(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .gc_horizon
             .unwrap_or(self.conf.default_tenant_conf.gc_horizon)
     }
 
     pub fn get_gc_period(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .gc_period
             .unwrap_or(self.conf.default_tenant_conf.gc_period)
     }
 
     pub fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     pub fn get_pitr_interval(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .pitr_interval
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
     pub fn get_trace_read_requests(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .trace_read_requests
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
     pub fn get_min_resident_size_override(&self) -> Option<u64> {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .min_resident_size_override
             .or(self.conf.default_tenant_conf.min_resident_size_override)
     }
 
     pub fn get_heatmap_period(&self) -> Option<Duration> {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         let heatmap_period = tenant_conf
             .heatmap_period
             .unwrap_or(self.conf.default_tenant_conf.heatmap_period);
@@ -2294,6 +2302,7 @@ impl Tenant {
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().tenant_conf = new_tenant_conf;
+        self.tenant_conf_updated();
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -2305,6 +2314,7 @@ impl Tenant {
 
     pub(crate) fn set_new_location_config(&self, new_conf: AttachedTenantConf) {
         *self.tenant_conf.write().unwrap() = new_conf;
+        self.tenant_conf_updated();
         // Don't hold self.timelines.lock() during the notifies.
         // There's no risk of deadlock right now, but there could be if we consolidate
         // mutexes in struct Timeline in the future.
@@ -2312,6 +2322,24 @@ impl Tenant {
         for timeline in timelines {
             timeline.tenant_conf_updated();
         }
+    }
+
+    fn get_timeline_get_throttle_config(
+        psconf: &'static PageServerConf,
+        overrides: &TenantConfOpt,
+    ) -> throttle::Config {
+        overrides
+            .timeline_get_throttle
+            .clone()
+            .unwrap_or(psconf.default_tenant_conf.timeline_get_throttle.clone())
+    }
+
+    pub(crate) fn tenant_conf_updated(&self) {
+        let conf = {
+            let guard = self.tenant_conf.read().unwrap();
+            Self::get_timeline_get_throttle_config(self.conf, &guard.tenant_conf)
+        };
+        self.timeline_get_throttle.reconfigure(conf)
     }
 
     /// Helper function to create a new Timeline struct.
@@ -2440,7 +2468,6 @@ impl Tenant {
             // using now here is good enough approximation to catch tenants with really long
             // activation times.
             constructed_at: Instant::now(),
-            tenant_conf: Arc::new(RwLock::new(attached_conf)),
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             gc_cs: tokio::sync::Mutex::new(()),
@@ -2455,6 +2482,11 @@ impl Tenant {
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
+            timeline_get_throttle: Arc::new(throttle::Throttle::new(
+                Tenant::get_timeline_get_throttle_config(conf, &attached_conf.tenant_conf),
+                &crate::metrics::tenant_throttling::TIMELINE_GET,
+            )),
+            tenant_conf: Arc::new(RwLock::new(attached_conf)),
         }
     }
 
@@ -3210,6 +3242,7 @@ impl Tenant {
         TimelineResources {
             remote_client,
             deletion_queue_client: self.deletion_queue_client.clone(),
+            timeline_get_throttle: self.timeline_get_throttle.clone(),
         }
     }
 
@@ -3465,7 +3498,7 @@ impl Tenant {
     }
 
     pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
-        self.tenant_conf.read().unwrap().tenant_conf
+        self.tenant_conf.read().unwrap().tenant_conf.clone()
     }
 }
 
@@ -3624,6 +3657,7 @@ pub(crate) mod harness {
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
+                timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
             }
         }
     }
@@ -3727,7 +3761,7 @@ pub(crate) mod harness {
                 TenantState::Loading,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
-                    TenantConfOpt::from(self.tenant_conf),
+                    TenantConfOpt::from(self.tenant_conf.clone()),
                     self.generation,
                     &ShardParameters::default(),
                 ))
@@ -3813,6 +3847,7 @@ mod tests {
     use bytes::BytesMut;
     use hex_literal::hex;
     use once_cell::sync::Lazy;
+    use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
     use tokio_util::sync::CancellationToken;
 
@@ -3826,7 +3861,7 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -3838,7 +3873,7 @@ mod tests {
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -3904,7 +3939,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
 
         #[allow(non_snake_case)]
         let TEST_KEY_A: Key = Key::from_hex("110000000033333333444444445500000001").unwrap();
@@ -3938,7 +3973,7 @@ mod tests {
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
-        let new_writer = newtline.writer().await;
+        let mut new_writer = newtline.writer().await;
         new_writer
             .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"), &ctx)
             .await?;
@@ -3970,7 +4005,7 @@ mod tests {
     ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         {
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             // Create a relation on the timeline
             writer
                 .put(
@@ -3995,7 +4030,7 @@ mod tests {
         }
         tline.freeze_and_flush().await?;
         {
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     *TEST_KEY,
@@ -4358,7 +4393,7 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4375,7 +4410,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4392,7 +4427,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4409,7 +4444,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4450,6 +4485,61 @@ mod tests {
         Ok(())
     }
 
+    async fn bulk_insert_compact_gc(
+        timeline: Arc<Timeline>,
+        ctx: &RequestContext,
+        mut lsn: Lsn,
+        repeat: usize,
+        key_count: usize,
+    ) -> anyhow::Result<()> {
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let mut blknum = 0;
+
+        // Enforce that key range is monotonously increasing
+        let mut keyspace = KeySpaceAccum::new();
+
+        for _ in 0..repeat {
+            for _ in 0..key_count {
+                test_key.field6 = blknum;
+                let mut writer = timeline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        ctx,
+                    )
+                    .await?;
+                writer.finish_write(lsn);
+                drop(writer);
+
+                keyspace.add_key(test_key);
+
+                lsn = Lsn(lsn.0 + 0x10);
+                blknum += 1;
+            }
+
+            let cutoff = timeline.get_last_record_lsn();
+
+            timeline
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    ctx,
+                )
+                .await?;
+            timeline.freeze_and_flush().await?;
+            timeline
+                .compact(&CancellationToken::new(), EnumSet::empty(), ctx)
+                .await?;
+            timeline.gc().await?;
+        }
+
+        Ok(())
+    }
+
     //
     // Insert 1000 key-value pairs with increasing keys, flush, compact, GC.
     // Repeat 50 times.
@@ -4462,49 +4552,98 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let mut lsn = Lsn(0x10);
+        let lsn = Lsn(0x10);
+        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
 
-        let mut keyspace = KeySpaceAccum::new();
+        Ok(())
+    }
 
-        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
-        let mut blknum = 0;
-        for _ in 0..50 {
-            for _ in 0..10000 {
-                test_key.field6 = blknum;
-                let writer = tline.writer().await;
-                writer
-                    .put(
-                        test_key,
-                        lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
-                        &ctx,
-                    )
-                    .await?;
-                writer.finish_write(lsn);
-                drop(writer);
+    // Test the vectored get real implementation against a simple sequential implementation.
+    //
+    // The test generates a keyspace by repeatedly flushing the in-memory layer and compacting.
+    // Projected to 2D the key space looks like below. Lsn grows upwards on the Y axis and keys
+    // grow to the right on the X axis.
+    //                       [Delta]
+    //                 [Delta]
+    //           [Delta]
+    //    [Delta]
+    // ------------ Image ---------------
+    //
+    // After layer generation we pick the ranges to query as follows:
+    // 1. The beginning of each delta layer
+    // 2. At the seam between two adjacent delta layers
+    //
+    // There's one major downside to this test: delta layers only contains images,
+    // so the search can stop at the first delta layer and doesn't traverse any deeper.
+    #[tokio::test]
+    async fn test_get_vectored() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_get_vectored")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
-                keyspace.add_key(test_key);
+        let lsn = Lsn(0x10);
+        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
 
-                lsn = Lsn(lsn.0 + 0x10);
-                blknum += 1;
+        let guard = tline.layers.read().await;
+        guard.layer_map().dump(true, &ctx).await?;
+
+        let mut reads = Vec::new();
+        let mut prev = None;
+        guard.layer_map().iter_historic_layers().for_each(|desc| {
+            if !desc.is_delta() {
+                prev = Some(desc.clone());
+                return;
             }
 
-            let cutoff = tline.get_last_record_lsn();
+            let start = desc.key_range.start;
+            let end = desc
+                .key_range
+                .start
+                .add(Timeline::MAX_GET_VECTORED_KEYS.try_into().unwrap());
+            reads.push(KeySpace {
+                ranges: vec![start..end],
+            });
 
+            if let Some(prev) = &prev {
+                if !prev.is_delta() {
+                    return;
+                }
+
+                let first_range = Key {
+                    field6: prev.key_range.end.field6 - 4,
+                    ..prev.key_range.end
+                }..prev.key_range.end;
+
+                let second_range = desc.key_range.start..Key {
+                    field6: desc.key_range.start.field6 + 4,
+                    ..desc.key_range.start
+                };
+
+                reads.push(KeySpace {
+                    ranges: vec![first_range, second_range],
+                });
+            };
+
+            prev = Some(desc.clone());
+        });
+
+        drop(guard);
+
+        // Pick a big LSN such that we query over all the changes.
+        // Technically, u64::MAX - 1 is the largest LSN supported by the read path,
+        // but there seems to be a bug on the non-vectored search path which surfaces
+        // in that case.
+        let reads_lsn = Lsn(u64::MAX - 1000);
+
+        for read in reads {
+            info!("Doing vectored read on {:?}", read);
+
+            let vectored_res = tline.get_vectored_impl(read.clone(), reads_lsn, &ctx).await;
             tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
-            tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
-                .await?;
-            tline.gc().await?;
+                .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
+                .await;
         }
 
         Ok(())
@@ -4533,7 +4672,7 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     test_key,
@@ -4554,7 +4693,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4622,7 +4761,7 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     test_key,
@@ -4651,7 +4790,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4728,7 +4867,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,

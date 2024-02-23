@@ -614,7 +614,7 @@ impl RemoteTimelineClient {
             metadata,
         );
         let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
-        self.calls_unfinished_metric_begin(&op);
+        self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
         upload_queue.latest_files_changes_since_metadata_upload_scheduled = 0;
 
@@ -654,7 +654,7 @@ impl RemoteTimelineClient {
             metadata.generation, metadata.shard
         );
         let op = UploadOp::UploadLayer(layer, metadata);
-        self.calls_unfinished_metric_begin(&op);
+        self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
     }
 
@@ -823,10 +823,14 @@ impl RemoteTimelineClient {
         }
 
         // schedule the actual deletions
+        if with_metadata.is_empty() {
+            // avoid scheduling the op & bumping the metric
+            return;
+        }
         let op = UploadOp::Delete(Delete {
             layers: with_metadata,
         });
-        self.calls_unfinished_metric_begin(&op);
+        self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
     }
 
@@ -1516,10 +1520,10 @@ impl RemoteTimelineClient {
                 .await;
         }
 
-        self.calls_unfinished_metric_end(&task.op);
+        self.metric_end(&task.op);
     }
 
-    fn calls_unfinished_metric_impl(
+    fn metric_impl(
         &self,
         op: &UploadOp,
     ) -> Option<(
@@ -1556,17 +1560,17 @@ impl RemoteTimelineClient {
         Some(res)
     }
 
-    fn calls_unfinished_metric_begin(&self, op: &UploadOp) {
-        let (file_kind, op_kind, track_bytes) = match self.calls_unfinished_metric_impl(op) {
+    fn metric_begin(&self, op: &UploadOp) {
+        let (file_kind, op_kind, track_bytes) = match self.metric_impl(op) {
             Some(x) => x,
             None => return,
         };
         let guard = self.metrics.call_begin(&file_kind, &op_kind, track_bytes);
-        guard.will_decrement_manually(); // in unfinished_ops_metric_end()
+        guard.will_decrement_manually(); // in metric_end(), see right below
     }
 
-    fn calls_unfinished_metric_end(&self, op: &UploadOp) {
-        let (file_kind, op_kind, track_bytes) = match self.calls_unfinished_metric_impl(op) {
+    fn metric_end(&self, op: &UploadOp) {
+        let (file_kind, op_kind, track_bytes) = match self.metric_impl(op) {
             Some(x) => x,
             None => return,
         };
@@ -1651,7 +1655,7 @@ impl RemoteTimelineClient {
 
                 // Tear down queued ops
                 for op in qi.queued_operations.into_iter() {
-                    self.calls_unfinished_metric_end(&op);
+                    self.metric_end(&op);
                     // Dropping UploadOp::Barrier() here will make wait_completion() return with an Err()
                     // which is exactly what we want to happen.
                     drop(op);

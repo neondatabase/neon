@@ -83,12 +83,12 @@ use utils::{
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
 // failed API calls while tenants are activating.
 #[cfg(not(feature = "testing"))]
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
+pub(crate) const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 // Tests run on slow/oversubscribed nodes, and may need to wait much longer for tenants to
 // finish attaching, if calls to remote storage are slow.
 #[cfg(feature = "testing")]
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
+pub(crate) const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 pub struct State {
     conf: &'static PageServerConf,
@@ -100,6 +100,7 @@ pub struct State {
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
     secondary_controller: SecondaryController,
+    latest_utilization: tokio::sync::Mutex<Option<(std::time::Instant, bytes::Bytes)>>,
 }
 
 impl State {
@@ -128,6 +129,7 @@ impl State {
             disk_usage_eviction_state,
             deletion_queue_client,
             secondary_controller,
+            latest_utilization: Default::default(),
         })
     }
 }
@@ -571,10 +573,16 @@ async fn timeline_list_handler(
         parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    let state = get_state(&request);
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let response_data = async {
-        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id, false)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
         let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
@@ -616,7 +624,7 @@ async fn timeline_preserve_initdb_handler(
     // location where timeline recreation cand find it.
 
     async {
-        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+        let tenant = mgr::get_tenant(tenant_shard_id, false)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -1136,7 +1144,7 @@ async fn tenant_shard_split_handler(
 
     let new_shards = state
         .tenant_manager
-        .shard_split(tenant_shard_id, ShardCount(req.new_shard_count), &ctx)
+        .shard_split(tenant_shard_id, ShardCount::new(req.new_shard_count), &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1951,9 +1959,58 @@ async fn put_io_engine_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
     let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
     crate::virtual_file::io_engine::set(kind);
     json_response(StatusCode::OK, ())
+}
+
+/// Polled by control plane.
+///
+/// See [`crate::utilization`].
+async fn get_utilization(
+    r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // this probably could be completely public, but lets make that change later.
+    check_permission(&r, None)?;
+
+    let state = get_state(&r);
+    let mut g = state.latest_utilization.lock().await;
+
+    let regenerate_every = Duration::from_secs(1);
+    let still_valid = g
+        .as_ref()
+        .is_some_and(|(captured_at, _)| captured_at.elapsed() < regenerate_every);
+
+    // avoid needless statvfs calls even though those should be non-blocking fast.
+    // regenerate at most 1Hz to allow polling at any rate.
+    if !still_valid {
+        let path = state.conf.tenants_path();
+        let doc = crate::utilization::regenerate(path.as_std_path())
+            .map_err(ApiError::InternalServerError)?;
+
+        let mut buf = Vec::new();
+        serde_json::to_writer(&mut buf, &doc)
+            .context("serialize")
+            .map_err(ApiError::InternalServerError)?;
+
+        let body = bytes::Bytes::from(buf);
+
+        *g = Some((std::time::Instant::now(), body));
+    }
+
+    // hyper 0.14 doesn't yet have Response::clone so this is a bit of extra legwork
+    let cached = g.as_ref().expect("just set").1.clone();
+
+    Response::builder()
+        .header(hyper::http::header::CONTENT_TYPE, "application/json")
+        // thought of using http date header, but that is second precision which does not give any
+        // debugging aid
+        .status(StatusCode::OK)
+        .body(hyper::Body::from(cached))
+        .context("build response")
+        .map_err(ApiError::InternalServerError)
 }
 
 /// Common functionality of all the HTTP API handlers.
@@ -2217,5 +2274,6 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .get("/v1/utilization", |r| api_handler(r, get_utilization))
         .any(handler_404))
 }

@@ -4,7 +4,7 @@ use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
     TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
-    TimelineCreateRequest,
+    TenantTimeTravelRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use utils::auth::SwappableJwtAuth;
 use utils::http::endpoint::{auth_middleware, request_span};
-use utils::http::request::parse_request_param;
+use utils::http::request::{must_get_query_param, parse_request_param};
 use utils::id::{TenantId, TimelineId};
 
 use utils::{
@@ -66,14 +66,7 @@ fn get_state(request: &Request<Body>) -> &HttpState {
 async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let reattach_req = json_request::<ReAttachRequest>(&mut req).await?;
     let state = get_state(&req);
-    json_response(
-        StatusCode::OK,
-        state
-            .service
-            .re_attach(reattach_req)
-            .await
-            .map_err(ApiError::InternalServerError)?,
-    )
+    json_response(StatusCode::OK, state.service.re_attach(reattach_req).await?)
 }
 
 /// Pageserver calls into this before doing deletions, to confirm that it still
@@ -114,7 +107,10 @@ async fn handle_tenant_create(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
-    json_response(StatusCode::OK, service.tenant_create(create_req).await?)
+    json_response(
+        StatusCode::CREATED,
+        service.tenant_create(create_req).await?,
+    )
 }
 
 // For tenant and timeline deletions, which both implement an "initially return 202, then 404 once
@@ -177,6 +173,39 @@ async fn handle_tenant_location_config(
     )
 }
 
+async fn handle_tenant_time_travel_remote_storage(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let time_travel_req = json_request::<TenantTimeTravelRequest>(&mut req).await?;
+
+    let timestamp_raw = must_get_query_param(&req, "travel_to")?;
+    let _timestamp = humantime::parse_rfc3339(&timestamp_raw).map_err(|_e| {
+        ApiError::BadRequest(anyhow::anyhow!(
+            "Invalid time for travel_to: {timestamp_raw:?}"
+        ))
+    })?;
+
+    let done_if_after_raw = must_get_query_param(&req, "done_if_after")?;
+    let _done_if_after = humantime::parse_rfc3339(&done_if_after_raw).map_err(|_e| {
+        ApiError::BadRequest(anyhow::anyhow!(
+            "Invalid time for done_if_after: {done_if_after_raw:?}"
+        ))
+    })?;
+
+    service
+        .tenant_time_travel_remote_storage(
+            &time_travel_req,
+            tenant_id,
+            timestamp_raw,
+            done_if_after_raw,
+        )
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handle_tenant_delete(
     service: Arc<Service>,
     req: Request<Body>,
@@ -196,7 +225,7 @@ async fn handle_tenant_timeline_create(
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let create_req = json_request::<TimelineCreateRequest>(&mut req).await?;
     json_response(
-        StatusCode::OK,
+        StatusCode::CREATED,
         service
             .tenant_timeline_create(tenant_id, create_req)
             .await?,
@@ -296,7 +325,10 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
     }
     let state = get_state(&req);
 
-    json_response(StatusCode::OK, state.service.node_configure(config_req)?)
+    json_response(
+        StatusCode::OK,
+        state.service.node_configure(config_req).await?,
+    )
 }
 
 async fn handle_tenant_shard_split(
@@ -331,6 +363,22 @@ async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let state = get_state(&req);
 
     json_response(StatusCode::OK, state.service.tenant_drop(tenant_id).await?)
+}
+
+async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+    state.service.tenants_dump()
+}
+
+async fn handle_scheduler_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+    state.service.scheduler_dump()
+}
+
+async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+
+    json_response(StatusCode::OK, state.service.consistency_check().await?)
 }
 
 /// Status endpoint is just used for checking that our HTTP listener is up
@@ -421,6 +469,13 @@ pub fn make_router(
         .post("/debug/v1/node/:node_id/drop", |r| {
             request_span(r, handle_node_drop)
         })
+        .get("/debug/v1/tenant", |r| request_span(r, handle_tenants_dump))
+        .get("/debug/v1/scheduler", |r| {
+            request_span(r, handle_scheduler_dump)
+        })
+        .post("/debug/v1/consistency_check", |r| {
+            request_span(r, handle_consistency_check)
+        })
         .get("/control/v1/tenant/:tenant_id/locate", |r| {
             tenant_service_handler(r, handle_tenant_locate)
         })
@@ -450,6 +505,9 @@ pub fn make_router(
         })
         .put("/v1/tenant/:tenant_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
+        })
+        .put("/v1/tenant/:tenant_id/time_travel_remote_storage", |r| {
+            tenant_service_handler(r, handle_tenant_time_travel_remote_storage)
         })
         // Timeline operations
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {

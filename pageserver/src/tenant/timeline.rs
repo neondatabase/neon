@@ -16,7 +16,7 @@ use futures::stream::StreamExt;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::{
-    keyspace::{key_range_size, KeySpaceAccum},
+    keyspace::KeySpaceAccum,
     models::{
         DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
         LayerMapInfo, TimelineState,
@@ -33,7 +33,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::sync::gate::Gate;
+use utils::{bin_ser::BeSer, sync::gate::Gate};
 
 use std::ops::{Deref, Range};
 use std::pin::pin;
@@ -67,7 +67,7 @@ use crate::{
     tenant::storage_layer::{
         AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
         LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
-        ValueReconstructState,
+        ValueReconstructState, ValuesReconstructState,
     },
 };
 use crate::{
@@ -111,11 +111,11 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
-use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::{config::TenantConf, storage_layer::ReadableLayerDesc};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
+use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -164,6 +164,9 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 pub struct TimelineResources {
     pub remote_client: Option<RemoteTimelineClient>,
     pub deletion_queue_client: DeletionQueueClient,
+    pub timeline_get_throttle: Arc<
+        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
+    >,
 }
 
 pub struct Timeline {
@@ -271,7 +274,7 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
-    write_lock: tokio::sync::Mutex<()>,
+    write_lock: tokio::sync::Mutex<Option<TimelineWriterState>>,
 
     /// Used to avoid multiple `flush_loop` tasks running
     pub(super) flush_loop_state: Mutex<FlushLoopState>,
@@ -355,6 +358,11 @@ pub struct Timeline {
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
+
+    /// Cloned from [`super::Tenant::timeline_get_throttle`] on construction.
+    timeline_get_throttle: Arc<
+        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
+    >,
 }
 
 pub struct WalReceiverInfo {
@@ -464,6 +472,15 @@ pub(crate) enum GetVectoredError {
 
     #[error("Requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
+
+    #[error("Requested key {0} not found")]
+    MissingKey(Key),
+
+    #[error(transparent)]
+    GetReadyAncestorError(GetReadyAncestorError),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -571,6 +588,23 @@ impl From<GetReadyAncestorError> for PageReconstructError {
     }
 }
 
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum GetVectoredImpl {
+    Sequential,
+    Vectored,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -614,6 +648,8 @@ impl Timeline {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
+
+        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
@@ -698,7 +734,7 @@ impl Timeline {
     /// which actually vectorizes the read path.
     pub(crate) async fn get_vectored(
         &self,
-        key_ranges: &[Range<Key>],
+        keyspace: KeySpace,
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
@@ -706,39 +742,170 @@ impl Timeline {
             return Err(GetVectoredError::InvalidLsn(lsn));
         }
 
-        let key_count = key_ranges
-            .iter()
-            .map(|range| key_range_size(range) as u64)
-            .sum();
+        let key_count = keyspace.total_size().try_into().unwrap();
         if key_count > Timeline::MAX_GET_VECTORED_KEYS {
             return Err(GetVectoredError::Oversized(key_count));
         }
+
+        self.timeline_get_throttle
+            .throttle(ctx, key_count as usize)
+            .await;
+
+        for range in &keyspace.ranges {
+            let mut key = range.start;
+            while key != range.end {
+                assert!(!self.shard_identity.is_key_disposable(&key));
+                key = key.next();
+            }
+        }
+
+        trace!(
+            "get vectored request for {:?}@{} from task kind {:?} will use {} implementation",
+            keyspace,
+            lsn,
+            ctx.task_kind(),
+            self.conf.get_vectored_impl
+        );
 
         let _timer = crate::metrics::GET_VECTORED_LATENCY
             .for_task_kind(ctx.task_kind())
             .map(|t| t.start_timer());
 
+        match self.conf.get_vectored_impl {
+            GetVectoredImpl::Sequential => {
+                self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
+            }
+            GetVectoredImpl::Vectored => {
+                let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
+
+                self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                    .await;
+
+                vectored_res
+            }
+        }
+    }
+
+    pub(super) async fn get_vectored_sequential_impl(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let mut values = BTreeMap::new();
-        for range in key_ranges {
+        for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                assert!(!self.shard_identity.is_key_disposable(&key));
-
                 let block = self.get(key, lsn, ctx).await;
 
-                if matches!(
-                    block,
-                    Err(PageReconstructError::Cancelled | PageReconstructError::AncestorStopping(_))
-                ) {
-                    return Err(GetVectoredError::Cancelled);
+                use PageReconstructError::*;
+                match block {
+                    Err(Cancelled | AncestorStopping(_)) => {
+                        return Err(GetVectoredError::Cancelled)
+                    }
+                    Err(Other(err)) if err.to_string().contains("could not find data for key") => {
+                        return Err(GetVectoredError::MissingKey(key))
+                    }
+                    _ => {
+                        values.insert(key, block);
+                        key = key.next();
+                    }
                 }
-
-                values.insert(key, block);
-                key = key.next();
             }
         }
 
         Ok(values)
+    }
+
+    pub(super) async fn get_vectored_impl(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        let mut reconstruct_state = ValuesReconstructState::new();
+
+        self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
+            .await?;
+
+        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
+        for (key, res) in reconstruct_state.keys {
+            match res {
+                Err(err) => {
+                    results.insert(key, Err(err));
+                }
+                Ok(state) => {
+                    let state = ValueReconstructState::from(state);
+
+                    let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
+                    results.insert(key, reconstruct_res);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub(super) async fn validate_get_vectored_impl(
+        &self,
+        vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) {
+        let sequential_res = self
+            .get_vectored_sequential_impl(keyspace.clone(), lsn, ctx)
+            .await;
+
+        fn errors_match(lhs: &GetVectoredError, rhs: &GetVectoredError) -> bool {
+            use GetVectoredError::*;
+            match (lhs, rhs) {
+                (Cancelled, Cancelled) => true,
+                (_, Cancelled) => true,
+                (Oversized(l), Oversized(r)) => l == r,
+                (InvalidLsn(l), InvalidLsn(r)) => l == r,
+                (MissingKey(l), MissingKey(r)) => l == r,
+                (GetReadyAncestorError(_), GetReadyAncestorError(_)) => true,
+                (Other(_), Other(_)) => true,
+                _ => false,
+            }
+        }
+
+        match (&sequential_res, vectored_res) {
+            (Err(seq_err), Ok(_)) => {
+                panic!(concat!("Sequential get failed with {}, but vectored get did not",
+                               " - keyspace={:?} lsn={}"),
+                       seq_err, keyspace, lsn) },
+            (Ok(_), Err(vec_err)) => {
+                panic!(concat!("Vectored get failed with {}, but sequential get did not",
+                               " - keyspace={:?} lsn={}"),
+                       vec_err, keyspace, lsn) },
+            (Err(seq_err), Err(vec_err)) => {
+                assert!(errors_match(seq_err, vec_err),
+                        "Mismatched errors: {seq_err} != {vec_err} - keyspace={keyspace:?} lsn={lsn}")},
+            (Ok(seq_values), Ok(vec_values)) => {
+                seq_values.iter().zip(vec_values.iter()).for_each(|((seq_key, seq_res), (vec_key, vec_res))| {
+                    assert_eq!(seq_key, vec_key);
+                    match (seq_res, vec_res) {
+                        (Ok(seq_blob), Ok(vec_blob)) => {
+                            assert_eq!(seq_blob, vec_blob,
+                                       "Image mismatch for key {seq_key} - keyspace={keyspace:?} lsn={lsn}");
+                        },
+                        (Err(err), Ok(_)) => {
+                            panic!(
+                                concat!("Sequential get failed with {} for key {}, but vectored get did not",
+                                        " - keyspace={:?} lsn={}"),
+                                err, seq_key, keyspace, lsn) },
+                        (Ok(_), Err(err)) => {
+                            panic!(
+                                concat!("Vectored get failed with {} for key {}, but sequential get did not",
+                                        " - keyspace={:?} lsn={}"),
+                                err, seq_key, keyspace, lsn) },
+                        (Err(_), Err(_)) => {}
+                    }
+                })
+            }
+        }
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -1037,51 +1204,8 @@ impl Timeline {
     pub(crate) async fn writer(&self) -> TimelineWriter<'_> {
         TimelineWriter {
             tl: self,
-            _write_guard: self.write_lock.lock().await,
+            write_guard: self.write_lock.lock().await,
         }
-    }
-
-    /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
-    /// the in-memory layer, and initiate flushing it if so.
-    ///
-    /// Also flush after a period of time without new data -- it helps
-    /// safekeepers to regard pageserver as caught up and suspend activity.
-    pub(crate) async fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
-        let last_lsn = self.get_last_record_lsn();
-        let open_layer_size = {
-            let guard = self.layers.read().await;
-            let layers = guard.layer_map();
-            let Some(open_layer) = layers.open_layer.as_ref() else {
-                return Ok(());
-            };
-            open_layer.size().await?
-        };
-        let last_freeze_at = self.last_freeze_at.load();
-        let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
-        let distance = last_lsn.widening_sub(last_freeze_at);
-        // Checkpointing the open layer can be triggered by layer size or LSN range.
-        // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
-        // we want to stay below that with a big margin.  The LSN distance determines how
-        // much WAL the safekeepers need to store.
-        if distance >= self.get_checkpoint_distance().into()
-            || open_layer_size > self.get_checkpoint_distance()
-            || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
-        {
-            info!(
-                "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
-                distance,
-                open_layer_size,
-                last_freeze_ts.elapsed()
-            );
-
-            self.freeze_inmem_layer(true).await;
-            self.last_freeze_at.store(last_lsn);
-            *(self.last_freeze_ts.write().unwrap()) = Instant::now();
-
-            // Wake up the layer flusher
-            self.flush_frozen_layers();
-        }
-        Ok(())
     }
 
     pub(crate) fn activate(
@@ -1335,49 +1459,49 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 // Private functions
 impl Timeline {
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .lazy_slru_download
             .unwrap_or(self.conf.default_tenant_conf.lazy_slru_download)
     }
 
     fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .eviction_policy
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
@@ -1393,7 +1517,7 @@ impl Timeline {
     }
 
     fn get_gc_feedback(&self) -> bool {
-        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
             .gc_feedback
             .unwrap_or(self.conf.default_tenant_conf.gc_feedback)
@@ -1515,7 +1639,7 @@ impl Timeline {
                 layer_flush_start_tx,
                 layer_flush_done_tx,
 
-                write_lock: tokio::sync::Mutex::new(()),
+                write_lock: tokio::sync::Mutex::new(None),
 
                 gc_info: std::sync::RwLock::new(GcInfo {
                     retain_lsns: Vec::new(),
@@ -1555,6 +1679,8 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),
+
+                timeline_get_throttle: resources.timeline_get_throttle,
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -2578,6 +2704,170 @@ impl Timeline {
         }
     }
 
+    /// Get the data needed to reconstruct all keys in the provided keyspace
+    ///
+    /// The algorithm is as follows:
+    /// 1.   While some keys are still not done and there's a timeline to visit:
+    /// 2.   Visit the timeline (see [`Timeline::get_vectored_reconstruct_data_timeline`]:
+    /// 2.1: Build the fringe for the current keyspace
+    /// 2.2  Visit the newest layer from the fringe to collect all values for the range it
+    ///      intersects
+    /// 2.3. Pop the timeline from the fringe
+    /// 2.4. If the fringe is empty, go back to 1
+    async fn get_vectored_reconstruct_data(
+        &self,
+        mut keyspace: KeySpace,
+        request_lsn: Lsn,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        let mut timeline_owned: Arc<Timeline>;
+        let mut timeline = self;
+
+        let mut cont_lsn = Lsn(request_lsn.0 + 1);
+
+        loop {
+            if self.cancel.is_cancelled() {
+                return Err(GetVectoredError::Cancelled);
+            }
+
+            let completed = Self::get_vectored_reconstruct_data_timeline(
+                timeline,
+                keyspace.clone(),
+                cont_lsn,
+                reconstruct_state,
+                &self.cancel,
+                ctx,
+            )
+            .await?;
+
+            keyspace.remove_overlapping_with(&completed);
+            if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
+                break;
+            }
+
+            cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
+            timeline_owned = timeline
+                .get_ready_ancestor_timeline(ctx)
+                .await
+                .map_err(GetVectoredError::GetReadyAncestorError)?;
+            timeline = &*timeline_owned;
+        }
+
+        if keyspace.total_size() != 0 {
+            return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
+        }
+
+        Ok(())
+    }
+
+    /// Collect the reconstruct data for a ketspace from the specified timeline.
+    ///
+    /// Maintain a fringe [`LayerFringe`] which tracks all the layers that intersect
+    /// the current keyspace. The current keyspace of the search at any given timeline
+    /// is the original keyspace minus all the keys that have been completed minus
+    /// any keys for which we couldn't find an intersecting layer. It's not tracked explicitly,
+    /// but if you merge all the keyspaces in the fringe, you get the "current keyspace".
+    ///
+    /// This is basically a depth-first search visitor implementation where a vertex
+    /// is the (layer, lsn range, key space) tuple. The fringe acts as the stack.
+    ///
+    /// At each iteration pop the top of the fringe (the layer with the highest Lsn)
+    /// and get all the required reconstruct data from the layer in one go.
+    async fn get_vectored_reconstruct_data_timeline(
+        timeline: &Timeline,
+        keyspace: KeySpace,
+        mut cont_lsn: Lsn,
+        reconstruct_state: &mut ValuesReconstructState,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> Result<KeySpace, GetVectoredError> {
+        let mut unmapped_keyspace = keyspace.clone();
+        let mut fringe = LayerFringe::new();
+
+        let mut completed_keyspace = KeySpace::default();
+
+        // Hold the layer map whilst visiting the timeline to prevent
+        // compaction, eviction and flushes from rendering the layers unreadable.
+        //
+        // TODO: Do we actually need to do this? In theory holding on
+        // to [`tenant::storage_layer::Layer`] should be enough. However,
+        // [`Timeline::get`] also holds the lock during IO, so more investigation
+        // is needed.
+        let guard = timeline.layers.read().await;
+        let layers = guard.layer_map();
+
+        'outer: loop {
+            if cancel.is_cancelled() {
+                return Err(GetVectoredError::Cancelled);
+            }
+
+            let keys_done_last_step = reconstruct_state.consume_done_keys();
+            unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
+            completed_keyspace.merge(&keys_done_last_step);
+
+            let in_memory_layer = layers.find_in_memory_layer(|l| {
+                let start_lsn = l.get_lsn_range().start;
+                cont_lsn > start_lsn
+            });
+
+            match in_memory_layer {
+                Some(l) => {
+                    fringe.update(
+                        ReadableLayerDesc::InMemory {
+                            handle: l,
+                            lsn_ceil: cont_lsn,
+                        },
+                        unmapped_keyspace.clone(),
+                    );
+                }
+                None => {
+                    for range in unmapped_keyspace.ranges.iter() {
+                        let results = match layers.range_search(range.clone(), cont_lsn) {
+                            Some(res) => res,
+                            None => {
+                                break 'outer;
+                            }
+                        };
+
+                        results
+                            .found
+                            .into_iter()
+                            .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                                (
+                                    ReadableLayerDesc::Persistent {
+                                        desc: (*layer).clone(),
+                                        lsn_floor,
+                                        lsn_ceil: cont_lsn,
+                                    },
+                                    keyspace_accum.to_keyspace(),
+                                )
+                            })
+                            .for_each(|(layer, keyspace)| fringe.update(layer, keyspace));
+                    }
+                }
+            }
+
+            if let Some((layer_to_read, keyspace_to_read)) = fringe.next_layer() {
+                layer_to_read
+                    .get_values_reconstruct_data(
+                        &guard,
+                        keyspace_to_read.clone(),
+                        reconstruct_state,
+                        ctx,
+                    )
+                    .await?;
+
+                unmapped_keyspace = keyspace_to_read;
+                cont_lsn = layer_to_read.get_lsn_floor();
+            } else {
+                break;
+            }
+        }
+
+        Ok(completed_keyspace)
+    }
+
     /// # Cancel-safety
     ///
     /// This method is cancellation-safe.
@@ -2690,43 +2980,6 @@ impl Timeline {
         Ok(layer)
     }
 
-    async fn put_value(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        val: &Value,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        //info!("PUT: key {} at {}", key, lsn);
-        let layer = self.get_layer_for_write(lsn).await?;
-        layer.put_value(key, lsn, val, ctx).await?;
-        Ok(())
-    }
-
-    async fn put_values(
-        &self,
-        values: &HashMap<Key, Vec<(Lsn, Value)>>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Pick the first LSN in the batch to get the layer to write to.
-        for lsns in values.values() {
-            if let Some((lsn, _)) = lsns.first() {
-                let layer = self.get_layer_for_write(*lsn).await?;
-                layer.put_values(values, ctx).await?;
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    async fn put_tombstones(&self, tombstones: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
-        if let Some((_, lsn)) = tombstones.first() {
-            let layer = self.get_layer_for_write(*lsn).await?;
-            layer.put_tombstones(tombstones).await?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
@@ -2737,14 +2990,20 @@ impl Timeline {
     async fn freeze_inmem_layer(&self, write_lock_held: bool) {
         // Freeze the current open in-memory layer. It will be written to disk on next
         // iteration.
+
         let _write_guard = if write_lock_held {
             None
         } else {
             Some(self.write_lock.lock().await)
         };
+
+        self.freeze_inmem_layer_at(self.get_last_record_lsn()).await;
+    }
+
+    async fn freeze_inmem_layer_at(&self, at: Lsn) {
         let mut guard = self.layers.write().await;
         guard
-            .try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at)
+            .try_freeze_in_memory_layer(at, &self.last_freeze_at)
             .await;
     }
 
@@ -3241,90 +3500,107 @@ impl Timeline {
 
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
-            start = img_range.end;
-            if force || self.time_for_new_image_layer(partition, lsn).await {
-                let mut image_layer_writer = ImageLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_shard_id,
-                    &img_range,
-                    lsn,
-                )
-                .await?;
+            if !force && !self.time_for_new_image_layer(partition, lsn).await {
+                start = img_range.end;
+                continue;
+            }
 
-                fail_point!("image-layer-writer-fail-before-finish", |_| {
-                    Err(CreateImageLayersError::Other(anyhow::anyhow!(
-                        "failpoint image-layer-writer-fail-before-finish"
-                    )))
-                });
+            let mut image_layer_writer = ImageLayerWriter::new(
+                self.conf,
+                self.timeline_id,
+                self.tenant_shard_id,
+                &img_range,
+                lsn,
+            )
+            .await?;
 
-                let mut key_request_accum = KeySpaceAccum::new();
-                for range in &partition.ranges {
-                    let mut key = range.start;
-                    while key < range.end {
-                        if self.shard_identity.is_key_disposable(&key) {
-                            debug!(
-                                "Dropping key {} during compaction (it belongs on shard {:?})",
-                                key,
-                                self.shard_identity.get_shard_number(&key)
-                            );
-                            key = key.next();
-                            continue;
-                        }
+            fail_point!("image-layer-writer-fail-before-finish", |_| {
+                Err(CreateImageLayersError::Other(anyhow::anyhow!(
+                    "failpoint image-layer-writer-fail-before-finish"
+                )))
+            });
 
+            let mut wrote_keys = false;
+
+            let mut key_request_accum = KeySpaceAccum::new();
+            for range in &partition.ranges {
+                let mut key = range.start;
+                while key < range.end {
+                    // Decide whether to retain this key: usually we do, but sharded tenants may
+                    // need to drop keys that don't belong to them.  If we retain the key, add it
+                    // to `key_request_accum` for later issuing a vectored get
+                    if self.shard_identity.is_key_disposable(&key) {
+                        debug!(
+                            "Dropping key {} during compaction (it belongs on shard {:?})",
+                            key,
+                            self.shard_identity.get_shard_number(&key)
+                        );
+                    } else {
                         key_request_accum.add_key(key);
-                        if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
-                            || key.next() == range.end
-                        {
-                            let results = self
-                                .get_vectored(
-                                    &key_request_accum.consume_keyspace().ranges,
-                                    lsn,
-                                    ctx,
-                                )
-                                .await?;
+                    }
 
-                            for (img_key, img) in results {
-                                let img = match img {
-                                    Ok(img) => img,
-                                    Err(err) => {
-                                        // If we fail to reconstruct a VM or FSM page, we can zero the
-                                        // page without losing any actual user data. That seems better
-                                        // than failing repeatedly and getting stuck.
-                                        //
-                                        // We had a bug at one point, where we truncated the FSM and VM
-                                        // in the pageserver, but the Postgres didn't know about that
-                                        // and continued to generate incremental WAL records for pages
-                                        // that didn't exist in the pageserver. Trying to replay those
-                                        // WAL records failed to find the previous image of the page.
-                                        // This special case allows us to recover from that situation.
-                                        // See https://github.com/neondatabase/neon/issues/2601.
-                                        //
-                                        // Unfortunately we cannot do this for the main fork, or for
-                                        // any metadata keys, keys, as that would lead to actual data
-                                        // loss.
-                                        if is_rel_fsm_block_key(img_key)
-                                            || is_rel_vm_block_key(img_key)
-                                        {
-                                            warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
-                                            ZERO_PAGE.clone()
-                                        } else {
-                                            return Err(
-                                                CreateImageLayersError::PageReconstructError(err),
-                                            );
-                                        }
+                    let last_key_in_range = key.next() == range.end;
+                    key = key.next();
+
+                    // Maybe flush `key_rest_accum`
+                    if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
+                        || last_key_in_range
+                    {
+                        let results = self
+                            .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
+                            .await?;
+
+                        for (img_key, img) in results {
+                            let img = match img {
+                                Ok(img) => img,
+                                Err(err) => {
+                                    // If we fail to reconstruct a VM or FSM page, we can zero the
+                                    // page without losing any actual user data. That seems better
+                                    // than failing repeatedly and getting stuck.
+                                    //
+                                    // We had a bug at one point, where we truncated the FSM and VM
+                                    // in the pageserver, but the Postgres didn't know about that
+                                    // and continued to generate incremental WAL records for pages
+                                    // that didn't exist in the pageserver. Trying to replay those
+                                    // WAL records failed to find the previous image of the page.
+                                    // This special case allows us to recover from that situation.
+                                    // See https://github.com/neondatabase/neon/issues/2601.
+                                    //
+                                    // Unfortunately we cannot do this for the main fork, or for
+                                    // any metadata keys, keys, as that would lead to actual data
+                                    // loss.
+                                    if is_rel_fsm_block_key(img_key) || is_rel_vm_block_key(img_key)
+                                    {
+                                        warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
+                                        ZERO_PAGE.clone()
+                                    } else {
+                                        return Err(CreateImageLayersError::PageReconstructError(
+                                            err,
+                                        ));
                                     }
-                                };
+                                }
+                            };
 
-                                image_layer_writer.put_image(img_key, img).await?;
-                            }
+                            // Write all the keys we just read into our new image layer.
+                            image_layer_writer.put_image(img_key, img).await?;
+                            wrote_keys = true;
                         }
-
-                        key = key.next();
                     }
                 }
+            }
+
+            if wrote_keys {
+                // Normal path: we have written some data into the new image layer for this
+                // partition, so flush it to disk.
+                start = img_range.end;
                 let image_layer = image_layer_writer.finish(self).await?;
                 image_layers.push(image_layer);
+            } else {
+                // Special case: the image layer may be empty if this is a sharded tenant and the
+                // partition does not cover any keys owned by this shard.  In this case, to ensure
+                // we don't leave gaps between image layers, leave `start` where it is, so that the next
+                // layer we write will cover the key range that we just scanned.
+                tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             }
         }
         // All layers that the GC wanted us to create have now been created.
@@ -3864,27 +4140,6 @@ impl Timeline {
                 // Remember size of key value because at next iteration we will access next item
                 key_values_total_size = next_key_size;
             }
-            if writer.is_none() {
-                // Create writer if not initiaized yet
-                writer = Some(
-                    DeltaLayerWriter::new(
-                        self.conf,
-                        self.timeline_id,
-                        self.tenant_shard_id,
-                        key,
-                        if dup_end_lsn.is_valid() {
-                            // this is a layer containing slice of values of the same key
-                            debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
-                            dup_start_lsn..dup_end_lsn
-                        } else {
-                            debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
-                            lsn_range.clone()
-                        },
-                    )
-                    .await?,
-                );
-            }
-
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
                 Err(CompactionError::Other(anyhow::anyhow!(
                     "failpoint delta-layer-writer-fail-before-finish"
@@ -3892,6 +4147,27 @@ impl Timeline {
             });
 
             if !self.shard_identity.is_key_disposable(&key) {
+                if writer.is_none() {
+                    // Create writer if not initiaized yet
+                    writer = Some(
+                        DeltaLayerWriter::new(
+                            self.conf,
+                            self.timeline_id,
+                            self.tenant_shard_id,
+                            key,
+                            if dup_end_lsn.is_valid() {
+                                // this is a layer containing slice of values of the same key
+                                debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
+                                dup_start_lsn..dup_end_lsn
+                            } else {
+                                debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
+                                lsn_range.clone()
+                            },
+                        )
+                        .await?,
+                    );
+                }
+
                 writer.as_mut().unwrap().put_value(key, lsn, value).await?;
             } else {
                 debug!(
@@ -4706,13 +4982,43 @@ fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageRecon
     PageReconstructError::from(msg)
 }
 
+struct TimelineWriterState {
+    open_layer: Arc<InMemoryLayer>,
+    current_size: u64,
+    // Previous Lsn which passed through
+    prev_lsn: Option<Lsn>,
+    // Largest Lsn which passed through the current writer
+    max_lsn: Option<Lsn>,
+    // Cached details of the last freeze. Avoids going trough the atomic/lock on every put.
+    cached_last_freeze_at: Lsn,
+    cached_last_freeze_ts: Instant,
+}
+
+impl TimelineWriterState {
+    fn new(
+        open_layer: Arc<InMemoryLayer>,
+        current_size: u64,
+        last_freeze_at: Lsn,
+        last_freeze_ts: Instant,
+    ) -> Self {
+        Self {
+            open_layer,
+            current_size,
+            prev_lsn: None,
+            max_lsn: None,
+            cached_last_freeze_at: last_freeze_at,
+            cached_last_freeze_ts: last_freeze_ts,
+        }
+    }
+}
+
 /// Various functions to mutate the timeline.
 // TODO Currently, Deref is used to allow easy access to read methods from this trait.
 // This is probably considered a bad practice in Rust and should be fixed eventually,
 // but will cause large code changes.
 pub(crate) struct TimelineWriter<'a> {
     tl: &'a Timeline,
-    _write_guard: tokio::sync::MutexGuard<'a, ()>,
+    write_guard: tokio::sync::MutexGuard<'a, Option<TimelineWriterState>>,
 }
 
 impl Deref for TimelineWriter<'_> {
@@ -4723,31 +5029,193 @@ impl Deref for TimelineWriter<'_> {
     }
 }
 
+impl Drop for TimelineWriter<'_> {
+    fn drop(&mut self) {
+        self.write_guard.take();
+    }
+}
+
+enum OpenLayerAction {
+    Roll,
+    Open,
+    None,
+}
+
 impl<'a> TimelineWriter<'a> {
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
     pub(crate) async fn put(
-        &self,
+        &mut self,
         key: Key,
         lsn: Lsn,
         value: &Value,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.tl.put_value(key, lsn, value, ctx).await
+        // Avoid doing allocations for "small" values.
+        // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
+        // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
+        let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
+        buf.clear();
+        value.ser_into(&mut buf)?;
+        let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
+
+        let action = self.get_open_layer_action(lsn, buf_size);
+        let layer = self.handle_open_layer_action(lsn, action).await?;
+        let res = layer.put_value(key, lsn, &buf, ctx).await;
+
+        if res.is_ok() {
+            // Update the current size only when the entire write was ok.
+            // In case of failures, we may have had partial writes which
+            // render the size tracking out of sync. That's ok because
+            // the checkpoint distance should be significantly smaller
+            // than the S3 single shot upload limit of 5GiB.
+            let state = self.write_guard.as_mut().unwrap();
+
+            state.current_size += buf_size;
+            state.prev_lsn = Some(lsn);
+            state.max_lsn = std::cmp::max(state.max_lsn, Some(lsn));
+        }
+
+        res
     }
 
+    async fn handle_open_layer_action(
+        &mut self,
+        at: Lsn,
+        action: OpenLayerAction,
+    ) -> anyhow::Result<&Arc<InMemoryLayer>> {
+        match action {
+            OpenLayerAction::Roll => {
+                let max_lsn = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
+                self.tl.freeze_inmem_layer_at(max_lsn).await;
+
+                let now = Instant::now();
+                *(self.last_freeze_ts.write().unwrap()) = now;
+
+                self.tl.flush_frozen_layers();
+
+                let current_size = self.write_guard.as_ref().unwrap().current_size;
+                if current_size > self.get_checkpoint_distance() {
+                    warn!("Flushed oversized open layer with size {}", current_size)
+                }
+
+                assert!(self.write_guard.is_some());
+
+                let layer = self.tl.get_layer_for_write(at).await?;
+                let initial_size = layer.size().await?;
+                self.write_guard.replace(TimelineWriterState::new(
+                    layer,
+                    initial_size,
+                    Lsn(max_lsn.0 + 1),
+                    now,
+                ));
+            }
+            OpenLayerAction::Open => {
+                assert!(self.write_guard.is_none());
+
+                let layer = self.tl.get_layer_for_write(at).await?;
+                let initial_size = layer.size().await?;
+
+                let last_freeze_at = self.last_freeze_at.load();
+                let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
+                self.write_guard.replace(TimelineWriterState::new(
+                    layer,
+                    initial_size,
+                    last_freeze_at,
+                    last_freeze_ts,
+                ));
+            }
+            OpenLayerAction::None => {
+                assert!(self.write_guard.is_some());
+            }
+        }
+
+        Ok(&self.write_guard.as_ref().unwrap().open_layer)
+    }
+
+    fn get_open_layer_action(&self, lsn: Lsn, new_value_size: u64) -> OpenLayerAction {
+        let state = &*self.write_guard;
+        let Some(state) = &state else {
+            return OpenLayerAction::Open;
+        };
+
+        if state.prev_lsn == Some(lsn) {
+            // Rolling mid LSN is not supported by downstream code.
+            // Hence, only roll at LSN boundaries.
+            return OpenLayerAction::None;
+        }
+
+        let distance = lsn.widening_sub(state.cached_last_freeze_at);
+        let proposed_open_layer_size = state.current_size + new_value_size;
+
+        // Rolling the open layer can be triggered by:
+        // 1. The distance from the last LSN we rolled at. This bounds the amount of WAL that
+        //    the safekeepers need to store.  For sharded tenants, we multiply by shard count to
+        //    account for how writes are distributed across shards: we expect each node to consume
+        //    1/count of the LSN on average.
+        // 2. The size of the currently open layer.
+        // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
+        //    up and suspend activity.
+        if distance
+            >= self.get_checkpoint_distance() as i128 * self.shard_identity.count.count() as i128
+        {
+            info!(
+                "Will roll layer at {} with layer size {} due to LSN distance ({})",
+                lsn, state.current_size, distance
+            );
+
+            OpenLayerAction::Roll
+        } else if state.current_size > 0
+            && proposed_open_layer_size >= self.get_checkpoint_distance()
+        {
+            info!(
+                "Will roll layer at {} with layer size {} due to layer size ({})",
+                lsn, state.current_size, proposed_open_layer_size
+            );
+
+            OpenLayerAction::Roll
+        } else if distance > 0
+            && state.cached_last_freeze_ts.elapsed() >= self.get_checkpoint_timeout()
+        {
+            info!(
+                "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
+                lsn,
+                state.current_size,
+                state.cached_last_freeze_ts.elapsed()
+            );
+
+            OpenLayerAction::Roll
+        } else {
+            OpenLayerAction::None
+        }
+    }
+
+    /// Put a batch keys at the specified Lsns.
+    ///
+    /// The batch should be sorted by Lsn such that it's safe
+    /// to roll the open layer mid batch.
     pub(crate) async fn put_batch(
-        &self,
-        batch: &HashMap<Key, Vec<(Lsn, Value)>>,
+        &mut self,
+        batch: Vec<(Key, Lsn, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.tl.put_values(batch, ctx).await
+        for (key, lsn, val) in batch {
+            self.put(key, lsn, &val, ctx).await?
+        }
+
+        Ok(())
     }
 
-    pub(crate) async fn delete_batch(&self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
-        self.tl.put_tombstones(batch).await
+    pub(crate) async fn delete_batch(&mut self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+        if let Some((_, lsn)) = batch.first() {
+            let action = self.get_open_layer_action(*lsn, 0);
+            let layer = self.handle_open_layer_action(*lsn, action).await?;
+            layer.put_tombstones(batch).await?;
+        }
+
+        Ok(())
     }
 
     /// Track the end of the latest digested WAL record.

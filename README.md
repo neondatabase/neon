@@ -5,7 +5,7 @@
 Neon is a serverless open-source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes the PostgreSQL storage layer by redistributing data across a cluster of nodes.
 
 ## Quick start
-Try the [Neon Free Tier](https://neon.tech/docs/introduction/technical-preview-free-tier/) to create a serverless Postgres instance. Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or use the online [SQL Editor](https://neon.tech/docs/get-started-with-neon/query-with-neon-sql-editor/). See [Connect from any application](https://neon.tech/docs/connect/connect-from-any-app/) for connection instructions.
+Try the [Neon Free Tier](https://neon.tech) to create a serverless Postgres instance. Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or use the online [SQL Editor](https://neon.tech/docs/get-started-with-neon/query-with-neon-sql-editor/). See [Connect from any application](https://neon.tech/docs/connect/connect-from-any-app/) for connection instructions.
 
 Alternatively, compile and run the project [locally](#running-local-installation).
 
@@ -248,6 +248,16 @@ testing locally, it is convenient to run just one set of permutations, like this
 ```sh
 DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest
 ```
+
+## Flamegraphs
+
+You may find yourself in need of flamegraphs for software in this repository.
+You can use [`flamegraph-rs`](https://github.com/flamegraph-rs/flamegraph) or the original [`flamegraph.pl`](https://github.com/brendangregg/FlameGraph). Your choice!
+
+>[!IMPORTANT]
+> If you're using `lld` or `mold`, you need the `--no-rosegment` linker argument.
+> It's a [general thing with Rust / lld / mold](https://crbug.com/919499#c16), not specific to this repository.
+> See [this PR for further instructions](https://github.com/neondatabase/neon/pull/6764).
 
 ## Documentation
 

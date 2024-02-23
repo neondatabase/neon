@@ -4,8 +4,8 @@ use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
-    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPairVec,
-    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
@@ -1266,13 +1266,12 @@ pub(crate) static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
 
 // remote storage metrics
 
-/// NB: increment _after_ recording the current value into [`REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST`].
-static REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_remote_timeline_client_calls_unfinished",
-        "Number of ongoing calls to remote timeline client. \
-         Used to populate pageserver_remote_timeline_client_calls_started. \
-         This metric is not useful for sampling from Prometheus, but useful in tests.",
+static REMOTE_TIMELINE_CLIENT_CALLS: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_remote_timeline_client_calls_started",
+        "Number of started calls to remote timeline client.",
+        "pageserver_remote_timeline_client_calls_finished",
+        "Number of finshed calls to remote timeline client.",
         &[
             "tenant_id",
             "shard_id",
@@ -1281,23 +1280,7 @@ static REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::
             "op_kind"
         ],
     )
-    .expect("failed to define a metric")
-});
-
-static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_remote_timeline_client_calls_started",
-        "When calling a remote timeline client method, we record the current value \
-         of the calls_unfinished gauge in this histogram. Plot the histogram \
-         over time in a heatmap to visualize how many operations were ongoing \
-         at a given instant. It gives you a better idea of the queue depth \
-         than plotting the gauge directly, since operations may complete faster \
-         than the sampling interval.",
-        &["file_kind", "op_kind"],
-        // The calls_unfinished gauge is an integer gauge, hence we have integer buckets.
-        vec![0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 40.0, 60.0, 80.0, 100.0, 500.0],
-    )
-    .expect("failed to define a metric")
+    .unwrap()
 });
 
 static REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER: Lazy<IntCounterVec> =
@@ -2078,7 +2061,7 @@ pub(crate) struct RemoteTimelineClientMetrics {
     shard_id: String,
     timeline_id: String,
     remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
-    calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
+    calls: Mutex<HashMap<(&'static str, &'static str), IntCounterPair>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
 }
@@ -2089,7 +2072,7 @@ impl RemoteTimelineClientMetrics {
             tenant_id: tenant_shard_id.tenant_id.to_string(),
             shard_id: format!("{}", tenant_shard_id.shard_slug()),
             timeline_id: timeline_id.to_string(),
-            calls_unfinished_gauge: Mutex::new(HashMap::default()),
+            calls: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
             bytes_finished_counter: Mutex::new(HashMap::default()),
             remote_physical_size_gauge: Mutex::new(None),
@@ -2129,15 +2112,15 @@ impl RemoteTimelineClientMetrics {
             .unwrap()
     }
 
-    fn calls_unfinished_gauge(
+    fn calls_counter_pair(
         &self,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
-    ) -> IntGauge {
-        let mut guard = self.calls_unfinished_gauge.lock().unwrap();
+    ) -> IntCounterPair {
+        let mut guard = self.calls.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE
+            REMOTE_TIMELINE_CLIENT_CALLS
                 .get_metric_with_label_values(&[
                     &self.tenant_id,
                     &self.shard_id,
@@ -2148,17 +2131,6 @@ impl RemoteTimelineClientMetrics {
                 .unwrap()
         });
         metric.clone()
-    }
-
-    fn calls_started_hist(
-        &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-    ) -> Histogram {
-        let key = (file_kind.as_str(), op_kind.as_str());
-        REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST
-            .get_metric_with_label_values(&[key.0, key.1])
-            .unwrap()
     }
 
     fn bytes_started_counter(
@@ -2231,7 +2203,7 @@ impl RemoteTimelineClientMetrics {
 #[must_use]
 pub(crate) struct RemoteTimelineClientCallMetricGuard {
     /// Decremented on drop.
-    calls_unfinished_metric: Option<IntGauge>,
+    calls_counter_pair: Option<IntCounterPair>,
     /// If Some(), this references the bytes_finished metric, and we increment it by the given `u64` on drop.
     bytes_finished: Option<(IntCounter, u64)>,
 }
@@ -2241,10 +2213,10 @@ impl RemoteTimelineClientCallMetricGuard {
     /// The caller vouches to do the metric updates manually.
     pub fn will_decrement_manually(mut self) {
         let RemoteTimelineClientCallMetricGuard {
-            calls_unfinished_metric,
+            calls_counter_pair,
             bytes_finished,
         } = &mut self;
-        calls_unfinished_metric.take();
+        calls_counter_pair.take();
         bytes_finished.take();
     }
 }
@@ -2252,10 +2224,10 @@ impl RemoteTimelineClientCallMetricGuard {
 impl Drop for RemoteTimelineClientCallMetricGuard {
     fn drop(&mut self) {
         let RemoteTimelineClientCallMetricGuard {
-            calls_unfinished_metric,
+            calls_counter_pair,
             bytes_finished,
         } = self;
-        if let Some(guard) = calls_unfinished_metric.take() {
+        if let Some(guard) = calls_counter_pair.take() {
             guard.dec();
         }
         if let Some((bytes_finished_metric, value)) = bytes_finished {
@@ -2288,10 +2260,8 @@ impl RemoteTimelineClientMetrics {
         op_kind: &RemoteOpKind,
         size: RemoteTimelineClientMetricsCallTrackSize,
     ) -> RemoteTimelineClientCallMetricGuard {
-        let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
-        self.calls_started_hist(file_kind, op_kind)
-            .observe(calls_unfinished_metric.get() as f64);
-        calls_unfinished_metric.inc(); // NB: inc after the histogram, see comment on underlying metric
+        let calls_counter_pair = self.calls_counter_pair(file_kind, op_kind);
+        calls_counter_pair.inc();
 
         let bytes_finished = match size {
             RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {
@@ -2305,7 +2275,7 @@ impl RemoteTimelineClientMetrics {
             }
         };
         RemoteTimelineClientCallMetricGuard {
-            calls_unfinished_metric: Some(calls_unfinished_metric),
+            calls_counter_pair: Some(calls_counter_pair),
             bytes_finished,
         }
     }
@@ -2319,12 +2289,8 @@ impl RemoteTimelineClientMetrics {
         op_kind: &RemoteOpKind,
         size: RemoteTimelineClientMetricsCallTrackSize,
     ) {
-        let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
-        debug_assert!(
-            calls_unfinished_metric.get() > 0,
-            "begin and end should cancel out"
-        );
-        calls_unfinished_metric.dec();
+        let calls_counter_pair = self.calls_counter_pair(file_kind, op_kind);
+        calls_counter_pair.dec();
         match size {
             RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {}
             RemoteTimelineClientMetricsCallTrackSize::Bytes(size) => {
@@ -2341,18 +2307,15 @@ impl Drop for RemoteTimelineClientMetrics {
             shard_id,
             timeline_id,
             remote_physical_size_gauge,
-            calls_unfinished_gauge,
+            calls,
             bytes_started_counter,
             bytes_finished_counter,
         } = self;
-        for ((a, b), _) in calls_unfinished_gauge.get_mut().unwrap().drain() {
-            let _ = REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE.remove_label_values(&[
-                tenant_id,
-                shard_id,
-                timeline_id,
-                a,
-                b,
-            ]);
+        for ((a, b), _) in calls.get_mut().unwrap().drain() {
+            let mut res = [Ok(()), Ok(())];
+            REMOTE_TIMELINE_CLIENT_CALLS
+                .remove_label_values(&mut res, &[tenant_id, shard_id, timeline_id, a, b]);
+            // don't care about results
         }
         for ((a, b), _) in bytes_started_counter.get_mut().unwrap().drain() {
             let _ = REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER.remove_label_values(&[
@@ -2496,6 +2459,56 @@ pub mod tokio_epoll_uring {
     }
 }
 
+pub(crate) mod tenant_throttling {
+    use metrics::{register_int_counter_vec, IntCounter};
+    use once_cell::sync::Lazy;
+
+    use crate::tenant::{self, throttle::Metric};
+
+    pub(crate) struct TimelineGet {
+        wait_time: IntCounter,
+        count: IntCounter,
+    }
+
+    pub(crate) static TIMELINE_GET: Lazy<TimelineGet> = Lazy::new(|| {
+        static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+            register_int_counter_vec!(
+            "pageserver_tenant_throttling_wait_usecs_sum_global",
+            "Sum of microseconds that tenants spent waiting for a tenant throttle of a given kind.",
+            &["kind"]
+        )
+            .unwrap()
+        });
+
+        static WAIT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+            register_int_counter_vec!(
+                "pageserver_tenant_throttling_count_global",
+                "Count of tenant throttlings, by kind of throttle.",
+                &["kind"]
+            )
+            .unwrap()
+        });
+
+        let kind = "timeline_get";
+        TimelineGet {
+            wait_time: WAIT_USECS.with_label_values(&[kind]),
+            count: WAIT_COUNT.with_label_values(&[kind]),
+        }
+    });
+
+    impl Metric for &'static TimelineGet {
+        #[inline(always)]
+        fn observe_throttling(
+            &self,
+            tenant::throttle::Observation { wait_time }: &tenant::throttle::Observation,
+        ) {
+            let val = u64::try_from(wait_time.as_micros()).unwrap();
+            self.wait_time.inc_by(val);
+            self.count.inc();
+        }
+    }
+}
+
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //
@@ -2557,4 +2570,5 @@ pub fn preinitialize_metrics() {
 
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
+    Lazy::force(&tenant_throttling::TIMELINE_GET);
 }
