@@ -415,6 +415,7 @@ class AuthKeys:
 
 # TODO: Replace with `StrEnum` when we upgrade to python 3.11
 class TokenScope(str, Enum):
+    ADMIN = "admin"
     PAGE_SERVER_API = "pageserverapi"
     GENERATIONS_API = "generations_api"
     SAFEKEEPER_DATA = "safekeeperdata"
