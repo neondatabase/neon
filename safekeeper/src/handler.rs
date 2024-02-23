@@ -29,7 +29,7 @@ use utils::{
 /// Safekeeper handler of postgres commands
 pub struct SafekeeperPostgresHandler {
     pub conf: SafeKeeperConf,
-    /// assigned applicatioun name
+    /// assigned application name
     pub appname: Option<String>,
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
