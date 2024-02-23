@@ -29,7 +29,7 @@
 //!
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
-use crate::page_cache::PAGE_SZ;
+use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
@@ -215,10 +215,11 @@ pub struct DeltaLayerInner {
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
-    vectored_blob_reader: VectoredBlobReader,
 
-    /// Reader object for reading blocks from the file.
-    file: FileBlockReader,
+    file: VirtualFile,
+    file_id: FileId,
+
+    max_vectored_read_bytes: usize,
 }
 
 impl std::fmt::Debug for DeltaLayerInner {
@@ -673,16 +674,16 @@ impl DeltaLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let file = VirtualFile::open_with_options(
+        let mut file = VirtualFile::open_with_options(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
         )
         .await
         .with_context(|| format!("Failed to open file '{}'", path))?;
-        let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0, ctx).await?;
+        let file_id = page_cache::next_file_id();
+        let block_reader = FileBlockReader::new(&file, file_id);
+        let summary_blk = block_reader.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
-        let mut file = file.file;
         if actual_summary.magic != DELTA_FILE_MAGIC {
             return Err(RewriteSummaryError::MagicMismatch);
         }
@@ -713,7 +714,9 @@ impl DeltaLayerInner {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };
-        let block_reader = FileBlockReader::new(file);
+        let file_id = page_cache::next_file_id();
+
+        let block_reader = FileBlockReader::new(&file, file_id);
 
         let summary_blk = match block_reader.read_blk(0, ctx).await {
             Ok(blk) => blk,
@@ -737,18 +740,12 @@ impl DeltaLayerInner {
             }
         }
 
-        // TODO: don't open file twice
-        let file = match VirtualFile::open(path).await {
-            Ok(file) => file,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
-        };
-        let vectored_blob_reader = VectoredBlobReader::new(file, max_vectored_read_bytes);
-
         Ok(Ok(DeltaLayerInner {
-            file: block_reader,
-            vectored_blob_reader,
+            file,
+            file_id,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
+            max_vectored_read_bytes,
         }))
     }
 
@@ -761,11 +758,11 @@ impl DeltaLayerInner {
     ) -> anyhow::Result<ValueReconstructResult> {
         let mut need_image = true;
         // Scan the page versions backwards, starting from `lsn`.
-        let file = &self.file;
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
-            file,
+            &block_reader,
         );
         let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
 
@@ -799,19 +796,19 @@ impl DeltaLayerInner {
             .build();
 
         // Ok, 'offsets' now contains the offsets of all the entries we need to read
-        let cursor = file.block_cursor();
+        let cursor = block_reader.block_cursor();
         let mut buf = Vec::new();
         for (entry_lsn, pos) in offsets {
             cursor
                 .read_blob_into_buf(pos, &mut buf, ctx)
                 .await
                 .with_context(|| {
-                    format!("Failed to read blob from virtual file {}", file.file.path)
+                    format!("Failed to read blob from virtual file {}", self.file.path)
                 })?;
             let val = Value::des(&buf).with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
-                    file.file.path
+                    self.file.path
                 )
             })?;
             match val {
@@ -874,13 +871,13 @@ impl DeltaLayerInner {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>> {
-        let mut planner = VectoredReadPlanner::new(self.vectored_blob_reader.get_max_read_size());
+        let mut planner = VectoredReadPlanner::new(self.max_vectored_read_bytes);
 
-        let file = &self.file;
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
-            file,
+            block_reader,
         );
 
         for range in keyspace.ranges.iter() {
@@ -940,15 +937,13 @@ impl DeltaLayerInner {
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
     ) {
+        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
         let mut ignore_key_with_err = None;
 
-        let mut buf = Some(BytesMut::with_capacity(
-            self.vectored_blob_reader.get_max_read_size(),
-        ));
+        let mut buf = Some(BytesMut::with_capacity(self.max_vectored_read_bytes));
 
         for read in reads.into_iter().rev() {
-            let res = self
-                .vectored_blob_reader
+            let res = vectored_blob_reader
                 .read_blobs(&read, buf.take().expect("Should have a buffer"))
                 .await;
 
@@ -961,7 +956,7 @@ impl DeltaLayerInner {
                             blob_meta.key,
                             PageReconstructError::from(anyhow!(
                                 "Failed to read blobs from virtual file {}: {}",
-                                self.vectored_blob_reader.get_file_ref().path,
+                                self.file.path,
                                 kind
                             )),
                         );
@@ -969,9 +964,7 @@ impl DeltaLayerInner {
 
                     // We have "lost" the buffer since the lower level IO api
                     // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(BytesMut::with_capacity(
-                        self.vectored_blob_reader.get_max_read_size(),
-                    ));
+                    buf = Some(BytesMut::with_capacity(self.max_vectored_read_bytes));
 
                     continue;
                 }
@@ -990,7 +983,7 @@ impl DeltaLayerInner {
                             meta.meta.key,
                             PageReconstructError::from(anyhow!(e).context(format!(
                                 "Failed to deserialize blob from virtual file {}",
-                                self.vectored_blob_reader.get_file_ref().path,
+                                self.file.path,
                             ))),
                         );
 
@@ -1013,12 +1006,11 @@ impl DeltaLayerInner {
         &'a self,
         ctx: &RequestContext,
     ) -> Result<Vec<DeltaEntry<'a>>> {
-        let file = &self.file;
-
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
-            file,
+            block_reader,
         );
 
         let mut all_keys: Vec<DeltaEntry<'_>> = Vec::new();
@@ -1070,11 +1062,11 @@ impl DeltaLayerInner {
             self.index_start_blk, self.index_root_blk
         );
 
-        let file = &self.file;
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
-            file,
+            block_reader,
         );
 
         tree_reader.dump().await?;
@@ -1169,7 +1161,8 @@ impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
         blknum: u32,
         ctx: &RequestContext,
     ) -> Result<BlockLease, std::io::Error> {
-        self.0.as_ref().file.read_blk(blknum, ctx).await
+        let block_reader = FileBlockReader::new(&self.0.as_ref().file, self.0.as_ref().file_id);
+        block_reader.read_blk(blknum, ctx).await
     }
 }
 

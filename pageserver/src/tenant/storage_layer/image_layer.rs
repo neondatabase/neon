@@ -25,7 +25,7 @@
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
-use crate::page_cache::PAGE_SZ;
+use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
@@ -155,9 +155,10 @@ pub struct ImageLayerInner {
 
     lsn: Lsn,
 
-    /// Reader object for reading blocks from the file.
-    file: FileBlockReader,
-    vectored_blob_reader: VectoredBlobReader,
+    file: VirtualFile,
+    file_id: FileId,
+
+    max_vectored_read_bytes: usize,
 }
 
 impl std::fmt::Debug for ImageLayerInner {
@@ -171,9 +172,12 @@ impl std::fmt::Debug for ImageLayerInner {
 
 impl ImageLayerInner {
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let file = &self.file;
-        let tree_reader =
-            DiskBtreeReader::<_, KEY_SIZE>::new(self.index_start_blk, self.index_root_blk, file);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader = DiskBtreeReader::<_, KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            block_reader,
+        );
 
         tree_reader.dump().await?;
 
@@ -342,16 +346,16 @@ impl ImageLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let file = VirtualFile::open_with_options(
+        let mut file = VirtualFile::open_with_options(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
         )
         .await
         .with_context(|| format!("Failed to open file '{}'", path))?;
-        let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0, ctx).await?;
+        let file_id = page_cache::next_file_id();
+        let block_reader = FileBlockReader::new(&file, file_id);
+        let summary_blk = block_reader.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
-        let mut file = file.file;
         if actual_summary.magic != IMAGE_FILE_MAGIC {
             return Err(RewriteSummaryError::MagicMismatch);
         }
@@ -383,7 +387,8 @@ impl ImageLayerInner {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };
-        let block_reader = FileBlockReader::new(file);
+        let file_id = page_cache::next_file_id();
+        let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = match block_reader.read_blk(0, ctx).await {
             Ok(blk) => blk,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
@@ -410,19 +415,13 @@ impl ImageLayerInner {
             }
         }
 
-        // TODO: don't open file twice
-        let file = match VirtualFile::open(path).await {
-            Ok(file) => file,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
-        };
-        let vectored_blob_reader = VectoredBlobReader::new(file, max_vectored_read_bytes);
-
         Ok(Ok(ImageLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
             lsn,
-            file: block_reader,
-            vectored_blob_reader,
+            file,
+            file_id,
+            max_vectored_read_bytes,
         }))
     }
 
@@ -432,8 +431,9 @@ impl ImageLayerInner {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
-        let file = &self.file;
-        let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -446,7 +446,7 @@ impl ImageLayerInner {
             )
             .await?
         {
-            let blob = file
+            let blob = block_reader
                 .block_cursor()
                 .read_blob(
                     offset,
@@ -489,10 +489,11 @@ impl ImageLayerInner {
         keyspace: KeySpace,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>> {
-        let mut planner = VectoredReadPlanner::new(self.vectored_blob_reader.get_max_read_size());
+        let mut planner = VectoredReadPlanner::new(self.max_vectored_read_bytes);
 
-        let file = &self.file;
-        let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
 
         for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
@@ -538,12 +539,10 @@ impl ImageLayerInner {
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
     ) {
-        let mut buf = Some(BytesMut::with_capacity(
-            self.vectored_blob_reader.get_max_read_size(),
-        ));
+        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let mut buf = Some(BytesMut::with_capacity(self.max_vectored_read_bytes));
         for read in reads.into_iter().rev() {
-            let res = self
-                .vectored_blob_reader
+            let res = vectored_blob_reader
                 .read_blobs(&read, buf.take().expect("Should have a buffer"))
                 .await;
 
@@ -567,7 +566,7 @@ impl ImageLayerInner {
                             blob_meta.key,
                             PageReconstructError::from(anyhow!(
                                 "Failed to read blobs from virtual file {}: {}",
-                                self.vectored_blob_reader.get_file_ref().path,
+                                self.file.path,
                                 kind
                             )),
                         );
@@ -575,9 +574,7 @@ impl ImageLayerInner {
 
                     // We have "lost" the buffer since the lower level IO api
                     // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(BytesMut::with_capacity(
-                        self.vectored_blob_reader.get_max_read_size(),
-                    ));
+                    buf = Some(BytesMut::with_capacity(self.max_vectored_read_bytes));
                 }
             };
         }

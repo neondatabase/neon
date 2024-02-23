@@ -140,6 +140,8 @@ impl VectoredReadPlanner {
     /// * This function should be called for each blob in the desired *inclusive* range.
     /// See `DeltaLayerInner::plan_reads` and `ImageLayerInner::plan_reads`.
     /// * Calls to this function should be for monotonically continuous (key, lsn) tuples.
+    /// In the event that entries from the index are skipped the behaviour is undefined.
+    /// We can end up asserting, erroring in wal redo or returning incorrect data to the user.
     ///
     /// The `flag` argument has two interesting values:
     /// * [`BlobFlag::Replaces`]: The blob for this key should replace all existing blobs.
@@ -222,25 +224,13 @@ impl VectoredReadPlanner {
 }
 
 /// Disk reader for vectored blob spans (does not go through the page cache)
-pub struct VectoredBlobReader {
-    file: VirtualFile,
-    max_vectored_read_bytes: usize,
+pub struct VectoredBlobReader<'a> {
+    file: &'a VirtualFile,
 }
 
-impl VectoredBlobReader {
-    pub fn new(file: VirtualFile, max_vectored_read_bytes: usize) -> Self {
-        Self {
-            file,
-            max_vectored_read_bytes,
-        }
-    }
-
-    pub fn get_max_read_size(&self) -> usize {
-        self.max_vectored_read_bytes
-    }
-
-    pub fn get_file_ref(&self) -> &VirtualFile {
-        &self.file
+impl<'a> VectoredBlobReader<'a> {
+    pub fn new(file: &'a VirtualFile) -> Self {
+        Self { file }
     }
 
     /// Read the requested blobs into the buffer.
@@ -256,8 +246,6 @@ impl VectoredBlobReader {
         read: &VectoredRead,
         buf: BytesMut,
     ) -> Result<VectoredBlobsBuf, std::io::Error> {
-        // tracing::info!("read_blobs(read={read:?}, read_size={})", read.size());
-
         assert!(read.size() > 0);
         assert!(
             read.size() <= buf.capacity(),
@@ -287,6 +275,8 @@ impl VectoredBlobReader {
 
             // Each blob is prefixed by a header containing it's size.
             // Extract the size and skip that header to find the start of the data.
+            // The size can be 1 or 4 bytes. The most significant bit is 0 in the
+            // 1 byte case and 1 in the 4 byte case.
             let (size_length, blob_size) = if first_len_byte < 0x80 {
                 (1, first_len_byte as u64)
             } else {
