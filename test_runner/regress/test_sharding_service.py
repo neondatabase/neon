@@ -1,10 +1,12 @@
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import List
+from typing import Any, Dict, List
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    AttachmentServiceApiException,
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
@@ -602,3 +604,64 @@ def test_sharding_service_s3_time_travel_recovery(
         endpoint.safe_psql("SELECT * FROM created_foo;")
 
     env.attachment_service.consistency_check()
+
+
+def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
+    env = neon_env_builder.init_start()
+    svc = env.attachment_service
+    api = env.attachment_service_api
+
+    tenant_id = TenantId.generate()
+    body: Dict[str, Any] = {"new_tenant_id": str(tenant_id)}
+
+    # No token
+    with pytest.raises(
+        AttachmentServiceApiException,
+        match="Unauthorized: missing authorization header",
+    ):
+        svc.request("POST", f"{env.attachment_service_api}/v1/tenant", json=body)
+
+    # Token with incorrect scope
+    with pytest.raises(
+        AttachmentServiceApiException,
+        match="Forbidden: JWT authentication error",
+    ):
+        svc.request("POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.ADMIN))
+
+    # Token with correct scope
+    svc.request(
+        "POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.PAGE_SERVER_API)
+    )
+
+    # No token
+    with pytest.raises(
+        AttachmentServiceApiException,
+        match="Unauthorized: missing authorization header",
+    ):
+        svc.request("GET", f"{api}/debug/v1/tenant")
+
+    # Token with incorrect scope
+    with pytest.raises(
+        AttachmentServiceApiException,
+        match="Forbidden: JWT authentication error",
+    ):
+        svc.request(
+            "GET", f"{api}/debug/v1/tenant", headers=svc.headers(TokenScope.GENERATIONS_API)
+        )
+
+    # No token
+    with pytest.raises(
+        AttachmentServiceApiException,
+        match="Unauthorized: missing authorization header",
+    ):
+        svc.request("POST", f"{api}/upcall/v1/re-attach")
+
+    # Token with incorrect scope
+    with pytest.raises(
+        AttachmentServiceApiException,
+        match="Forbidden: JWT authentication error",
+    ):
+        svc.request(
+            "POST", f"{api}/upcall/v1/re-attach", headers=svc.headers(TokenScope.PAGE_SERVER_API)
+        )
