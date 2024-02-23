@@ -802,7 +802,6 @@ async fn init_timeline_state(
             {
                 tracing::error!("Failed to remove temporary file {file_path}: {e}");
             }
-
             continue;
         }
 
