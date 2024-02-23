@@ -8,6 +8,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    TokenScope,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -452,7 +453,9 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
 
     # Initial tenant (1 shard) and the one we just created (2 shards) should be visible
     response = env.attachment_service.request(
-        "GET", f"{env.attachment_service_api}/debug/v1/tenant"
+        "GET",
+        f"{env.attachment_service_api}/debug/v1/tenant",
+        headers=env.attachment_service.headers(TokenScope.ADMIN),
     )
     assert len(response.json()) == 3
 
@@ -466,17 +469,23 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     assert all(v["may_schedule"] for v in response.json()["nodes"].values())
 
     response = env.attachment_service.request(
-        "POST", f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop"
+        "POST",
+        f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop",
+        headers=env.attachment_service.headers(TokenScope.ADMIN),
     )
     assert len(env.attachment_service.node_list()) == 1
 
     response = env.attachment_service.request(
-        "POST", f"{env.attachment_service_api}/debug/v1/tenant/{tenant_id}/drop"
+        "POST",
+        f"{env.attachment_service_api}/debug/v1/tenant/{tenant_id}/drop",
+        headers=env.attachment_service.headers(TokenScope.ADMIN),
     )
 
     # Tenant drop should be reflected in dump output
     response = env.attachment_service.request(
-        "GET", f"{env.attachment_service_api}/debug/v1/tenant"
+        "GET",
+        f"{env.attachment_service_api}/debug/v1/tenant",
+        headers=env.attachment_service.headers(TokenScope.ADMIN),
     )
     assert len(response.json()) == 1
 

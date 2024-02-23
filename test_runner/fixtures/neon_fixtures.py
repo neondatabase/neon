@@ -1975,7 +1975,10 @@ class NeonAttachmentService(MetricsGetter):
         per-tenant actions into per-shard actions (e.g. timeline creation).  Tests should invoke those
         functions via the HttpClient, as an implicit check that these APIs remain compatible.
         """
-        return PageserverHttpClient(self.env.attachment_service_port, lambda: True)
+        auth_token = None
+        if self.auth_enabled:
+            auth_token = self.env.auth_keys.generate_token(scope=TokenScope.PAGE_SERVER_API)
+        return PageserverHttpClient(self.env.attachment_service_port, lambda: True, auth_token)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
         resp = requests.request(method, *args, **kwargs)
@@ -1983,10 +1986,10 @@ class NeonAttachmentService(MetricsGetter):
 
         return resp
 
-    def headers(self) -> Dict[str, str]:
+    def headers(self, scope: Optional[TokenScope]) -> Dict[str, str]:
         headers = {}
-        if self.auth_enabled:
-            jwt_token = self.env.auth_keys.generate_pageserver_token()
+        if self.auth_enabled and scope is not None:
+            jwt_token = self.env.auth_keys.generate_token(scope=scope)
             headers["Authorization"] = f"Bearer {jwt_token}"
 
         return headers
@@ -2017,7 +2020,7 @@ class NeonAttachmentService(MetricsGetter):
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
-            headers=self.headers(),
+            headers=self.headers(TokenScope.ADMIN),
         )
         gen = response.json()["gen"]
         assert isinstance(gen, int)
@@ -2028,7 +2031,7 @@ class NeonAttachmentService(MetricsGetter):
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": None},
-            headers=self.headers(),
+            headers=self.headers(TokenScope.ADMIN),
         )
 
     def inspect(self, tenant_shard_id: Union[TenantId, TenantShardId]) -> Optional[tuple[int, int]]:
@@ -2039,7 +2042,7 @@ class NeonAttachmentService(MetricsGetter):
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/inspect",
             json={"tenant_shard_id": str(tenant_shard_id)},
-            headers=self.headers(),
+            headers=self.headers(TokenScope.ADMIN),
         )
         json = response.json()
         log.info(f"Response: {json}")
@@ -2060,12 +2063,14 @@ class NeonAttachmentService(MetricsGetter):
             "POST",
             f"{self.env.attachment_service_api}/control/v1/node",
             json=body,
-            headers=self.headers()
+            headers=self.headers(TokenScope.ADMIN),
         )
 
     def node_list(self):
         response = self.request(
-            "GET", f"{self.env.attachment_service_api}/control/v1/node", headers=self.headers()
+            "GET",
+            f"{self.env.attachment_service_api}/control/v1/node",
+            headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
 
@@ -2076,7 +2081,7 @@ class NeonAttachmentService(MetricsGetter):
             "PUT",
             f"{self.env.attachment_service_api}/control/v1/node/{node_id}/config",
             json=body,
-            headers=self.headers(),
+            headers=self.headers(TokenScope.ADMIN),
         )
 
     def tenant_create(
@@ -2102,7 +2107,12 @@ class NeonAttachmentService(MetricsGetter):
             for k, v in tenant_config.items():
                 body[k] = v
 
-        response = self.request("POST", f"{self.env.attachment_service_api}/v1/tenant", json=body)
+        response = self.request(
+            "POST",
+            f"{self.env.attachment_service_api}/v1/tenant",
+            json=body,
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
         log.info(f"tenant_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
@@ -2110,7 +2120,9 @@ class NeonAttachmentService(MetricsGetter):
         :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
         """
         response = self.request(
-            "GET", f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/locate"
+            "GET",
+            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/locate",
+            headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
@@ -2121,6 +2133,7 @@ class NeonAttachmentService(MetricsGetter):
             "PUT",
             f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/shard_split",
             json={"new_shard_count": shard_count},
+            headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
         log.info(f"tenant_shard_split success: {body}")
@@ -2132,6 +2145,7 @@ class NeonAttachmentService(MetricsGetter):
             "PUT",
             f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_shard_id}/migrate",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
+            headers=self.headers(TokenScope.ADMIN),
         )
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
@@ -2143,6 +2157,7 @@ class NeonAttachmentService(MetricsGetter):
         self.request(
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/consistency_check",
+            headers=self.headers(TokenScope.ADMIN),
         )
         log.info("Attachment service passed consistency check")
 
