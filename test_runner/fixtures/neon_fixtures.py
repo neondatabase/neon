@@ -1922,6 +1922,13 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
+class AttachmentServiceApiException(Exception):
+    def __init__(self, message, status_code: int):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
 class NeonAttachmentService(MetricsGetter):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
@@ -1940,6 +1947,17 @@ class NeonAttachmentService(MetricsGetter):
             self.running = False
         return self
 
+    @staticmethod
+    def raise_api_exception(res: requests.Response):
+        try:
+            res.raise_for_status()
+        except requests.RequestException as e:
+            try:
+                msg = res.json()["msg"]
+            except:  # noqa: E722
+                msg = ""
+            raise AttachmentServiceApiException(msg, res.status_code) from e
+
     def pageserver_api(self) -> PageserverHttpClient:
         """
         The attachment service implements a subset of the pageserver REST API, for mapping
@@ -1949,8 +1967,10 @@ class NeonAttachmentService(MetricsGetter):
         return PageserverHttpClient(self.env.attachment_service_port, lambda: True)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
-        kwargs["headers"] = self.headers()
-        return requests.request(method, *args, **kwargs)
+        resp = requests.request(method, *args, **kwargs)
+        NeonAttachmentService.raise_api_exception(resp)
+
+        return resp
 
     def headers(self) -> Dict[str, str]:
         headers = {}
@@ -1962,17 +1982,22 @@ class NeonAttachmentService(MetricsGetter):
 
     def get_metrics(self) -> Metrics:
         res = self.request("GET", f"{self.env.attachment_service_api}/metrics")
-        res.raise_for_status()
         return parse_metrics(res.text)
 
     def ready(self) -> bool:
-        resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
-        if resp.status_code == 503:
+        status = None
+        try:
+            resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
+            status = resp.status_code
+        except AttachmentServiceApiException as e:
+            status = e.status_code
+
+        if status == 503:
             return False
-        elif resp.status_code == 200:
+        elif status == 200:
             return True
         else:
-            raise RuntimeError(f"Unexpected status {resp.status_code} from readiness endpoint")
+            raise RuntimeError(f"Unexpected status {status} from readiness endpoint")
 
     def attach_hook_issue(
         self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
@@ -1983,19 +2008,17 @@ class NeonAttachmentService(MetricsGetter):
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
             headers=self.headers(),
         )
-        response.raise_for_status()
         gen = response.json()["gen"]
         assert isinstance(gen, int)
         return gen
 
     def attach_hook_drop(self, tenant_shard_id: Union[TenantId, TenantShardId]):
-        response = self.request(
+        self.request(
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": None},
             headers=self.headers(),
         )
-        response.raise_for_status()
 
     def inspect(self, tenant_shard_id: Union[TenantId, TenantShardId]) -> Optional[tuple[int, int]]:
         """
@@ -2007,7 +2030,6 @@ class NeonAttachmentService(MetricsGetter):
             json={"tenant_shard_id": str(tenant_shard_id)},
             headers=self.headers(),
         )
-        response.raise_for_status()
         json = response.json()
         log.info(f"Response: {json}")
         if json["attachment"]:
@@ -2027,14 +2049,13 @@ class NeonAttachmentService(MetricsGetter):
             "POST",
             f"{self.env.attachment_service_api}/control/v1/node",
             json=body,
-            headers=self.headers(),
-        ).raise_for_status()
+            headers=self.headers()
+        )
 
     def node_list(self):
         response = self.request(
             "GET", f"{self.env.attachment_service_api}/control/v1/node", headers=self.headers()
         )
-        response.raise_for_status()
         return response.json()
 
     def node_configure(self, node_id, body: dict[str, Any]):
@@ -2045,7 +2066,7 @@ class NeonAttachmentService(MetricsGetter):
             f"{self.env.attachment_service_api}/control/v1/node/{node_id}/config",
             json=body,
             headers=self.headers(),
-        ).raise_for_status()
+        )
 
     def tenant_create(
         self,
@@ -2071,7 +2092,6 @@ class NeonAttachmentService(MetricsGetter):
                 body[k] = v
 
         response = self.request("POST", f"{self.env.attachment_service_api}/v1/tenant", json=body)
-        response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
@@ -2081,7 +2101,6 @@ class NeonAttachmentService(MetricsGetter):
         response = self.request(
             "GET", f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/locate"
         )
-        response.raise_for_status()
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
         return shards
@@ -2092,19 +2111,17 @@ class NeonAttachmentService(MetricsGetter):
             f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/shard_split",
             json={"new_shard_count": shard_count},
         )
-        response.raise_for_status()
         body = response.json()
         log.info(f"tenant_shard_split success: {body}")
         shards: list[TenantShardId] = body["new_shards"]
         return shards
 
     def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
-        response = self.request(
+        self.request(
             "PUT",
             f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_shard_id}/migrate",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
         )
-        response.raise_for_status()
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
 
@@ -2112,11 +2129,10 @@ class NeonAttachmentService(MetricsGetter):
         """
         Throw an exception if the service finds any inconsistencies in its state
         """
-        response = self.request(
+        self.request(
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/consistency_check",
         )
-        response.raise_for_status()
         log.info("Attachment service passed consistency check")
 
     def __enter__(self) -> "NeonAttachmentService":
@@ -2894,7 +2910,6 @@ class NeonProxy(PgProtocol):
 
     def get_metrics(self) -> str:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
-        request_result.raise_for_status()
         return request_result.text
 
     @staticmethod

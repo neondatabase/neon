@@ -454,14 +454,12 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     response = env.attachment_service.request(
         "GET", f"{env.attachment_service_api}/debug/v1/tenant"
     )
-    response.raise_for_status()
     assert len(response.json()) == 3
 
     # Scheduler should report the expected nodes and shard counts
     response = env.attachment_service.request(
         "GET", f"{env.attachment_service_api}/debug/v1/scheduler"
     )
-    response.raise_for_status()
     # Two nodes, in a dict of node_id->node
     assert len(response.json()["nodes"]) == 2
     assert sum(v["shard_count"] for v in response.json()["nodes"].values()) == 3
@@ -470,19 +468,16 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     response = env.attachment_service.request(
         "POST", f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop"
     )
-    response.raise_for_status()
     assert len(env.attachment_service.node_list()) == 1
 
     response = env.attachment_service.request(
         "POST", f"{env.attachment_service_api}/debug/v1/tenant/{tenant_id}/drop"
     )
-    response.raise_for_status()
 
     # Tenant drop should be reflected in dump output
     response = env.attachment_service.request(
         "GET", f"{env.attachment_service_api}/debug/v1/tenant"
     )
-    response.raise_for_status()
     assert len(response.json()) == 1
 
     # Check that the 'drop' APIs didn't leave things in a state that would fail a consistency check: they're
