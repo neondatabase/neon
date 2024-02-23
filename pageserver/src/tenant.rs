@@ -2395,7 +2395,7 @@ impl Tenant {
             self.tenant_shard_id,
             self.generation,
             self.shard_identity,
-            self.walredo_mgr.as_ref().map(Arc::clone),
+            self.walredo_mgr.clone(),
             resources,
             pg_version,
             state,

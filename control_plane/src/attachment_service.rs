@@ -317,7 +317,7 @@ impl AttachmentService {
                 "localhost",
                 "-p",
                 &format!("{}", self.postgres_port),
-                &DB_NAME,
+                DB_NAME,
             ])
             .output()
             .await
