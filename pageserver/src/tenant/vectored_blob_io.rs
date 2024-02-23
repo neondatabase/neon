@@ -224,19 +224,19 @@ impl VectoredReadPlanner {
 /// Disk reader for vectored blob spans (does not go through the page cache)
 pub struct VectoredBlobReader {
     file: VirtualFile,
-    max_vectored_read_size: usize,
+    max_vectored_read_bytes: usize,
 }
 
 impl VectoredBlobReader {
-    pub fn new(file: VirtualFile, max_vectored_read_size: usize) -> Self {
+    pub fn new(file: VirtualFile, max_vectored_read_bytes: usize) -> Self {
         Self {
             file,
-            max_vectored_read_size,
+            max_vectored_read_bytes,
         }
     }
 
     pub fn get_max_read_size(&self) -> usize {
-        self.max_vectored_read_size
+        self.max_vectored_read_bytes
     }
 
     pub fn get_file_ref(&self) -> &VirtualFile {

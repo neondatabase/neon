@@ -287,25 +287,25 @@ impl DeltaLayer {
     async fn load(
         &self,
         access_kind: LayerAccessKind,
-        max_vectored_read_size: usize,
+        max_vectored_read_bytes: usize,
         ctx: &RequestContext,
     ) -> Result<&Arc<DeltaLayerInner>> {
         self.access_stats.record_access(access_kind, ctx);
         // Quick exit if already loaded
         self.inner
-            .get_or_try_init(|| self.load_inner(max_vectored_read_size, ctx))
+            .get_or_try_init(|| self.load_inner(max_vectored_read_bytes, ctx))
             .await
             .with_context(|| format!("Failed to load delta layer {}", self.path()))
     }
 
     async fn load_inner(
         &self,
-        max_vectored_read_size: usize,
+        max_vectored_read_bytes: usize,
         ctx: &RequestContext,
     ) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
-        let loaded = DeltaLayerInner::load(&path, None, max_vectored_read_size, ctx)
+        let loaded = DeltaLayerInner::load(&path, None, max_vectored_read_bytes, ctx)
             .await
             .and_then(|res| res)?;
 
@@ -706,7 +706,7 @@ impl DeltaLayerInner {
     pub(super) async fn load(
         path: &Utf8Path,
         summary: Option<Summary>,
-        max_vectored_read_size: usize,
+        max_vectored_read_bytes: usize,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
         let file = match VirtualFile::open(path).await {
@@ -742,7 +742,7 @@ impl DeltaLayerInner {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };
-        let vectored_blob_reader = VectoredBlobReader::new(file, max_vectored_read_size);
+        let vectored_blob_reader = VectoredBlobReader::new(file, max_vectored_read_bytes);
 
         Ok(Ok(DeltaLayerInner {
             file: block_reader,

@@ -87,7 +87,7 @@ pub mod defaults {
 
     pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
 
-    pub const DEFAULT_MAX_VECTORED_READ_SIZE: usize = 128 * 1024; // 128 KiB
+    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
@@ -130,7 +130,7 @@ pub mod defaults {
 
 #get_vectored_impl = '{DEFAULT_GET_VECTORED_IMPL}'
 
-#max_vectored_read_size = '{DEFAULT_MAX_VECTORED_READ_SIZE}'
+#max_vectored_read_bytes = '{DEFAULT_MAX_VECTORED_READ_BYTES}'
 
 #validate_vectored_get = '{DEFAULT_VALIDATE_VECTORED_GET}'
 
@@ -272,7 +272,7 @@ pub struct PageServerConf {
 
     pub get_vectored_impl: GetVectoredImpl,
 
-    pub max_vectored_read_size: usize,
+    pub max_vectored_read_bytes: usize,
 
     pub validate_vectored_get: bool,
 }
@@ -364,7 +364,7 @@ struct PageServerConfigBuilder {
 
     get_vectored_impl: BuilderValue<GetVectoredImpl>,
 
-    max_vectored_read_size: BuilderValue<usize>,
+    max_vectored_read_bytes: BuilderValue<usize>,
 
     validate_vectored_get: BuilderValue<bool>,
 }
@@ -446,7 +446,7 @@ impl Default for PageServerConfigBuilder {
             virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
 
             get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
-            max_vectored_read_size: Set(DEFAULT_MAX_VECTORED_READ_SIZE),
+            max_vectored_read_bytes: Set(DEFAULT_MAX_VECTORED_READ_BYTES),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
         }
     }
@@ -612,8 +612,8 @@ impl PageServerConfigBuilder {
         self.get_vectored_impl = BuilderValue::Set(value);
     }
 
-    pub fn get_max_vectored_read_size(&mut self, value: usize) {
-        self.max_vectored_read_size = BuilderValue::Set(value);
+    pub fn get_max_vectored_read_bytes(&mut self, value: usize) {
+        self.max_vectored_read_bytes = BuilderValue::Set(value);
     }
 
     pub fn get_validate_vectored_get(&mut self, value: bool) {
@@ -733,9 +733,9 @@ impl PageServerConfigBuilder {
             get_vectored_impl: self
                 .get_vectored_impl
                 .ok_or(anyhow!("missing get_vectored_impl"))?,
-            max_vectored_read_size: self
-                .max_vectored_read_size
-                .ok_or(anyhow!("missing max_vectored_read_size"))?,
+            max_vectored_read_bytes: self
+                .max_vectored_read_bytes
+                .ok_or(anyhow!("missing max_vectored_read_bytes"))?,
             validate_vectored_get: self
                 .validate_vectored_get
                 .ok_or(anyhow!("missing validate_vectored_get"))?,
@@ -996,8 +996,8 @@ impl PageServerConf {
                 "get_vectored_impl" => {
                     builder.get_vectored_impl(parse_toml_from_str("get_vectored_impl", item)?)
                 }
-                "max_vectored_read_size" => {
-                    builder.get_max_vectored_read_size(parse_toml_u64("max_vectored_read_size", item)? as usize)
+                "max_vectored_read_bytes" => {
+                    builder.get_max_vectored_read_bytes(parse_toml_u64("max_vectored_read_bytes", item)? as usize)
                 }
                 "validate_vectored_get" => {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
@@ -1077,7 +1077,7 @@ impl PageServerConf {
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-            max_vectored_read_size: defaults::DEFAULT_MAX_VECTORED_READ_SIZE,
+            max_vectored_read_bytes: defaults::DEFAULT_MAX_VECTORED_READ_BYTES,
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
         }
     }
@@ -1313,7 +1313,7 @@ background_task_maximum_delay = '334 s'
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                max_vectored_read_size: defaults::DEFAULT_MAX_VECTORED_READ_SIZE,
+                max_vectored_read_bytes: defaults::DEFAULT_MAX_VECTORED_READ_BYTES,
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             },
             "Correct defaults should be used when no config values are provided"
@@ -1380,7 +1380,7 @@ background_task_maximum_delay = '334 s'
                 ingest_batch_size: 100,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                max_vectored_read_size: defaults::DEFAULT_MAX_VECTORED_READ_SIZE,
+                max_vectored_read_bytes: defaults::DEFAULT_MAX_VECTORED_READ_BYTES,
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             },
             "Should be able to parse all basic config values correctly"

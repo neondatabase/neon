@@ -1310,7 +1310,7 @@ impl DownloadedLayer {
                 delta_layer::DeltaLayerInner::load(
                     &owner.path,
                     summary,
-                    owner.conf.max_vectored_read_size,
+                    owner.conf.max_vectored_read_bytes,
                     ctx,
                 )
                 .await
@@ -1327,7 +1327,7 @@ impl DownloadedLayer {
                     &owner.path,
                     lsn,
                     summary,
-                    owner.conf.max_vectored_read_size,
+                    owner.conf.max_vectored_read_bytes,
                     ctx,
                 )
                 .await
