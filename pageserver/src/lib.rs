@@ -169,15 +169,6 @@ pub fn is_delete_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_DELETE_MARK_SUFFIX)
 }
 
-fn is_walkdir_io_not_found(e: &walkdir::Error) -> bool {
-    if let Some(e) = e.io_error() {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            return true;
-        }
-    }
-    false
-}
-
 /// During pageserver startup, we need to order operations not to exhaust tokio worker threads by
 /// blocking.
 ///

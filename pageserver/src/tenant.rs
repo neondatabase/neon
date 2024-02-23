@@ -172,9 +172,6 @@ pub(crate) mod throttle;
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
-// re-export for use in remote_timeline_client.rs
-pub use crate::tenant::metadata::save_metadata;
-
 // re-export for use in walreceiver
 pub use crate::tenant::timeline::WalReceiverInfo;
 
@@ -1150,17 +1147,6 @@ impl Tenant {
         } else {
             None
         };
-
-        // timeline loading after attach expects to find metadata file for each metadata
-        save_metadata(
-            self.conf,
-            &self.tenant_shard_id,
-            &timeline_id,
-            &remote_metadata,
-        )
-        .await
-        .context("save_metadata")
-        .map_err(LoadLocalTimelineError::Load)?;
 
         self.timeline_init_and_sync(
             timeline_id,
@@ -3293,10 +3279,7 @@ impl Tenant {
 
         timeline_struct.init_empty_layer_map(start_lsn);
 
-        if let Err(e) = self
-            .create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
-            .await
-        {
+        if let Err(e) = self.create_timeline_files(&uninit_mark.timeline_path).await {
             error!("Failed to create initial files for timeline {tenant_shard_id}/{new_timeline_id}, cleaning up: {e:?}");
             cleanup_timeline_directory(uninit_mark);
             return Err(e);
@@ -3313,26 +3296,13 @@ impl Tenant {
         ))
     }
 
-    async fn create_timeline_files(
-        &self,
-        timeline_path: &Utf8Path,
-        new_timeline_id: &TimelineId,
-        new_metadata: &TimelineMetadata,
-    ) -> anyhow::Result<()> {
+    async fn create_timeline_files(&self, timeline_path: &Utf8Path) -> anyhow::Result<()> {
         crashsafe::create_dir(timeline_path).context("Failed to create timeline directory")?;
 
         fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
             anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
         });
 
-        save_metadata(
-            self.conf,
-            &self.tenant_shard_id,
-            new_timeline_id,
-            new_metadata,
-        )
-        .await
-        .context("Failed to create timeline metadata")?;
         Ok(())
     }
 
