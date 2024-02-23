@@ -37,7 +37,7 @@
 PG_MODULE_MAGIC;
 void		_PG_init(void);
 
-static int	logical_replication_max_time_lag = 300;
+static int	logical_replication_max_snap_files = 300;
 bool primary_is_running = false;
 
 static void
