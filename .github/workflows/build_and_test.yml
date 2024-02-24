@@ -77,16 +77,22 @@ jobs:
         shell: bash
         id: build-tag
 
-  build-buildtools-image:
+  check-build-tools-image:
     needs: [ check-permissions ]
+    uses: ./.github/workflows/check-build-tools-image.yml
+
+  build-build-tools-image:
+    needs: [ check-build-tools-image ]
     uses: ./.github/workflows/build-build-tools-image.yml
+    with:
+      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
     secrets: inherit
 
   check-codestyle-python:
-    needs: [ check-permissions, build-buildtools-image ]
+    needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: ${{ needs.build-buildtools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -118,10 +124,10 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    needs: [ check-permissions, build-buildtools-image ]
+    needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: ${{ needs.build-buildtools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -188,10 +194,10 @@ jobs:
         run: cargo deny check --hide-inclusion-graph
 
   build-neon:
-    needs: [ check-permissions, tag, build-buildtools-image ]
+    needs: [ check-permissions, tag, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: ${{ needs.build-buildtools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -432,10 +438,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    needs: [ check-permissions, build-neon, build-buildtools-image, tag ]
+    needs: [ check-permissions, build-neon, build-build-tools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: ${{ needs.build-buildtools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -482,10 +488,10 @@ jobs:
   get-benchmarks-durations:
     outputs:
       json: ${{ steps.get-benchmark-durations.outputs.json }}
-    needs: [ check-permissions, build-buildtools-image ]
+    needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: ${{ needs.build-buildtools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -515,10 +521,10 @@ jobs:
           echo "json=$(jq --compact-output '.' /tmp/benchmark_durations.json)" >> $GITHUB_OUTPUT
 
   benchmarks:
-    needs: [ check-permissions, build-neon, build-buildtools-image, get-benchmarks-durations ]
+    needs: [ check-permissions, build-neon, build-build-tools-image, get-benchmarks-durations ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: ${{ needs.build-buildtools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -553,12 +559,12 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   create-test-report:
-    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-buildtools-image ]
+    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-build-tools-image ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: ${{ needs.build-buildtools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -602,10 +608,10 @@ jobs:
             })
 
   coverage-report:
-    needs: [ check-permissions, regress-tests, build-buildtools-image ]
+    needs: [ check-permissions, regress-tests, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: ${{ needs.build-buildtools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -712,7 +718,7 @@ jobs:
     secrets: inherit
 
   neon-image:
-    needs: [ check-permissions, build-buildtools-image, tag ]
+    needs: [ check-permissions, build-build-tools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
 
     steps:
@@ -747,7 +753,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-buildtools-image.outputs.tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
           provenance: false
           push: true
           pull: true
@@ -765,7 +771,7 @@ jobs:
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
-    needs: [ check-permissions, build-buildtools-image, tag ]
+    needs: [ check-permissions, build-build-tools-image, tag ]
 
     steps:
       - name: Checkout
@@ -799,7 +805,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{needs.tag.outputs.build-tag}}
-            TAG=${{ needs.build-buildtools-image.outputs.tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
           provenance: false
           push: true
           pull: true
@@ -816,7 +822,7 @@ jobs:
           rm -rf .docker-custom
 
   compute-node-image:
-    needs: [ check-permissions, build-buildtools-image, tag ]
+    needs: [ check-permissions, build-build-tools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
 
     strategy:
@@ -863,7 +869,7 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version }}
             BUILD_TAG=${{needs.tag.outputs.build-tag}}
-            TAG=${{ needs.build-buildtools-image.outputs.tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
           provenance: false
           push: true
           pull: true

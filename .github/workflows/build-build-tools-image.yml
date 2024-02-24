@@ -2,67 +2,37 @@ name: Build build-tools image
 
 on:
   workflow_call:
-    outputs:
-      tag:
+    inputs:
+      image-tag:
         description: "build-tools image tag"
-        value: ${{ jobs.check-image.outputs.tag }}
+        required: true
+        type: string
+    outputs:
+      image-tag:
+        description: "build-tools tag"
+        value: ${{ inputs.image-tag }}
       image:
         description: "build-tools image"
-        value: neondatabase/build-tools:${{ jobs.check-image.outputs.tag }}
+        value: neondatabase/build-tools:${{ inputs.image-tag }}
 
 defaults:
   run:
     shell: bash -euo pipefail {0}
+
+concurrency:
+  group: build-build-tools-image-${{ inputs.image-tag }}
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
 
 jobs:
   check-image:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.get-build-tools-tag.outputs.image-tag }}
-      build_required: ${{ steps.check-image.outputs.build_required }}
-
-    steps:
-      - name: Get build-tools image tag for current commit
-        id: get-build-tools-tag
-        env:
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          LAST_BUILD_TOOLS_SHA=$(
-            gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              --method GET \
-              --field path=Dockerfile.build-tools \
-              --field sha=${COMMIT_SHA} \
-              --field per_page=1 \
-              --jq ".[0].sha" \
-              "/repos/${GITHUB_REPOSITORY}/commits"
-          )
-          echo "image-tag=${LAST_BUILD_TOOLS_SHA}" | tee -a $GITHUB_OUTPUT
-
-      - name: Check if such tag exists
-        id: check-image
-        env:
-          IMAGE_TAG: ${{ steps.get-build-tools-tag.outputs.image-tag }}
-        run: |
-          if [[ -z "$(docker manifest inspect neondatabase/build-tools:${IMAGE_TAG} || true)" ]]; then
-            build_required=true
-          else
-            build_required=false
-          fi
-
-          echo "build_required=${build_required}" | tee -a $GITHUB_OUTPUT
+    uses: ./.github/workflows/check-build-tools-image.yml
 
   # This job uses older version of GitHub Actions because it's run on gen2 runners, which don't support node 20 (for newer versions)
   build-image:
     needs: [ check-image ]
-    if: needs.check-image.outputs.build_required == 'true'
-    outputs:
-      skipped: ${{ steps.double-check-image.outputs.skip }}
+    if: needs.check-image.outputs.found == 'false'
 
     strategy:
       matrix:
@@ -70,47 +40,37 @@ jobs:
 
     runs-on: ${{ fromJson(format('["self-hosted", "dev", "{0}"]', matrix.arch)) }}
 
-    concurrency:
-      group: ${{ github.workflow }}-${{ needs.check-image.outputs.tag }}
-
     env:
-      IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
+      IMAGE_TAG: ${{ inputs.image-tag }}
 
     steps:
-      # `double-check-image` step along with `concurrency.group` is used to prevent
-      # from concurrent image building triggered by different commits in main
-      - id: double-check-image
+      - name: Check `input.tag` is correct
+        env:
+          INPUTS_IMAGE_TAG: ${{ inputs.image-tag }}
+          CHECK_IMAGE_TAG : ${{ needs.check-image.outputs.image-tag }}
         run: |
-          if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
-            skip=true
-          else
-            skip=false
+          if [ "${INPUTS_IMAGE_TAG}" != "${CHECK_IMAGE_TAG}" ]; then
+            echo "'inputs.image-tag' (${INPUTS_IMAGE_TAG}) does not match the tag of the latest build-tools image 'inputs.image-tag' (${CHECK_IMAGE_TAG})"
+            exit 1
           fi
 
-          echo "skip=${skip}" | tee -a $GITHUB_OUTPUT
-
       - uses: actions/checkout@v3
-        if: steps.double-check-image.outputs.skip == 'false'
 
       # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
       # The default value is ~/.docker
       - name: Set custom docker config directory
-        if: steps.double-check-image.outputs.skip == 'false'
         run: |
           mkdir -p /tmp/.docker-custom
           echo DOCKER_CONFIG=/tmp/.docker-custom >> $GITHUB_ENV
 
       - uses: docker/setup-buildx-action@v2
-        if: steps.double-check-image.outputs.skip == 'false'
 
       - uses: docker/login-action@v2
-        if: steps.double-check-image.outputs.skip == 'false'
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - uses: docker/build-push-action@v4
-        if: steps.double-check-image.outputs.skip == 'false'
         with:
           context: .
           provenance: false
@@ -119,20 +79,18 @@ jobs:
           file: Dockerfile.build-tools
           cache-from: type=registry,ref=neondatabase/build-tools:cache-${{ matrix.arch }}
           cache-to: type=registry,ref=neondatabase/build-tools:cache-${{ matrix.arch }},mode=max
-          tags: neondatabase/build-tools:${{ needs.check-image.outputs.tag }}-${{ matrix.arch }}
+          tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
 
       - name: Remove custom docker config directory
-        if: always() && steps.double-check-image.outputs.skip == 'false'
         run: |
           rm -rf /tmp/.docker-custom
 
   merge-images:
-    needs: [ check-image, build-image ]
-    if: needs.build-image.outputs.skipped == 'false'
+    needs: [ build-image ]
     runs-on: ubuntu-latest
 
     env:
-      IMAGE_TAG: ${{ needs.check-image.outputs.tag }}
+      IMAGE_TAG: ${{ inputs.image-tag }}
 
     steps:
       - uses: docker/login-action@v3
