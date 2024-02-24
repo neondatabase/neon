@@ -156,8 +156,8 @@ jobs:
       - name: Promote image
         if: github.ref_name == 'main'
         run: |
-          docker tag neondatabase/build-tools:${IMAGE_TAG} neondatabase/build-tools:pinned
-          docker push neondatabase/build-tools:pinned
+          docker buildx imagetools create -t neondatabase/build-tools:pinned \
+                                             neondatabase/build-tools:${IMAGE_TAG}
 
-          docker tag neondatabase/build-tools:pinned 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-          docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned \
+                                             neondatabase/build-tools:${IMAGE_TAG}
