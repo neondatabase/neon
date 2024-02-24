@@ -1242,3 +1242,10 @@ jobs:
 
             time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/${PREFIX}/${FILENAME}
           done
+
+  pin-build-tools-image:
+    needs: [ build-build-tools-image, promote-images, regress-tests ]
+    if: github.ref_name == 'main'
+    uses: ./.github/workflows/pin-build-tools-image.yml
+    with:
+      from-tag: ${{ needs.build-build-tools-image.outputs.image-tag }}

@@ -103,19 +103,3 @@ jobs:
           docker buildx imagetools create -t neondatabase/build-tools:${IMAGE_TAG} \
                                              neondatabase/build-tools:${IMAGE_TAG}-x64 \
                                              neondatabase/build-tools:${IMAGE_TAG}-arm64
-
-      - uses: docker/login-action@v3
-        if: github.ref_name == 'main'
-        with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
-
-      - name: Promote image
-        if: github.ref_name == 'main'
-        run: |
-          docker buildx imagetools create -t neondatabase/build-tools:pinned \
-                                             neondatabase/build-tools:${IMAGE_TAG}
-
-          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned \
-                                             neondatabase/build-tools:${IMAGE_TAG}

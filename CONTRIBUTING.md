@@ -76,12 +76,9 @@ For details see [`approved-for-ci-run.yml`](.github/workflows/approved-for-ci-ru
 
 ## How do I make build-tools image "pinned"
 
-It's possible to update the `pinned` tag of the `build-tools` image using the `update-build-tools-image-tag.yml` workflow.
+It's possible to update the `pinned` tag of the `build-tools` image using the `pin-build-tools-image.yml` workflow.
 
 ```bash
-gh workflow -R neondatabase/neon run update-build-tools-image-tag.yml \
-            -f from-tag=cc98d9b00d670f182c507ae3783342bd7e64c31e \
-            -f to-tag=pinned
-
-# Default `-f to-tag` is `pinned`, so the parameter can be omitted.
+gh workflow -R neondatabase/neon run pin-build-tools-image.yml \
+            -f from-tag=cc98d9b00d670f182c507ae3783342bd7e64c31e
 ```
