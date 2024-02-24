@@ -26,6 +26,11 @@ jobs:
     with:
       github-event-name: ${{ github.event_name}}
 
+  build-buildtools-image:
+    needs: [ check-permissions ]
+    uses: ./.github/workflows/build-build-tools-image.yml
+    secrets: inherit
+
   check-macos-build:
     needs: [ check-permissions ]
     if: |
@@ -123,7 +128,7 @@ jobs:
         run: ./run_clippy.sh
 
   check-linux-arm-build:
-    needs: [ check-permissions ]
+    needs: [ check-permissions, build-buildtools-image ]
     timeout-minutes: 90
     runs-on: [ self-hosted, dev, arm64 ]
 
@@ -137,7 +142,10 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -244,12 +252,15 @@ jobs:
           cargo nextest run --package remote_storage --test test_real_azure
 
   check-codestyle-rust-arm:
-    needs: [ check-permissions ]
+    needs: [ check-permissions, build-buildtools-image ]
     timeout-minutes: 90
     runs-on: [ self-hosted, dev, arm64 ]
 
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -316,14 +327,17 @@ jobs:
         run: cargo deny check
 
   gather-rust-build-stats:
-    needs: [ check-permissions ]
+    needs: [ check-permissions, build-buildtools-image ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: neondatabase/build-tools:pinned
+      image: ${{ needs.build-buildtools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     env:
