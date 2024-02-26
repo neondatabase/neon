@@ -2573,19 +2573,24 @@ impl Tenant {
         legacy_config_path: &Utf8Path,
         location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
-        // Forward compat: write out an old-style configuration that old versions can read, in case we roll back
-        Self::persist_tenant_config_legacy(
-            tenant_shard_id,
-            legacy_config_path,
-            &location_conf.tenant_conf,
-        )
-        .await?;
-
         if let LocationMode::Attached(attach_conf) = &location_conf.mode {
-            // Once we use LocationMode, generations are mandatory.  If we aren't using generations,
-            // then drop out after writing legacy-style config.
+            // The modern-style LocationConf config file requires a generation to be set. In case someone
+            // is running a pageserver without the infrastructure to set generations, write out the legacy-style
+            // config file that only contains TenantConf.
+            //
+            // This will eventually be removed in https://github.com/neondatabase/neon/issues/5388
+
             if attach_conf.generation.is_none() {
-                tracing::debug!("Running without generations, not writing new-style LocationConf");
+                tracing::info!(
+                    "Running without generations, writing legacy-style tenant config file"
+                );
+                Self::persist_tenant_config_legacy(
+                    tenant_shard_id,
+                    legacy_config_path,
+                    &location_conf.tenant_conf,
+                )
+                .await?;
+
                 return Ok(());
             }
         }
