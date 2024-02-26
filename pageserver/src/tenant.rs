@@ -709,8 +709,8 @@ impl Tenant {
                         _permit: tokio::sync::SemaphorePermit<'a>,
                         during_startup: bool
                     },
-                    /// We are attaching this tenant as soon as we can, because an endpoint tried to
-                    /// access it.
+                    /// We are attaching this tenant as soon as we can, because for example an
+                    /// endpoint tried to access it.
                     OnDemand,
                     /// During normal operations after startup, we are attaching a tenant, and
                     /// eager attach was requested.
