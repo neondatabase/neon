@@ -812,9 +812,9 @@ $$;"#,
                 WHERE nspname = 'public'\n\
             )\n\
             THEN\n\
-                REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC
+                REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC;\n\
             END IF;\n\
-        END\n
+        END\n\
     $$;";
 
     client.simple_query(query)?;
