@@ -102,7 +102,7 @@ files:
 
       - metric_name: lfc_used
         type: gauge
-        help: 'lfc_used'
+        help: 'LFC chunks used (chunk = 1MB)'
         key_labels:
         values: [lfc_used]
         query: |
@@ -123,6 +123,14 @@ files:
         values: [lfc_writes]
         query: |
           select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes';
+
+      - metric_name: lfc_cache_size_limit
+        type: gauge
+        help: 'LFC cache size limit in bytes'
+        key_labels:
+        values: [lfc_cache_size_limit]
+        query: |
+          select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
 
 build: |
   # Build cgroup-tools
