@@ -34,7 +34,7 @@ use crate::{
     },
 };
 
-use utils::completion;
+use utils::{completion, sync::gate::GateGuard};
 
 use super::Timeline;
 
@@ -72,14 +72,18 @@ impl Timeline {
                     _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
                 };
 
-                self_clone.eviction_task(cancel).await;
+                let Ok(guard) = self_clone.gate.enter() else {
+                    return Ok(());
+                };
+
+                self_clone.eviction_task(cancel, &guard).await;
                 Ok(())
             },
         );
     }
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
-    async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
+    async fn eviction_task(self: Arc<Self>, cancel: CancellationToken, guard: &GateGuard) {
         use crate::tenant::tasks::random_init_delay;
         {
             let policy = self.get_eviction_policy();
@@ -96,7 +100,7 @@ impl Timeline {
         let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
         loop {
             let policy = self.get_eviction_policy();
-            let cf = self.eviction_iteration(&policy, &cancel, &ctx).await;
+            let cf = self.eviction_iteration(&policy, &cancel, guard, &ctx).await;
 
             match cf {
                 ControlFlow::Break(()) => break,
@@ -117,6 +121,7 @@ impl Timeline {
         self: &Arc<Self>,
         policy: &EvictionPolicy,
         cancel: &CancellationToken,
+        guard: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<(), Instant> {
         debug!("eviction iteration: {policy:?}");
@@ -127,14 +132,17 @@ impl Timeline {
                 return ControlFlow::Continue(Instant::now() + Duration::from_secs(10));
             }
             EvictionPolicy::LayerAccessThreshold(p) => {
-                match self.eviction_iteration_threshold(p, cancel, ctx).await {
+                match self
+                    .eviction_iteration_threshold(p, cancel, guard, ctx)
+                    .await
+                {
                     ControlFlow::Break(()) => return ControlFlow::Break(()),
                     ControlFlow::Continue(()) => (),
                 }
                 (p.period, p.threshold)
             }
             EvictionPolicy::OnlyImitiate(p) => {
-                if self.imitiate_only(p, cancel, ctx).await.is_break() {
+                if self.imitiate_only(p, cancel, guard, ctx).await.is_break() {
                     return ControlFlow::Break(());
                 }
                 (p.period, p.threshold)
@@ -165,6 +173,7 @@ impl Timeline {
         self: &Arc<Self>,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
+        guard: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
@@ -180,7 +189,7 @@ impl Timeline {
             _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
-        match self.imitate_layer_accesses(p, cancel, ctx).await {
+        match self.imitate_layer_accesses(p, cancel, guard, ctx).await {
             ControlFlow::Break(()) => return ControlFlow::Break(()),
             ControlFlow::Continue(()) => (),
         }
@@ -302,6 +311,7 @@ impl Timeline {
         self: &Arc<Self>,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
+        guard: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
@@ -315,7 +325,7 @@ impl Timeline {
             _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
-        self.imitate_layer_accesses(p, cancel, ctx).await
+        self.imitate_layer_accesses(p, cancel, guard, ctx).await
     }
 
     /// If we evict layers but keep cached values derived from those layers, then
@@ -347,6 +357,7 @@ impl Timeline {
         &self,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
+        guard: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_zero() {
@@ -365,7 +376,8 @@ impl Timeline {
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_timeline_cached_layer_accesses(ctx).await;
+                self.imitate_timeline_cached_layer_accesses(guard, ctx)
+                    .await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now())
             }
         }
@@ -405,12 +417,21 @@ impl Timeline {
 
     /// Recompute the values which would cause on-demand downloads during restart.
     #[instrument(skip_all)]
-    async fn imitate_timeline_cached_layer_accesses(&self, ctx: &RequestContext) {
+    async fn imitate_timeline_cached_layer_accesses(
+        &self,
+        guard: &GateGuard,
+        ctx: &RequestContext,
+    ) {
         let lsn = self.get_last_record_lsn();
 
         // imitiate on-restart initial logical size
         let size = self
-            .calculate_logical_size(lsn, LogicalSizeCalculationCause::EvictionTaskImitation, ctx)
+            .calculate_logical_size(
+                lsn,
+                LogicalSizeCalculationCause::EvictionTaskImitation,
+                guard,
+                ctx,
+            )
             .instrument(info_span!("calculate_logical_size"))
             .await;
 

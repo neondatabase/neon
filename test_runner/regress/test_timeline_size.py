@@ -1,8 +1,6 @@
 import concurrent.futures
 import math
-import queue
 import random
-import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -20,7 +18,6 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
@@ -333,39 +330,13 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     log.info(
         f"try to delete the timeline using {deletion_method}, this should cancel size computation tasks and wait for them to finish"
     )
-    delete_timeline_success: queue.Queue[bool] = queue.Queue(maxsize=1)
 
-    def delete_timeline_thread_fn():
-        try:
-            if deletion_method == "tenant_detach":
-                client.tenant_detach(tenant_id)
-            elif deletion_method == "timeline_delete":
-                timeline_delete_wait_completed(client, tenant_id, timeline_id)
-            delete_timeline_success.put(True)
-        except PageserverApiException:
-            delete_timeline_success.put(False)
-            raise
-
-    delete_timeline_thread = threading.Thread(target=delete_timeline_thread_fn)
-    delete_timeline_thread.start()
-    # give it some time to settle in the state where it waits for size computation task
-    time.sleep(5)
-    if not delete_timeline_success.empty():
-        raise AssertionError(
-            f"test is broken, the {deletion_method} should be stuck waiting for size computation task, got result {delete_timeline_success.get()}"
-        )
-
-    log.info(
-        "resume the size calculation. The failpoint checks that the timeline directory still exists."
-    )
-    client.configure_failpoints(("timeline-calculate-logical-size-check-dir-exists", "return"))
-    client.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
-
-    log.info("wait for delete timeline thread to finish and assert that it succeeded")
-    assert delete_timeline_success.get()
-
-    # if the implementation is incorrect, the teardown would complain about an error log
-    # message emitted by the code behind failpoint "timeline-calculate-logical-size-check-dir-exists"
+    if deletion_method == "tenant_detach":
+        client.tenant_detach(tenant_id)
+    elif deletion_method == "timeline_delete":
+        timeline_delete_wait_completed(client, tenant_id, timeline_id)
+    else:
+        raise RuntimeError(deletion_method)
 
 
 def test_timeline_physical_size_init(neon_env_builder: NeonEnvBuilder):
