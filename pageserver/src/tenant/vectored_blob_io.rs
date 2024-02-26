@@ -269,6 +269,10 @@ impl<'a> VectoredBlobReader<'a> {
         let start_offset = blobs_at.first().expect("VectoredRead is never empty").0;
 
         let mut metas = Vec::with_capacity(blobs_at.len());
+
+        // Blobs in `read` only provide their starting offset. The end offset
+        // of a blob is implicit: the start of the next blob if one exists
+        // or the end of the read.
         let pairs = blobs_at.iter().zip(
             blobs_at
                 .iter()
@@ -276,6 +280,7 @@ impl<'a> VectoredBlobReader<'a> {
                 .skip(1)
                 .chain(std::iter::once(None)),
         );
+
         for ((offset, meta), next) in pairs {
             let offset_in_buf = offset - start_offset;
             let first_len_byte = buf[offset_in_buf as usize];
