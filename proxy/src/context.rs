@@ -40,6 +40,7 @@ pub struct RequestMonitoring {
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
     success: bool,
+    is_cold_start: Option<bool>,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -79,6 +80,7 @@ impl RequestMonitoring {
             error_kind: None,
             auth_method: None,
             success: false,
+            is_cold_start: None,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
@@ -102,6 +104,7 @@ impl RequestMonitoring {
         self.branch = Some(x.branch_id);
         self.endpoint_id = Some(x.endpoint_id);
         self.project = Some(x.project_id);
+        self.is_cold_start = x.is_cold_start;
     }
 
     pub fn set_project_id(&mut self, project_id: ProjectId) {
