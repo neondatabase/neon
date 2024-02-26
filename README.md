@@ -232,7 +232,7 @@ postgres=# select * from t;
 
 #### Handling build failures
 
-If you encounter build failures during the initialization steps, it's best to stop everything (`cargo neon stop`) and remove the `.neon` directory.
+If you encounter errors during setting up the initial tenant, it's best to stop everything (`cargo neon stop`) and remove the `.neon` directory. Then fix the problems, and start the setup again.
 
 ## Running tests
 
