@@ -28,3 +28,4 @@ def test_neon_extension(neon_env_builder: NeonEnvBuilder):
             res = cur.fetchall()
             log.info(res)
             assert len(res) == 1
+            assert len(res[0])==5
