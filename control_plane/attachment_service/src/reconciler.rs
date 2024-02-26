@@ -27,7 +27,7 @@ pub(super) struct Reconciler {
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
     pub(crate) generation: Generation,
-    pub(crate) intent: IntentState,
+    pub(crate) intent: TargetState,
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
 
@@ -62,10 +62,38 @@ pub(super) struct Reconciler {
     pub(crate) persistence: Arc<Persistence>,
 }
 
+/// This is a snapshot of [`crate::tenant_state::IntentState`], but it does not do any
+/// reference counting for Scheduler.  The IntentState is what the scheduler works with,
+/// and the TargetState is just the instruction for a particular Reconciler run.
+#[derive(Debug)]
+pub(crate) struct TargetState {
+    pub(crate) attached: Option<NodeId>,
+    pub(crate) secondary: Vec<NodeId>,
+}
+
+impl TargetState {
+    pub(crate) fn from_intent(intent: &IntentState) -> Self {
+        Self {
+            attached: *intent.get_attached(),
+            secondary: intent.get_secondary().clone(),
+        }
+    }
+
+    fn all_pageservers(&self) -> Vec<NodeId> {
+        let mut result = self.secondary.clone();
+        if let Some(node_id) = &self.attached {
+            result.push(*node_id);
+        }
+        result
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ReconcileError {
     #[error(transparent)]
     Notify(#[from] NotifyError),
+    #[error("Cancelled")]
+    Cancel,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -410,7 +438,7 @@ impl Reconciler {
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
-                    tracing::info!("Observed configuration already correct.")
+                    tracing::info!(%node_id, "Observed configuration already correct.")
                 }
                 _ => {
                     // In all cases other than a matching observed configuration, we will
@@ -421,7 +449,7 @@ impl Reconciler {
                         .increment_generation(self.tenant_shard_id, node_id)
                         .await?;
                     wanted_conf.generation = self.generation.into();
-                    tracing::info!("Observed configuration requires update.");
+                    tracing::info!(%node_id, "Observed configuration requires update.");
                     self.location_config(node_id, wanted_conf, None).await?;
                     self.compute_notify().await?;
                 }
@@ -471,6 +499,9 @@ impl Reconciler {
         }
 
         for (node_id, conf) in changes {
+            if self.cancel.is_cancelled() {
+                return Err(ReconcileError::Cancel);
+            }
             self.location_config(node_id, conf, None).await?;
         }
 

@@ -1,10 +1,12 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use crate::{metrics, persistence::TenantShardPersistence};
 use control_plane::attachment_service::NodeAvailability;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
 };
+use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, Instrument};
@@ -19,11 +21,27 @@ use crate::{
     compute_hook::ComputeHook,
     node::Node,
     persistence::{split_state::SplitState, Persistence},
-    reconciler::{attached_location_conf, secondary_location_conf, ReconcileError, Reconciler},
+    reconciler::{
+        attached_location_conf, secondary_location_conf, ReconcileError, Reconciler, TargetState,
+    },
     scheduler::{ScheduleError, Scheduler},
     service, PlacementPolicy, Sequence,
 };
 
+/// Serialization helper
+fn read_mutex_content<S, T>(v: &std::sync::Mutex<T>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::ser::Serializer,
+    T: Clone + std::fmt::Display,
+{
+    serializer.collect_str(&v.lock().unwrap())
+}
+
+/// In-memory state for a particular tenant shard.
+///
+/// This struct implement Serialize for debugging purposes, but is _not_ persisted
+/// itself: see [`crate::persistence`] for the subset of tenant shard state that is persisted.
+#[derive(Serialize)]
 pub(crate) struct TenantState {
     pub(crate) tenant_shard_id: TenantShardId,
 
@@ -58,6 +76,7 @@ pub(crate) struct TenantState {
     /// If a reconcile task is currently in flight, it may be joined here (it is
     /// only safe to join if either the result has been received or the reconciler's
     /// cancellation token has been fired)
+    #[serde(skip)]
     pub(crate) reconciler: Option<ReconcilerHandle>,
 
     /// If a tenant is being split, then all shards with that TenantId will have a
@@ -67,16 +86,19 @@ pub(crate) struct TenantState {
 
     /// Optionally wait for reconciliation to complete up to a particular
     /// sequence number.
+    #[serde(skip)]
     pub(crate) waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
 
     /// Indicates sequence number for which we have encountered an error reconciling.  If
     /// this advances ahead of [`Self::waiter`] then a reconciliation error has occurred,
     /// and callers should stop waiting for `waiter` and propagate the error.
+    #[serde(skip)]
     pub(crate) error_waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
 
     /// The most recent error from a reconcile on this tenant
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
+    #[serde(serialize_with = "read_mutex_content")]
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<String>>,
 
     /// If we have a pending compute notification that for some reason we weren't able to send,
@@ -86,13 +108,131 @@ pub(crate) struct TenantState {
     pub(crate) pending_compute_notification: bool,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize)]
 pub(crate) struct IntentState {
-    pub(crate) attached: Option<NodeId>,
-    pub(crate) secondary: Vec<NodeId>,
+    attached: Option<NodeId>,
+    secondary: Vec<NodeId>,
 }
 
-#[derive(Default, Clone)]
+impl IntentState {
+    pub(crate) fn new() -> Self {
+        Self {
+            attached: None,
+            secondary: vec![],
+        }
+    }
+    pub(crate) fn single(scheduler: &mut Scheduler, node_id: Option<NodeId>) -> Self {
+        if let Some(node_id) = node_id {
+            scheduler.node_inc_ref(node_id);
+        }
+        Self {
+            attached: node_id,
+            secondary: vec![],
+        }
+    }
+
+    pub(crate) fn set_attached(&mut self, scheduler: &mut Scheduler, new_attached: Option<NodeId>) {
+        if self.attached != new_attached {
+            if let Some(old_attached) = self.attached.take() {
+                scheduler.node_dec_ref(old_attached);
+            }
+            if let Some(new_attached) = &new_attached {
+                scheduler.node_inc_ref(*new_attached);
+            }
+            self.attached = new_attached;
+        }
+    }
+
+    /// Like set_attached, but the node is from [`Self::secondary`].  This swaps the node from
+    /// secondary to attached while maintaining the scheduler's reference counts.
+    pub(crate) fn promote_attached(
+        &mut self,
+        _scheduler: &mut Scheduler,
+        promote_secondary: NodeId,
+    ) {
+        // If we call this with a node that isn't in secondary, it would cause incorrect
+        // scheduler reference counting, since we assume the node is already referenced as a secondary.
+        debug_assert!(self.secondary.contains(&promote_secondary));
+
+        // TODO: when scheduler starts tracking attached + secondary counts separately, we will
+        // need to call into it here.
+        self.secondary.retain(|n| n != &promote_secondary);
+        self.attached = Some(promote_secondary);
+    }
+
+    pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
+        debug_assert!(!self.secondary.contains(&new_secondary));
+        scheduler.node_inc_ref(new_secondary);
+        self.secondary.push(new_secondary);
+    }
+
+    /// It is legal to call this with a node that is not currently a secondary: that is a no-op
+    pub(crate) fn remove_secondary(&mut self, scheduler: &mut Scheduler, node_id: NodeId) {
+        let index = self.secondary.iter().position(|n| *n == node_id);
+        if let Some(index) = index {
+            scheduler.node_dec_ref(node_id);
+            self.secondary.remove(index);
+        }
+    }
+
+    pub(crate) fn clear_secondary(&mut self, scheduler: &mut Scheduler) {
+        for secondary in self.secondary.drain(..) {
+            scheduler.node_dec_ref(secondary);
+        }
+    }
+
+    pub(crate) fn clear(&mut self, scheduler: &mut Scheduler) {
+        if let Some(old_attached) = self.attached.take() {
+            scheduler.node_dec_ref(old_attached);
+        }
+
+        self.clear_secondary(scheduler);
+    }
+
+    pub(crate) fn all_pageservers(&self) -> Vec<NodeId> {
+        let mut result = Vec::new();
+        if let Some(p) = self.attached {
+            result.push(p)
+        }
+
+        result.extend(self.secondary.iter().copied());
+
+        result
+    }
+
+    pub(crate) fn get_attached(&self) -> &Option<NodeId> {
+        &self.attached
+    }
+
+    pub(crate) fn get_secondary(&self) -> &Vec<NodeId> {
+        &self.secondary
+    }
+
+    /// When a node goes offline, we update intents to avoid using it
+    /// as their attached pageserver.
+    ///
+    /// Returns true if a change was made
+    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
+        if self.attached == Some(node_id) {
+            // TODO: when scheduler starts tracking attached + secondary counts separately, we will
+            // need to call into it here.
+            self.attached = None;
+            self.secondary.push(node_id);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for IntentState {
+    fn drop(&mut self) {
+        // Must clear before dropping, to avoid leaving stale refcounts in the Scheduler
+        debug_assert!(self.attached.is_none() && self.secondary.is_empty());
+    }
+}
+
+#[derive(Default, Clone, Serialize)]
 pub(crate) struct ObservedState {
     pub(crate) locations: HashMap<NodeId, ObservedStateLocation>,
 }
@@ -106,7 +246,7 @@ pub(crate) struct ObservedState {
 ///       what it is (e.g. we failed partway through configuring it)
 ///     * Instance exists with conf==Some: this tells us what we last successfully configured on this node,
 ///       and that configuration will still be present unless something external interfered.
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub(crate) struct ObservedStateLocation {
     /// If None, it means we do not know the status of this shard's location on this node, but
     /// we know that we might have some state on this node.
@@ -182,46 +322,6 @@ pub(crate) struct ReconcileResult {
     pub(crate) pending_compute_notification: bool,
 }
 
-impl IntentState {
-    pub(crate) fn new() -> Self {
-        Self {
-            attached: None,
-            secondary: vec![],
-        }
-    }
-    pub(crate) fn all_pageservers(&self) -> Vec<NodeId> {
-        let mut result = Vec::new();
-        if let Some(p) = self.attached {
-            result.push(p)
-        }
-
-        result.extend(self.secondary.iter().copied());
-
-        result
-    }
-
-    pub(crate) fn single(node_id: Option<NodeId>) -> Self {
-        Self {
-            attached: node_id,
-            secondary: vec![],
-        }
-    }
-
-    /// When a node goes offline, we update intents to avoid using it
-    /// as their attached pageserver.
-    ///
-    /// Returns true if a change was made
-    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
-        if self.attached == Some(node_id) {
-            self.attached = None;
-            self.secondary.push(node_id);
-            true
-        } else {
-            false
-        }
-    }
-}
-
 impl ObservedState {
     pub(crate) fn new() -> Self {
         Self {
@@ -289,11 +389,41 @@ impl TenantState {
         // All remaining observed locations generate secondary intents.  This includes None
         // observations, as these may well have some local content on disk that is usable (this
         // is an edge case that might occur if we restarted during a migration or other change)
+        //
+        // We may leave intent.attached empty if we didn't find any attached locations: [`Self::schedule`]
+        // will take care of promoting one of these secondaries to be attached.
         self.observed.locations.keys().for_each(|node_id| {
             if Some(*node_id) != self.intent.attached {
                 self.intent.secondary.push(*node_id);
             }
         });
+    }
+
+    /// Part of [`Self::schedule`] that is used to choose exactly one node to act as the
+    /// attached pageserver for a shard.
+    ///
+    /// Returns whether we modified it, and the NodeId selected.
+    fn schedule_attached(
+        &mut self,
+        scheduler: &mut Scheduler,
+    ) -> Result<(bool, NodeId), ScheduleError> {
+        // No work to do if we already have an attached tenant
+        if let Some(node_id) = self.intent.attached {
+            return Ok((false, node_id));
+        }
+
+        if let Some(promote_secondary) = scheduler.node_preferred(&self.intent.secondary) {
+            // Promote a secondary
+            tracing::debug!("Promoted secondary {} to attached", promote_secondary);
+            self.intent.promote_attached(scheduler, promote_secondary);
+            Ok((true, promote_secondary))
+        } else {
+            // Pick a fresh node: either we had no secondaries or none were schedulable
+            let node_id = scheduler.schedule_shard(&self.intent.secondary)?;
+            tracing::debug!("Selected {} as attached", node_id);
+            self.intent.set_attached(scheduler, Some(node_id));
+            Ok((true, node_id))
+        }
     }
 
     pub(crate) fn schedule(&mut self, scheduler: &mut Scheduler) -> Result<(), ScheduleError> {
@@ -306,36 +436,29 @@ impl TenantState {
 
         // Build the set of pageservers already in use by this tenant, to avoid scheduling
         // more work on the same pageservers we're already using.
-        let mut used_pageservers = self.intent.all_pageservers();
         let mut modified = false;
 
         use PlacementPolicy::*;
         match self.policy {
             Single => {
                 // Should have exactly one attached, and zero secondaries
-                if self.intent.attached.is_none() {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.attached = Some(node_id);
-                    used_pageservers.push(node_id);
-                    modified = true;
-                }
+                let (modified_attached, _attached_node_id) = self.schedule_attached(scheduler)?;
+                modified |= modified_attached;
+
                 if !self.intent.secondary.is_empty() {
-                    self.intent.secondary.clear();
+                    self.intent.clear_secondary(scheduler);
                     modified = true;
                 }
             }
             Double(secondary_count) => {
                 // Should have exactly one attached, and N secondaries
-                if self.intent.attached.is_none() {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.attached = Some(node_id);
-                    used_pageservers.push(node_id);
-                    modified = true;
-                }
+                let (modified_attached, attached_node_id) = self.schedule_attached(scheduler)?;
+                modified |= modified_attached;
 
+                let mut used_pageservers = vec![attached_node_id];
                 while self.intent.secondary.len() < secondary_count {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.secondary.push(node_id);
+                    self.intent.push_secondary(scheduler, node_id);
                     used_pageservers.push(node_id);
                     modified = true;
                 }
@@ -343,12 +466,12 @@ impl TenantState {
             Detached => {
                 // Should have no attached or secondary pageservers
                 if self.intent.attached.is_some() {
-                    self.intent.attached = None;
+                    self.intent.set_attached(scheduler, None);
                     modified = true;
                 }
 
                 if !self.intent.secondary.is_empty() {
-                    self.intent.secondary.clear();
+                    self.intent.clear_secondary(scheduler);
                     modified = true;
                 }
             }
@@ -411,6 +534,13 @@ impl TenantState {
                 Some(_) | None => {
                     return true;
                 }
+            }
+        }
+
+        for node_id in self.observed.locations.keys() {
+            if self.intent.attached != Some(*node_id) && !self.intent.secondary.contains(node_id) {
+                // We have observed state that isn't part of our intent: need to clean it up.
+                return true;
             }
         }
 
@@ -490,7 +620,7 @@ impl TenantState {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
             generation: self.generation,
-            intent: self.intent.clone(),
+            intent: TargetState::from_intent(&self.intent),
             config: self.config.clone(),
             observed: self.observed.clone(),
             pageservers: pageservers.clone(),
@@ -509,6 +639,7 @@ impl TenantState {
         let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
                                                         shard_id=%reconciler.tenant_shard_id.shard_slug());
+        metrics::RECONCILER.spawned.inc();
         let join_handle = tokio::task::spawn(
             async move {
                 // Wait for any previous reconcile task to complete before we start
@@ -525,6 +656,10 @@ impl TenantState {
                 // TODO: wrap all remote API operations in cancellation check
                 // as well.
                 if reconciler.cancel.is_cancelled() {
+                    metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL])
+                        .inc();
                     return;
                 }
 
@@ -537,6 +672,20 @@ impl TenantState {
                     // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
                     reconciler.compute_notify().await.ok();
                 }
+
+                // Update result counter
+                match &result {
+                    Ok(_) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::SUCCESS]),
+                    Err(ReconcileError::Cancel) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL]),
+                    Err(_) => metrics::RECONCILER
+                        .complete
+                        .with_label_values(&[metrics::ReconcilerMetrics::ERROR]),
+                }
+                .inc();
 
                 result_tx
                     .send(ReconcileResult {
@@ -579,5 +728,104 @@ impl TenantState {
         self.observed.locations.remove(&node_id);
 
         debug_assert!(!self.intent.all_pageservers().contains(&node_id));
+    }
+
+    pub(crate) fn to_persistent(&self) -> TenantShardPersistence {
+        TenantShardPersistence {
+            tenant_id: self.tenant_shard_id.tenant_id.to_string(),
+            shard_number: self.tenant_shard_id.shard_number.0 as i32,
+            shard_count: self.tenant_shard_id.shard_count.literal() as i32,
+            shard_stripe_size: self.shard.stripe_size.0 as i32,
+            generation: self.generation.into().unwrap_or(0) as i32,
+            generation_pageserver: self
+                .intent
+                .get_attached()
+                .map(|n| n.0 as i64)
+                .unwrap_or(i64::MAX),
+
+            placement_policy: serde_json::to_string(&self.policy).unwrap(),
+            config: serde_json::to_string(&self.config).unwrap(),
+            splitting: SplitState::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use utils::id::TenantId;
+
+    use crate::scheduler::test_utils::make_test_nodes;
+
+    use super::*;
+
+    fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantState {
+        let tenant_id = TenantId::generate();
+        let shard_number = ShardNumber(0);
+        let shard_count = ShardCount::new(1);
+
+        let tenant_shard_id = TenantShardId {
+            tenant_id,
+            shard_number,
+            shard_count,
+        };
+        TenantState::new(
+            tenant_shard_id,
+            ShardIdentity::new(
+                shard_number,
+                shard_count,
+                pageserver_api::shard::ShardStripeSize(32768),
+            )
+            .unwrap(),
+            policy,
+        )
+    }
+
+    /// Test the scheduling behaviors used when a tenant configured for HA is subject
+    /// to nodes being marked offline.
+    #[test]
+    fn tenant_ha_scheduling() -> anyhow::Result<()> {
+        // Start with three nodes.  Our tenant will only use two.  The third one is
+        // expected to remain unused.
+        let mut nodes = make_test_nodes(3);
+
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+        tenant_state
+            .schedule(&mut scheduler)
+            .expect("we have enough nodes, scheduling should work");
+
+        // Expect to initially be schedule on to different nodes
+        assert_eq!(tenant_state.intent.secondary.len(), 1);
+        assert!(tenant_state.intent.attached.is_some());
+
+        let attached_node_id = tenant_state.intent.attached.unwrap();
+        let secondary_node_id = *tenant_state.intent.secondary.iter().last().unwrap();
+        assert_ne!(attached_node_id, secondary_node_id);
+
+        // Notifying the attached node is offline should demote it to a secondary
+        let changed = tenant_state.intent.notify_offline(attached_node_id);
+        assert!(changed);
+
+        // Update the scheduler state to indicate the node is offline
+        nodes.get_mut(&attached_node_id).unwrap().availability = NodeAvailability::Offline;
+        scheduler.node_upsert(nodes.get(&attached_node_id).unwrap());
+
+        // Scheduling the node should promote the still-available secondary node to attached
+        tenant_state
+            .schedule(&mut scheduler)
+            .expect("active nodes are available");
+        assert_eq!(tenant_state.intent.attached.unwrap(), secondary_node_id);
+
+        // The original attached node should have been retained as a secondary
+        assert_eq!(
+            *tenant_state.intent.secondary.iter().last().unwrap(),
+            attached_node_id
+        );
+
+        tenant_state.intent.clear(&mut scheduler);
+
+        Ok(())
     }
 }

@@ -80,13 +80,13 @@ runs:
 
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         submodules: true
         fetch-depth: 1
 
     - name: Cache poetry deps
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pypoetry/virtualenvs
         key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}

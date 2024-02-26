@@ -299,8 +299,7 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 
     # tenant is created with defaults, as in without config file
     (tenant_id, timeline_id) = env.neon_cli.create_tenant()
-    config_path = env.pageserver.tenant_dir(tenant_id) / "config"
-    assert config_path.exists(), "config file is always initially created"
+    config_path = env.pageserver.tenant_dir(tenant_id) / "config-v1"
 
     http_client = env.pageserver.http_client()
 

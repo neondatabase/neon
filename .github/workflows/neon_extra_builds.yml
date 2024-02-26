@@ -20,7 +20,14 @@ env:
   COPT: '-Werror'
 
 jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
+
   check-macos-build:
+    needs: [ check-permissions ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
@@ -57,21 +64,21 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
@@ -82,7 +89,7 @@ jobs:
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
       - name: Cache cargo deps
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -116,8 +123,8 @@ jobs:
         run: ./run_clippy.sh
 
   check-linux-arm-build:
+    needs: [ check-permissions ]
     timeout-minutes: 90
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: [ self-hosted, dev, arm64 ]
 
     env:
@@ -172,21 +179,21 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
@@ -237,8 +244,8 @@ jobs:
           cargo nextest run --package remote_storage --test test_real_azure
 
   check-codestyle-rust-arm:
+    needs: [ check-permissions ]
     timeout-minutes: 90
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     runs-on: [ self-hosted, dev, arm64 ]
 
     container:
@@ -309,6 +316,7 @@ jobs:
         run: cargo deny check
 
   gather-rust-build-stats:
+    needs: [ check-permissions ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
@@ -356,7 +364,7 @@ jobs:
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
       - name: Publish build stats report
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         env:
           REPORT_URL: ${{ steps.upload-stats.outputs.report-url }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -1,5 +1,6 @@
 {
-    "postgres-v16": "9c37a4988463a97d9cacb321acf3828b09823269",
-    "postgres-v15": "ca2def999368d9df098a637234ad5a9003189463",
-    "postgres-v14": "9dd9956c55ffbbd9abe77d10382453757fedfcf5"
+    "postgres-v16": "cc98378b0fa7413b78a197e3292a806865e4056a",
+    "postgres-v15": "0ec04712d55539550278595e853c172f7aa5fe3e",
+    "postgres-v14": "4cdba8ec5a3868cec4826bbb3f16c1d3d2ac2283"
 }
+

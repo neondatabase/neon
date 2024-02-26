@@ -39,7 +39,7 @@ runs:
         PR_NUMBER=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH" || true)
         if [ "${PR_NUMBER}" != "null" ]; then
           BRANCH_OR_PR=pr-${PR_NUMBER}
-        elif [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "release" ]; then
+        elif [ "${GITHUB_REF_NAME}" = "main" ] || [ "${GITHUB_REF_NAME}" = "release" ] || [ "${GITHUB_REF_NAME}" = "release-proxy" ]; then
           # Shortcut for special branches
           BRANCH_OR_PR=${GITHUB_REF_NAME}
         else
@@ -59,7 +59,7 @@ runs:
         BUCKET: neon-github-public-dev
 
     # TODO: We can replace with a special docker image with Java and Allure pre-installed
-    - uses: actions/setup-java@v3
+    - uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
         java-version: '17'
@@ -76,8 +76,8 @@ runs:
           rm -f ${ALLURE_ZIP}
         fi
       env:
-        ALLURE_VERSION: 2.24.0
-        ALLURE_ZIP_SHA256: 60b1d6ce65d9ef24b23cf9c2c19fd736a123487c38e54759f1ed1a7a77353c90
+        ALLURE_VERSION: 2.27.0
+        ALLURE_ZIP_SHA256: b071858fb2fa542c65d8f152c5c40d26267b2dfb74df1f1608a589ecca38e777
 
     # Potentially we could have several running build for the same key (for example, for the main branch), so we use improvised lock for this
     - name: Acquire lock
@@ -180,7 +180,7 @@ runs:
         fi
 
     - name: Cache poetry deps
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pypoetry/virtualenvs
         key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
@@ -215,7 +215,7 @@ runs:
           rm -rf ${WORKDIR}
         fi
 
-    - uses: actions/github-script@v6
+    - uses: actions/github-script@v7
       if: always()
       env:
         REPORT_URL: ${{ steps.generate-report.outputs.report-url }}

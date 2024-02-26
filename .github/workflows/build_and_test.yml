@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - release
+      - release-proxy
   pull_request:
 
 defaults:
@@ -27,24 +28,9 @@ env:
 jobs:
   check-permissions:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
-    runs-on: ubuntu-latest
-    steps:
-    - name: Disallow PRs from forks
-      if: |
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name != github.repository
-
-      run: |
-        if [ "${{ contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}" = "true" ]; then
-          MESSAGE="Please create a PR from a branch of ${GITHUB_REPOSITORY} instead of a fork"
-        else
-          MESSAGE="The PR should be reviewed and labelled with 'approved-for-ci-run' to trigger a CI run"
-        fi
-
-        echo >&2 "We don't run CI for PRs from forks"
-        echo >&2 "${MESSAGE}"
-
-        exit 1
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
 
   cancel-previous-e2e-tests:
     needs: [ check-permissions ]
@@ -69,7 +55,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -82,6 +68,8 @@ jobs:
             echo "tag=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
+            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
@@ -106,13 +94,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: 1
 
       - name: Cache poetry deps
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
           key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
@@ -138,7 +126,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 1
@@ -146,7 +134,7 @@ jobs:
 #      Disabled for now
 #      - name: Restore cargo deps cache
 #        id: cache_cargo
-#        uses: actions/cache@v3
+#        uses: actions/cache@v4
 #        with:
 #          path: |
 #            !~/.cargo/registry/src
@@ -231,7 +219,7 @@ jobs:
           done
 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 1
@@ -303,7 +291,7 @@ jobs:
       # compressed crates.
 #      - name: Cache cargo deps
 #        id: cache_cargo
-#        uses: actions/cache@v3
+#        uses: actions/cache@v4
 #        with:
 #          path: |
 #            ~/.cargo/registry/
@@ -317,21 +305,21 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v14
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
@@ -451,7 +439,7 @@ jobs:
         pg_version: [ v14, v15, v16 ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 1
@@ -472,9 +460,14 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
+          PAGESERVER_GET_VECTORED_IMPL: vectored
 
+      # Temporary disable this step until we figure out why it's so flaky
+      # Ref https://github.com/neondatabase/neon/issues/4540
       - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
+        if: |
+          false &&
+          matrix.build_type == 'debug' && matrix.pg_version == 'v14'
         uses: ./.github/actions/save-coverage-data
 
   get-benchmarks-durations:
@@ -488,10 +481,10 @@ jobs:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Cache poetry deps
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
           key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
@@ -525,7 +518,7 @@ jobs:
         build_type: [ release ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
@@ -554,7 +547,7 @@ jobs:
       options: --init
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create Allure report
         if: ${{ !cancelled() }}
@@ -565,7 +558,7 @@ jobs:
         env:
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
-      - uses: actions/github-script@v6
+      - uses: actions/github-script@v7
         if: ${{ !cancelled() }}
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
@@ -605,7 +598,7 @@ jobs:
         coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
@@ -674,7 +667,7 @@ jobs:
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/summary.json
           echo "summary-json=${REPORT_URL}" >> $GITHUB_OUTPUT
 
-      - uses: actions/github-script@v6
+      - uses: actions/github-script@v7
         env:
           REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -692,7 +685,7 @@ jobs:
             })
 
   trigger-e2e-tests:
-    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' }}
+    if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' }}
     needs: [ check-permissions, promote-images, tag ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
@@ -700,158 +693,173 @@ jobs:
   neon-image:
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.2-debug
-    defaults:
-      run:
-        shell: sh -eu {0}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1 # v3 won't work with kaniko
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
 
-      - name: Configure ECR and Docker Hub login
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
         run: |
-          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
-          echo "::add-mask::${DOCKERHUB_AUTH}"
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+      - uses: docker/setup-buildx-action@v3
 
-          cat <<-EOF > /kaniko/.docker/config.json
-            {
-              "auths": {
-                "https://index.docker.io/v1/": {
-                  "auth": "${DOCKERHUB_AUTH}"
-                }
-              },
-              "credHelpers": {
-                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
-              }
-            }
-          EOF
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Kaniko build neon
-        run:
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
-                           --context .
-                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-                           --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-                           --build-arg TAG=${{ needs.build-buildtools-image.outputs.build-tools-tag }}
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
-                           --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
-      - name: Cleanup ECR folder
-        run: rm -rf ~/.ecr
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            TAG=${{ needs.build-buildtools-image.outputs.build-tools-tag }}
+            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile
+          cache-from: type=registry,ref=neondatabase/neon:cache
+          cache-to: type=registry,ref=neondatabase/neon:cache,mode=max
+          tags: |
+            369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+            neondatabase/neon:${{needs.tag.outputs.build-tag}}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ check-permissions, build-buildtools-image, tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.2-debug
-    defaults:
-      run:
-        shell: sh -eu {0}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1 # v3 won't work with kaniko
-
-      - name: Configure ECR and Docker Hub login
-        run: |
-          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
-          echo "::add-mask::${DOCKERHUB_AUTH}"
-
-          cat <<-EOF > /kaniko/.docker/config.json
-            {
-              "auths": {
-                "https://index.docker.io/v1/": {
-                  "auth": "${DOCKERHUB_AUTH}"
-                }
-              },
-              "credHelpers": {
-                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
-              }
-            }
-          EOF
-
-      - name: Kaniko build compute tools
-        run:
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
-                           --context .
-                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
-                           --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
-                           --dockerfile Dockerfile.compute-tools
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
-                           --destination neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
-
-      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
-      - name: Cleanup ECR folder
-        run: rm -rf ~/.ecr
-
-  compute-node-image:
-    needs: [ check-permissions, build-buildtools-image, tag ]
-    runs-on: [ self-hosted, gen3, large ]
-    container:
-      image: gcr.io/kaniko-project/executor:v1.9.2-debug
-      # Workaround for "Resolving download.osgeo.org (download.osgeo.org)... failed: Temporary failure in name resolution.""
-      # Should be prevented by https://github.com/neondatabase/neon/issues/4281
-      options: --add-host=download.osgeo.org:140.211.15.30
-    strategy:
-      fail-fast: false
-      matrix:
-        version: [ v14, v15, v16 ]
-    defaults:
-      run:
-        shell: sh -eu {0}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v1 # v3 won't work with kaniko
+        uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
 
-      - name: Configure ECR and Docker Hub login
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
         run: |
-          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
-          echo "::add-mask::${DOCKERHUB_AUTH}"
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+      - uses: docker/setup-buildx-action@v3
 
-          cat <<-EOF > /kaniko/.docker/config.json
-            {
-              "auths": {
-                "https://index.docker.io/v1/": {
-                  "auth": "${DOCKERHUB_AUTH}"
-                }
-              },
-              "credHelpers": {
-                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
-              }
-            }
-          EOF
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Kaniko build compute node with extensions
-        run:
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
-                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
-                           --context .
-                           --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-                           --build-arg PG_VERSION=${{ matrix.version }}
-                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
-                           --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
-                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
-                           --dockerfile Dockerfile.compute-node
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
-                           --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
-                           --cleanup
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
-      - name: Cleanup ECR folder
-        run: rm -rf ~/.ecr
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            BUILD_TAG=${{needs.tag.outputs.build-tag}}
+            TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
+            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-tools
+          cache-from: type=registry,ref=neondatabase/compute-tools:cache
+          cache-to: type=registry,ref=neondatabase/compute-tools:cache,mode=max
+          tags: |
+            369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+            neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
+
+  compute-node-image:
+    needs: [ check-permissions, build-buildtools-image, tag ]
+    runs-on: [ self-hosted, gen3, large ]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ v14, v15, v16 ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+      - uses: docker/setup-buildx-action@v3
+        with:
+          # Disable parallelism for docker buildkit.
+          # As we already build everything with `make -j$(nproc)`, running it in additional level of parallelisam blows up the Runner.
+          config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            PG_VERSION=${{ matrix.version }}
+            BUILD_TAG=${{needs.tag.outputs.build-tag}}
+            TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
+            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-node
+          cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache
+          cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache,mode=max
+          tags: |
+            369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+            neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
@@ -900,7 +908,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -962,9 +970,7 @@ jobs:
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} vm-compute-node-v16
 
       - name: Add latest tag to images
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-           github.event_name != 'workflow_dispatch'
+        if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy'
         run: |
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
@@ -976,9 +982,7 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-           github.event_name != 'workflow_dispatch'
+        if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
@@ -1002,9 +1006,7 @@ jobs:
           crane push vm-compute-node-v16 neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}}
 
       - name: Push latest tags to Docker Hub
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
+        if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         run: |
           crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
@@ -1094,7 +1096,7 @@ jobs:
 
   deploy:
     needs: [ check-permissions, promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
-    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
+    if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
 
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
@@ -1114,7 +1116,7 @@ jobs:
           done
 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: 0
@@ -1129,15 +1131,29 @@ jobs:
             # TODO: move deployPreprodRegion to release (`"$GITHUB_REF_NAME" == "release"` block), once Staging support different compute tag prefixes for different regions
             gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=true
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}}
+            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main \
+              -f deployPgSniRouter=false \
+              -f deployProxy=false \
+              -f deployStorage=true \
+              -f deployStorageBroker=true \
+              -f branch=main \
+              -f dockerTag=${{needs.tag.outputs.build-tag}}
+          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
+            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main \
+              -f deployPgSniRouter=true \
+              -f deployProxy=true \
+              -f deployStorage=false \
+              -f deployStorageBroker=false \
+              -f branch=main \
+              -f dockerTag=${{needs.tag.outputs.build-tag}}
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1
           fi
 
       - name: Create git tag
-        if: github.ref_name == 'release'
-        uses: actions/github-script@v6
+        if: github.ref_name == 'release' || github.ref_name == 'release-proxy'
+        uses: actions/github-script@v7
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
@@ -1149,9 +1165,10 @@ jobs:
               sha: context.sha,
             })
 
+      # TODO: check how GitHub releases looks for proxy releases and enable it if it's ok
       - name: Create GitHub release
         if: github.ref_name == 'release'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5

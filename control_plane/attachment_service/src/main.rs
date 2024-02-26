@@ -6,6 +6,7 @@
 ///
 use anyhow::{anyhow, Context};
 use attachment_service::http::make_router;
+use attachment_service::metrics::preinitialize_metrics;
 use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
 use aws_config::{self, BehaviorVersion, Region};
@@ -204,6 +205,8 @@ async fn async_main() -> anyhow::Result<()> {
         logging::TracingErrorLayerEnablement::Disabled,
         logging::Output::Stdout,
     )?;
+
+    preinitialize_metrics();
 
     let args = Cli::parse();
     tracing::info!(

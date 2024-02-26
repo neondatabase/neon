@@ -695,9 +695,11 @@ impl Collector for TimelineCollector {
 
         // report total number of timelines
         self.timelines_count.set(timelines_count as i64);
+        mfs.extend(self.timelines_count.collect());
+
         self.active_timelines_count
             .set(active_timelines_count as i64);
-        mfs.extend(self.timelines_count.collect());
+        mfs.extend(self.active_timelines_count.collect());
 
         mfs
     }

@@ -27,6 +27,7 @@ from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
+import httpx
 import jwt
 import psycopg2
 import pytest
@@ -46,6 +47,7 @@ from urllib3.util.retry import Retry
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
+from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
     DEFAULT_PAGESERVER_ALLOWED_ERRORS,
     scan_pageserver_log_for_errors,
@@ -486,6 +488,11 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
+        self.pageserver_get_vectored_impl: Optional[str] = None
+        if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
+            self.pageserver_get_vectored_impl = "vectored"
+            log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
+
         assert test_name.startswith(
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
@@ -505,7 +512,7 @@ class NeonEnvBuilder:
 
     def init_start(
         self,
-        initial_tenant_conf: Optional[Dict[str, str]] = None,
+        initial_tenant_conf: Optional[Dict[str, Any]] = None,
         default_remote_storage_if_missing: bool = True,
         initial_tenant_shard_count: Optional[int] = None,
         initial_tenant_shard_stripe_size: Optional[int] = None,
@@ -1053,6 +1060,8 @@ class NeonEnv:
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+            if config.pageserver_get_vectored_impl is not None:
+                ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1488,7 +1497,7 @@ class NeonCli(AbstractNeonCli):
         self,
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
-        conf: Optional[Dict[str, str]] = None,
+        conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         set_default: bool = False,
@@ -1913,7 +1922,7 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
-class NeonAttachmentService:
+class NeonAttachmentService(MetricsGetter):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
@@ -1950,6 +1959,11 @@ class NeonAttachmentService:
             headers["Authorization"] = f"Bearer {jwt_token}"
 
         return headers
+
+    def get_metrics(self) -> Metrics:
+        res = self.request("GET", f"{self.env.attachment_service_api}/metrics")
+        res.raise_for_status()
+        return parse_metrics(res.text)
 
     def ready(self) -> bool:
         resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
@@ -2093,6 +2107,17 @@ class NeonAttachmentService:
         response.raise_for_status()
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
+
+    def consistency_check(self):
+        """
+        Throw an exception if the service finds any inconsistencies in its state
+        """
+        response = self.request(
+            "POST",
+            f"{self.env.attachment_service_api}/debug/v1/consistency_check",
+        )
+        response.raise_for_status()
+        log.info("Attachment service passed consistency check")
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
@@ -2839,8 +2864,33 @@ class NeonProxy(PgProtocol):
         )
 
         if expected_code is not None:
-            assert response.status_code == kwargs["expected_code"], f"response: {response.json()}"
+            assert response.status_code == expected_code, f"response: {response.json()}"
         return response.json()
+
+    async def http2_query(self, query, args, **kwargs):
+        # TODO maybe use default values if not provided
+        user = kwargs["user"]
+        password = kwargs["password"]
+        expected_code = kwargs.get("expected_code")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        async with httpx.AsyncClient(
+            http2=True, verify=str(self.test_output_dir / "proxy.crt")
+        ) as client:
+            response = await client.post(
+                f"https://{self.domain}:{self.external_http_port}/sql",
+                json={"query": query, "params": args},
+                headers={
+                    "Content-Type": "application/sql",
+                    "Neon-Connection-String": connstr,
+                    "Neon-Pool-Opt-In": "true",
+                },
+            )
+            assert response.http_version == "HTTP/2"
+
+            if expected_code is not None:
+                assert response.status_code == expected_code, f"response: {response.json()}"
+            return response.json()
 
     def get_metrics(self) -> str:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
@@ -3054,6 +3104,8 @@ class Endpoint(PgProtocol):
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
+
+        config_lines = ["neon.primary_is_running=on"] + config_lines
         self.config(config_lines)
 
         return self
@@ -3760,7 +3812,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"config|config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
+    r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 
 
@@ -4095,6 +4147,21 @@ def tenant_get_shards(
     else:
         # Assume an unsharded tenant
         return [(TenantShardId(tenant_id, 0, 0), override_pageserver or env.pageserver)]
+
+
+def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
+    primary_lsn = Lsn(
+        primary.safe_psql_scalar("SELECT pg_current_wal_flush_lsn()", log_query=False)
+    )
+    while True:
+        secondary_lsn = Lsn(
+            secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
+        )
+        caught_up = secondary_lsn >= primary_lsn
+        log.info(f"caughtup={caught_up}, primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}")
+        if caught_up:
+            return
+        time.sleep(1)
 
 
 def wait_for_last_flush_lsn(

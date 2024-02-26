@@ -64,7 +64,7 @@ jobs:
     steps:
       - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           ref: main
           token: ${{ secrets.CI_ACCESS_TOKEN }}
