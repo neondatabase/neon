@@ -676,8 +676,15 @@ pub fn handle_grants(
                             GRANT CREATE ON SCHEMA public TO web_access;\n\
                         END IF;\n\
                     END IF;\n\
-                    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser WITH GRANT OPTION;\n\
-                    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser WITH GRANT OPTION;\n\
+                    IF EXISTS(\n\
+                        SELECT nspname\n\
+                        FROM pg_catalog.pg_namespace\n\
+                        WHERE nspname = 'public'\n\
+                    )\n\
+                    THEN\n\
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser WITH GRANT OPTION;\n\
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser WITH GRANT OPTION;\n\
+                    END IF;\n\
                 END\n\
             $$;"
         .to_string();
