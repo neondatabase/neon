@@ -540,24 +540,22 @@ impl ImageLayerInner {
             .into();
 
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
-        let mut buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
-        for read in reads.into_iter().rev() {
-            let res = vectored_blob_reader
-                .read_blobs(&read, buf.take().expect("Should have a buffer"))
-                .await;
+        for read in reads.into_iter() {
+            let buf = BytesMut::with_capacity(max_vectored_read_bytes);
+            let res = vectored_blob_reader.read_blobs(&read, buf).await;
 
             match res {
                 Ok(blobs_buf) => {
-                    for meta in blobs_buf.blobs.iter().rev() {
-                        let img_buf = Bytes::copy_from_slice(&blobs_buf.buf[meta.start..meta.end]);
+                    let frozen_buf = blobs_buf.buf.freeze();
+
+                    for meta in blobs_buf.blobs.iter() {
+                        let img_buf = frozen_buf.slice(meta.start..meta.end);
                         reconstruct_state.update_key(
                             &meta.meta.key,
                             self.lsn,
                             Value::Image(img_buf),
                         );
                     }
-
-                    buf = Some(blobs_buf.buf);
                 }
                 Err(err) => {
                     let kind = err.kind();
@@ -571,10 +569,6 @@ impl ImageLayerInner {
                             )),
                         );
                     }
-
-                    // We have "lost" the buffer since the lower level IO api
-                    // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
                 }
             };
         }

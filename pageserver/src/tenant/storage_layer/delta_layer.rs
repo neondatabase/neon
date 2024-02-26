@@ -946,6 +946,9 @@ impl DeltaLayerInner {
             .into();
         let mut buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
 
+        // Note that reads are processed in reverse order (from highest key+lsn).
+        // This is the order that `ReconstructState` requires such that it can
+        // track when a key is done.
         for read in reads.into_iter().rev() {
             let res = vectored_blob_reader
                 .read_blobs(&read, buf.take().expect("Should have a buffer"))
