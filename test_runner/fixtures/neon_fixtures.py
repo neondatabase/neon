@@ -3812,7 +3812,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"config|config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
+    r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 
 
