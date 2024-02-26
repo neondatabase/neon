@@ -14,7 +14,6 @@ from performance.pageserver.util import (
 )
 
 
-@pytest.mark.repeat(5)
 @pytest.mark.parametrize("duration", [30])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
 @pytest.mark.parametrize("n_tenants", [10])
