@@ -3407,7 +3407,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
-            // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timelien.
+            // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
             anyhow::bail!("repartition() called concurrently, this should not happen");
