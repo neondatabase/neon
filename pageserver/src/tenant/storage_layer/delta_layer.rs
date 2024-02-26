@@ -843,13 +843,12 @@ impl DeltaLayerInner {
     pub(super) async fn get_values_reconstruct_data(
         &self,
         keyspace: KeySpace,
-        start_lsn: Lsn,
-        end_lsn: Lsn,
+        lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         let reads = self
-            .plan_reads(keyspace, start_lsn..end_lsn, reconstruct_state, ctx)
+            .plan_reads(keyspace, lsn_range, reconstruct_state, ctx)
             .await
             .map_err(GetVectoredError::Other)?;
 

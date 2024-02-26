@@ -267,8 +267,7 @@ impl Layer {
     pub(crate) async fn get_values_reconstruct_data(
         &self,
         keyspace: KeySpace,
-        start_lsn: Lsn,
-        end_lsn: Lsn,
+        lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
@@ -283,14 +282,7 @@ impl Layer {
             .record_access(LayerAccessKind::GetValueReconstructData, ctx);
 
         layer
-            .get_values_reconstruct_data(
-                keyspace,
-                start_lsn,
-                end_lsn,
-                reconstruct_data,
-                &self.0,
-                ctx,
-            )
+            .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
     }
@@ -1384,8 +1376,7 @@ impl DownloadedLayer {
     async fn get_values_reconstruct_data(
         &self,
         keyspace: KeySpace,
-        start_lsn: Lsn,
-        end_lsn: Lsn,
+        lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
         owner: &Arc<LayerInner>,
         ctx: &RequestContext,
@@ -1394,7 +1385,7 @@ impl DownloadedLayer {
 
         match self.get(owner, ctx).await.map_err(GetVectoredError::from)? {
             Delta(d) => {
-                d.get_values_reconstruct_data(keyspace, start_lsn, end_lsn, reconstruct_data, ctx)
+                d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
                     .await
             }
             Image(i) => {

@@ -338,8 +338,7 @@ impl ReadableLayerDesc {
                 layer
                     .get_values_reconstruct_data(
                         keyspace,
-                        *lsn_floor,
-                        *lsn_ceil,
+                        *lsn_floor..*lsn_ceil,
                         reconstruct_state,
                         ctx,
                     )
