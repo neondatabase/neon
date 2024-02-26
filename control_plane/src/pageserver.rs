@@ -115,7 +115,7 @@ impl PageServerNode {
             if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
-                    .generate_auth_token(&Claims::new(None, Scope::PageServerApi))
+                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
                     .unwrap();
                 overrides.push(format!("control_plane_api_token='{}'", jwt_token));
             }

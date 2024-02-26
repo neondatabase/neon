@@ -11,12 +11,12 @@ use pageserver_api::{
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::str::FromStr;
+use std::{fs, str::FromStr};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
 use utils::{
-    auth::{Claims, Scope},
+    auth::{encode_from_key_file, Claims, Scope},
     id::{NodeId, TenantId},
 };
 
@@ -24,7 +24,7 @@ pub struct AttachmentService {
     env: LocalEnv,
     listen: String,
     path: Utf8PathBuf,
-    jwt_token: Option<String>,
+    private_key: Option<Vec<u8>>,
     public_key: Option<String>,
     postgres_port: u16,
     client: reqwest::Client,
@@ -204,12 +204,11 @@ impl AttachmentService {
             .pageservers
             .first()
             .expect("Config is validated to contain at least one pageserver");
-        let (jwt_token, public_key) = match ps_conf.http_auth_type {
+        let (private_key, public_key) = match ps_conf.http_auth_type {
             AuthType::Trust => (None, None),
             AuthType::NeonJWT => {
-                let jwt_token = env
-                    .generate_auth_token(&Claims::new(None, Scope::PageServerApi))
-                    .unwrap();
+                let private_key_path = env.get_private_key_path();
+                let private_key = fs::read(private_key_path).expect("failed to read private key");
 
                 // If pageserver auth is enabled, this implicitly enables auth for this service,
                 // using the same credentials.
@@ -235,7 +234,7 @@ impl AttachmentService {
                 } else {
                     std::fs::read_to_string(&public_key_path).expect("Can't read public key")
                 };
-                (Some(jwt_token), Some(public_key))
+                (Some(private_key), Some(public_key))
             }
         };
 
@@ -243,7 +242,7 @@ impl AttachmentService {
             env: env.clone(),
             path,
             listen,
-            jwt_token,
+            private_key,
             public_key,
             postgres_port,
             client: reqwest::ClientBuilder::new()
@@ -397,7 +396,10 @@ impl AttachmentService {
         .into_iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
-        if let Some(jwt_token) = &self.jwt_token {
+        if let Some(private_key) = &self.private_key {
+            let claims = Claims::new(None, Scope::PageServerApi);
+            let jwt_token =
+                encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
             args.push(format!("--jwt-token={jwt_token}"));
         }
 
@@ -468,6 +470,20 @@ impl AttachmentService {
         Ok(())
     }
 
+    fn get_claims_for_path(path: &str) -> anyhow::Result<Option<Claims>> {
+        let category = match path.find('/') {
+            Some(idx) => &path[..idx],
+            None => path,
+        };
+
+        match category {
+            "status" | "ready" => Ok(None),
+            "control" | "debug" => Ok(Some(Claims::new(None, Scope::Admin))),
+            "v1" => Ok(Some(Claims::new(None, Scope::PageServerApi))),
+            _ => Err(anyhow::anyhow!("Failed to determine claims for {}", path)),
+        }
+    }
+
     /// Simple HTTP request wrapper for calling into attachment service
     async fn dispatch<RQ, RS>(
         &self,
@@ -493,11 +509,16 @@ impl AttachmentService {
         if let Some(body) = body {
             builder = builder.json(&body)
         }
-        if let Some(jwt_token) = &self.jwt_token {
-            builder = builder.header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {jwt_token}"),
-            );
+        if let Some(private_key) = &self.private_key {
+            println!("Getting claims for path {}", path);
+            if let Some(required_claims) = Self::get_claims_for_path(&path)? {
+                println!("Got claims {:?} for path {}", required_claims, path);
+                let jwt_token = encode_from_key_file(&required_claims, private_key)?;
+                builder = builder.header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {jwt_token}"),
+                );
+            }
         }
 
         let response = builder.send().await?;

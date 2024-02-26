@@ -32,6 +32,8 @@ pub enum Scope {
     // The scope used by pageservers in upcalls to storage controller and cloud control plane
     #[serde(rename = "generations_api")]
     GenerationsApi,
+    // Allows access to control plane managment API and some storage controller endpoints.
+    Admin,
 }
 
 /// JWT payload. See docs/authentication.md for the format
