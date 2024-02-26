@@ -802,7 +802,21 @@ $$;"#,
     query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
     client.simple_query(query)?;
 
-    query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
+    // handle the case when public schema is not present
+    query = "
+    DO $$\n\
+        BEGIN\n\
+            IF EXISTS(\n\
+                SELECT nspname\n\
+                FROM pg_catalog.pg_namespace\n\
+                WHERE nspname = 'public'\n\
+            )\n\
+            THEN\n\
+                REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC
+            END IF;\n\
+        END\n
+    $$;";
+
     client.simple_query(query)?;
 
     query = "SELECT id FROM neon_migration.migration_id";
