@@ -388,7 +388,7 @@ def test_remote_timeline_client_calls_started_metric(
             "gc_period": "0s",
             "compaction_period": "0s",
             # create image layers eagerly, so that GC can remove some layers
-            "image_creation_threshold": "1",
+            "image_creation_threshold": "0",
         }
     )
     env.pageserver.quiesce_tenants()
