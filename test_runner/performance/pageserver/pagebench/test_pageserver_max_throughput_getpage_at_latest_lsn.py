@@ -29,6 +29,7 @@ from performance.pageserver.util import (
 # 5.1G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-10-6
 # 76G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-13
 # 46G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-6
+@pytest.mark.repeat(5)
 @pytest.mark.parametrize("duration", [30])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(s) for s in [100, 200]])
 @pytest.mark.parametrize("n_tenants", [1, 10])
