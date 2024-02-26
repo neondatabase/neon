@@ -265,7 +265,7 @@ impl<'a> VectoredBlobReader<'a> {
         let blobs_at = read.blobs_at.as_slice();
         let start_offset = blobs_at.first().expect("VectoredRead is never empty").0;
 
-        let mut metas = Vec::new();
+        let mut metas = Vec::with_capacity(blobs_at.len());
         let pairs = blobs_at.iter().zip(
             blobs_at
                 .iter()
