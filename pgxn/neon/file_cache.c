@@ -18,6 +18,10 @@
 #include <sys/file.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 
 #include "neon_pgversioncompat.h"
 
@@ -62,6 +66,18 @@
 
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ / BLOCKS_PER_CHUNK))
 
+#define BLKDISCARD _IO(0x12, 119)
+
+int ioctl_discard(int fd, int64_t offset, int64_t len)
+{
+  uint64_t range[2] = {(uint64_t)offset, (uint64_t)len};
+  int ret = ioctl(fd, BLKDISCARD, range);
+  if (ret < 0) {
+    return errno;
+  }
+  return 0;
+}
+
 typedef struct FileCacheEntry
 {
 	BufferTag	key;
@@ -91,6 +107,7 @@ static int	lfc_desc = 0;
 static LWLockId lfc_lock;
 static int	lfc_max_size;
 static int	lfc_size_limit;
+static bool	lfc_raw_block_device;
 static char *lfc_path;
 static FileCacheControl *lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
@@ -149,7 +166,12 @@ lfc_disable(char const *op)
 	 * We need to use unlink to to avoid races in LFC write, because it is not
 	 * protectedby
 	 */
-	unlink(lfc_path);
+	
+	if (lfc_raw_block_device) {
+		ioctl_discard(lfc_desc, 0, SIZE_MB_TO_CHUNKS(lfc_max_size) * BLOCKS_PER_CHUNK * BLCKSZ);
+	} else {
+		unlink(lfc_path);
+	}
 
 	fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
 	if (fd < 0)
@@ -306,10 +328,18 @@ lfc_change_limit_hook(int newval, void *extra)
 		FileCacheEntry *victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
 
 		Assert(victim->access_count == 0);
+		if (lfc_raw_block_device) {
+			if (ioctl_discard(lfc_desc,  (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0) {
+				neon_log(LOG, "Failed to discard on raw block device: %m");
+			}
+		}
+		else
+		{
 #ifdef FALLOC_FL_PUNCH_HOLE
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0)
 			neon_log(LOG, "Failed to punch hole in file: %m");
 #endif
+		}
 		hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 		lfc_ctl->used -= 1;
 	}
@@ -358,6 +388,17 @@ lfc_init(void)
 							lfc_check_limit_hook,
 							lfc_change_limit_hook,
 							NULL);
+
+	DefineCustomBoolVariable("neon.file_cache_raw_block_device",
+							 "Set local file cache to raw block device mode.",
+							 NULL,
+							 &lfc_raw_block_device,
+							 false, /* disabled by default */
+							 PGC_SIGHUP,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
 
 	DefineCustomStringVariable("neon.file_cache_path",
 							   "Path to local file cache (can be raw device)",
