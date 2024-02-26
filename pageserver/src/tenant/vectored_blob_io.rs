@@ -140,12 +140,15 @@ impl VectoredReadPlanner {
 
     /// Include a new blob in the read plan.
     ///
-    /// Notes:
-    /// * This function should be called for each blob in the desired *inclusive* range.
-    /// See `DeltaLayerInner::plan_reads` and `ImageLayerInner::plan_reads`.
-    /// * Calls to this function should be for monotonically continuous (key, lsn) tuples.
-    /// In the event that entries from the index are skipped the behaviour is undefined.
-    /// We can end up asserting, erroring in wal redo or returning incorrect data to the user.
+    /// This function is called from a B-Tree index visitor (see `DeltaLayerInner::plan_reads`
+    /// and `ImageLayerInner::plan_reads`). Said visitor wants to collect blob offsets for all
+    /// keys in a given keyspace. This function must be called for each key in the desired
+    /// keyspace (monotonically continuous). [`Self::handle_range_end`] must
+    /// be called after every range in the offset.
+    ///
+    /// In the event that keys are skipped, the behaviour is undefined and can lead to an
+    /// incorrect read plan. We can end up asserting, erroring in wal redo or returning
+    /// incorrect data to the user.
     ///
     /// The `flag` argument has two interesting values:
     /// * [`BlobFlag::Replaces`]: The blob for this key should replace all existing blobs.
