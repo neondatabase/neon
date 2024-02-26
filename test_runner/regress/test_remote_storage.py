@@ -380,6 +380,7 @@ def test_remote_timeline_client_calls_started_metric(
         initial_tenant_conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
             "checkpoint_distance": f"{128 * 1024}",
+            # ensure each timeline_checkpoint() calls creates L1s
             "compaction_threshold": "1",
             "compaction_target_size": f"{128 * 1024}",
             # no PITR horizon, we specify the horizon when we request on-demand GC
@@ -387,8 +388,6 @@ def test_remote_timeline_client_calls_started_metric(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
-            # create image layers eagerly, so that GC can remove some layers
-            "image_creation_threshold": "0",
         }
     )
     env.pageserver.quiesce_tenants()
@@ -451,12 +450,17 @@ def test_remote_timeline_client_calls_started_metric(
             ), f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
 
     def churn(data_pass1, data_pass2):
+        # overwrite the same data in place, vacuum inbetween, and
+        # and create image layers; then run a gc().
+        # this should
+        # - create new layers
+        # - delete some layers
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass1)
-        client.timeline_checkpoint(tenant_id, timeline_id)
-        client.timeline_compact(tenant_id, timeline_id)
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass2)
-        client.timeline_checkpoint(tenant_id, timeline_id)
-        client.timeline_compact(tenant_id, timeline_id)
+        client.timeline_checkpoint(tenant_id, timeline_id, force_image_layer_creation=True)
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass1)
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass2)
+        client.timeline_checkpoint(tenant_id, timeline_id, force_image_layer_creation=True)
         gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
         print_gc_result(gc_result)
         assert gc_result["layers_removed"] > 0
