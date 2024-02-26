@@ -1,7 +1,7 @@
 from contextlib import closing
 
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 # Verify that the neon extension is installed and has the correct version.
