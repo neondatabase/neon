@@ -283,7 +283,6 @@ pub struct TenantConfig {
     pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
