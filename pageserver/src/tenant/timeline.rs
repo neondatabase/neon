@@ -2282,7 +2282,10 @@ impl Timeline {
         // accurate relation sizes, and they do not emit consumption metrics.
         debug_assert!(self.tenant_shard_id.is_zero());
 
-        let _guard = self.gate.enter();
+        let _guard = self
+            .gate
+            .enter()
+            .map_err(|_| CalculateLogicalSizeError::Cancelled)?;
 
         let self_calculation = Arc::clone(self);
 
