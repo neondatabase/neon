@@ -35,7 +35,7 @@ use crate::tenant::storage_layer::{
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+    BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
 };
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
@@ -158,7 +158,7 @@ pub struct ImageLayerInner {
     file: VirtualFile,
     file_id: FileId,
 
-    max_vectored_read_bytes: usize,
+    max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
 }
 
 impl std::fmt::Debug for ImageLayerInner {
@@ -218,7 +218,7 @@ impl ImageLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, 0, ctx).await?;
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
 
         inner.dump(ctx).await?;
 
@@ -248,32 +248,21 @@ impl ImageLayer {
     async fn load(
         &self,
         access_kind: LayerAccessKind,
-        max_vectored_read_bytes: usize,
         ctx: &RequestContext,
     ) -> Result<&ImageLayerInner> {
         self.access_stats.record_access(access_kind, ctx);
         self.inner
-            .get_or_try_init(|| self.load_inner(max_vectored_read_bytes, ctx))
+            .get_or_try_init(|| self.load_inner(ctx))
             .await
             .with_context(|| format!("Failed to load image layer {}", self.path()))
     }
 
-    async fn load_inner(
-        &self,
-        max_vectored_read_bytes: usize,
-        ctx: &RequestContext,
-    ) -> Result<ImageLayerInner> {
+    async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded = ImageLayerInner::load(
-            &path,
-            self.desc.image_layer_lsn(),
-            None,
-            max_vectored_read_bytes,
-            ctx,
-        )
-        .await
-        .and_then(|res| res)?;
+        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
+            .await
+            .and_then(|res| res)?;
 
         // not production code
         let actual_filename = path.file_name().unwrap().to_owned();
@@ -380,7 +369,7 @@ impl ImageLayerInner {
         path: &Utf8Path,
         lsn: Lsn,
         summary: Option<Summary>,
-        max_vectored_read_bytes: usize,
+        max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
         let file = match VirtualFile::open(path).await {
@@ -489,7 +478,12 @@ impl ImageLayerInner {
         keyspace: KeySpace,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>> {
-        let mut planner = VectoredReadPlanner::new(self.max_vectored_read_bytes);
+        let mut planner = VectoredReadPlanner::new(
+            self.max_vectored_read_bytes
+                .expect("Layer is loaded with max vectored bytes config")
+                .0
+                .into(),
+        );
 
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
@@ -539,8 +533,14 @@ impl ImageLayerInner {
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
     ) {
+        let max_vectored_read_bytes = self
+            .max_vectored_read_bytes
+            .expect("Layer is loaded with max vectored bytes config")
+            .0
+            .into();
+
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
-        let mut buf = Some(BytesMut::with_capacity(self.max_vectored_read_bytes));
+        let mut buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
         for read in reads.into_iter().rev() {
             let res = vectored_blob_reader
                 .read_blobs(&read, buf.take().expect("Should have a buffer"))
@@ -574,7 +574,7 @@ impl ImageLayerInner {
 
                     // We have "lost" the buffer since the lower level IO api
                     // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(BytesMut::with_capacity(self.max_vectored_read_bytes));
+                    buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
                 }
             };
         }

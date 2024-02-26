@@ -34,6 +34,7 @@ use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::timeline::GetVectoredImpl;
+use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
@@ -272,7 +273,7 @@ pub struct PageServerConf {
 
     pub get_vectored_impl: GetVectoredImpl,
 
-    pub max_vectored_read_bytes: usize,
+    pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
     pub validate_vectored_get: bool,
 }
@@ -364,7 +365,7 @@ struct PageServerConfigBuilder {
 
     get_vectored_impl: BuilderValue<GetVectoredImpl>,
 
-    max_vectored_read_bytes: BuilderValue<usize>,
+    max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
 
     validate_vectored_get: BuilderValue<bool>,
 }
@@ -446,7 +447,9 @@ impl Default for PageServerConfigBuilder {
             virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
 
             get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
-            max_vectored_read_bytes: Set(DEFAULT_MAX_VECTORED_READ_BYTES),
+            max_vectored_read_bytes: Set(MaxVectoredReadBytes(
+                NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
+            )),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
         }
     }
@@ -612,7 +615,7 @@ impl PageServerConfigBuilder {
         self.get_vectored_impl = BuilderValue::Set(value);
     }
 
-    pub fn get_max_vectored_read_bytes(&mut self, value: usize) {
+    pub fn get_max_vectored_read_bytes(&mut self, value: MaxVectoredReadBytes) {
         self.max_vectored_read_bytes = BuilderValue::Set(value);
     }
 
@@ -997,7 +1000,10 @@ impl PageServerConf {
                     builder.get_vectored_impl(parse_toml_from_str("get_vectored_impl", item)?)
                 }
                 "max_vectored_read_bytes" => {
-                    builder.get_max_vectored_read_bytes(parse_toml_u64("max_vectored_read_bytes", item)? as usize)
+                    let bytes = parse_toml_u64("max_vectored_read_bytes", item)? as usize;
+                    builder.get_max_vectored_read_bytes(
+                        MaxVectoredReadBytes(
+                            NonZeroUsize::new(bytes).expect("Max byte size of vectored read must be greater than 0")))
                 }
                 "validate_vectored_get" => {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
@@ -1077,7 +1083,10 @@ impl PageServerConf {
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-            max_vectored_read_bytes: defaults::DEFAULT_MAX_VECTORED_READ_BYTES,
+            max_vectored_read_bytes: MaxVectoredReadBytes(
+                NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
+                    .expect("Invalid default constant"),
+            ),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
         }
     }
@@ -1313,7 +1322,10 @@ background_task_maximum_delay = '334 s'
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                max_vectored_read_bytes: defaults::DEFAULT_MAX_VECTORED_READ_BYTES,
+                max_vectored_read_bytes: MaxVectoredReadBytes(
+                    NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
+                        .expect("Invalid default constant")
+                ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             },
             "Correct defaults should be used when no config values are provided"
@@ -1380,7 +1392,10 @@ background_task_maximum_delay = '334 s'
                 ingest_batch_size: 100,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                max_vectored_read_bytes: defaults::DEFAULT_MAX_VECTORED_READ_BYTES,
+                max_vectored_read_bytes: MaxVectoredReadBytes(
+                    NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
+                        .expect("Invalid default constant")
+                ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             },
             "Should be able to parse all basic config values correctly"

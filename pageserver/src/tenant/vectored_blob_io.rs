@@ -16,6 +16,7 @@
 //! Note that the vectored blob api does *not* go through the page cache.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 
 use bytes::BytesMut;
 use pageserver_api::key::Key;
@@ -23,6 +24,9 @@ use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 
 use crate::virtual_file::VirtualFile;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MaxVectoredReadBytes(pub NonZeroUsize);
 
 /// Metadata bundled with the start and end offset of a blob.
 #[derive(Copy, Clone, Debug)]
