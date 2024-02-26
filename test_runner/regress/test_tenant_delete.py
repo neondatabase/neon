@@ -130,7 +130,6 @@ FAILPOINTS = [
     "timeline-delete-before-index-deleted-at",
     "timeline-delete-before-rm",
     "timeline-delete-before-index-delete",
-    "timeline-delete-after-rm-dir",
 ]
 
 FAILPOINTS_BEFORE_BACKGROUND = [

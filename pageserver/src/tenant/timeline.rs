@@ -54,7 +54,7 @@ use crate::pgdatadir_mapping::DirectoryKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
-    metadata::{save_metadata, TimelineMetadata},
+    metadata::TimelineMetadata,
     par_fsync,
 };
 use crate::{
@@ -76,7 +76,7 @@ use crate::{
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 
 use crate::config::PageServerConf;
-use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
+use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
@@ -210,17 +210,6 @@ pub struct Timeline {
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
     pub(crate) layers: Arc<tokio::sync::RwLock<LayerManager>>,
 
-    /// Set of key ranges which should be covered by image layers to
-    /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
-    /// It is used by compaction task when it checks if new image layer should be created.
-    /// Newly created image layer doesn't help to remove the delta layer, until the
-    /// newly created image layer falls off the PITR horizon. So on next GC cycle,
-    /// gc_timeline may still want the new image layer to be created. To avoid redundant
-    /// image layers creation we should check if image layer exists but beyond PITR horizon.
-    /// This is why we need remember GC cutoff LSN.
-    ///
-    wanted_image_layers: Mutex<Option<(Lsn, KeySpace)>>,
-
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
     last_freeze_ts: RwLock<Instant>,
@@ -303,7 +292,7 @@ pub struct Timeline {
     pub initdb_lsn: Lsn,
 
     /// When did we last calculate the partitioning?
-    partitioning: Mutex<(KeyPartitioning, Lsn)>,
+    partitioning: tokio::sync::Mutex<(KeyPartitioning, Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -345,7 +334,7 @@ pub struct Timeline {
     ///
     /// Must only be taken in two places:
     /// - [`Timeline::compact`] (this file)
-    /// - [`delete::delete_local_layer_files`]
+    /// - [`delete::delete_local_timeline_directory`]
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     compaction_lock: tokio::sync::Mutex<()>,
@@ -354,7 +343,7 @@ pub struct Timeline {
     ///
     /// Must only be taken in two places:
     /// - [`Timeline::gc`] (this file)
-    /// - [`delete::delete_local_layer_files`]
+    /// - [`delete::delete_local_timeline_directory`]
     ///
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
@@ -1518,13 +1507,6 @@ impl Timeline {
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
     }
 
-    fn get_gc_feedback(&self) -> bool {
-        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf.clone();
-        tenant_conf
-            .gc_feedback
-            .unwrap_or(self.conf.default_tenant_conf.gc_feedback)
-    }
-
     pub(super) fn tenant_conf_updated(&self) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
@@ -1598,7 +1580,6 @@ impl Timeline {
                 shard_identity,
                 pg_version,
                 layers: Default::default(),
-                wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
@@ -1661,7 +1642,7 @@ impl Timeline {
                     // initial logical size is 0.
                     LogicalSize::empty_initial()
                 },
-                partitioning: Mutex::new((KeyPartitioning::new(), Lsn(0))),
+                partitioning: tokio::sync::Mutex::new((KeyPartitioning::new(), Lsn(0))),
                 repartition_threshold: 0,
 
                 last_received_wal: Mutex::new(None),
@@ -1847,7 +1828,11 @@ impl Timeline {
                             discovered_layers.push((file_name, file_size));
                             continue;
                         }
-                        Discovered::Metadata | Discovered::IgnoredBackup => {
+                        Discovered::Metadata => {
+                            warn!("found legacy metadata file, these should have been removed in load_tenant_config");
+                            continue;
+                        }
+                        Discovered::IgnoredBackup => {
                             continue;
                         }
                         Discovered::Unknown(file_name) => {
@@ -2354,7 +2339,7 @@ impl Timeline {
         fail::fail_point!("timeline-calculate-logical-size-check-dir-exists", |_| {
             if !self
                 .conf
-                .metadata_path(&self.tenant_shard_id, &self.timeline_id)
+                .timeline_path(&self.tenant_shard_id, &self.timeline_id)
                 .exists()
             {
                 error!("timeline-calculate-logical-size-pre metadata file does not exist")
@@ -3209,7 +3194,7 @@ impl Timeline {
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now. The flushed layer is stored in
         // the mapping in `create_delta_layer`.
-        let metadata = {
+        {
             let mut guard = self.layers.write().await;
 
             if self.cancel.is_cancelled() {
@@ -3223,9 +3208,7 @@ impl Timeline {
                 self.disk_consistent_lsn.store(disk_consistent_lsn);
 
                 // Schedule remote uploads that will reflect our new disk_consistent_lsn
-                Some(self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?)
-            } else {
-                None
+                self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?;
             }
             // release lock on 'layers'
         };
@@ -3240,22 +3223,6 @@ impl Timeline {
         // This failpoint is used by another test case `test_pageserver_recovery`.
         fail_point!("flush-frozen-exit");
 
-        // Update the metadata file, with new 'disk_consistent_lsn'
-        //
-        // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
-        // *all* the layers, to avoid fsyncing the file multiple times.
-
-        // If we updated our disk_consistent_lsn, persist the updated metadata to local disk.
-        if let Some(metadata) = metadata {
-            save_metadata(
-                self.conf,
-                &self.tenant_shard_id,
-                &self.timeline_id,
-                &metadata,
-            )
-            .await
-            .context("save_metadata")?;
-        }
         Ok(())
     }
 
@@ -3309,25 +3276,6 @@ impl Timeline {
         }
 
         Ok(metadata)
-    }
-
-    async fn update_metadata_file(
-        &self,
-        disk_consistent_lsn: Lsn,
-        layers_to_upload: impl IntoIterator<Item = ResidentLayer>,
-    ) -> anyhow::Result<()> {
-        let metadata = self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?;
-
-        save_metadata(
-            self.conf,
-            &self.tenant_shard_id,
-            &self.timeline_id,
-            &metadata,
-        )
-        .await
-        .context("save_metadata")?;
-
-        Ok(())
     }
 
     pub(crate) async fn preserve_initdb_archive(&self) -> anyhow::Result<()> {
@@ -3408,30 +3356,34 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
-        {
-            let partitioning_guard = self.partitioning.lock().unwrap();
-            let distance = lsn.0 - partitioning_guard.1 .0;
-            if partitioning_guard.1 != Lsn(0)
-                && distance <= self.repartition_threshold
-                && !flags.contains(CompactFlags::ForceRepartition)
-            {
-                debug!(
-                    distance,
-                    threshold = self.repartition_threshold,
-                    "no repartitioning needed"
-                );
-                return Ok((partitioning_guard.0.clone(), partitioning_guard.1));
-            }
+        let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
+            // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
+            // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
+            // and hence before the compaction task starts.
+            anyhow::bail!("repartition() called concurrently, this should not happen");
+        };
+        if lsn < partitioning_guard.1 {
+            anyhow::bail!("repartition() called with LSN going backwards, this should not happen");
         }
+
+        let distance = lsn.0 - partitioning_guard.1 .0;
+        if partitioning_guard.1 != Lsn(0)
+            && distance <= self.repartition_threshold
+            && !flags.contains(CompactFlags::ForceRepartition)
+        {
+            debug!(
+                distance,
+                threshold = self.repartition_threshold,
+                "no repartitioning needed"
+            );
+            return Ok((partitioning_guard.0.clone(), partitioning_guard.1));
+        }
+
         let keyspace = self.collect_keyspace(lsn, ctx).await?;
         let partitioning = keyspace.partition(partition_size);
 
-        let mut partitioning_guard = self.partitioning.lock().unwrap();
-        if lsn > partitioning_guard.1 {
-            *partitioning_guard = (partitioning, lsn);
-        } else {
-            warn!("Concurrent repartitioning of keyspace. This unexpected, but probably harmless");
-        }
+        *partitioning_guard = (partitioning, lsn);
+
         Ok((partitioning_guard.0.clone(), partitioning_guard.1))
     }
 
@@ -3443,31 +3395,6 @@ impl Timeline {
         let layers = guard.layer_map();
 
         let mut max_deltas = 0;
-        {
-            let wanted_image_layers = self.wanted_image_layers.lock().unwrap();
-            if let Some((cutoff_lsn, wanted)) = &*wanted_image_layers {
-                let img_range =
-                    partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
-                if wanted.overlaps(&img_range) {
-                    //
-                    // gc_timeline only pays attention to image layers that are older than the GC cutoff,
-                    // but create_image_layers creates image layers at last-record-lsn.
-                    // So it's possible that gc_timeline wants a new image layer to be created for a key range,
-                    // but the range is already covered by image layers at more recent LSNs. Before we
-                    // create a new image layer, check if the range is already covered at more recent LSNs.
-                    if !layers
-                        .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))
-                    {
-                        debug!(
-                            "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
-                            img_range.start, img_range.end, cutoff_lsn, lsn
-                        );
-                        return true;
-                    }
-                }
-            }
-        }
-
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn);
             for (img_range, last_img) in image_coverage {
@@ -3638,12 +3565,6 @@ impl Timeline {
                 tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
             }
         }
-        // All layers that the GC wanted us to create have now been created.
-        //
-        // It's possible that another GC cycle happened while we were compacting, and added
-        // something new to wanted_image_layers, and we now clear that before processing it.
-        // That's OK, because the next GC iteration will put it back in.
-        *self.wanted_image_layers.lock().unwrap() = None;
 
         // Sync the new layer to disk before adding it to the layer map, to make sure
         // we don't garbage collect something based on the new layer, before it has
@@ -4553,7 +4474,6 @@ impl Timeline {
         debug!("retain_lsns: {:?}", retain_lsns);
 
         let mut layers_to_remove = Vec::new();
-        let mut wanted_image_layers = KeySpaceRandomAccum::default();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -4635,15 +4555,6 @@ impl Timeline {
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
             {
                 debug!("keeping {} because it is the latest layer", l.filename());
-                // Collect delta key ranges that need image layers to allow garbage
-                // collecting the layers.
-                // It is not so obvious whether we need to propagate information only about
-                // delta layers. Image layers can form "stairs" preventing old image from been deleted.
-                // But image layers are in any case less sparse than delta layers. Also we need some
-                // protection from replacing recent image layers with new one after each GC iteration.
-                if self.get_gc_feedback() && l.is_incremental() && !LayerMap::is_l0(&l) {
-                    wanted_image_layers.add_range(l.get_key_range());
-                }
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
@@ -4656,24 +4567,13 @@ impl Timeline {
             );
             layers_to_remove.push(l);
         }
-        self.wanted_image_layers
-            .lock()
-            .unwrap()
-            .replace((new_gc_cutoff, wanted_image_layers.to_keyspace()));
 
         if !layers_to_remove.is_empty() {
-            // Persist the new GC cutoff value in the metadata file, before
-            // we actually remove anything.
-            //
-            // This does not in fact have any effect as we no longer consider local metadata unless
-            // running without remote storage.
-            //
+            // Persist the new GC cutoff value before we actually remove anything.
             // This unconditionally schedules also an index_part.json update, even though, we will
             // be doing one a bit later with the unlinked gc'd layers.
-            //
-            // TODO: remove when implementing <https://github.com/neondatabase/neon/issues/4099>.
-            self.update_metadata_file(self.disk_consistent_lsn.load(), None)
-                .await?;
+            let disk_consistent_lsn = self.disk_consistent_lsn.load();
+            self.schedule_uploads(disk_consistent_lsn, None)?;
 
             let gc_layers = layers_to_remove
                 .iter()

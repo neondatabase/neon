@@ -228,9 +228,9 @@ def test_remote_storage_upload_queue_retries(
     tenant_id, timeline_id = env.neon_cli.create_tenant(
         conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
-            "checkpoint_distance": f"{128 * 1024}",
+            "checkpoint_distance": f"{64 * 1024}",
             "compaction_threshold": "1",
-            "compaction_target_size": f"{128 * 1024}",
+            "compaction_target_size": f"{64 * 1024}",
             # no PITR horizon, we specify the horizon when we request on-demand GC
             "pitr_interval": "0s",
             # disable background compaction and GC. We invoke it manually when we want it to happen.
@@ -256,21 +256,24 @@ def test_remote_storage_upload_queue_retries(
             ]
         )
 
+    FOO_ROWS_COUNT = 4000
+
     def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
         # create initial set of layers & upload them with failpoints configured
-        endpoint.safe_psql_many(
-            [
-                f"""
-               INSERT INTO foo (id, val)
-               SELECT g, '{data}'
-               FROM generate_series(1, 20000) g
-               ON CONFLICT (id) DO UPDATE
-               SET val = EXCLUDED.val
-               """,
-                # to ensure that GC can actually remove some layers
-                "VACUUM foo",
-            ]
-        )
+        for _v in range(2):
+            endpoint.safe_psql_many(
+                [
+                    f"""
+                    INSERT INTO foo (id, val)
+                    SELECT g, '{data}'
+                    FROM generate_series(1, {FOO_ROWS_COUNT}) g
+                    ON CONFLICT (id) DO UPDATE
+                    SET val = EXCLUDED.val
+                    """,
+                    # to ensure that GC can actually remove some layers
+                    "VACUUM foo",
+                ]
+            )
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
@@ -333,7 +336,7 @@ def test_remote_storage_upload_queue_retries(
 
     # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
     # so, give it some time to wrap up.
-    churn_while_failpoints_active_thread.join(30)
+    churn_while_failpoints_active_thread.join(60)
     assert not churn_while_failpoints_active_thread.is_alive()
     assert churn_thread_result[0]
 
@@ -365,7 +368,7 @@ def test_remote_storage_upload_queue_retries(
     log.info("restarting postgres to validate")
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with endpoint.cursor() as cur:
-        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 20000
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == FOO_ROWS_COUNT
 
 
 def test_remote_timeline_client_calls_started_metric(
@@ -694,10 +697,8 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
     # index upload is now hitting the failpoint, it should block the shutdown
     env.pageserver.stop(immediate=True)
 
-    local_metadata = (
-        env.pageserver.timeline_dir(env.initial_tenant, new_branch_timeline_id) / "metadata"
-    )
-    assert local_metadata.is_file()
+    timeline_dir = env.pageserver.timeline_dir(env.initial_tenant, new_branch_timeline_id)
+    assert timeline_dir.is_dir()
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 

@@ -1,3 +1,6 @@
+import os
+
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -232,11 +235,6 @@ def test_sharding_split_smoke(
     all_shards = tenant_get_shards(env, tenant_id)
     for tenant_shard_id, pageserver in all_shards:
         pageserver.http_client().timeline_gc(tenant_shard_id, timeline_id, None)
-
-    # Restart all nodes, to check that the newly created shards are durable
-    for ps in env.pageservers:
-        ps.restart()
-
     workload.validate()
 
     migrate_to_pageserver_ids = list(
@@ -285,7 +283,39 @@ def test_sharding_split_smoke(
 
     env.attachment_service.consistency_check()
 
+    # Validate pageserver state
+    shards_exist: list[TenantShardId] = []
+    for pageserver in env.pageservers:
+        locations = pageserver.http_client().tenant_list_locations()
+        shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
 
+    log.info("Shards after split: {shards_exist}")
+    assert len(shards_exist) == split_shard_count
+
+    # Ensure post-split pageserver locations survive a restart (i.e. the child shards
+    # correctly wrote config to disk, and the storage controller responds correctly
+    # to /re-attach)
+    for pageserver in env.pageservers:
+        pageserver.stop()
+        pageserver.start()
+
+    shards_exist = []
+    for pageserver in env.pageservers:
+        locations = pageserver.http_client().tenant_list_locations()
+        shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
+
+    log.info("Shards after restart: {shards_exist}")
+    assert len(shards_exist) == split_shard_count
+
+    workload.validate()
+
+
+@pytest.mark.skipif(
+    # The quantity of data isn't huge, but debug can be _very_ slow, and the things we're
+    # validating in this test don't benefit much from debug assertions.
+    os.getenv("BUILD_TYPE") == "debug",
+    reason="Avoid running bulkier ingest tests in debug mode",
+)
 def test_sharding_ingest(
     neon_env_builder: NeonEnvBuilder,
 ):
@@ -319,10 +349,10 @@ def test_sharding_ingest(
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
-    workload.write_rows(512, upload=False)
-    workload.write_rows(512, upload=False)
-    workload.write_rows(512, upload=False)
-    workload.write_rows(512, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
     workload.validate()
 
     small_layer_count = 0
@@ -361,7 +391,12 @@ def test_sharding_ingest(
     # - Because we roll layers on checkpoint_distance * shard_count, we expect to obey the target
     #   layer size on average, but it is still possible to write some tiny layers.
     log.info(f"Totals: {small_layer_count} small layers, {ok_layer_count} ok layers")
-    assert float(small_layer_count) / float(ok_layer_count) < 0.25
+    if small_layer_count <= shard_count:
+        # If each shard has <= 1 small layer
+        pass
+    else:
+        # General case:
+        assert float(small_layer_count) / float(ok_layer_count) < 0.25
 
     # Each shard may emit up to one huge layer, because initdb ingest doesn't respect checkpoint_distance.
     assert huge_layer_count <= shard_count

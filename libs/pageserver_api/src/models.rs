@@ -1,4 +1,7 @@
 pub mod partitioning;
+pub mod utilization;
+
+pub use utilization::PageserverUtilization;
 
 use std::{
     collections::HashMap,
@@ -280,7 +283,6 @@ pub struct TenantConfig {
     pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
@@ -291,6 +293,7 @@ pub struct TenantConfig {
 pub enum EvictionPolicy {
     NoEviction,
     LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+    OnlyImitiate(EvictionPolicyLayerAccessThreshold),
 }
 
 impl EvictionPolicy {
@@ -298,6 +301,7 @@ impl EvictionPolicy {
         match self {
             EvictionPolicy::NoEviction => "NoEviction",
             EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+            EvictionPolicy::OnlyImitiate(_) => "OnlyImitiate",
         }
     }
 }
@@ -335,14 +339,14 @@ impl ThrottleConfig {
     }
     /// The requests per second allowed  by the given config.
     pub fn steady_rps(&self) -> f64 {
-        (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64()) / 1e3
+        (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64())
     }
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
 /// lists out all possible states (and the virtual "Detached" state)
 /// in a flat form rather than using rust-style enums.
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LocationConfigMode {
     AttachedSingle,
     AttachedMulti,
@@ -404,6 +408,12 @@ pub struct TenantLocationConfigRequest {
     pub tenant_id: TenantShardId,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantTimeTravelRequest {
+    pub shard_counts: Vec<ShardCount>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

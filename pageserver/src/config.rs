@@ -40,7 +40,7 @@ use crate::tenant::{
 };
 use crate::virtual_file;
 use crate::{
-    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
+    IGNORED_TENANT_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
     TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
@@ -149,7 +149,6 @@ pub mod defaults {
 
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
-#gc_feedback = false
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
 #secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
@@ -859,17 +858,6 @@ impl PageServerConf {
             .join(tenant_shard_id.to_string())
             .join(timeline_id.to_string())
             .join(connection_id.to_string())
-    }
-
-    /// Points to a place in pageserver's local directory,
-    /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-    ) -> Utf8PathBuf {
-        self.timeline_path(tenant_shard_id, timeline_id)
-            .join(METADATA_FILE_NAME)
     }
 
     /// Turns storage remote path of a file into its local path.
@@ -1631,15 +1619,48 @@ threshold = "20m"
                 eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
             })
         );
+
         match &conf.default_tenant_conf.eviction_policy {
-            EvictionPolicy::NoEviction => panic!("Unexpected eviction opolicy tenant settings"),
-            EvictionPolicy::LayerAccessThreshold(eviction_thresold) => {
-                assert_eq!(eviction_thresold.period, Duration::from_secs(20 * 60));
-                assert_eq!(eviction_thresold.threshold, Duration::from_secs(20 * 60));
+            EvictionPolicy::LayerAccessThreshold(eviction_threshold) => {
+                assert_eq!(eviction_threshold.period, Duration::from_secs(20 * 60));
+                assert_eq!(eviction_threshold.threshold, Duration::from_secs(20 * 60));
             }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn parse_imitation_only_pageserver_config() {
+        let tempdir = tempdir().unwrap();
+        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir).unwrap();
+
+        let pageserver_conf_toml = format!(
+            r#"pg_distrib_dir = "{pg_distrib_dir}"
+metric_collection_endpoint = "http://sample.url"
+metric_collection_interval = "10min"
+id = 222
+
+[tenant_config]
+evictions_low_residence_duration_metric_threshold = "20m"
+
+[tenant_config.eviction_policy]
+kind = "OnlyImitiate"
+period = "20m"
+threshold = "20m"
+"#,
+        );
+        let toml: Document = pageserver_conf_toml.parse().unwrap();
+        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+
+        match &conf.default_tenant_conf.eviction_policy {
+            EvictionPolicy::OnlyImitiate(t) => {
+                assert_eq!(t.period, Duration::from_secs(20 * 60));
+                assert_eq!(t.threshold, Duration::from_secs(20 * 60));
+            }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
+        }
     }
 
     fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {

@@ -143,6 +143,23 @@ impl IntentState {
         }
     }
 
+    /// Like set_attached, but the node is from [`Self::secondary`].  This swaps the node from
+    /// secondary to attached while maintaining the scheduler's reference counts.
+    pub(crate) fn promote_attached(
+        &mut self,
+        _scheduler: &mut Scheduler,
+        promote_secondary: NodeId,
+    ) {
+        // If we call this with a node that isn't in secondary, it would cause incorrect
+        // scheduler reference counting, since we assume the node is already referenced as a secondary.
+        debug_assert!(self.secondary.contains(&promote_secondary));
+
+        // TODO: when scheduler starts tracking attached + secondary counts separately, we will
+        // need to call into it here.
+        self.secondary.retain(|n| n != &promote_secondary);
+        self.attached = Some(promote_secondary);
+    }
+
     pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
         debug_assert!(!self.secondary.contains(&new_secondary));
         scheduler.node_inc_ref(new_secondary);
@@ -197,6 +214,8 @@ impl IntentState {
     /// Returns true if a change was made
     pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
         if self.attached == Some(node_id) {
+            // TODO: when scheduler starts tracking attached + secondary counts separately, we will
+            // need to call into it here.
             self.attached = None;
             self.secondary.push(node_id);
             true
@@ -370,11 +389,41 @@ impl TenantState {
         // All remaining observed locations generate secondary intents.  This includes None
         // observations, as these may well have some local content on disk that is usable (this
         // is an edge case that might occur if we restarted during a migration or other change)
+        //
+        // We may leave intent.attached empty if we didn't find any attached locations: [`Self::schedule`]
+        // will take care of promoting one of these secondaries to be attached.
         self.observed.locations.keys().for_each(|node_id| {
             if Some(*node_id) != self.intent.attached {
                 self.intent.secondary.push(*node_id);
             }
         });
+    }
+
+    /// Part of [`Self::schedule`] that is used to choose exactly one node to act as the
+    /// attached pageserver for a shard.
+    ///
+    /// Returns whether we modified it, and the NodeId selected.
+    fn schedule_attached(
+        &mut self,
+        scheduler: &mut Scheduler,
+    ) -> Result<(bool, NodeId), ScheduleError> {
+        // No work to do if we already have an attached tenant
+        if let Some(node_id) = self.intent.attached {
+            return Ok((false, node_id));
+        }
+
+        if let Some(promote_secondary) = scheduler.node_preferred(&self.intent.secondary) {
+            // Promote a secondary
+            tracing::debug!("Promoted secondary {} to attached", promote_secondary);
+            self.intent.promote_attached(scheduler, promote_secondary);
+            Ok((true, promote_secondary))
+        } else {
+            // Pick a fresh node: either we had no secondaries or none were schedulable
+            let node_id = scheduler.schedule_shard(&self.intent.secondary)?;
+            tracing::debug!("Selected {} as attached", node_id);
+            self.intent.set_attached(scheduler, Some(node_id));
+            Ok((true, node_id))
+        }
     }
 
     pub(crate) fn schedule(&mut self, scheduler: &mut Scheduler) -> Result<(), ScheduleError> {
@@ -387,19 +436,15 @@ impl TenantState {
 
         // Build the set of pageservers already in use by this tenant, to avoid scheduling
         // more work on the same pageservers we're already using.
-        let mut used_pageservers = self.intent.all_pageservers();
         let mut modified = false;
 
         use PlacementPolicy::*;
         match self.policy {
             Single => {
                 // Should have exactly one attached, and zero secondaries
-                if self.intent.attached.is_none() {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.set_attached(scheduler, Some(node_id));
-                    used_pageservers.push(node_id);
-                    modified = true;
-                }
+                let (modified_attached, _attached_node_id) = self.schedule_attached(scheduler)?;
+                modified |= modified_attached;
+
                 if !self.intent.secondary.is_empty() {
                     self.intent.clear_secondary(scheduler);
                     modified = true;
@@ -407,13 +452,10 @@ impl TenantState {
             }
             Double(secondary_count) => {
                 // Should have exactly one attached, and N secondaries
-                if self.intent.attached.is_none() {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
-                    self.intent.set_attached(scheduler, Some(node_id));
-                    used_pageservers.push(node_id);
-                    modified = true;
-                }
+                let (modified_attached, attached_node_id) = self.schedule_attached(scheduler)?;
+                modified |= modified_attached;
 
+                let mut used_pageservers = vec![attached_node_id];
                 while self.intent.secondary.len() < secondary_count {
                     let node_id = scheduler.schedule_shard(&used_pageservers)?;
                     self.intent.push_secondary(scheduler, node_id);
@@ -492,6 +534,13 @@ impl TenantState {
                 Some(_) | None => {
                     return true;
                 }
+            }
+        }
+
+        for node_id in self.observed.locations.keys() {
+            if self.intent.attached != Some(*node_id) && !self.intent.secondary.contains(node_id) {
+                // We have observed state that isn't part of our intent: need to clean it up.
+                return true;
             }
         }
 
@@ -688,10 +737,95 @@ impl TenantState {
             shard_count: self.tenant_shard_id.shard_count.literal() as i32,
             shard_stripe_size: self.shard.stripe_size.0 as i32,
             generation: self.generation.into().unwrap_or(0) as i32,
-            generation_pageserver: i64::MAX,
+            generation_pageserver: self
+                .intent
+                .get_attached()
+                .map(|n| n.0 as i64)
+                .unwrap_or(i64::MAX),
+
             placement_policy: serde_json::to_string(&self.policy).unwrap(),
             config: serde_json::to_string(&self.config).unwrap(),
             splitting: SplitState::default(),
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use utils::id::TenantId;
+
+    use crate::scheduler::test_utils::make_test_nodes;
+
+    use super::*;
+
+    fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantState {
+        let tenant_id = TenantId::generate();
+        let shard_number = ShardNumber(0);
+        let shard_count = ShardCount::new(1);
+
+        let tenant_shard_id = TenantShardId {
+            tenant_id,
+            shard_number,
+            shard_count,
+        };
+        TenantState::new(
+            tenant_shard_id,
+            ShardIdentity::new(
+                shard_number,
+                shard_count,
+                pageserver_api::shard::ShardStripeSize(32768),
+            )
+            .unwrap(),
+            policy,
+        )
+    }
+
+    /// Test the scheduling behaviors used when a tenant configured for HA is subject
+    /// to nodes being marked offline.
+    #[test]
+    fn tenant_ha_scheduling() -> anyhow::Result<()> {
+        // Start with three nodes.  Our tenant will only use two.  The third one is
+        // expected to remain unused.
+        let mut nodes = make_test_nodes(3);
+
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+        tenant_state
+            .schedule(&mut scheduler)
+            .expect("we have enough nodes, scheduling should work");
+
+        // Expect to initially be schedule on to different nodes
+        assert_eq!(tenant_state.intent.secondary.len(), 1);
+        assert!(tenant_state.intent.attached.is_some());
+
+        let attached_node_id = tenant_state.intent.attached.unwrap();
+        let secondary_node_id = *tenant_state.intent.secondary.iter().last().unwrap();
+        assert_ne!(attached_node_id, secondary_node_id);
+
+        // Notifying the attached node is offline should demote it to a secondary
+        let changed = tenant_state.intent.notify_offline(attached_node_id);
+        assert!(changed);
+
+        // Update the scheduler state to indicate the node is offline
+        nodes.get_mut(&attached_node_id).unwrap().availability = NodeAvailability::Offline;
+        scheduler.node_upsert(nodes.get(&attached_node_id).unwrap());
+
+        // Scheduling the node should promote the still-available secondary node to attached
+        tenant_state
+            .schedule(&mut scheduler)
+            .expect("active nodes are available");
+        assert_eq!(tenant_state.intent.attached.unwrap(), secondary_node_id);
+
+        // The original attached node should have been retained as a secondary
+        assert_eq!(
+            *tenant_state.intent.secondary.iter().last().unwrap(),
+            attached_node_id
+        );
+
+        tenant_state.intent.clear(&mut scheduler);
+
+        Ok(())
     }
 }

@@ -130,7 +130,7 @@ pub(super) struct UploadQueueStopped {
 pub(crate) enum NotInitialized {
     #[error("queue is in state Uninitialized")]
     Uninitialized,
-    #[error("queue is in state Stopping")]
+    #[error("queue is in state Stopped")]
     Stopped,
     #[error("queue is shutting down")]
     ShuttingDown,

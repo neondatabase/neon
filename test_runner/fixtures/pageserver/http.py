@@ -302,6 +302,15 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
 
+    def tenant_list_locations(self):
+        res = self.get(
+            f"http://localhost:{self.port}/v1/location_config",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json["tenant_shards"], list)
+        return res_json
+
     def tenant_delete(self, tenant_id: Union[TenantId, TenantShardId]):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
@@ -395,12 +404,20 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: Union[TenantId, TenantShardId],
         timestamp: datetime,
         done_if_after: datetime,
+        shard_counts: Optional[List[int]] = None,
     ):
         """
         Issues a request to perform time travel operations on the remote storage
         """
+
+        if shard_counts is None:
+            shard_counts = []
+        body: Dict[str, Any] = {
+            "shard_counts": shard_counts,
+        }
         res = self.put(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/time_travel_remote_storage?travel_to={timestamp.isoformat()}Z&done_if_after={done_if_after.isoformat()}Z"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/time_travel_remote_storage?travel_to={timestamp.isoformat()}Z&done_if_after={done_if_after.isoformat()}Z",
+            json=body,
         )
         self.verbose_error(res)
 

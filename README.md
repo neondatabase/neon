@@ -5,7 +5,7 @@
 Neon is a serverless open-source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes the PostgreSQL storage layer by redistributing data across a cluster of nodes.
 
 ## Quick start
-Try the [Neon Free Tier](https://neon.tech/docs/introduction/technical-preview-free-tier/) to create a serverless Postgres instance. Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or use the online [SQL Editor](https://neon.tech/docs/get-started-with-neon/query-with-neon-sql-editor/). See [Connect from any application](https://neon.tech/docs/connect/connect-from-any-app/) for connection instructions.
+Try the [Neon Free Tier](https://neon.tech) to create a serverless Postgres instance. Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or use the online [SQL Editor](https://neon.tech/docs/get-started-with-neon/query-with-neon-sql-editor/). See [Connect from any application](https://neon.tech/docs/connect/connect-from-any-app/) for connection instructions.
 
 Alternatively, compile and run the project [locally](#running-local-installation).
 
@@ -230,6 +230,10 @@ postgres=# select * from t;
 > cargo neon stop
 ```
 
+#### Handling build failures
+
+If you encounter errors during setting up the initial tenant, it's best to stop everything (`cargo neon stop`) and remove the `.neon` directory. Then fix the problems, and start the setup again.
+
 ## Running tests
 
 Ensure your dependencies are installed as described [here](https://github.com/neondatabase/neon#dependency-installation-notes).
@@ -258,6 +262,12 @@ You can use [`flamegraph-rs`](https://github.com/flamegraph-rs/flamegraph) or th
 > If you're using `lld` or `mold`, you need the `--no-rosegment` linker argument.
 > It's a [general thing with Rust / lld / mold](https://crbug.com/919499#c16), not specific to this repository.
 > See [this PR for further instructions](https://github.com/neondatabase/neon/pull/6764).
+
+## Cleanup
+
+For cleaning up the source tree from build artifacts, run `make clean` in the source directory.
+
+For removing every artifact from build and configure steps, run `make distclean`, and also consider removing the cargo binaries in the `target` directory, as well as the database in the `.neon` directory. Note that removing the `.neon` directorz will remove your database, with all data in it. You have been warned!
 
 ## Documentation
 

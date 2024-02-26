@@ -29,7 +29,6 @@ use remote_storage::TimeoutOrCancel;
 use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
-use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -172,9 +171,6 @@ pub(crate) mod throttle;
 
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
-
-// re-export for use in remote_timeline_client.rs
-pub use crate::tenant::metadata::save_metadata;
 
 // re-export for use in walreceiver
 pub use crate::tenant::timeline::WalReceiverInfo;
@@ -1151,17 +1147,6 @@ impl Tenant {
         } else {
             None
         };
-
-        // timeline loading after attach expects to find metadata file for each metadata
-        save_metadata(
-            self.conf,
-            &self.tenant_shard_id,
-            &timeline_id,
-            &remote_metadata,
-        )
-        .await
-        .context("save_metadata")
-        .map_err(LoadLocalTimelineError::Load)?;
 
         self.timeline_init_and_sync(
             timeline_id,
@@ -2589,19 +2574,24 @@ impl Tenant {
         legacy_config_path: &Utf8Path,
         location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
-        // Forward compat: write out an old-style configuration that old versions can read, in case we roll back
-        Self::persist_tenant_config_legacy(
-            tenant_shard_id,
-            legacy_config_path,
-            &location_conf.tenant_conf,
-        )
-        .await?;
-
         if let LocationMode::Attached(attach_conf) = &location_conf.mode {
-            // Once we use LocationMode, generations are mandatory.  If we aren't using generations,
-            // then drop out after writing legacy-style config.
+            // The modern-style LocationConf config file requires a generation to be set. In case someone
+            // is running a pageserver without the infrastructure to set generations, write out the legacy-style
+            // config file that only contains TenantConf.
+            //
+            // This will eventually be removed in https://github.com/neondatabase/neon/issues/5388
+
             if attach_conf.generation.is_none() {
-                tracing::debug!("Running without generations, not writing new-style LocationConf");
+                tracing::info!(
+                    "Running without generations, writing legacy-style tenant config file"
+                );
+                Self::persist_tenant_config_legacy(
+                    tenant_shard_id,
+                    legacy_config_path,
+                    &location_conf.tenant_conf,
+                )
+                .await?;
+
                 return Ok(());
             }
         }
@@ -2624,17 +2614,10 @@ impl Tenant {
 
         let tenant_shard_id = *tenant_shard_id;
         let config_path = config_path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            Handle::current().block_on(async move {
-                let conf_content = conf_content.into_bytes();
-                VirtualFile::crashsafe_overwrite(&config_path, &temp_path, conf_content)
-                    .await
-                    .with_context(|| {
-                        format!("write tenant {tenant_shard_id} config to {config_path}")
-                    })
-            })
-        })
-        .await??;
+        let conf_content = conf_content.into_bytes();
+        VirtualFile::crashsafe_overwrite(config_path.clone(), temp_path, conf_content)
+            .await
+            .with_context(|| format!("write tenant {tenant_shard_id} config to {config_path}"))?;
 
         Ok(())
     }
@@ -2661,17 +2644,12 @@ impl Tenant {
 
         let tenant_shard_id = *tenant_shard_id;
         let target_config_path = target_config_path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            Handle::current().block_on(async move {
-                let conf_content = conf_content.into_bytes();
-                VirtualFile::crashsafe_overwrite(&target_config_path, &temp_path, conf_content)
-                    .await
-                    .with_context(|| {
-                        format!("write tenant {tenant_shard_id} config to {target_config_path}")
-                    })
-            })
-        })
-        .await??;
+        let conf_content = conf_content.into_bytes();
+        VirtualFile::crashsafe_overwrite(target_config_path.clone(), temp_path, conf_content)
+            .await
+            .with_context(|| {
+                format!("write tenant {tenant_shard_id} config to {target_config_path}")
+            })?;
         Ok(())
     }
 
@@ -3294,10 +3272,7 @@ impl Tenant {
 
         timeline_struct.init_empty_layer_map(start_lsn);
 
-        if let Err(e) = self
-            .create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
-            .await
-        {
+        if let Err(e) = self.create_timeline_files(&uninit_mark.timeline_path).await {
             error!("Failed to create initial files for timeline {tenant_shard_id}/{new_timeline_id}, cleaning up: {e:?}");
             cleanup_timeline_directory(uninit_mark);
             return Err(e);
@@ -3314,26 +3289,13 @@ impl Tenant {
         ))
     }
 
-    async fn create_timeline_files(
-        &self,
-        timeline_path: &Utf8Path,
-        new_timeline_id: &TimelineId,
-        new_metadata: &TimelineMetadata,
-    ) -> anyhow::Result<()> {
+    async fn create_timeline_files(&self, timeline_path: &Utf8Path) -> anyhow::Result<()> {
         crashsafe::create_dir(timeline_path).context("Failed to create timeline directory")?;
 
         fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
             anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
         });
 
-        save_metadata(
-            self.conf,
-            &self.tenant_shard_id,
-            new_timeline_id,
-            new_metadata,
-        )
-        .await
-        .context("Failed to create timeline metadata")?;
         Ok(())
     }
 
@@ -3685,7 +3647,6 @@ pub(crate) mod harness {
                 evictions_low_residence_duration_metric_threshold: Some(
                     tenant_conf.evictions_low_residence_duration_metric_threshold,
                 ),
-                gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
                 timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
