@@ -161,14 +161,16 @@ class NeonCompare(PgCompare):
             "file_kind": "layer",
             "op_kind": "upload",
         }
+        # use `started` (not `finished`) counters here, because some callers
+        # don't wait for upload queue to drain
         total_files = self.zenbenchmark.get_int_counter_value(
             self.env.pageserver,
-            "pageserver_remote_timeline_client_calls_finished_total",
+            "pageserver_remote_timeline_client_calls_started_total",
             metric_filters,
         )
         total_bytes = self.zenbenchmark.get_int_counter_value(
             self.env.pageserver,
-            "pageserver_remote_timeline_client_bytes_finished_total",
+            "pageserver_remote_timeline_client_bytes_started_total",
             metric_filters,
         )
         self.zenbenchmark.record(
