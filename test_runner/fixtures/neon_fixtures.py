@@ -1104,6 +1104,13 @@ class NeonEnv:
         # bounce through retries on startup
         self.attachment_service.start()
 
+        def attachment_service_ready():
+            assert self.attachment_service.ready() is True
+
+        # Wait for attachment service readiness to prevent unnecessary post start-up
+        # reconcile.
+        wait_until(30, 1, attachment_service_ready)
+
         # Start up broker, pageserver and all safekeepers
         futs = []
         with concurrent.futures.ThreadPoolExecutor(
