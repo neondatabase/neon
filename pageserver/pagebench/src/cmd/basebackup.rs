@@ -25,10 +25,8 @@ use crate::util::{request_stats, tokio_thread_local_stats};
 pub(crate) struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
-    #[clap(long, default_value = "localhost:64000")]
-    page_service_host_port: String,
-    #[clap(long)]
-    page_service_connstring: Option<String>,
+    #[clap(long, default_value = "postgres://postgres@localhost:64000")]
+    page_service_connstring: String,
     #[clap(long)]
     pageserver_jwt: Option<String>,
     #[clap(long, default_value = "1")]
@@ -232,15 +230,7 @@ async fn client(
 ) {
     start_work_barrier.wait().await;
 
-    let connstr = match &args.page_service_connstring {
-        Some(connstr) => connstr.clone(),
-        None => crate::util::connstring::connstring(
-            &args.page_service_host_port,
-            args.pageserver_jwt.as_deref(),
-        ),
-    };
-
-    let client = pageserver_client::page_service::Client::new(connstr)
+    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
         .await
         .unwrap();
 
