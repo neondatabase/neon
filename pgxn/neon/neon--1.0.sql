@@ -32,6 +32,8 @@ RETURNS integer
 AS 'MODULE_PATHNAME', 'approximate_working_set_size'
 LANGUAGE C PARALLEL SAFE;
 
+GRANT EXECUTE ON FUNCTION approximate_working_set_size() TO pg_monitor;
+
 -- Create a view for convenient access.
 CREATE VIEW local_cache AS
 	SELECT P.* FROM local_cache_pages() AS P
