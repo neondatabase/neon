@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{metrics, persistence::TenantShardPersistence};
-use control_plane::attachment_service::NodeAvailability;
+use pageserver_api::controller_api::NodeAvailability;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
