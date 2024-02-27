@@ -119,7 +119,6 @@ impl FileStorage {
     ) -> Result<TimelinePersistentState> {
         let mut control_file = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
             .open(&control_file_path)
             .with_context(|| {
                 format!(
