@@ -1120,3 +1120,15 @@ impl AsRef<DeltaLayerInner> for DeltaLayerInner {
         self
     }
 }
+
+impl<'a> pageserver_compaction::interface::CompactionDeltaEntry<'a, Key> for DeltaEntry<'a> {
+    fn key(&self) -> Key {
+        self.key
+    }
+    fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+}

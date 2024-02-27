@@ -1,3 +1,4 @@
+mod compaction;
 pub mod delete;
 mod eviction_task;
 mod init;
@@ -18,8 +19,8 @@ use once_cell::sync::Lazy;
 use pageserver_api::{
     keyspace::KeySpaceAccum,
     models::{
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-        LayerMapInfo, TimelineState,
+        CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
+        EvictionPolicy, LayerMapInfo, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, TenantShardId},
@@ -63,6 +64,7 @@ use crate::tenant::{
 use crate::{
     context::{AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder},
     disk_usage_eviction_task::DiskUsageEvictionInfo,
+    pgdatadir_mapping::CollectKeySpaceError,
 };
 use crate::{deletion_queue::DeletionQueueClient, tenant::remote_timeline_client::StopError};
 use crate::{
@@ -1093,6 +1095,19 @@ impl Timeline {
             return Ok(());
         }
 
+        match self.get_compaction_algorithm() {
+            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
+            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
+        }
+    }
+
+    /// TODO: cancellation
+    async fn compact_legacy(
+        self: &Arc<Self>,
+        _cancel: &CancellationToken,
+        flags: EnumSet<CompactFlags>,
+        ctx: &RequestContext,
+    ) -> Result<(), CompactionError> {
         // High level strategy for compaction / image creation:
         //
         // 1. First, calculate the desired "partitioning" of the
@@ -1496,6 +1511,13 @@ impl Timeline {
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
+    }
+
+    fn get_compaction_algorithm(&self) -> CompactionAlgorithm {
+        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf;
+        tenant_conf
+            .compaction_algorithm
+            .unwrap_or(self.conf.default_tenant_conf.compaction_algorithm)
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
@@ -3639,6 +3661,18 @@ pub(crate) enum CompactionError {
     Other(#[from] anyhow::Error),
 }
 
+impl From<CollectKeySpaceError> for CompactionError {
+    fn from(err: CollectKeySpaceError) -> Self {
+        match err {
+            CollectKeySpaceError::Cancelled
+            | CollectKeySpaceError::PageRead(PageReconstructError::Cancelled) => {
+                CompactionError::ShuttingDown
+            }
+            e => CompactionError::Other(e.into()),
+        }
+    }
+}
+
 #[serde_as]
 #[derive(serde::Serialize)]
 struct RecordedDuration(#[serde_as(as = "serde_with::DurationMicroSeconds")] Duration);
@@ -3758,7 +3792,7 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 }
 
 impl Timeline {
-    /// Level0 files first phase of compaction, explained in the [`Self::compact`] comment.
+    /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
     async fn compact_level0_phase1(
         self: &Arc<Self>,
         guard: tokio::sync::OwnedRwLockReadGuard<LayerManager>,
@@ -4237,13 +4271,24 @@ impl Timeline {
             return Ok(());
         }
 
+        self.finish_compact_batch(&new_layers, &Vec::new(), &deltas_to_compact)
+            .await?;
+        Ok(())
+    }
+
+    async fn finish_compact_batch(
+        self: &Arc<Self>,
+        new_deltas: &[ResidentLayer],
+        new_images: &[ResidentLayer],
+        layers_to_remove: &[Layer],
+    ) -> anyhow::Result<()> {
         let mut guard = self.layers.write().await;
 
         let mut duplicated_layers = HashSet::new();
 
-        let mut insert_layers = Vec::with_capacity(new_layers.len());
+        let mut insert_layers = Vec::with_capacity(new_deltas.len());
 
-        for l in &new_layers {
+        for l in new_deltas {
             if guard.contains(l.as_ref()) {
                 // expected in tests
                 tracing::error!(layer=%l, "duplicated L1 layer");
@@ -4254,24 +4299,28 @@ impl Timeline {
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
             } else if LayerMap::is_l0(l.layer_desc()) {
-                return Err(CompactionError::Other(anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
+                bail!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
             } else {
                 insert_layers.push(l.clone());
             }
         }
 
-        let remove_layers = {
-            let mut deltas_to_compact = deltas_to_compact;
-            // only remove those inputs which were not outputs
-            deltas_to_compact.retain(|l| !duplicated_layers.contains(&l.layer_desc().key()));
-            deltas_to_compact
-        };
+        // only remove those inputs which were not outputs
+        let remove_layers: Vec<Layer> = layers_to_remove
+            .iter()
+            .filter(|l| !duplicated_layers.contains(&l.layer_desc().key()))
+            .cloned()
+            .collect();
+
+        if !new_images.is_empty() {
+            guard.track_new_image_layers(new_images, &self.metrics);
+        }
 
         // deletion will happen later, the layer file manager calls garbage_collect_on_drop
         guard.finish_compact_l0(&remove_layers, &insert_layers, &self.metrics);
 
         if let Some(remote_client) = self.remote_client.as_ref() {
-            remote_client.schedule_compaction_update(&remove_layers, &new_layers)?;
+            remote_client.schedule_compaction_update(&remove_layers, new_deltas)?;
         }
 
         drop_wlock(guard);
