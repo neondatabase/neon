@@ -840,7 +840,8 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     )
 
     # Deleting a stuck tenant should prompt it to go active
-    delete_lazy_activating(delete_tenant_id, env.pageserver)
+    # in some cases, it has already been activated because it's behind the detach
+    delete_lazy_activating(delete_tenant_id, env.pageserver, expect_attaching=False)
     tenant_ids.remove(delete_tenant_id)
 
     # Check that all the stuck tenants proceed to active (apart from the one that deletes, and the one
@@ -849,24 +850,29 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     assert len(get_tenant_states()) == n_tenants - 2
 
 
-def delete_lazy_activating(delete_tenant_id: TenantId, pageserver: NeonPageserver):
+def delete_lazy_activating(
+    delete_tenant_id: TenantId, pageserver: NeonPageserver, expect_attaching: bool
+):
     pageserver_http = pageserver.http_client()
+
+    # Deletion itself won't complete due to our failpoint: Tenant::shutdown can't complete while calculating
+    # logical size is paused in a failpoint.  So instead we will use a log observation to check that
+    # on-demand activation was triggered by the tenant deletion
+    log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000 gen=[0-9a-f]+}}: Activating tenant \\(on-demand\\).*"
+
+    if expect_attaching:
+        assert pageserver_http.tenant_status(delete_tenant_id)["state"]["slug"] == "Attaching"
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         log.info("Starting background delete")
+
+        def activated_on_demand():
+            assert pageserver.log_contains(log_match) is not None
 
         def delete_tenant():
             pageserver_http.tenant_delete(delete_tenant_id)
 
         background_delete = executor.submit(delete_tenant)
-
-        # Deletion itself won't complete due to our failpoint: Tenant::shutdown can't complete while calculating
-        # logical size is paused in a failpoint.  So instead we will use a log observation to check that
-        # on-demand activation was triggered by the tenant deletion
-        log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000 gen=[0-9a-f]+}}: Activating tenant \\(on-demand\\).*"
-
-        def activated_on_demand():
-            assert pageserver.log_contains(log_match) is not None
 
         log.info(f"Waiting for activation message '{log_match}'")
         try:
