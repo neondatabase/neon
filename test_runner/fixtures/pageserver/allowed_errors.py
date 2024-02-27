@@ -82,11 +82,6 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # During shutdown, DownloadError::Cancelled may be logged as an error.  Cleaning this
     # up is tracked in https://github.com/neondatabase/neon/issues/6096
     ".*Cancelled, shutting down.*",
-    # Open layers are only rolled at Lsn boundaries to avoid name clashses.
-    # Hence, we can overshoot the soft limit set by checkpoint distance.
-    # This is especially pronounced in tests that set small checkpoint
-    # distances.
-    ".*Flushed oversized open layer with size.*",
 )
 
 
