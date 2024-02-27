@@ -389,10 +389,6 @@ def test_remote_timeline_client_calls_started_metric(
             "compaction_period": "0s",
         }
     )
-    env.pageserver.quiesce_tenants()
-    env.pageserver.stop(immediate=True)
-    pageserver_extra_env = {"RUST_LOG": "info,pageserver::tenant::timeline=debug"}
-    env.pageserver.start(extra_env_vars=pageserver_extra_env)
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
@@ -496,7 +492,7 @@ def test_remote_timeline_client_calls_started_metric(
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
-    env.pageserver.start(extra_env_vars=pageserver_extra_env)
+    env.pageserver.start()
     client = env.pageserver.http_client()
 
     env.pageserver.tenant_attach(tenant_id)
