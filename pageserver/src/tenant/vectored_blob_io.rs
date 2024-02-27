@@ -58,8 +58,12 @@ pub struct VectoredRead {
     pub end: u64,
     /// Starting offsets and metadata for each blob in this read
     pub blobs_at: VecMap<u64, BlobMeta>,
+}
 
-    max_read_size: usize,
+impl VectoredRead {
+    fn size(&self) -> usize {
+        (self.end - self.start) as usize
+    }
 }
 
 #[derive(Eq, PartialEq)]
@@ -68,7 +72,14 @@ enum VectoredReadExtended {
     No,
 }
 
-impl VectoredRead {
+struct VectoredReadBuilder {
+    start: u64,
+    end: u64,
+    blobs_at: VecMap<u64, BlobMeta>,
+    max_read_size: usize,
+}
+
+impl VectoredReadBuilder {
     fn new(start_offset: u64, end_offset: u64, meta: BlobMeta, max_read_size: usize) -> Self {
         let mut blobs_at = VecMap::default();
         blobs_at
@@ -102,6 +113,14 @@ impl VectoredRead {
 
     fn size(&self) -> usize {
         (self.end - self.start) as usize
+    }
+
+    fn build(self) -> VectoredRead {
+        VectoredRead {
+            start: self.start,
+            end: self.end,
+            blobs_at: self.blobs_at,
+        }
     }
 }
 
@@ -195,35 +214,37 @@ impl VectoredReadPlanner {
     }
 
     pub fn finish(self) -> Vec<VectoredRead> {
-        let mut current_read: Option<VectoredRead> = None;
+        let mut current_read_builder: Option<VectoredReadBuilder> = None;
         let mut reads = Vec::new();
 
         for (key, blobs_for_key) in self.blobs {
             for (lsn, start_offset, end_offset) in blobs_for_key {
-                let extended = match &mut current_read {
-                    Some(read) => read.extend(start_offset, end_offset, BlobMeta { key, lsn }),
+                let extended = match &mut current_read_builder {
+                    Some(read_builder) => {
+                        read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn })
+                    }
                     None => VectoredReadExtended::No,
                 };
 
                 if extended == VectoredReadExtended::No {
-                    let next_read = VectoredRead::new(
+                    let next_read_builder = VectoredReadBuilder::new(
                         start_offset,
                         end_offset,
                         BlobMeta { key, lsn },
                         self.max_read_size,
                     );
 
-                    let prev_read = current_read.replace(next_read);
+                    let prev_read_builder = current_read_builder.replace(next_read_builder);
 
-                    if let Some(read) = prev_read {
-                        reads.push(read);
+                    if let Some(read_builder) = prev_read_builder {
+                        reads.push(read_builder.build());
                     }
                 }
             }
         }
 
-        if let Some(read) = current_read {
-            reads.push(read);
+        if let Some(read_builder) = current_read_builder {
+            reads.push(read_builder.build());
         }
 
         reads
