@@ -6,10 +6,13 @@ use utils::{
 };
 
 use super::*;
+use crate::task_mgr::BACKGROUND_RUNTIME;
 use crate::tenant::harness::TenantHarness;
 
 #[tokio::test(start_paused = true)]
 async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
+    // this is the runtime on which Layer spawns the blocking tasks on
+    let handle = BACKGROUND_RUNTIME.handle();
     let h = TenantHarness::create("residency_check_while_evict_and_wait_on_clogged_spawn_blocking")
         .unwrap();
     utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
@@ -44,7 +47,7 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     assert_eq!(1, LAYER_IMPL_METRICS.started_evictions.get());
 
     // clog up BACKGROUND_RUNTIME spawn_blocking
-    let (completion, mut js) = consume_all_background_runtime_spawn_blocking_threads().await;
+    let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
 
     // now the eviction cannot proceed because the threads are consumed while completion exists
     drop(resident);
@@ -92,10 +95,7 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     // happens?
     assert_eq!(2, LAYER_IMPL_METRICS.started_evictions.get());
 
-    drop(completion);
-    while let Some(res) = js.join_next().await {
-        res.unwrap();
-    }
+    helper.release().await;
 
     tokio::time::timeout(std::time::Duration::from_secs(3600), &mut second_eviction)
         .await
@@ -117,6 +117,9 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 
 #[tokio::test(start_paused = true)]
 async fn evict_and_wait_on_wanted_deleted() {
+    // this is the runtime on which Layer spawns the blocking tasks on
+    let handle = BACKGROUND_RUNTIME.handle();
+
     let h = TenantHarness::create("evict_and_wait_on_wanted_deleted").unwrap();
     utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
     let (tenant, ctx) = h.load().await;
@@ -154,7 +157,7 @@ async fn evict_and_wait_on_wanted_deleted() {
         drop(resident);
 
         // make sure the eviction task gets to run
-        cycle_background_runtime_spawn_blocking().await;
+        SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle).await;
 
         let resident = layer.keep_resident().await.unwrap();
 
@@ -178,7 +181,7 @@ async fn evict_and_wait_on_wanted_deleted() {
         layers.finish_gc_timeline(&[layer]);
     }
 
-    cycle_background_runtime_spawn_blocking().await;
+    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle).await;
 
     assert_eq!(1, LAYER_IMPL_METRICS.started_deletes.get());
     assert_eq!(1, LAYER_IMPL_METRICS.completed_deletes.get());
@@ -187,43 +190,73 @@ async fn evict_and_wait_on_wanted_deleted() {
     assert_eq!(1, LAYER_IMPL_METRICS.completed_evictions.get());
 }
 
-/// All `crate::task_mgr::BACKGROUND_RUNTIME` spawn_blocking threads will be consumed momentarily
-/// by this or it will not complete.
-///
-/// This should be no issue nowdays, because nextest runs each test in it's own process.
-async fn consume_all_background_runtime_spawn_blocking_threads() -> (Completion, JoinSet<()>) {
-    let (completion, barrier) = completion::channel();
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-
-    let assumed_max_blocking_threads = 512;
-
-    let mut blocking_tasks = JoinSet::new();
-
-    for _ in 0..assumed_max_blocking_threads {
-        let barrier = barrier.clone();
-        let tx = tx.clone();
-        blocking_tasks.spawn_blocking_on(
-            move || {
-                tx.blocking_send(()).unwrap();
-                drop(tx);
-                tokio::runtime::Handle::current().block_on(barrier.wait());
-            },
-            crate::task_mgr::BACKGROUND_RUNTIME.handle(),
-        );
-    }
-
-    drop(barrier);
-
-    for _ in 0..assumed_max_blocking_threads {
-        rx.recv().await.unwrap();
-    }
-
-    (completion, blocking_tasks)
+struct SpawnBlockingPoolHelper {
+    awaited_by_spawn_blocking_tasks: Completion,
+    blocking_tasks: JoinSet<()>,
 }
 
-async fn cycle_background_runtime_spawn_blocking() {
-    let (_, mut js) = consume_all_background_runtime_spawn_blocking_threads().await;
-    while let Some(res) = js.join_next().await {
-        res.unwrap();
+impl SpawnBlockingPoolHelper {
+    /// All `crate::task_mgr::BACKGROUND_RUNTIME` spawn_blocking threads will be consumed until
+    /// release is called.
+    ///
+    /// In the tests this can be used to ensure something cannot be started on the target runtimes
+    /// spawn_blocking pool.
+    ///
+    /// This should be no issue nowdays, because nextest runs each test in it's own process.
+    async fn consume_all_spawn_blocking_threads(handle: &tokio::runtime::Handle) -> Self {
+        let (completion, barrier) = completion::channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        let assumed_max_blocking_threads = 512;
+
+        let mut blocking_tasks = JoinSet::new();
+
+        for _ in 0..assumed_max_blocking_threads {
+            let barrier = barrier.clone();
+            let tx = tx.clone();
+            blocking_tasks.spawn_blocking_on(
+                move || {
+                    tx.blocking_send(()).unwrap();
+                    drop(tx);
+                    tokio::runtime::Handle::current().block_on(barrier.wait());
+                },
+                handle,
+            );
+        }
+
+        drop(barrier);
+
+        for _ in 0..assumed_max_blocking_threads {
+            rx.recv().await.unwrap();
+        }
+
+        SpawnBlockingPoolHelper {
+            awaited_by_spawn_blocking_tasks: completion,
+            blocking_tasks,
+        }
+    }
+
+    /// Release all previously blocked spawn_blocking threads
+    async fn release(self) {
+        let SpawnBlockingPoolHelper {
+            awaited_by_spawn_blocking_tasks,
+            mut blocking_tasks,
+        } = self;
+
+        drop(awaited_by_spawn_blocking_tasks);
+
+        while let Some(res) = blocking_tasks.join_next().await {
+            res.expect("none of the tasks should had panicked");
+        }
+    }
+
+    /// In the tests it is used as an easy way of making sure something scheduled on the target
+    /// runtimes `spawn_blocking` has completed, because it must've been scheduled and completed
+    /// before our tasks have a chance to schedule and complete.
+    async fn consume_and_release_all_of_spawn_blocking_threads(handle: &tokio::runtime::Handle) {
+        Self::consume_all_spawn_blocking_threads(handle)
+            .await
+            .release()
+            .await
     }
 }
