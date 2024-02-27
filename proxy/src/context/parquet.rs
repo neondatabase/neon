@@ -92,6 +92,8 @@ struct RequestData {
     /// Success is counted if we form a HTTP response with sql rows inside
     /// Or if we make it to proxy_pass
     success: bool,
+    /// Indicates id the cplane started the new compute node for this request.
+    is_cold_start: Option<bool>,
     /// Tracks time from session start (HTTP request/libpq TCP handshake)
     /// Through to success/failure
     duration_us: u64,
@@ -119,6 +121,7 @@ impl From<RequestMonitoring> for RequestData {
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
+            is_cold_start: value.is_cold_start,
             duration_us: SystemTime::from(value.first_packet)
                 .elapsed()
                 .unwrap_or_default()
@@ -452,6 +455,7 @@ mod tests {
             region: "us-east-1",
             error: None,
             success: rng.gen(),
+            is_cold_start: Some(true),
             duration_us: rng.gen_range(0..30_000_000),
         }
     }
@@ -521,15 +525,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313727, 3, 6000),
-                (1313720, 3, 6000),
-                (1313780, 3, 6000),
-                (1313737, 3, 6000),
-                (1313867, 3, 6000),
-                (1313709, 3, 6000),
-                (1313501, 3, 6000),
-                (1313737, 3, 6000),
-                (438118, 1, 2000)
+                (1315032, 3, 6000),
+                (1315025, 3, 6000),
+                (1315085, 3, 6000),
+                (1315042, 3, 6000),
+                (1315172, 3, 6000),
+                (1315014, 3, 6000),
+                (1314806, 3, 6000),
+                (1315042, 3, 6000),
+                (438563, 1, 2000)
             ],
         );
 
@@ -559,11 +563,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1219459, 5, 10000),
-                (1225609, 5, 10000),
-                (1227403, 5, 10000),
-                (1226765, 5, 10000),
-                (1218043, 5, 10000)
+                (1220433, 5, 10000),
+                (1226583, 5, 10000),
+                (1228377, 5, 10000),
+                (1227739, 5, 10000),
+                (1219017, 5, 10000)
             ],
         );
 
@@ -595,11 +599,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1205106, 5, 10000),
-                (1204837, 5, 10000),
-                (1205130, 5, 10000),
-                (1205118, 5, 10000),
-                (1205373, 5, 10000)
+                (1206080, 5, 10000),
+                (1205811, 5, 10000),
+                (1206104, 5, 10000),
+                (1206092, 5, 10000),
+                (1206347, 5, 10000)
             ],
         );
 
@@ -624,15 +628,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313727, 3, 6000),
-                (1313720, 3, 6000),
-                (1313780, 3, 6000),
-                (1313737, 3, 6000),
-                (1313867, 3, 6000),
-                (1313709, 3, 6000),
-                (1313501, 3, 6000),
-                (1313737, 3, 6000),
-                (438118, 1, 2000)
+                (1315032, 3, 6000),
+                (1315025, 3, 6000),
+                (1315085, 3, 6000),
+                (1315042, 3, 6000),
+                (1315172, 3, 6000),
+                (1315014, 3, 6000),
+                (1314806, 3, 6000),
+                (1315042, 3, 6000),
+                (438563, 1, 2000)
             ],
         );
 
@@ -669,7 +673,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(658383, 2, 3001), (658097, 2, 3000), (657893, 2, 2999)],
+            [(659129, 2, 3001), (658842, 2, 3000), (658638, 2, 2999)],
         );
 
         tmpdir.close().unwrap();
