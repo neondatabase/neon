@@ -533,6 +533,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	{
 		/* Page is not cached */
 		lfc_ctl->misses += 1;
+		pgBufferUsage.file_cache.misses += 1;
 		LWLockRelease(lfc_lock);
 		return false;
 	}
@@ -558,6 +559,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	{
 		Assert(LFC_ENABLED());
 		lfc_ctl->hits += 1;
+		pgBufferUsage.file_cache.hits += 1;
 		Assert(entry->access_count > 0);
 		if (--entry->access_count == 0)
 			dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
