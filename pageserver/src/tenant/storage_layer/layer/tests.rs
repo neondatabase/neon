@@ -43,13 +43,6 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
         .expect_err("should had been a timeout since we are holding the layer resident");
     assert_eq!(1, LAYER_IMPL_METRICS.started_evictions.get());
 
-    // make the eviction attempt a noop because the layer is also wanted as deleted.
-    // we could now evict wanted deleted layers because we unlink the layers from index_part.json
-    // right away, but that has not been implemented. alternatively we could cause a version
-    // mismatch by incrementing the ` layer.0.version.fetch_add(1, Ordering::Relaxed)`.
-    //
-    // testability would be simpler if there was a separate actor for these.
-
     // clog up BACKGROUND_RUNTIME spawn_blocking
     let (completion, mut js) = consume_all_background_runtime_spawn_blocking_threads().await;
 
@@ -64,7 +57,8 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     layer
         .keep_resident()
         .await
-        .expect("keep_resident should had reinitialized without downloading");
+        .expect("keep_resident should had reinitialized without downloading")
+        .expect("ResidentLayer");
 
     // because the keep_resident check alters wanted evicted without sending a message, we will never get completed
     let e = tokio::time::timeout(std::time::Duration::from_secs(3600), &mut evict_and_wait)
@@ -93,6 +87,9 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
         .await
         .expect_err("timeout because spawn_blocking is clogged");
 
+    // in this case we don't leak started evictions, but I think there is still a chance of that
+    // happening, because we could have upgrades race multiple evictions while only one of them
+    // happens?
     assert_eq!(2, LAYER_IMPL_METRICS.started_evictions.get());
 
     drop(completion);
@@ -166,7 +163,6 @@ async fn evict_and_wait_on_wanted_deleted() {
             "keep_resident should not have re-initialized"
         );
 
-        // because the keep_resident check alters wanted evicted without sending a message, we will never get completed
         tokio::time::timeout(std::time::Duration::from_secs(3600), &mut evict_and_wait)
             .await
             .expect("completion")
