@@ -1052,7 +1052,7 @@ impl Timeline {
 
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
-    pub(crate) async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+    pub(crate) async fn freeze_and_flush(&self, what: Option<Weak<InMemoryLayer>>) -> anyhow::Result<()> {
         self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait().await
     }
@@ -1234,6 +1234,30 @@ impl Timeline {
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
         self.launch_eviction_task(background_jobs_can_start);
+        let (open_layer_expiration_tx, open_layer_expiration_rx) = watch::channel();
+        ...open_layer_expiration_tx = rx;
+        tokio::spawn(async move {
+            loop {
+                let (expired_layer, deadline) = tokio::select! {
+                    _ = self.cancel.cancelled() => {
+                        return;
+                    }
+                    v = open_layer_expiration_rx.recv() => {
+                        v
+                    }
+                };
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => {},
+                    _ = self.cancel.cancelled() => { return; }
+                };
+                let write_lock = self.write_lock.lock().await;
+                let mut layers = self.layers.write().await;
+                if layers.layer_map().open_layer.as_ref().map(|open_layer| Arc::ptr_eq(open_layer, )) {
+                    self.freeze_inmem_layer(true);
+                    self.flush_frozen_layers();
+                }
+            }
+        });
     }
 
     /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
@@ -1608,7 +1632,12 @@ impl Timeline {
                 generation,
                 shard_identity,
                 pg_version,
+<<<<<<< Updated upstream
                 layers: Default::default(),
+=======
+                layers: LayerManager::default(),
+                wanted_image_layers: Mutex::new(None),
+>>>>>>> Stashed changes
 
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
@@ -3023,6 +3052,7 @@ impl Timeline {
                     break;
                 },
                 _ = layer_flush_start_rx.changed() => {}
+                }
             }
 
             trace!("waking up");
@@ -5015,7 +5045,14 @@ impl Deref for TimelineWriter<'_> {
 
 impl Drop for TimelineWriter<'_> {
     fn drop(&mut self) {
-        self.write_guard.take();
+        let timeline_writer_state = self.write_guard.take();
+        if let Some(state) = timeline_writer_state {
+            tokio::spawn(async move {
+                tokio::time::sleep_until(state.)
+                self.tl.freeze_and_flush().await;
+            })
+        }
+
     }
 }
 

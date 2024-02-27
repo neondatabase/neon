@@ -28,6 +28,8 @@ pub(crate) struct LayerManager {
 }
 
 impl LayerManager {
+
+    pub(crate) fn 
     pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
         self.layer_fmgr.get_from_desc(desc)
     }
@@ -108,8 +110,8 @@ impl LayerManager {
             let new_layer =
                 InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn).await?;
             let layer = Arc::new(new_layer);
-
             self.layer_map.open_layer = Some(layer.clone());
+            self.layer_map.open_layer_expiration_tx.send((Arc::downgrade(layer), Instant::now() + Duration::from_secs(600)));
             self.layer_map.next_open_layer_at = None;
 
             layer

@@ -1538,7 +1538,7 @@ impl<'a> DatadirModification<'a> {
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            let prev_pending_updates = std::mem::take(&mut self.pending_updates);
+            let prev_pending_updates = std::mem::take(&mut self.pending_updates); // this doesn't recycle the memory; this is a hot path, we call this on each walingest; might cause wait_lsn timeuots?
 
             // The put_batch call below expects expects the inputs to be sorted by Lsn,
             // so we do that first.
@@ -1549,7 +1549,7 @@ impl<'a> DatadirModification<'a> {
                 .collect();
 
             writer.put_batch(lsn_ordered_batch, ctx).await?;
-            self.pending_updates.clear();
+            self.pending_updates.clear(); // this is unnecessary
         }
 
         if !self.pending_deletions.is_empty() {
