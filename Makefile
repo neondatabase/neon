@@ -299,6 +299,10 @@ neon-pgindent: postgres-v16-pg-bsd-indent neon-pg-ext-v16
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-v16 \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile pgindent
 
+# Check whether pxgn/neon code is compliant with pgindent.
+.PHONY: pgindent
+neon-pgindent-check:
+	$(MAKE) PGINDENT_FLAGS=--silent-diff neon-pgindent
 
 .PHONY: setup-pre-commit-hook
 setup-pre-commit-hook:
