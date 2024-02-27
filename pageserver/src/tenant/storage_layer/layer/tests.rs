@@ -15,7 +15,6 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     let handle = BACKGROUND_RUNTIME.handle();
     let h = TenantHarness::create("residency_check_while_evict_and_wait_on_clogged_spawn_blocking")
         .unwrap();
-    utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
     let (tenant, ctx) = h.load().await;
 
     let timeline = tenant
