@@ -25,12 +25,12 @@ use utils::{
     id::NodeId,
 };
 
-use pageserver_api::control_api::{ReAttachRequest, ValidateRequest};
-
-use control_plane::attachment_service::{
-    AttachHookRequest, InspectRequest, NodeConfigureRequest, NodeRegisterRequest,
-    TenantShardMigrateRequest,
+use pageserver_api::controller_api::{
+    NodeConfigureRequest, NodeRegisterRequest, TenantShardMigrateRequest,
 };
+use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
+
+use control_plane::attachment_service::{AttachHookRequest, InspectRequest};
 
 /// State available to HTTP request handlers
 #[derive(Clone)]

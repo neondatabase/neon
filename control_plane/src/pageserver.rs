@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
+use pageserver_api::controller_api::NodeRegisterRequest;
 use pageserver_api::models::{
     self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
 };
@@ -30,7 +31,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::attachment_service::{AttachmentService, NodeRegisterRequest};
+use crate::attachment_service::AttachmentService;
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 

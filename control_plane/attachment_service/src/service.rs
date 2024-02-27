@@ -9,19 +9,17 @@ use std::{
 
 use anyhow::Context;
 use control_plane::attachment_service::{
-    AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse, NodeAvailability,
-    NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, TenantCreateResponse,
-    TenantCreateResponseShard, TenantLocateResponse, TenantLocateResponseShard,
-    TenantShardMigrateRequest, TenantShardMigrateResponse,
+    AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
 use diesel::result::DatabaseErrorKind;
 use futures::{stream::FuturesUnordered, StreamExt};
 use hyper::StatusCode;
+use pageserver_api::controller_api::{
+    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy,
+    TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
+    TenantLocateResponseShard, TenantShardMigrateRequest, TenantShardMigrateResponse,
+};
 use pageserver_api::{
-    control_api::{
-        ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
-        ValidateResponse, ValidateResponseTenant,
-    },
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode, ShardParameters,
         TenantConfig, TenantCreateRequest, TenantLocationConfigRequest,
@@ -29,6 +27,10 @@ use pageserver_api::{
         TenantShardSplitResponse, TenantTimeTravelRequest, TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
+    upcall_api::{
+        ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
+        ValidateResponse, ValidateResponseTenant,
+    },
 };
 use pageserver_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
