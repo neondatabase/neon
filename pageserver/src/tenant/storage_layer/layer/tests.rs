@@ -171,9 +171,10 @@ async fn evict_and_wait_on_wanted_deleted() {
         // works as intended
     }
 
+    // assert that once we remove the `layer` from the layer map and drop our reference,
+    // the deletion of the layer in remote_storage happens.
     {
         let mut layers = timeline.layers.write().await;
-        // layer is moved to a temporary here, then dropped
         layers.finish_gc_timeline(&[layer]);
     }
 
