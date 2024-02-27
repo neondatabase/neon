@@ -9,111 +9,8 @@ use super::*;
 use crate::task_mgr::BACKGROUND_RUNTIME;
 use crate::tenant::harness::TenantHarness;
 
-#[tokio::test(start_paused = true)]
-async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
-    // this is the runtime on which Layer spawns the blocking tasks on
-    let handle = BACKGROUND_RUNTIME.handle();
-    let h = TenantHarness::create("residency_check_while_evict_and_wait_on_clogged_spawn_blocking")
-        .unwrap();
-    let (tenant, ctx) = h.load().await;
-
-    let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
-        .await
-        .unwrap();
-
-    let layer = {
-        let mut layers = {
-            let layers = timeline.layers.read().await;
-            layers.resident_layers().collect::<Vec<_>>().await
-        };
-
-        assert_eq!(layers.len(), 1);
-
-        layers.swap_remove(0)
-    };
-
-    // setup done
-
-    let resident = layer.keep_resident().await.unwrap();
-
-    let mut evict_and_wait = std::pin::pin!(layer.evict_and_wait());
-
-    // drive the future to await on the status channel
-    tokio::time::timeout(std::time::Duration::from_secs(3600), &mut evict_and_wait)
-        .await
-        .expect_err("should had been a timeout since we are holding the layer resident");
-    assert_eq!(1, LAYER_IMPL_METRICS.started_evictions.get());
-
-    // clog up BACKGROUND_RUNTIME spawn_blocking
-    let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
-
-    // now the eviction cannot proceed because the threads are consumed while completion exists
-    drop(resident);
-
-    // this resets the wanted eviction. in the bug situation, it could had been executed by
-    // eviction_task or disk usage based eviction while eviction_task was waiting on
-    // `Layer::evict_and_wait`.
-    //
-    // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
-    layer
-        .keep_resident()
-        .await
-        .expect("keep_resident should had reinitialized without downloading")
-        .expect("ResidentLayer");
-
-    // because the keep_resident check alters wanted evicted without sending a message, we will never get completed
-    let e = tokio::time::timeout(std::time::Duration::from_secs(3600), &mut evict_and_wait)
-        .await
-        .expect("no timeout, because keep_resident re-initialized")
-        .expect_err("eviction should not have succeeded because re-initialized");
-
-    // works as intended: evictions lose to "downloads"
-    assert!(matches!(e, EvictionError::Downloaded), "{e:?}");
-    assert_eq!(0, LAYER_IMPL_METRICS.completed_evictions.get());
-
-    // this is not wrong: the eviction is technically still "on the way" it's still queued
-    // because spawn_blocking is clogged up
-    assert_eq!(
-        0,
-        LAYER_IMPL_METRICS
-            .cancelled_evictions
-            .values()
-            .map(|ctr| ctr.get())
-            .sum::<u64>()
-    );
-
-    let mut second_eviction = std::pin::pin!(layer.evict_and_wait());
-
-    tokio::time::timeout(std::time::Duration::from_secs(3600), &mut second_eviction)
-        .await
-        .expect_err("timeout because spawn_blocking is clogged");
-
-    // in this case we don't leak started evictions, but I think there is still a chance of that
-    // happening, because we could have upgrades race multiple evictions while only one of them
-    // happens?
-    assert_eq!(2, LAYER_IMPL_METRICS.started_evictions.get());
-
-    helper.release().await;
-
-    tokio::time::timeout(std::time::Duration::from_secs(3600), &mut second_eviction)
-        .await
-        .expect("eviction goes through now that spawn_blocking is unclogged")
-        .expect("eviction should succeed, because version matches");
-
-    assert_eq!(1, LAYER_IMPL_METRICS.completed_evictions.get());
-
-    // now we finally can observe the original spawn_blocking failing
-    assert_eq!(
-        1,
-        LAYER_IMPL_METRICS
-            .cancelled_evictions
-            .values()
-            .map(|ctr| ctr.get())
-            .sum::<u64>()
-    );
-}
-
+/// This test demonstrates a previous hang when a eviction and deletion were requested at the same
+/// time. Now both of them complete per Arc drop semantics.
 #[tokio::test(start_paused = true)]
 async fn evict_and_wait_on_wanted_deleted() {
     // this is the runtime on which Layer spawns the blocking tasks on
@@ -158,16 +55,14 @@ async fn evict_and_wait_on_wanted_deleted() {
         // make sure the eviction task gets to run
         SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle).await;
 
-        let resident = layer.keep_resident().await.unwrap();
-
+        let resident = layer.keep_resident().await;
         assert!(
-            resident.is_none(),
-            "keep_resident should not have re-initialized"
+            matches!(resident, Ok(None)),
+            "keep_resident should not have re-initialized: {resident:?}"
         );
 
-        tokio::time::timeout(std::time::Duration::from_secs(3600), &mut evict_and_wait)
+        evict_and_wait
             .await
-            .expect("completion")
             .expect("evict_and_wait should had succeeded");
 
         // works as intended
@@ -184,9 +79,116 @@ async fn evict_and_wait_on_wanted_deleted() {
 
     assert_eq!(1, LAYER_IMPL_METRICS.started_deletes.get());
     assert_eq!(1, LAYER_IMPL_METRICS.completed_deletes.get());
-
     assert_eq!(1, LAYER_IMPL_METRICS.started_evictions.get());
     assert_eq!(1, LAYER_IMPL_METRICS.completed_evictions.get());
+}
+
+/// This test shows that ensures we are able to read the layer while the layer eviction has been
+/// started but not completed due to spawn_blocking pool being blocked.
+///
+/// Here `Layer::keep_resident` is used to "simulate" reads, because it cannot download.
+#[tokio::test(start_paused = true)]
+async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
+    // this is the runtime on which Layer spawns the blocking tasks on
+    let handle = BACKGROUND_RUNTIME.handle();
+    let h = TenantHarness::create("residency_check_while_evict_and_wait_on_clogged_spawn_blocking")
+        .unwrap();
+    let (tenant, ctx) = h.load().await;
+
+    let timeline = tenant
+        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .await
+        .unwrap();
+
+    let layer = {
+        let mut layers = {
+            let layers = timeline.layers.read().await;
+            layers.resident_layers().collect::<Vec<_>>().await
+        };
+
+        assert_eq!(layers.len(), 1);
+
+        layers.swap_remove(0)
+    };
+
+    // setup done
+
+    let resident = layer.keep_resident().await.unwrap();
+
+    let mut evict_and_wait = std::pin::pin!(layer.evict_and_wait());
+
+    // drive the future to await on the status channel
+    tokio::time::timeout(std::time::Duration::from_secs(3600), &mut evict_and_wait)
+        .await
+        .expect_err("should had been a timeout since we are holding the layer resident");
+    assert_eq!(1, LAYER_IMPL_METRICS.started_evictions.get());
+
+    // clog up BACKGROUND_RUNTIME spawn_blocking
+    let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
+
+    // now the eviction cannot proceed because the threads are consumed while completion exists
+    drop(resident);
+
+    // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
+    layer
+        .keep_resident()
+        .await
+        .expect("keep_resident should had reinitialized without downloading")
+        .expect("ResidentLayer");
+
+    // because the keep_resident check alters wanted evicted without sending a message, we will
+    // never get completed
+    let e = tokio::time::timeout(std::time::Duration::from_secs(3600), &mut evict_and_wait)
+        .await
+        .expect("no timeout, because keep_resident re-initialized")
+        .expect_err("eviction should not have succeeded because re-initialized");
+
+    // works as intended: evictions lose to "downloads"
+    assert!(matches!(e, EvictionError::Downloaded), "{e:?}");
+    assert_eq!(0, LAYER_IMPL_METRICS.completed_evictions.get());
+
+    // this is not wrong: the eviction is technically still "on the way" as it's still queued
+    // because spawn_blocking is clogged up
+    assert_eq!(
+        0,
+        LAYER_IMPL_METRICS
+            .cancelled_evictions
+            .values()
+            .map(|ctr| ctr.get())
+            .sum::<u64>()
+    );
+
+    let mut second_eviction = std::pin::pin!(layer.evict_and_wait());
+
+    tokio::time::timeout(std::time::Duration::from_secs(3600), &mut second_eviction)
+        .await
+        .expect_err("timeout because spawn_blocking is clogged");
+
+    // in this case we don't leak started evictions, but I think there is still a chance of that
+    // happening, because we could have upgrades race multiple evictions while only one of them
+    // happens?
+    assert_eq!(2, LAYER_IMPL_METRICS.started_evictions.get());
+
+    helper.release().await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(3600), &mut second_eviction)
+        .await
+        .expect("eviction goes through now that spawn_blocking is unclogged")
+        .expect("eviction should succeed, because version matches");
+
+    assert_eq!(1, LAYER_IMPL_METRICS.completed_evictions.get());
+
+    // now we finally can observe the original spawn_blocking failing
+    // it would had been possible to observe it earlier, but here it is guaranteed to have
+    // happened.
+    assert_eq!(
+        1,
+        LAYER_IMPL_METRICS
+            .cancelled_evictions
+            .values()
+            .map(|ctr| ctr.get())
+            .sum::<u64>()
+    );
 }
 
 struct SpawnBlockingPoolHelper {
