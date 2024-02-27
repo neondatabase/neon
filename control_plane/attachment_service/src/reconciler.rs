@@ -440,15 +440,46 @@ impl Reconciler {
                     // Nothing to do
                     tracing::info!(%node_id, "Observed configuration already correct.")
                 }
-                _ => {
+                observed => {
                     // In all cases other than a matching observed configuration, we will
                     // reconcile this location.  This includes locations with different configurations, as well
                     // as locations with unknown (None) observed state.
-                    self.generation = self
-                        .persistence
-                        .increment_generation(self.tenant_shard_id, node_id)
-                        .await?;
-                    wanted_conf.generation = self.generation.into();
+
+                    // The general case is to increment the generation.  However, there are cases
+                    // where this is not necessary:
+                    // - if we are only updating the TenantConf part of the location
+                    // - if we are only changing the attachment mode (e.g. going to attachedmulti or attachedstale)
+                    //   and the location was already in the correct generation
+                    let increment_generation = match observed {
+                        None => true,
+                        Some(ObservedStateLocation { conf: None }) => true,
+                        Some(ObservedStateLocation {
+                            conf: Some(observed),
+                        }) => {
+                            // If mode and generation are the same, it follows that only the configuration has changed
+                            let config_update = observed.generation == wanted_conf.generation
+                                && observed.mode == wanted_conf.mode;
+
+                            // Usually the short-lived attachment modes (multi and stale) are only used
+                            // in the case of [`Self::live_migrate`], but it is simple to handle them correctly
+                            // here too.  Locations are allowed to go Single->Stale and Multi->Single within the same generation.
+                            let mode_transition = observed.generation == wanted_conf.generation
+                                && ((observed.mode == LocationConfigMode::AttachedSingle
+                                    && wanted_conf.mode == LocationConfigMode::AttachedStale)
+                                    || (observed.mode == LocationConfigMode::AttachedMulti
+                                        && wanted_conf.mode == LocationConfigMode::AttachedSingle));
+
+                            !(config_update || mode_transition)
+                        }
+                    };
+
+                    if increment_generation {
+                        self.generation = self
+                            .persistence
+                            .increment_generation(self.tenant_shard_id, node_id)
+                            .await?;
+                        wanted_conf.generation = self.generation.into();
+                    }
                     tracing::info!(%node_id, "Observed configuration requires update.");
                     self.location_config(node_id, wanted_conf, None).await?;
                     self.compute_notify().await?;
