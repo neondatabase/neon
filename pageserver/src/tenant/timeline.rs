@@ -33,7 +33,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{bin_ser::BeSer, sync::gate::Gate};
+use utils::{
+    bin_ser::BeSer,
+    sync::gate::{Gate, GateGuard},
+};
 
 use std::ops::{Deref, Range};
 use std::pin::pin;
@@ -2288,14 +2291,17 @@ impl Timeline {
         // accurate relation sizes, and they do not emit consumption metrics.
         debug_assert!(self.tenant_shard_id.is_zero());
 
-        let _guard = self.gate.enter();
+        let guard = self
+            .gate
+            .enter()
+            .map_err(|_| CalculateLogicalSizeError::Cancelled)?;
 
         let self_calculation = Arc::clone(self);
 
         let mut calculation = pin!(async {
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(lsn, cause, &ctx)
+                .calculate_logical_size(lsn, cause, &guard, &ctx)
                 .await
         });
 
@@ -2324,33 +2330,16 @@ impl Timeline {
         &self,
         up_to_lsn: Lsn,
         cause: LogicalSizeCalculationCause,
+        _guard: &GateGuard,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         info!(
             "Calculating logical size for timeline {} at {}",
             self.timeline_id, up_to_lsn
         );
-        // These failpoints are used by python tests to ensure that we don't delete
-        // the timeline while the logical size computation is ongoing.
-        // The first failpoint is used to make this function pause.
-        // Then the python test initiates timeline delete operation in a thread.
-        // It waits for a few seconds, then arms the second failpoint and disables
-        // the first failpoint. The second failpoint prints an error if the timeline
-        // delete code has deleted the on-disk state while we're still running here.
-        // It shouldn't do that. If it does it anyway, the error will be caught
-        // by the test suite, highlighting the problem.
-        fail::fail_point!("timeline-calculate-logical-size-pause");
-        fail::fail_point!("timeline-calculate-logical-size-check-dir-exists", |_| {
-            if !self
-                .conf
-                .timeline_path(&self.tenant_shard_id, &self.timeline_id)
-                .exists()
-            {
-                error!("timeline-calculate-logical-size-pre metadata file does not exist")
-            }
-            // need to return something
-            Ok(0)
-        });
+
+        pausable_failpoint!("timeline-calculate-logical-size-pause");
+
         // See if we've already done the work for initial size calculation.
         // This is a short-cut for timelines that are mostly unused.
         if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {

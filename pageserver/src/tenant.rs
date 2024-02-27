@@ -3461,9 +3461,8 @@ impl Tenant {
             // Run each timeline's flush in a task holding the timeline's gate: this
             // means that if this function's future is cancelled, the Timeline shutdown
             // will still wait for any I/O in here to complete.
-            let gate = match timeline.gate.enter() {
-                Ok(g) => g,
-                Err(_) => continue,
+            let Ok(gate) = timeline.gate.enter() else {
+                continue;
             };
             let jh = tokio::task::spawn(async move { flush_timeline(gate, timeline).await });
             results.push(jh);
