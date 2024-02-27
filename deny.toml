@@ -106,7 +106,7 @@ name = "smol"
 unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/japaric/heapless.git"]
 
 [sources.allow-org]
 github = [
