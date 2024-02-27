@@ -368,7 +368,6 @@ def test_remote_storage_upload_queue_retries(
         assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 20000
 
 
-@pytest.mark.repeat(100)
 def test_remote_timeline_client_calls_started_metric(
     neon_env_builder: NeonEnvBuilder,
 ):
