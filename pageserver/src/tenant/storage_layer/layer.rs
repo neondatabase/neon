@@ -29,6 +29,9 @@ use super::{
 
 use utils::generation::Generation;
 
+#[cfg(test)]
+mod tests;
+
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
@@ -1049,16 +1052,10 @@ impl LayerInner {
 
     /// `DownloadedLayer` is being dropped, so it calls this method.
     fn on_downloaded_layer_drop(self: Arc<LayerInner>, version: usize) {
-        let delete = self.wanted_deleted.load(Ordering::Acquire);
         let evict = self.wanted_evicted.load(Ordering::Acquire);
         let can_evict = self.have_remote_client;
 
-        if delete {
-            // do nothing now, only in LayerInner::drop -- this was originally implemented because
-            // we could had already scheduled the deletion at the time.
-            //
-            // FIXME: this is not true anymore, we can safely evict wanted deleted files.
-        } else if can_evict && evict {
+        if can_evict && evict {
             let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, %version);
 
             // downgrade for queueing, in case there's a tear down already ongoing we should not
