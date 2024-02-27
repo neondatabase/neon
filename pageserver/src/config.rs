@@ -61,6 +61,7 @@ pub mod defaults {
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
+    pub const DEFAULT_LOCALE: &str = "C.UTF-8";
 
     pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
@@ -104,6 +105,9 @@ pub mod defaults {
 
 # initial superuser role name to use when creating a new tenant
 #initial_superuser_name = '{DEFAULT_SUPERUSER}'
+
+# Used when running initdb
+#locale = '{DEFAULT_LOCALE}'
 
 #broker_endpoint = '{BROKER_DEFAULT_ENDPOINT}'
 
@@ -170,6 +174,7 @@ pub struct PageServerConf {
     pub wal_redo_timeout: Duration,
 
     pub superuser: String,
+    pub locale: String,
 
     pub page_cache_size: usize,
     pub max_file_descriptors: usize,
@@ -300,6 +305,7 @@ struct PageServerConfigBuilder {
     wal_redo_timeout: BuilderValue<Duration>,
 
     superuser: BuilderValue<String>,
+    locale: BuilderValue<String>,
 
     page_cache_size: BuilderValue<usize>,
     max_file_descriptors: BuilderValue<usize>,
@@ -365,6 +371,7 @@ impl Default for PageServerConfigBuilder {
             wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
                 .expect("cannot parse default wal redo timeout")),
             superuser: Set(DEFAULT_SUPERUSER.to_string()),
+            locale: Set(DEFAULT_LOCALE.to_string()),
             page_cache_size: Set(DEFAULT_PAGE_CACHE_SIZE),
             max_file_descriptors: Set(DEFAULT_MAX_FILE_DESCRIPTORS),
             workdir: Set(Utf8PathBuf::new()),
@@ -456,6 +463,10 @@ impl PageServerConfigBuilder {
 
     pub fn superuser(&mut self, superuser: String) {
         self.superuser = BuilderValue::Set(superuser)
+    }
+
+    pub fn locale(&mut self, locale: String) {
+        self.locale = BuilderValue::Set(locale)
     }
 
     pub fn page_cache_size(&mut self, page_cache_size: usize) {
@@ -619,6 +630,7 @@ impl PageServerConfigBuilder {
                 .wal_redo_timeout
                 .ok_or(anyhow!("missing wal_redo_timeout"))?,
             superuser: self.superuser.ok_or(anyhow!("missing superuser"))?,
+            locale: self.locale.ok_or(anyhow!("missing locale"))?,
             page_cache_size: self
                 .page_cache_size
                 .ok_or(anyhow!("missing page_cache_size"))?,
@@ -868,6 +880,7 @@ impl PageServerConf {
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
                 "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
                 "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
+                "locale" => builder.locale(parse_toml_string(key, item)?),
                 "page_cache_size" => builder.page_cache_size(parse_toml_u64(key, item)? as usize),
                 "max_file_descriptors" => {
                     builder.max_file_descriptors(parse_toml_u64(key, item)? as usize)
@@ -994,6 +1007,7 @@ impl PageServerConf {
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             availability_zone: None,
             superuser: "cloud_admin".to_string(),
+            locale: "C.UTF-8".to_string(),
             workdir: repo_dir,
             pg_distrib_dir,
             http_auth_type: AuthType::Trust,
@@ -1181,6 +1195,7 @@ max_file_descriptors = 333
 
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zzzz'
+locale = 'en_US.UTF-8'
 id = 10
 
 metric_collection_interval = '222 s'
@@ -1217,6 +1232,7 @@ background_task_maximum_delay = '334 s'
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
                 wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
+                locale: defaults::DEFAULT_LOCALE.to_string(),
                 page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
                 max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
                 workdir,
@@ -1292,6 +1308,7 @@ background_task_maximum_delay = '334 s'
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),
+                locale: "en_US.UTF-8".to_string(),
                 page_cache_size: 444,
                 max_file_descriptors: 333,
                 workdir,
