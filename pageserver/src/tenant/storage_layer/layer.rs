@@ -1061,6 +1061,8 @@ impl LayerInner {
             // we could had already scheduled the deletion at the time.
             //
             // FIXME: this is not true anymore, we can safely evict wanted deleted files.
+
+            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::WantedDeleted);
         } else if can_evict && evict {
             let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, %version);
 
@@ -1693,6 +1695,7 @@ enum EvictionCancelled {
     LostToDownload,
     /// After eviction, there was a new layer access which cancelled the eviction.
     UpgradedBackOnAccess,
+    WantedDeleted,
 }
 
 impl EvictionCancelled {
@@ -1706,6 +1709,7 @@ impl EvictionCancelled {
             EvictionCancelled::AlreadyReinitialized => "already_reinitialized",
             EvictionCancelled::LostToDownload => "lost_to_download",
             EvictionCancelled::UpgradedBackOnAccess => "upgraded_back_on_access",
+            EvictionCancelled::WantedDeleted => "wanted_deleted",
         }
     }
 }
