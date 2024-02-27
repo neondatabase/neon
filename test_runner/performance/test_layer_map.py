@@ -17,10 +17,10 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             "gc_period": "0s",
-            "checkpoint_distance": "16384",
+            "checkpoint_distance": "8192",
             "compaction_period": "1 s",
             "compaction_threshold": "1",
-            "compaction_target_size": "16384",
+            "compaction_target_size": "8192",
         }
     )
 
