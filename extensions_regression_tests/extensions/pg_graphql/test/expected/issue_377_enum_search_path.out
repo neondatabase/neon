@@ -1,0 +1,176 @@
+begin;
+    comment on schema public is '@graphql({"inflect_names": false})';
+    create schema salt;
+    create type salt.encr as enum ('variant');
+    create table public.sample(
+        id int primary key,
+        val salt.encr
+    );
+    -- encr should not be visible
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "encr") {
+            name
+          }
+        }
+        $$)
+    );
+      jsonb_pretty      
+------------------------
+ {                     +
+     "data": {         +
+         "__type": null+
+     }                 +
+ }
+(1 row)
+
+    -- the `val` column should have opaque type since `encr` not on search path
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "sample") {
+            kind
+            name
+            fields {
+              name
+              type {
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
+          }
+        }
+        $$)
+    );
+                 jsonb_pretty                  
+-----------------------------------------------
+ {                                            +
+     "data": {                                +
+         "__type": {                          +
+             "kind": "OBJECT",                +
+             "name": "sample",                +
+             "fields": [                      +
+                 {                            +
+                     "name": "nodeId",        +
+                     "type": {                +
+                         "name": null,        +
+                         "ofType": {          +
+                             "kind": "SCALAR",+
+                             "name": "ID"     +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "id",            +
+                     "type": {                +
+                         "name": null,        +
+                         "ofType": {          +
+                             "kind": "SCALAR",+
+                             "name": "Int"    +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "val",           +
+                     "type": {                +
+                         "name": "Opaque",    +
+                         "ofType": null       +
+                     }                        +
+                 }                            +
+             ]                                +
+         }                                    +
+     }                                        +
+ }
+(1 row)
+
+    -- Adding it to the search path adds `encr` to the schema
+    set local search_path = public,salt;
+    -- encr now visible
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "encr") {
+            kind
+            name
+            enumValues {
+              name
+            }
+          }
+        }
+        $$)
+    );
+             jsonb_pretty              
+---------------------------------------
+ {                                    +
+     "data": {                        +
+         "__type": {                  +
+             "kind": "ENUM",          +
+             "name": "encr",          +
+             "enumValues": [          +
+                 {                    +
+                     "name": "variant"+
+                 }                    +
+             ]                        +
+         }                            +
+     }                                +
+ }
+(1 row)
+
+    -- A table referencing encr references it vs opaque
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "sample") {
+            kind
+            name
+            fields {
+              name
+              type {
+                name
+                kind
+              }
+            }
+          }
+        }
+        $$)
+    );
+                jsonb_pretty                 
+---------------------------------------------
+ {                                          +
+     "data": {                              +
+         "__type": {                        +
+             "kind": "OBJECT",              +
+             "name": "sample",              +
+             "fields": [                    +
+                 {                          +
+                     "name": "nodeId",      +
+                     "type": {              +
+                         "kind": "NON_NULL",+
+                         "name": null       +
+                     }                      +
+                 },                         +
+                 {                          +
+                     "name": "id",          +
+                     "type": {              +
+                         "kind": "NON_NULL",+
+                         "name": null       +
+                     }                      +
+                 },                         +
+                 {                          +
+                     "name": "val",         +
+                     "type": {              +
+                         "kind": "ENUM",    +
+                         "name": "encr"     +
+                     }                      +
+                 }                          +
+             ]                              +
+         }                                  +
+     }                                      +
+ }
+(1 row)
+
+rollback;

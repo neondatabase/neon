@@ -1,0 +1,90 @@
+begin;
+    create table blog_post(
+        id int primary key,
+        data jsonb,
+        parent_id int references blog_post(id)
+    );
+    select graphql.resolve($$
+    mutation {
+      insertIntoBlogPostCollection(objects: [{
+        id: 1
+        data: "{\"key\": \"value\"}"
+        parentId: 1
+      }]) {
+        records {
+          id
+          data
+        }
+      }
+    }
+    $$);
+                                               resolve                                                
+------------------------------------------------------------------------------------------------------
+ {"data": {"insertIntoBlogPostCollection": {"records": [{"id": 1, "data": "{\"key\": \"value\"}"}]}}}
+(1 row)
+
+    select * from blog_post;
+ id |       data       | parent_id 
+----+------------------+-----------
+  1 | {"key": "value"} |         1
+(1 row)
+
+    select graphql.resolve($$
+    mutation {
+      updateBlogPostCollection(set: {
+        data: "{\"key\": \"value2\"}"
+      }) {
+        records {
+          id
+          data
+        }
+      }
+    }
+    $$);
+                                              resolve                                              
+---------------------------------------------------------------------------------------------------
+ {"data": {"updateBlogPostCollection": {"records": [{"id": 1, "data": "{\"key\": \"value2\"}"}]}}}
+(1 row)
+
+    select * from blog_post;
+ id |       data        | parent_id 
+----+-------------------+-----------
+  1 | {"key": "value2"} |         1
+(1 row)
+
+    select graphql.resolve($$
+    {
+      blogPostCollection {
+        edges {
+          node {
+            data
+            parent {
+              id
+              data
+            }
+          }
+        }
+      }
+    }
+    $$);
+                                                                     resolve                                                                      
+--------------------------------------------------------------------------------------------------------------------------------------------------
+ {"data": {"blogPostCollection": {"edges": [{"node": {"data": "{\"key\": \"value2\"}", "parent": {"id": 1, "data": "{\"key\": \"value2\"}"}}}]}}}
+(1 row)
+
+    select graphql.resolve($$
+    mutation {
+      deleteFromBlogPostCollection {
+        records {
+          id
+          data
+        }
+      }
+    }
+    $$);
+                                                resolve                                                
+-------------------------------------------------------------------------------------------------------
+ {"data": {"deleteFromBlogPostCollection": {"records": [{"id": 1, "data": "{\"key\": \"value2\"}"}]}}}
+(1 row)
+
+rollback;

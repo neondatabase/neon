@@ -1,0 +1,9 @@
+select
+    graphql.comment_directive(
+        comment_ := '@graphql({"name": "myField"})'
+    )
+  comment_directive  
+---------------------
+ {"name": "myField"}
+(1 row)
+

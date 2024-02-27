@@ -1,0 +1,75 @@
+EXTENSION = vector
+EXTVERSION = 0.5.1
+
+OBJS = src\hnsw.obj src\hnswbuild.obj src\hnswinsert.obj src\hnswscan.obj src\hnswutils.obj src\hnswvacuum.obj src\ivfbuild.obj src\ivfflat.obj src\ivfinsert.obj src\ivfkmeans.obj src\ivfscan.obj src\ivfutils.obj src\ivfvacuum.obj src\vector.obj
+HEADERS = src\vector.h
+
+REGRESS = btree cast copy functions input ivfflat_cosine ivfflat_ip ivfflat_l2 ivfflat_options ivfflat_unlogged
+REGRESS_OPTS = --inputdir=test --load-extension=$(EXTENSION)
+
+# For /arch flags
+# https://learn.microsoft.com/en-us/cpp/build/reference/arch-minimum-cpu-architecture
+OPTFLAGS =
+
+# For auto-vectorization:
+# - MSVC (needs /O2 /fp:fast) - https://learn.microsoft.com/en-us/cpp/parallel/auto-parallelization-and-auto-vectorization?#auto-vectorizer
+PG_CFLAGS = $(PG_CFLAGS) $(OPTFLAGS) /O2 /fp:fast
+
+# Debug MSVC auto-vectorization
+# https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/vectorizer-and-parallelizer-messages
+# PG_CFLAGS = $(PG_CFLAGS) /Qvec-report:2
+
+all: sql\$(EXTENSION)--$(EXTVERSION).sql
+
+sql\$(EXTENSION)--$(EXTVERSION).sql: sql\$(EXTENSION).sql
+	copy sql\$(EXTENSION).sql $@
+
+# TODO use pg_config
+!ifndef PGROOT
+!error PGROOT is not set
+!endif
+BINDIR = $(PGROOT)\bin
+INCLUDEDIR = $(PGROOT)\include
+INCLUDEDIR_SERVER = $(PGROOT)\include\server
+LIBDIR = $(PGROOT)\lib
+PKGLIBDIR = $(PGROOT)\lib
+SHAREDIR = $(PGROOT)\share
+
+CFLAGS = /nologo /I"$(INCLUDEDIR_SERVER)\port\win32_msvc" /I"$(INCLUDEDIR_SERVER)\port\win32" /I"$(INCLUDEDIR_SERVER)" /I"$(INCLUDEDIR)"
+
+CFLAGS = $(CFLAGS) $(PG_CFLAGS)
+
+SHLIB = $(EXTENSION).dll
+
+LIBS = "$(LIBDIR)\postgres.lib"
+
+.c.obj:
+	$(CC) $(CFLAGS) /c $< /Fo$@
+
+$(SHLIB): $(OBJS)
+	$(CC) $(CFLAGS) $(OBJS) $(LIBS) /link /DLL /OUT:$(SHLIB)
+
+all: $(SHLIB)
+
+install:
+	copy $(SHLIB) "$(PKGLIBDIR)"
+	copy $(EXTENSION).control "$(SHAREDIR)\extension"
+	copy sql\$(EXTENSION)--*.sql "$(SHAREDIR)\extension"
+	mkdir "$(INCLUDEDIR_SERVER)\extension\$(EXTENSION)"
+	copy $(HEADERS) "$(INCLUDEDIR_SERVER)\extension\$(EXTENSION)"
+
+installcheck:
+	"$(BINDIR)\pg_regress" --bindir="$(BINDIR)" $(REGRESS_OPTS) $(REGRESS)
+
+uninstall:
+	del /f "$(PKGLIBDIR)\$(SHLIB)"
+	del /f "$(SHAREDIR)\extension\$(EXTENSION).control"
+	del /f "$(SHAREDIR)\extension\$(EXTENSION)--*.sql"
+	del /f "$(INCLUDEDIR_SERVER)\extension\$(EXTENSION)\*.h"
+	rmdir "$(INCLUDEDIR_SERVER)\extension\$(EXTENSION)"
+
+clean:
+	del /f $(SHLIB) $(EXTENSION).lib $(EXTENSION).exp
+	del /f $(OBJS)
+	del /f sql\$(EXTENSION)--$(EXTVERSION).sql
+	del /f /s /q results regression.diffs regression.out tmp_check tmp_check_iso log output_iso

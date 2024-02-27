@@ -1,0 +1,25 @@
+begin;
+    -- Test that the argument parser can handle null values
+    create table account(
+        id serial primary key,
+        email text
+    );
+    select graphql.resolve($$
+    mutation {
+      insertIntoAccountCollection(objects: [
+        { email: null }
+      ]) {
+        affectedCount
+        records {
+          id
+          email
+        }
+      }
+    }
+    $$);
+                                                resolve                                                 
+--------------------------------------------------------------------------------------------------------
+ {"data": {"insertIntoAccountCollection": {"records": [{"id": 1, "email": null}], "affectedCount": 1}}}
+(1 row)
+
+rollback;

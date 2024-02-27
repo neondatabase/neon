@@ -1,0 +1,26 @@
+begin;
+    create table account(
+        id int primary key
+    );
+    insert into public.account(id)
+    select * from generate_series(1,5);
+    select graphql.resolve(
+        $$
+        query FirstNAccounts($first_: Int!) {
+          accountCollection(first: $first_) {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
+        $$,
+        '{"first_": 2}'::jsonb
+    );
+                                        resolve                                         
+----------------------------------------------------------------------------------------
+ {"data": {"accountCollection": {"edges": [{"node": {"id": 1}}, {"node": {"id": 2}}]}}}
+(1 row)
+
+rollback;

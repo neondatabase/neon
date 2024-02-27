@@ -1,0 +1,110 @@
+begin;
+    create table public.device(
+        id serial primary key,
+        val inet
+    );
+    -- should work
+    select graphql.resolve($$
+    mutation {
+      insertIntoDeviceCollection(objects: [
+        { val: "102.118.1.1" }
+      ]) {
+        records {
+          id
+          val
+        }
+      }
+    }
+    $$);
+                                         resolve                                          
+------------------------------------------------------------------------------------------
+ {"data": {"insertIntoDeviceCollection": {"records": [{"id": 1, "val": "102.118.1.1"}]}}}
+(1 row)
+
+    select graphql.resolve($$
+    mutation {
+      updateDeviceCollection(
+        set: {
+          val: "1.1.1.1"
+        }
+        atMost: 1
+      ) {
+        records {
+          id
+          val
+        }
+      }
+    }
+    $$);
+                                     resolve                                      
+----------------------------------------------------------------------------------
+ {"data": {"updateDeviceCollection": {"records": [{"id": 1, "val": "1.1.1.1"}]}}}
+(1 row)
+
+    -- Filter: should work
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              deviceCollection(filter: {val: {eq: "1.1.1.1"}}) {
+                edges {
+                  node {
+                    id
+                    val
+                  }
+                }
+              }
+            }
+        $$)
+    );
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "deviceCollection": {           +
+             "edges": [                  +
+                 {                       +
+                     "node": {           +
+                         "id": 1,        +
+                         "val": "1.1.1.1"+
+                     }                   +
+                 }                       +
+             ]                           +
+         }                               +
+     }                                   +
+ }
+(1 row)
+
+    -- Filter: should work
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              deviceCollection(filter: {val: {is: NOT_NULL}}) {
+                edges {
+                  node {
+                    id
+                    val
+                  }
+                }
+              }
+            }
+        $$)
+    );
+               jsonb_pretty               
+------------------------------------------
+ {                                       +
+     "data": {                           +
+         "deviceCollection": {           +
+             "edges": [                  +
+                 {                       +
+                     "node": {           +
+                         "id": 1,        +
+                         "val": "1.1.1.1"+
+                     }                   +
+                 }                       +
+             ]                           +
+         }                               +
+     }                                   +
+ }
+(1 row)
+
+rollback;

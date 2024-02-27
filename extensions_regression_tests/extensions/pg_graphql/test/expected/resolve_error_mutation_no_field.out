@@ -1,0 +1,16 @@
+begin;
+    select graphql.resolve($$
+    mutation {
+       insertDNE(object: {
+        email: "o@r.com"
+      }) {
+        id
+      }
+    }
+    $$);
+                             resolve                              
+------------------------------------------------------------------
+ {"data": null, "errors": [{"message": "Unknown type Mutation"}]}
+(1 row)
+
+rollback;

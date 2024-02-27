@@ -1,0 +1,59 @@
+begin;
+    create table public.account(
+        id int primary key
+    );
+    create function public._one(rec public.account)
+        returns int
+        immutable
+        strict
+        language sql
+    as $$
+        select 1
+    $$;
+    comment on table public.account
+    is e'@graphql({"description": "Some Description"})';
+    comment on column public.account.id
+    is e'@graphql({"description": "Some Other Description"})';
+    comment on function public._one
+    is e'@graphql({"description": "Func Description"})';
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Account") {
+            kind
+            description
+            fields {
+              name
+              description
+            }
+          }
+        }
+        $$)
+    );
+                              jsonb_pretty                              
+------------------------------------------------------------------------
+ {                                                                     +
+     "data": {                                                         +
+         "__type": {                                                   +
+             "kind": "OBJECT",                                         +
+             "fields": [                                               +
+                 {                                                     +
+                     "name": "nodeId",                                 +
+                     "description": "Globally Unique Record Identifier"+
+                 },                                                    +
+                 {                                                     +
+                     "name": "id",                                     +
+                     "description": "Some Other Description"           +
+                 },                                                    +
+                 {                                                     +
+                     "name": "one",                                    +
+                     "description": "Func Description"                 +
+                 }                                                     +
+             ],                                                        +
+             "description": "Some Description"                         +
+         }                                                             +
+     }                                                                 +
+ }
+(1 row)
+
+rollback;

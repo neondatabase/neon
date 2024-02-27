@@ -1,0 +1,376 @@
+begin;
+    create table account(
+        id serial primary key,
+        email varchar(255) not null,
+        encrypted_password varchar(255) not null,
+        created_at timestamp not null,
+        updated_at timestamp not null
+    );
+    create table blog(
+        id serial primary key,
+        owner_id integer not null references account(id),
+        name varchar(255) not null,
+        description varchar(255),
+        created_at timestamp not null,
+        updated_at timestamp not null
+    );
+    create type blog_post_status as enum ('PENDING', 'RELEASED');
+    create table blog_post(
+        id uuid not null default gen_random_uuid() primary key,
+        blog_id integer not null references blog(id),
+        title varchar(255) not null,
+        body varchar(10000),
+        status blog_post_status not null,
+        created_at timestamp not null,
+        updated_at timestamp not null
+    );
+    select jsonb_pretty(
+        graphql.resolve($$
+            query IntrospectionQuery {
+              __schema {
+                queryType {
+                  name
+                }
+                mutationType {
+                  name
+                }
+                types {
+                  kind
+                  name
+                }
+                directives {
+                  name
+                  description
+                  locations
+                }
+              }
+            }
+        $$)
+    );
+                                                   jsonb_pretty                                                    
+-------------------------------------------------------------------------------------------------------------------
+ {                                                                                                                +
+     "data": {                                                                                                    +
+         "__schema": {                                                                                            +
+             "types": [                                                                                           +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "Account"                                                                            +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "AccountConnection"                                                                  +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "AccountDeleteResponse"                                                              +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "AccountEdge"                                                                        +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "AccountFilter"                                                                      +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "AccountInsertInput"                                                                 +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "AccountInsertResponse"                                                              +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "AccountOrderBy"                                                                     +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "AccountUpdateInput"                                                                 +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "AccountUpdateResponse"                                                              +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "BigFloat"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BigFloatFilter"                                                                     +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "BigInt"                                                                             +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BigIntFilter"                                                                       +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "Blog"                                                                               +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogConnection"                                                                     +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogDeleteResponse"                                                                 +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogEdge"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogFilter"                                                                         +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogInsertInput"                                                                    +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogInsertResponse"                                                                 +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogOrderBy"                                                                        +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogPost"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogPostConnection"                                                                 +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogPostDeleteResponse"                                                             +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogPostEdge"                                                                       +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogPostFilter"                                                                     +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogPostInsertInput"                                                                +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogPostInsertResponse"                                                             +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogPostOrderBy"                                                                    +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "ENUM",                                                                              +
+                     "name": "BlogPostStatus"                                                                     +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogPostStatusFilter"                                                               +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogPostUpdateInput"                                                                +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogPostUpdateResponse"                                                             +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BlogUpdateInput"                                                                    +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "BlogUpdateResponse"                                                                 +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "Boolean"                                                                            +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "BooleanFilter"                                                                      +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "Cursor"                                                                             +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "Date"                                                                               +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "DateFilter"                                                                         +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "Datetime"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "DatetimeFilter"                                                                     +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "ENUM",                                                                              +
+                     "name": "FilterIs"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "Float"                                                                              +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "FloatFilter"                                                                        +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "ID"                                                                                 +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "IDFilter"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "Int"                                                                                +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "IntFilter"                                                                          +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "JSON"                                                                               +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "Mutation"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INTERFACE",                                                                         +
+                     "name": "Node"                                                                               +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "Opaque"                                                                             +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "OpaqueFilter"                                                                       +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "ENUM",                                                                              +
+                     "name": "OrderByDirection"                                                                   +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "PageInfo"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "Query"                                                                              +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "String"                                                                             +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "StringFilter"                                                                       +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "Time"                                                                               +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "TimeFilter"                                                                         +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "SCALAR",                                                                            +
+                     "name": "UUID"                                                                               +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "INPUT_OBJECT",                                                                      +
+                     "name": "UUIDFilter"                                                                         +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "__Directive"                                                                        +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "ENUM",                                                                              +
+                     "name": "__DirectiveLocation"                                                                +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "__EnumValue"                                                                        +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "__Field"                                                                            +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "__InputValue"                                                                       +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "__Schema"                                                                           +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "OBJECT",                                                                            +
+                     "name": "__Type"                                                                             +
+                 },                                                                                               +
+                 {                                                                                                +
+                     "kind": "ENUM",                                                                              +
+                     "name": "__TypeKind"                                                                         +
+                 }                                                                                                +
+             ],                                                                                                   +
+             "queryType": {                                                                                       +
+                 "name": "Query"                                                                                  +
+             },                                                                                                   +
+             "directives": [                                                                                      +
+                 {                                                                                                +
+                     "name": "include",                                                                           +
+                     "locations": [                                                                               +
+                         "FIELD",                                                                                 +
+                         "FRAGMENT_SPREAD",                                                                       +
+                         "INLINE_FRAGMENT"                                                                        +
+                     ],                                                                                           +
+                     "description": "This field or fragment will be included only when the `if` argument is true."+
+                 },                                                                                               +
+                 {                                                                                                +
+                     "name": "skip",                                                                              +
+                     "locations": [                                                                               +
+                         "FIELD",                                                                                 +
+                         "FRAGMENT_SPREAD",                                                                       +
+                         "INLINE_FRAGMENT"                                                                        +
+                     ],                                                                                           +
+                     "description": "This field or fragment will be skipped when the `if` argument is true."      +
+                 }                                                                                                +
+             ],                                                                                                   +
+             "mutationType": {                                                                                    +
+                 "name": "Mutation"                                                                               +
+             }                                                                                                    +
+         }                                                                                                        +
+     }                                                                                                            +
+ }
+(1 row)
+
+rollback;

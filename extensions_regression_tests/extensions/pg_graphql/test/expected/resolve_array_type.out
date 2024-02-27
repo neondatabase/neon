@@ -1,0 +1,196 @@
+begin;
+    create table xrr(
+        id bigserial primary key,
+        tags text[],
+        nums int[],
+        uids uuid[]
+    );
+    insert into xrr(id, tags, nums)
+    values (9, array['a', 'b'], array[1, 2]);
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              xrrCollection {
+                edges {
+                  node {
+                    id
+                    tags
+                  }
+                }
+              }
+            }
+        $$)
+    );
+            jsonb_pretty            
+------------------------------------
+ {                                 +
+     "data": {                     +
+         "xrrCollection": {        +
+             "edges": [            +
+                 {                 +
+                     "node": {     +
+                         "id": "9",+
+                         "tags": [ +
+                             "a",  +
+                             "b"   +
+                         ]         +
+                     }             +
+                 }                 +
+             ]                     +
+         }                         +
+     }                             +
+ }
+(1 row)
+
+    -- Insert
+    select jsonb_pretty(
+        graphql.resolve($$
+    mutation {
+      insertIntoXrrCollection(objects: [
+        { nums: 1 },
+        { tags: "b", nums: null },
+        { tags: ["c", "d"], nums: [3, null] },
+      ]) {
+        affectedCount
+        records {
+          id
+          tags
+          nums
+        }
+      }
+    }
+    $$));
+             jsonb_pretty             
+--------------------------------------
+ {                                   +
+     "data": {                       +
+         "insertIntoXrrCollection": {+
+             "records": [            +
+                 {                   +
+                     "id": "1",      +
+                     "nums": [       +
+                         1           +
+                     ],              +
+                     "tags": null    +
+                 },                  +
+                 {                   +
+                     "id": "2",      +
+                     "nums": null,   +
+                     "tags": [       +
+                         "b"         +
+                     ]               +
+                 },                  +
+                 {                   +
+                     "id": "3",      +
+                     "nums": [       +
+                         3,          +
+                         null        +
+                     ],              +
+                     "tags": [       +
+                         "c",        +
+                         "d"         +
+                     ]               +
+                 }                   +
+             ],                      +
+             "affectedCount": 3      +
+         }                           +
+     }                               +
+ }
+(1 row)
+
+    -- Update
+    select jsonb_pretty(
+        graphql.resolve($$
+    mutation {
+      updateXrrCollection(
+        filter: { id: { gte: "8" } },
+        set: { tags: "g" }
+      ) {
+        affectedCount
+        records {
+          id
+          tags
+          nums
+        }
+      }
+    }
+    $$));
+           jsonb_pretty           
+----------------------------------
+ {                               +
+     "data": {                   +
+         "updateXrrCollection": {+
+             "records": [        +
+                 {               +
+                     "id": "9",  +
+                     "nums": [   +
+                         1,      +
+                         2       +
+                     ],          +
+                     "tags": [   +
+                         "g"     +
+                     ]           +
+                 }               +
+             ],                  +
+             "affectedCount": 1  +
+         }                       +
+     }                           +
+ }
+(1 row)
+
+    -- Delete
+    select jsonb_pretty(
+        graphql.resolve($$
+    mutation {
+      updateXrrCollection(
+        filter: { id: { eq: 1 } },
+        set: { tags: ["h", null, "i"], uids: [null, "9fb1c8e9-da2a-4072-b9fb-4f277446df9c"] }
+      ) {
+        affectedCount
+        records {
+          id
+          tags
+          nums
+          uids
+        }
+      }
+    }
+    $$));
+                          jsonb_pretty                          
+----------------------------------------------------------------
+ {                                                             +
+     "data": {                                                 +
+         "updateXrrCollection": {                              +
+             "records": [                                      +
+                 {                                             +
+                     "id": "1",                                +
+                     "nums": [                                 +
+                         1                                     +
+                     ],                                        +
+                     "tags": [                                 +
+                         "h",                                  +
+                         null,                                 +
+                         "i"                                   +
+                     ],                                        +
+                     "uids": [                                 +
+                         null,                                 +
+                         "9fb1c8e9-da2a-4072-b9fb-4f277446df9c"+
+                     ]                                         +
+                 }                                             +
+             ],                                                +
+             "affectedCount": 1                                +
+         }                                                     +
+     }                                                         +
+ }
+(1 row)
+
+    select * from xrr;
+ id |    tags    |   nums   |                    uids                     
+----+------------+----------+---------------------------------------------
+  2 | {b}        |          | 
+  3 | {c,d}      | {3,NULL} | 
+  9 | {g}        | {1,2}    | 
+  1 | {h,NULL,i} | {1}      | {NULL,9fb1c8e9-da2a-4072-b9fb-4f277446df9c}
+(4 rows)
+
+rollback;

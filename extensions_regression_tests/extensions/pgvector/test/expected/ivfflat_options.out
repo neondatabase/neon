@@ -1,0 +1,14 @@
+CREATE TABLE t (val vector(3));
+CREATE INDEX ON t USING ivfflat (val vector_l2_ops) WITH (lists = 0);
+ERROR:  value 0 out of bounds for option "lists"
+DETAIL:  Valid values are between "1" and "32768".
+CREATE INDEX ON t USING ivfflat (val vector_l2_ops) WITH (lists = 32769);
+ERROR:  value 32769 out of bounds for option "lists"
+DETAIL:  Valid values are between "1" and "32768".
+SHOW ivfflat.probes;
+ ivfflat.probes 
+----------------
+ 1
+(1 row)
+
+DROP TABLE t;

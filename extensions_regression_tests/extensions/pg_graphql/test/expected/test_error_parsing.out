@@ -1,0 +1,8 @@
+select graphql.resolve(
+    'query MyQuery { { extra brack }'
+)
+                                                      resolve                                                       
+--------------------------------------------------------------------------------------------------------------------
+ {"errors": [{"message": "query parse error: Parse error at 1:17\nUnexpected `{[Punctuator]`\nExpected `Name`\n"}]}
+(1 row)
+

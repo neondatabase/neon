@@ -1,0 +1,124 @@
+begin;
+    create type my_enum as enum ('test', 'valid value', 'another value');
+    comment on type my_enum is E'@graphql({"mappings": {"valid value": "valid_value", "another value": "another_value"}})';
+    create table enums (
+       id serial primary key,
+       value my_enum
+    );
+    -- Seed with value that's valid in both Postgres and GraphQL
+    insert into enums (value) values ('test');
+    -- Mutation to insert
+    select graphql.resolve($$
+    mutation {
+      insertIntoEnumsCollection(objects: [ { value: "valid_value" } ]) {
+          affectedCount
+      }
+    }
+    $$);
+                            resolve                            
+---------------------------------------------------------------
+ {"data": {"insertIntoEnumsCollection": {"affectedCount": 1}}}
+(1 row)
+
+    -- Mutation to update
+    select graphql.resolve($$
+    mutation {
+      updateEnumsCollection(set: { value: "another_value" }, filter: { value: {eq: "test"} } ) {
+        records { value }
+      }
+    }
+    $$);
+                                    resolve                                     
+--------------------------------------------------------------------------------
+ {"data": {"updateEnumsCollection": {"records": [{"value": "another_value"}]}}}
+(1 row)
+
+    --- Query
+    select graphql.resolve($$
+        {
+          enumsCollection {
+            edges {
+                node {
+                 value
+                }
+            }
+          }
+        }
+    $$);
+                                                       resolve                                                        
+----------------------------------------------------------------------------------------------------------------------
+ {"data": {"enumsCollection": {"edges": [{"node": {"value": "another_value"}}, {"node": {"value": "valid_value"}}]}}}
+(1 row)
+
+    --- Query with filter
+    select graphql.resolve($$
+        {
+          enumsCollection(filter: {value: {eq: "another_value"}}) {
+            edges {
+                node {
+                 value
+                }
+            }
+          }
+        }
+    $$);
+                                     resolve                                      
+----------------------------------------------------------------------------------
+ {"data": {"enumsCollection": {"edges": [{"node": {"value": "another_value"}}]}}}
+(1 row)
+
+    --- Query with `in` filter
+    select graphql.resolve($$
+        {
+          enumsCollection(filter: {value: {in: ["another_value"]}}) {
+            edges {
+                node {
+                 value
+                }
+            }
+          }
+        }
+    $$);
+                                     resolve                                      
+----------------------------------------------------------------------------------
+ {"data": {"enumsCollection": {"edges": [{"node": {"value": "another_value"}}]}}}
+(1 row)
+
+    -- Display type via introspection
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "MyEnum") {
+            kind
+            name
+            enumValues {
+              name
+            }
+          }
+        }
+        $$)
+    );
+                jsonb_pretty                 
+---------------------------------------------
+ {                                          +
+     "data": {                              +
+         "__type": {                        +
+             "kind": "ENUM",                +
+             "name": "MyEnum",              +
+             "enumValues": [                +
+                 {                          +
+                     "name": "test"         +
+                 },                         +
+                 {                          +
+                     "name": "valid_value"  +
+                 },                         +
+                 {                          +
+                     "name": "another_value"+
+                 }                          +
+             ]                              +
+         }                                  +
+     }                                      +
+ }
+(1 row)
+
+rollback;

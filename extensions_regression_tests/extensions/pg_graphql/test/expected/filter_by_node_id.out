@@ -1,0 +1,197 @@
+begin;
+    create table account(
+        id int primary key,
+        email text
+    );
+    insert into public.account(id, email)
+    values
+        (1, 'foo@foo.com'),
+        (2, 'bar@bar.com'),
+        (3, 'baz@baz.com');
+    savepoint a;
+    -- Display the node_ids
+    select jsonb_pretty(
+        graphql.resolve($${accountCollection { edges { node { id nodeId } } }}$$)
+    );
+                             jsonb_pretty                             
+----------------------------------------------------------------------
+ {                                                                   +
+     "data": {                                                       +
+         "accountCollection": {                                      +
+             "edges": [                                              +
+                 {                                                   +
+                     "node": {                                       +
+                         "id": 1,                                    +
+                         "nodeId": "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDFd"+
+                     }                                               +
+                 },                                                  +
+                 {                                                   +
+                     "node": {                                       +
+                         "id": 2,                                    +
+                         "nodeId": "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDJd"+
+                     }                                               +
+                 },                                                  +
+                 {                                                   +
+                     "node": {                                       +
+                         "id": 3,                                    +
+                         "nodeId": "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDNd"+
+                     }                                               +
+                 }                                                   +
+             ]                                                       +
+         }                                                           +
+     }                                                               +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(filter: { nodeId: { eq: "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDJd"} } ) {
+                edges {
+                  node {
+                    id
+                  }
+                }
+              }
+            }
+        $$)
+    );
+          jsonb_pretty           
+---------------------------------
+ {                              +
+     "data": {                  +
+         "accountCollection": { +
+             "edges": [         +
+                 {              +
+                     "node": {  +
+                         "id": 2+
+                     }          +
+                 }              +
+             ]                  +
+         }                      +
+     }                          +
+ }
+(1 row)
+
+    -- Select by nodeId
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(
+                filter: {
+                  nodeId: {eq: "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDJd"}
+                }
+              ) {
+                edges {
+                  node {
+                    id
+                    nodeId
+                  }
+                }
+              }
+            }$$
+        )
+    );
+                             jsonb_pretty                             
+----------------------------------------------------------------------
+ {                                                                   +
+     "data": {                                                       +
+         "accountCollection": {                                      +
+             "edges": [                                              +
+                 {                                                   +
+                     "node": {                                       +
+                         "id": 2,                                    +
+                         "nodeId": "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDJd"+
+                     }                                               +
+                 }                                                   +
+             ]                                                       +
+         }                                                           +
+     }                                                               +
+ }
+(1 row)
+
+    -- Update by nodeId
+    select graphql.resolve($$
+    mutation {
+      updateAccountCollection(
+        set: {
+          email: "new@email.com"
+        }
+        filter: {
+          nodeId: {eq: "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDJd"}
+        }
+      ) {
+        records { id }
+      }
+    }
+    $$);
+                             resolve                             
+-----------------------------------------------------------------
+ {"data": {"updateAccountCollection": {"records": [{"id": 2}]}}}
+(1 row)
+
+    rollback to savepoint a;
+    -- Delete by nodeId
+    select graphql.resolve($$
+    mutation {
+      deleteFromAccountCollection(
+        filter: {
+          nodeId: {eq: "WyJwdWJsaWMiLCAiYWNjb3VudCIsIDJd"}
+        }
+      ) {
+        records { id }
+      }
+    }
+    $$);
+                               resolve                               
+---------------------------------------------------------------------
+ {"data": {"deleteFromAccountCollection": {"records": [{"id": 2}]}}}
+(1 row)
+
+    select * from public.account;
+ id |    email    
+----+-------------
+  1 | foo@foo.com
+  3 | baz@baz.com
+(2 rows)
+
+    rollback to savepoint a;
+    -- ERRORS: use incorrect table
+    select graphql.encode('["public", "blog", 1]'::jsonb);
+            encode            
+------------------------------
+ WyJwdWJsaWMiLCAiYmxvZyIsIDFd
+(1 row)
+
+    -- Wrong table
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(
+                filter: {
+                  nodeId: {eq: "WyJwdWJsaWMiLCAiYmxvZyIsIDFd"}
+                }
+              ) {
+                edges {
+                  node {
+                    id
+                    nodeId
+                  }
+                }
+              }
+            }$$
+        )
+    );
+                           jsonb_pretty                            
+-------------------------------------------------------------------
+ {                                                                +
+     "data": null,                                                +
+     "errors": [                                                  +
+         {                                                        +
+             "message": "nodeId belongs to a different collection"+
+         }                                                        +
+     ]                                                            +
+ }
+(1 row)
+
+rollback;

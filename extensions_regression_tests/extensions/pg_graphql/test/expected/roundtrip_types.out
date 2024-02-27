@@ -1,0 +1,732 @@
+begin;
+    comment on schema public is '@graphql({"inflect_names": false})';
+    create type "Color" as enum ('RED', 'GREEN');
+    create table "MainType" (
+        id serial primary key,
+        "typeJson" json,
+        "typeJsonb" jsonb,
+        "typeBigint" bigint,
+        "typeText" text,
+        "typeVarchar" varchar,
+        "typeVarchar_n" varchar(10),
+        "typeChar" char,
+        "typeUuid" uuid,
+        "typeDate" date,
+        "typeTime" time,
+        "typeDatetime" timestamptz,
+        "typeEnum" "Color",
+        "typeNumeric" numeric(10,2),
+        "typeFloat" float,
+        "typeDouble" double precision,
+        "typeArrayEnum" "Color"[],
+        "typeArrayText" text[],
+        "typeArrayJson" json[],
+        "typeArrayNumeric" numeric(10,2)[]
+    );
+    -- insert works with large range of types
+    select jsonb_pretty(
+        graphql.resolve($$
+            mutation {
+              insertIntoMainTypeCollection (
+                objects: [
+                  {
+                    typeJson: "{\"a\": 1}"
+                    typeJsonb: "{\"a\": 1}"
+                    typeBigint: "1"
+                    typeText: "1a"
+                    typeVarchar: "1a"
+                    typeVarchar_n: "1a"
+                    typeChar: "1"
+                    typeUuid: "d4f47ef5-fb25-4d2a-83b2-d5fab114a2e6"
+                    typeDate: "1900-01-01"
+                    typeTime: "18:23"
+                    typeDatetime: "1900-01-01 18:00"
+                    typeEnum: RED
+                    typeFloat: 25.1
+                    typeDouble: 25
+                    typeNumeric: "25.1"
+                    typeArrayEnum: [RED, RED, GREEN]
+                    typeArrayText: ["a", "b"]
+                    typeArrayJson: ["{\"a\": 1}"]
+                    typeArrayNumeric: ["2.5"]
+
+                  }
+              ]
+              ) {
+                affectedCount
+                records{
+                  id
+                  typeJson
+                  typeJsonb
+                  typeBigint
+                  typeText
+                  typeVarchar
+                  typeVarchar_n
+                  typeChar
+                  typeUuid
+                  typeDate
+                  typeTime
+                  typeDatetime
+                  typeEnum
+                  typeFloat
+                  typeDouble
+                  typeNumeric
+                }
+              }
+            }
+        $$)
+    );
+                              jsonb_pretty                               
+-------------------------------------------------------------------------
+ {                                                                      +
+     "data": {                                                          +
+         "insertIntoMainTypeCollection": {                              +
+             "records": [                                               +
+                 {                                                      +
+                     "id": 1,                                           +
+                     "typeChar": "1",                                   +
+                     "typeDate": "1900-01-01",                          +
+                     "typeEnum": "RED",                                 +
+                     "typeJson": "{\"a\": 1}",                          +
+                     "typeText": "1a",                                  +
+                     "typeTime": "18:23:00",                            +
+                     "typeUuid": "d4f47ef5-fb25-4d2a-83b2-d5fab114a2e6",+
+                     "typeFloat": 25.1,                                 +
+                     "typeJsonb": "{\"a\": 1}",                         +
+                     "typeBigint": "1",                                 +
+                     "typeDouble": 25,                                  +
+                     "typeNumeric": "25.10",                            +
+                     "typeVarchar": "1a",                               +
+                     "typeDatetime": "1900-01-01T18:00:00-08:00",       +
+                     "typeVarchar_n": "1a"                              +
+                 }                                                      +
+             ],                                                         +
+             "affectedCount": 1                                         +
+         }                                                              +
+     }                                                                  +
+ }
+(1 row)
+
+    select * from "MainType";
+ id | typeJson | typeJsonb | typeBigint | typeText | typeVarchar | typeVarchar_n | typeChar |               typeUuid               |  typeDate  | typeTime |         typeDatetime         | typeEnum | typeNumeric | typeFloat | typeDouble |  typeArrayEnum  | typeArrayText | typeArrayJson  | typeArrayNumeric 
+----+----------+-----------+------------+----------+-------------+---------------+----------+--------------------------------------+------------+----------+------------------------------+----------+-------------+-----------+------------+-----------------+---------------+----------------+------------------
+  1 | {"a": 1} | {"a": 1}  |          1 | 1a       | 1a          | 1a            | 1        | d4f47ef5-fb25-4d2a-83b2-d5fab114a2e6 | 01-01-1900 | 18:23:00 | Mon Jan 01 18:00:00 1900 PST | RED      |       25.10 |      25.1 |         25 | {RED,RED,GREEN} | {a,b}         | {"{\"a\": 1}"} | {2.50}
+(1 row)
+
+    -- update works with large range of types
+    select jsonb_pretty(
+        graphql.resolve($$
+            mutation {
+              updateMainTypeCollection (
+                filter: {id: {eq: 1}}
+                set: {
+                    typeJson: "{\"b\": 2}"
+                    typeJsonb: "{\"b\": 2}"
+                    typeBigint: "1"
+                    typeText: "b2"
+                    typeVarchar: "b2"
+                    typeVarchar_n: "b2"
+                    typeChar: "b"
+                    typeUuid: "e4f47ef5-fb25-4d2a-83b2-d5fab114a2e6"
+                    typeDate: "2000-01-01"
+                    typeTime: "17:23"
+                    typeDatetime: "2000-01-01 18:00"
+                    typeEnum: GREEN
+                    typeFloat: 30
+                    typeDouble: 21.5
+                    typeNumeric: "0.1"
+                    typeArrayEnum: [GREEN],
+                    typeArrayText: ["c", "d"]
+                    typeArrayJson: ["{\"b\": 2}"]
+                    typeArrayNumeric: ["0.1"]
+                }
+              ) {
+                affectedCount
+                records{
+                  id
+                  typeJson
+                  typeJsonb
+                  typeBigint
+                  typeText
+                  typeVarchar
+                  typeVarchar_n
+                  typeChar
+                  typeUuid
+                  typeDate
+                  typeTime
+                  typeDatetime
+                  typeEnum
+                  typeFloat
+                  typeDouble
+                  typeNumeric
+                }
+              }
+            }
+        $$)
+    );
+                              jsonb_pretty                               
+-------------------------------------------------------------------------
+ {                                                                      +
+     "data": {                                                          +
+         "updateMainTypeCollection": {                                  +
+             "records": [                                               +
+                 {                                                      +
+                     "id": 1,                                           +
+                     "typeChar": "b",                                   +
+                     "typeDate": "2000-01-01",                          +
+                     "typeEnum": "GREEN",                               +
+                     "typeJson": "{\"b\": 2}",                          +
+                     "typeText": "b2",                                  +
+                     "typeTime": "17:23:00",                            +
+                     "typeUuid": "e4f47ef5-fb25-4d2a-83b2-d5fab114a2e6",+
+                     "typeFloat": 30,                                   +
+                     "typeJsonb": "{\"b\": 2}",                         +
+                     "typeBigint": "1",                                 +
+                     "typeDouble": 21.5,                                +
+                     "typeNumeric": "0.10",                             +
+                     "typeVarchar": "b2",                               +
+                     "typeDatetime": "2000-01-01T18:00:00-08:00",       +
+                     "typeVarchar_n": "b2"                              +
+                 }                                                      +
+             ],                                                         +
+             "affectedCount": 1                                         +
+         }                                                              +
+     }                                                                  +
+ }
+(1 row)
+
+    select * from "MainType";
+ id | typeJson | typeJsonb | typeBigint | typeText | typeVarchar | typeVarchar_n | typeChar |               typeUuid               |  typeDate  | typeTime |         typeDatetime         | typeEnum | typeNumeric | typeFloat | typeDouble | typeArrayEnum | typeArrayText | typeArrayJson  | typeArrayNumeric 
+----+----------+-----------+------------+----------+-------------+---------------+----------+--------------------------------------+------------+----------+------------------------------+----------+-------------+-----------+------------+---------------+---------------+----------------+------------------
+  1 | {"b": 2} | {"b": 2}  |          1 | b2       | b2          | b2            | b        | e4f47ef5-fb25-4d2a-83b2-d5fab114a2e6 | 01-01-2000 | 17:23:00 | Sat Jan 01 18:00:00 2000 PST | GREEN    |        0.10 |        30 |       21.5 | {GREEN}       | {c,d}         | {"{\"b\": 2}"} | {0.10}
+(1 row)
+
+    -- Select/OrderBy works with all types
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              mainTypeCollection (
+                orderBy: [
+                  {id: AscNullsLast}
+                  {typeBigint: AscNullsLast}
+                  {typeText: AscNullsLast}
+                  {typeVarchar: AscNullsLast}
+                  {typeVarchar_n: AscNullsLast}
+                  {typeUuid: AscNullsLast}
+                  {typeDate: AscNullsLast}
+                  {typeTime: AscNullsLast}
+                  {typeDatetime: AscNullsLast}
+                  {typeEnum: AscNullsLast}
+                  {typeFloat: AscNullsLast}
+                  {typeDouble: AscNullsLast}
+                  {typeNumeric: AscNullsLast}
+                ]
+              ) {
+                  pageInfo{
+                    startCursor
+                    endCursor
+                  }
+                  edges{
+                    node{
+                      id
+                    }
+                  }
+                }
+            }
+        $$)
+    );
+                                                                                                             jsonb_pretty                                                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {                                                                                                                                                                                                                                    +
+     "data": {                                                                                                                                                                                                                        +
+         "mainTypeCollection": {                                                                                                                                                                                                      +
+             "edges": [                                                                                                                                                                                                               +
+                 {                                                                                                                                                                                                                    +
+                     "node": {                                                                                                                                                                                                        +
+                         "id": 1                                                                                                                                                                                                      +
+                     }                                                                                                                                                                                                                +
+                 }                                                                                                                                                                                                                    +
+             ],                                                                                                                                                                                                                       +
+             "pageInfo": {                                                                                                                                                                                                            +
+                 "endCursor": "WzEsIDEsICJiMiIsICJiMiIsICJiMiIsICJlNGY0N2VmNS1mYjI1LTRkMmEtODNiMi1kNWZhYjExNGEyZTYiLCAiMjAwMC0wMS0wMSIsICIxNzoyMzowMCIsICIyMDAwLTAxLTAxVDE4OjAwOjAwLTA4OjAwIiwgIkdSRUVOIiwgMzAsIDIxLjUsIDAuMTAsIDFd", +
+                 "startCursor": "WzEsIDEsICJiMiIsICJiMiIsICJiMiIsICJlNGY0N2VmNS1mYjI1LTRkMmEtODNiMi1kNWZhYjExNGEyZTYiLCAiMjAwMC0wMS0wMSIsICIxNzoyMzowMCIsICIyMDAwLTAxLTAxVDE4OjAwOjAwLTA4OjAwIiwgIkdSRUVOIiwgMzAsIDIxLjUsIDAuMTAsIDFd"+
+             }                                                                                                                                                                                                                        +
+         }                                                                                                                                                                                                                            +
+     }                                                                                                                                                                                                                                +
+ }
+(1 row)
+
+    -- Delete/Filter works with all types
+    select jsonb_pretty(
+        graphql.resolve($$
+            mutation {
+              deleteFromMainTypeCollection (
+                filter: {
+                    typeBigint: {eq: "1"}
+                    typeText: {eq: "b2"}
+                    typeVarchar: {eq: "b2"}
+                    typeVarchar_n: {eq: "b2"}
+                    typeChar: {eq: "b"}
+                    typeUuid: {eq: "e4f47ef5-fb25-4d2a-83b2-d5fab114a2e6"}
+                    typeDate: {eq: "2000-01-01"}
+                    typeTime: {eq: "17:23"}
+                    typeDatetime: {eq: "2000-01-01 18:00"}
+                    typeEnum: {eq: GREEN}
+                    typeNumeric: {eq: 30}
+                    typeNumeric: {eq: 21.5}
+                    typeNumeric: {eq: "0.1"}
+                }
+              ) {
+                affectedCount
+                records{
+                  id
+                  typeJson
+                  typeJsonb
+                  typeBigint
+                  typeText
+                  typeVarchar
+                  typeVarchar_n
+                  typeChar
+                  typeUuid
+                  typeEnum
+                  typeFloat
+                  typeDouble
+                  typeNumeric
+                }
+              }
+            }
+        $$)
+    );
+                              jsonb_pretty                               
+-------------------------------------------------------------------------
+ {                                                                      +
+     "data": {                                                          +
+         "deleteFromMainTypeCollection": {                              +
+             "records": [                                               +
+                 {                                                      +
+                     "id": 1,                                           +
+                     "typeChar": "b",                                   +
+                     "typeEnum": "GREEN",                               +
+                     "typeJson": "{\"b\": 2}",                          +
+                     "typeText": "b2",                                  +
+                     "typeUuid": "e4f47ef5-fb25-4d2a-83b2-d5fab114a2e6",+
+                     "typeFloat": 30,                                   +
+                     "typeJsonb": "{\"b\": 2}",                         +
+                     "typeBigint": "1",                                 +
+                     "typeDouble": 21.5,                                +
+                     "typeNumeric": "0.10",                             +
+                     "typeVarchar": "b2",                               +
+                     "typeVarchar_n": "b2"                              +
+                 }                                                      +
+             ],                                                         +
+             "affectedCount": 1                                         +
+         }                                                              +
+     }                                                                  +
+ }
+(1 row)
+
+    -- Check field types
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "MainType") {
+            kind
+            fields {
+                name
+                type {
+                    kind
+                    name
+                    ofType {
+                        kind
+                        name
+                    }
+                }
+            }
+          }
+        }
+        $$)
+    );
+                  jsonb_pretty                   
+-------------------------------------------------
+ {                                              +
+     "data": {                                  +
+         "__type": {                            +
+             "kind": "OBJECT",                  +
+             "fields": [                        +
+                 {                              +
+                     "name": "nodeId",          +
+                     "type": {                  +
+                         "kind": "NON_NULL",    +
+                         "name": null,          +
+                         "ofType": {            +
+                             "kind": "SCALAR",  +
+                             "name": "ID"       +
+                         }                      +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "id",              +
+                     "type": {                  +
+                         "kind": "NON_NULL",    +
+                         "name": null,          +
+                         "ofType": {            +
+                             "kind": "SCALAR",  +
+                             "name": "Int"      +
+                         }                      +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeJson",        +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "JSON",        +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeJsonb",       +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "JSON",        +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeBigint",      +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "BigInt",      +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeText",        +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "String",      +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeVarchar",     +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "String",      +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeVarchar_n",   +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "String",      +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeChar",        +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "String",      +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeUuid",        +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "UUID",        +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeDate",        +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "Date",        +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeTime",        +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "Time",        +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeDatetime",    +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "Datetime",    +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeEnum",        +
+                     "type": {                  +
+                         "kind": "ENUM",        +
+                         "name": "Color",       +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeNumeric",     +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "BigFloat",    +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeFloat",       +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "Float",       +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeDouble",      +
+                     "type": {                  +
+                         "kind": "SCALAR",      +
+                         "name": "Float",       +
+                         "ofType": null         +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeArrayEnum",   +
+                     "type": {                  +
+                         "kind": "LIST",        +
+                         "name": null,          +
+                         "ofType": {            +
+                             "kind": "ENUM",    +
+                             "name": "Color"    +
+                         }                      +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeArrayText",   +
+                     "type": {                  +
+                         "kind": "LIST",        +
+                         "name": null,          +
+                         "ofType": {            +
+                             "kind": "SCALAR",  +
+                             "name": "String"   +
+                         }                      +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeArrayJson",   +
+                     "type": {                  +
+                         "kind": "LIST",        +
+                         "name": null,          +
+                         "ofType": {            +
+                             "kind": "SCALAR",  +
+                             "name": "JSON"     +
+                         }                      +
+                     }                          +
+                 },                             +
+                 {                              +
+                     "name": "typeArrayNumeric",+
+                     "type": {                  +
+                         "kind": "LIST",        +
+                         "name": null,          +
+                         "ofType": {            +
+                             "kind": "SCALAR",  +
+                             "name": "BigFloat" +
+                         }                      +
+                     }                          +
+                 }                              +
+             ]                                  +
+         }                                      +
+     }                                          +
+ }
+(1 row)
+
+    -- Check field types
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "MainTypeFilter") {
+            kind
+            inputFields {
+                name
+                type {
+                    kind
+                    name
+                    ofType {
+                        kind
+                        name
+                    }
+                }
+            }
+          }
+        }
+        $$)
+    );
+                   jsonb_pretty                    
+---------------------------------------------------
+ {                                                +
+     "data": {                                    +
+         "__type": {                              +
+             "kind": "INPUT_OBJECT",              +
+             "inputFields": [                     +
+                 {                                +
+                     "name": "id",                +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "IntFilter",     +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeBigint",        +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "BigIntFilter",  +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeText",          +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "StringFilter",  +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeVarchar",       +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "StringFilter",  +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeVarchar_n",     +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "StringFilter",  +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeChar",          +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "StringFilter",  +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeUuid",          +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "UUIDFilter",    +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeDate",          +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "DateFilter",    +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeTime",          +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "TimeFilter",    +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeDatetime",      +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "DatetimeFilter",+
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeEnum",          +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "ColorFilter",   +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeNumeric",       +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "BigFloatFilter",+
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeFloat",         +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "FloatFilter",   +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "typeDouble",        +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "FloatFilter",   +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "nodeId",            +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "IDFilter",      +
+                         "ofType": null           +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "and",               +
+                     "type": {                    +
+                         "kind": "LIST",          +
+                         "name": null,            +
+                         "ofType": {              +
+                             "kind": "NON_NULL",  +
+                             "name": null         +
+                         }                        +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "or",                +
+                     "type": {                    +
+                         "kind": "LIST",          +
+                         "name": null,            +
+                         "ofType": {              +
+                             "kind": "NON_NULL",  +
+                             "name": null         +
+                         }                        +
+                     }                            +
+                 },                               +
+                 {                                +
+                     "name": "not",               +
+                     "type": {                    +
+                         "kind": "INPUT_OBJECT",  +
+                         "name": "MainTypeFilter",+
+                         "ofType": null           +
+                     }                            +
+                 }                                +
+             ]                                    +
+         }                                        +
+     }                                            +
+ }
+(1 row)
+
+rollback;

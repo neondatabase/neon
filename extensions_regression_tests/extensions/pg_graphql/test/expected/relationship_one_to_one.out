@@ -1,0 +1,177 @@
+begin;
+    create table account(
+        id int primary key
+    );
+    create table address(
+        id int primary key,
+        -- unique constraint makes this a 1:1 relationship
+        account_id int not null unique references account(id)
+    );
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Account") {
+            kind
+            fields {
+              name
+              type {
+                name
+              }
+            }
+          }
+        }
+        $$)
+    );
+               jsonb_pretty                
+-------------------------------------------
+ {                                        +
+     "data": {                            +
+         "__type": {                      +
+             "kind": "OBJECT",            +
+             "fields": [                  +
+                 {                        +
+                     "name": "nodeId",    +
+                     "type": {            +
+                         "name": null     +
+                     }                    +
+                 },                       +
+                 {                        +
+                     "name": "id",        +
+                     "type": {            +
+                         "name": null     +
+                     }                    +
+                 },                       +
+                 {                        +
+                     "name": "address",   +
+                     "type": {            +
+                         "name": "Address"+
+                     }                    +
+                 }                        +
+             ]                            +
+         }                                +
+     }                                    +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Address") {
+            kind
+            fields {
+              name
+              type {
+                name
+                kind
+                ofType { name }
+              }
+            }
+          }
+        }
+        $$)
+    );
+                 jsonb_pretty                  
+-----------------------------------------------
+ {                                            +
+     "data": {                                +
+         "__type": {                          +
+             "kind": "OBJECT",                +
+             "fields": [                      +
+                 {                            +
+                     "name": "nodeId",        +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "ID"     +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "id",            +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "Int"    +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "accountId",     +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "Int"    +
+                         }                    +
+                     }                        +
+                 },                           +
+                 {                            +
+                     "name": "account",       +
+                     "type": {                +
+                         "kind": "NON_NULL",  +
+                         "name": null,        +
+                         "ofType": {          +
+                             "name": "Account"+
+                         }                    +
+                     }                        +
+                 }                            +
+             ]                                +
+         }                                    +
+     }                                        +
+ }
+(1 row)
+
+    insert into account(id) select * from generate_series(1, 10);
+    insert into address(id, account_id) select y.x, y.x from generate_series(1, 10) y(x);
+    -- Filter by Int
+    select jsonb_pretty(
+        graphql.resolve($$
+            {
+              accountCollection(filter: {id: {eq: 3}}) {
+                edges {
+                  node {
+                    id
+                    address {
+                      id
+                      account {
+                        id
+                        address {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        $$)
+    );
+                 jsonb_pretty                 
+----------------------------------------------
+ {                                           +
+     "data": {                               +
+         "accountCollection": {              +
+             "edges": [                      +
+                 {                           +
+                     "node": {               +
+                         "id": 3,            +
+                         "address": {        +
+                             "id": 3,        +
+                             "account": {    +
+                                 "id": 3,    +
+                                 "address": {+
+                                     "id": 3 +
+                                 }           +
+                             }               +
+                         }                   +
+                     }                       +
+                 }                           +
+             ]                               +
+         }                                   +
+     }                                       +
+ }
+(1 row)
+
+rollback;

@@ -48,7 +48,10 @@ RUN set -e \
         xz-utils \
         zlib1g-dev \
         zstd \
+        libipc-run-perl \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+
 
 # protobuf-compiler (protoc)
 ENV PROTOC_VERSION 25.1
@@ -106,6 +109,8 @@ RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JS
     && make install \
     && rm -rf ../lcov.tar.gz
 
+
+
 # Switch to nonroot user
 USER nonroot:nonroot
 WORKDIR /home/nonroot
@@ -155,6 +160,9 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 ENV RUSTC_WRAPPER=cachepot
+
+
+
 
 # Show versions
 RUN whoami \

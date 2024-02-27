@@ -1,0 +1,8 @@
+select graphql.resolve(
+    query:='{ anon1 } { anon2 }'
+)
+                                       resolve                                        
+--------------------------------------------------------------------------------------
+ {"errors": [{"message": "Anonymous operations must be the only defined operation"}]}
+(1 row)
+

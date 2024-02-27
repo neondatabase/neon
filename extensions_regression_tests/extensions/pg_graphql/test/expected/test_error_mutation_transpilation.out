@@ -1,0 +1,49 @@
+begin;
+    comment on schema public is '@graphql({"inflect_names": true})';
+    create table public.account(
+        id serial primary key,
+        first_name varchar(255) not null check (first_name not like '%_%')
+    );
+    -- Second mutation is supposed to generate an exception
+    select
+      jsonb_pretty(
+        graphql.resolve($$
+          mutation {
+            firstInsert: insertIntoAccountCollection(objects: [
+              { firstName: "name" }
+            ]) {
+              records {
+                id
+                firstName
+              }
+            }
+
+            secondInsert: insertIntoAccountCollection(objects: [
+              { firstName: "another_name" }
+            ]) {
+              records {
+                id
+                firstName
+              }
+            }
+          }
+        $$)
+      );
+                                                   jsonb_pretty                                                   
+------------------------------------------------------------------------------------------------------------------
+ {                                                                                                               +
+     "data": null,                                                                                               +
+     "errors": [                                                                                                 +
+         {                                                                                                       +
+             "message": "new row for relation \"account\" violates check constraint \"account_first_name_check\""+
+         }                                                                                                       +
+     ]                                                                                                           +
+ }
+(1 row)
+
+    select * from public.account;
+ id | first_name 
+----+------------
+(0 rows)
+
+rollback;

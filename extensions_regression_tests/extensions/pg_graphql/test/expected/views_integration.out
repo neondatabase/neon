@@ -1,0 +1,632 @@
+begin;
+    create table account(
+        id serial primary key,
+        email varchar(255) not null
+    );
+    insert into account(email) values ('foo'), ('bar'), ('baz');
+    create view person as
+        select * from account;
+    create table blog(
+        id serial primary key,
+        account_id integer not null, -- references account(id)
+        name varchar(255) not null
+    );
+    insert into blog(account_id, name)
+    values (1, 'Blog A'), (2, 'Blog B');
+    -- No entry for "personCollection" since it has no primary key
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Query") {
+            fields {
+              name
+            }
+          }
+        }
+        $$)
+    );
+                  jsonb_pretty                   
+-------------------------------------------------
+ {                                              +
+     "data": {                                  +
+         "__type": {                            +
+             "fields": [                        +
+                 {                              +
+                     "name": "accountCollection"+
+                 },                             +
+                 {                              +
+                     "name": "blogCollection"   +
+                 },                             +
+                 {                              +
+                     "name": "node"             +
+                 }                              +
+             ]                                  +
+         }                                      +
+     }                                          +
+ }
+(1 row)
+
+    comment on view person is e'
+    @graphql({
+        "primary_key_columns": ["id"]
+    })';
+    -- CRUD
+    -- "personCollection" exists because it now has a primary key
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Query") {
+            fields {
+              name
+            }
+          }
+        }
+        $$)
+    );
+                  jsonb_pretty                   
+-------------------------------------------------
+ {                                              +
+     "data": {                                  +
+         "__type": {                            +
+             "fields": [                        +
+                 {                              +
+                     "name": "accountCollection"+
+                 },                             +
+                 {                              +
+                     "name": "blogCollection"   +
+                 },                             +
+                 {                              +
+                     "name": "node"             +
+                 },                             +
+                 {                              +
+                     "name": "personCollection" +
+                 }                              +
+             ]                                  +
+         }                                      +
+     }                                          +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          personCollection (first: 2) {
+            edges {
+              node {
+                nodeId
+                email
+              }
+            }
+          }
+        }
+        $$)
+    );
+                             jsonb_pretty                             
+----------------------------------------------------------------------
+ {                                                                   +
+     "data": {                                                       +
+         "personCollection": {                                       +
+             "edges": [                                              +
+                 {                                                   +
+                     "node": {                                       +
+                         "email": "foo",                             +
+                         "nodeId": "WyJwdWJsaWMiLCAicGVyc29uIiwgMV0="+
+                     }                                               +
+                 },                                                  +
+                 {                                                   +
+                     "node": {                                       +
+                         "email": "bar",                             +
+                         "nodeId": "WyJwdWJsaWMiLCAicGVyc29uIiwgMl0="+
+                     }                                               +
+                 }                                                   +
+             ]                                                       +
+         }                                                           +
+     }                                                               +
+ }
+(1 row)
+
+    -- "person" is a simple view so it is insertable, updatable, and deletable
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Mutation") {
+            fields {
+              name
+            }
+          }
+        }
+        $$)
+    );
+                       jsonb_pretty                        
+-----------------------------------------------------------
+ {                                                        +
+     "data": {                                            +
+         "__type": {                                      +
+             "fields": [                                  +
+                 {                                        +
+                     "name": "deleteFromAccountCollection"+
+                 },                                       +
+                 {                                        +
+                     "name": "deleteFromBlogCollection"   +
+                 },                                       +
+                 {                                        +
+                     "name": "deleteFromPersonCollection" +
+                 },                                       +
+                 {                                        +
+                     "name": "insertIntoAccountCollection"+
+                 },                                       +
+                 {                                        +
+                     "name": "insertIntoBlogCollection"   +
+                 },                                       +
+                 {                                        +
+                     "name": "insertIntoPersonCollection" +
+                 },                                       +
+                 {                                        +
+                     "name": "updateAccountCollection"    +
+                 },                                       +
+                 {                                        +
+                     "name": "updateBlogCollection"       +
+                 },                                       +
+                 {                                        +
+                     "name": "updatePersonCollection"     +
+                 }                                        +
+             ]                                            +
+         }                                                +
+     }                                                    +
+ }
+(1 row)
+
+    -- insert
+    select jsonb_pretty(
+        graphql.resolve($$
+        mutation {
+          insertIntoPersonCollection (
+            objects: {email: "quz"}
+          ) {
+            affectedCount
+            records {
+              id
+              nodeId
+              email
+            }
+          }
+        }
+        $$)
+    );
+                           jsonb_pretty                           
+------------------------------------------------------------------
+ {                                                               +
+     "data": {                                                   +
+         "insertIntoPersonCollection": {                         +
+             "records": [                                        +
+                 {                                               +
+                     "id": 4,                                    +
+                     "email": "quz",                             +
+                     "nodeId": "WyJwdWJsaWMiLCAicGVyc29uIiwgNF0="+
+                 }                                               +
+             ],                                                  +
+             "affectedCount": 1                                  +
+         }                                                       +
+     }                                                           +
+ }
+(1 row)
+
+    -- update
+    select jsonb_pretty(
+        graphql.resolve($$
+        mutation {
+          updatePersonCollection (
+            set: {email: "thud"}
+            filter: {email: {eq: "quz"}}
+          ) {
+            affectedCount
+            records {
+              id
+              nodeId
+              email
+            }
+          }
+        }
+        $$)
+    );
+                           jsonb_pretty                           
+------------------------------------------------------------------
+ {                                                               +
+     "data": {                                                   +
+         "updatePersonCollection": {                             +
+             "records": [                                        +
+                 {                                               +
+                     "id": 4,                                    +
+                     "email": "thud",                            +
+                     "nodeId": "WyJwdWJsaWMiLCAicGVyc29uIiwgNF0="+
+                 }                                               +
+             ],                                                  +
+             "affectedCount": 1                                  +
+         }                                                       +
+     }                                                           +
+ }
+(1 row)
+
+    -- delete
+    select jsonb_pretty(
+        graphql.resolve($$
+        mutation {
+          deleteFromPersonCollection (
+            filter: {email: {eq: "thud"}}
+          ) {
+            affectedCount
+            records {
+              id
+              nodeId
+              email
+            }
+          }
+        }
+        $$)
+    );
+                           jsonb_pretty                           
+------------------------------------------------------------------
+ {                                                               +
+     "data": {                                                   +
+         "deleteFromPersonCollection": {                         +
+             "records": [                                        +
+                 {                                               +
+                     "id": 4,                                    +
+                     "email": "thud",                            +
+                     "nodeId": "WyJwdWJsaWMiLCAicGVyc29uIiwgNF0="+
+                 }                                               +
+             ],                                                  +
+             "affectedCount": 1                                  +
+         }                                                       +
+     }                                                           +
+ }
+(1 row)
+
+    -- Relationships with explicit names
+    comment on table blog is e'
+    @graphql({
+        "foreign_keys": [
+          {
+            "local_name": "blogs",
+            "local_columns": ["account_id"],
+            "foreign_name": "person",
+            "foreign_schema": "public",
+            "foreign_table": "person",
+            "foreign_columns": ["id"]
+          }
+        ]
+    })';
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Person") {
+            fields {
+              name
+            }
+          }
+        }
+        $$)
+    );
+             jsonb_pretty             
+--------------------------------------
+ {                                   +
+     "data": {                       +
+         "__type": {                 +
+             "fields": [             +
+                 {                   +
+                     "name": "nodeId"+
+                 },                  +
+                 {                   +
+                     "name": "id"    +
+                 },                  +
+                 {                   +
+                     "name": "email" +
+                 },                  +
+                 {                   +
+                     "name": "blogs" +
+                 }                   +
+             ]                       +
+         }                           +
+     }                               +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Blog") {
+            fields {
+              name
+            }
+          }
+        }
+        $$)
+    );
+              jsonb_pretty               
+-----------------------------------------
+ {                                      +
+     "data": {                          +
+         "__type": {                    +
+             "fields": [                +
+                 {                      +
+                     "name": "nodeId"   +
+                 },                     +
+                 {                      +
+                     "name": "id"       +
+                 },                     +
+                 {                      +
+                     "name": "accountId"+
+                 },                     +
+                 {                      +
+                     "name": "name"     +
+                 },                     +
+                 {                      +
+                     "name": "person"   +
+                 }                      +
+             ]                          +
+         }                              +
+     }                                  +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          personCollection (first: 2) {
+            edges {
+              node {
+                email
+                blogs(first: 1) {
+                  edges {
+                    node {
+                      name
+                      person {
+                        email
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        $$)
+    );
+                        jsonb_pretty                        
+------------------------------------------------------------
+ {                                                         +
+     "data": {                                             +
+         "personCollection": {                             +
+             "edges": [                                    +
+                 {                                         +
+                     "node": {                             +
+                         "blogs": {                        +
+                             "edges": [                    +
+                                 {                         +
+                                     "node": {             +
+                                         "name": "Blog A", +
+                                         "person": {       +
+                                             "email": "foo"+
+                                         }                 +
+                                     }                     +
+                                 }                         +
+                             ]                             +
+                         },                                +
+                         "email": "foo"                    +
+                     }                                     +
+                 },                                        +
+                 {                                         +
+                     "node": {                             +
+                         "blogs": {                        +
+                             "edges": [                    +
+                                 {                         +
+                                     "node": {             +
+                                         "name": "Blog B", +
+                                         "person": {       +
+                                             "email": "bar"+
+                                         }                 +
+                                     }                     +
+                                 }                         +
+                             ]                             +
+                         },                                +
+                         "email": "bar"                    +
+                     }                                     +
+                 }                                         +
+             ]                                             +
+         }                                                 +
+     }                                                     +
+ }
+(1 row)
+
+    -- Relationships with default names (check that inflection rules still work)
+    comment on table blog is e'
+    @graphql({
+        "foreign_keys": [
+          {
+            "local_columns": ["account_id"],
+            "foreign_schema": "public",
+            "foreign_table": "person",
+            "foreign_columns": ["id"]
+          }
+        ]
+    })';
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Person") {
+            fields {
+              name
+            }
+          }
+        }
+        $$)
+    );
+                 jsonb_pretty                 
+----------------------------------------------
+ {                                           +
+     "data": {                               +
+         "__type": {                         +
+             "fields": [                     +
+                 {                           +
+                     "name": "nodeId"        +
+                 },                          +
+                 {                           +
+                     "name": "id"            +
+                 },                          +
+                 {                           +
+                     "name": "email"         +
+                 },                          +
+                 {                           +
+                     "name": "blogCollection"+
+                 }                           +
+             ]                               +
+         }                                   +
+     }                                       +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          __type(name: "Blog") {
+            fields {
+              name
+            }
+          }
+        }
+        $$)
+    );
+              jsonb_pretty               
+-----------------------------------------
+ {                                      +
+     "data": {                          +
+         "__type": {                    +
+             "fields": [                +
+                 {                      +
+                     "name": "nodeId"   +
+                 },                     +
+                 {                      +
+                     "name": "id"       +
+                 },                     +
+                 {                      +
+                     "name": "accountId"+
+                 },                     +
+                 {                      +
+                     "name": "name"     +
+                 },                     +
+                 {                      +
+                     "name": "account"  +
+                 }                      +
+             ]                          +
+         }                              +
+     }                                  +
+ }
+(1 row)
+
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          personCollection (first: 2) {
+            edges {
+              node {
+                email
+                blogCollection(first: 1) {
+                  edges {
+                    node {
+                      name
+                      account {
+                        email
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        $$)
+    );
+                        jsonb_pretty                        
+------------------------------------------------------------
+ {                                                         +
+     "data": {                                             +
+         "personCollection": {                             +
+             "edges": [                                    +
+                 {                                         +
+                     "node": {                             +
+                         "email": "foo",                   +
+                         "blogCollection": {               +
+                             "edges": [                    +
+                                 {                         +
+                                     "node": {             +
+                                         "name": "Blog A", +
+                                         "account": {      +
+                                             "email": "foo"+
+                                         }                 +
+                                     }                     +
+                                 }                         +
+                             ]                             +
+                         }                                 +
+                     }                                     +
+                 },                                        +
+                 {                                         +
+                     "node": {                             +
+                         "email": "bar",                   +
+                         "blogCollection": {               +
+                             "edges": [                    +
+                                 {                         +
+                                     "node": {             +
+                                         "name": "Blog B", +
+                                         "account": {      +
+                                             "email": "bar"+
+                                         }                 +
+                                     }                     +
+                                 }                         +
+                             ]                             +
+                         }                                 +
+                     }                                     +
+                 }                                         +
+             ]                                             +
+         }                                                 +
+     }                                                     +
+ }
+(1 row)
+
+    -- Error states
+    -- Invalid structure of comment directive (columns not a list)
+    comment on table blog is e'
+    @graphql({
+        "foreign_keys": [
+          {
+            "local_columns": "account_id",
+            "foreign_schema": "public",
+            "foreign_table": "person",
+            "foreign_columns": ["id"]
+          }
+        ]
+    })';
+    select jsonb_pretty(
+        graphql.resolve($$
+        {
+          personCollection (first: 1) {
+            edges {
+              node {
+                email
+              }
+            }
+          }
+        }
+        $$)
+    );
+                                                              jsonb_pretty                                                               
+-----------------------------------------------------------------------------------------------------------------------------------------
+ {                                                                                                                                      +
+     "errors": [                                                                                                                        +
+         {                                                                                                                              +
+             "message": "Error while loading schema, check comment directives. invalid type: string \"account_id\", expected a sequence"+
+         }                                                                                                                              +
+     ]                                                                                                                                  +
+ }
+(1 row)
+
+rollback;

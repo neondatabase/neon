@@ -1,0 +1,210 @@
+SELECT '[1,2,3]'::vector + '[4,5,6]';
+ ?column? 
+----------
+ [5,7,9]
+(1 row)
+
+SELECT '[3e38]'::vector + '[3e38]';
+ERROR:  value out of range: overflow
+SELECT '[1,2,3]'::vector - '[4,5,6]';
+  ?column?  
+------------
+ [-3,-3,-3]
+(1 row)
+
+SELECT '[-3e38]'::vector - '[3e38]';
+ERROR:  value out of range: overflow
+SELECT '[1,2,3]'::vector * '[4,5,6]';
+ ?column?  
+-----------
+ [4,10,18]
+(1 row)
+
+SELECT '[1e37]'::vector * '[1e37]';
+ERROR:  value out of range: overflow
+SELECT '[1e-37]'::vector * '[1e-37]';
+ERROR:  value out of range: underflow
+SELECT vector_dims('[1,2,3]');
+ vector_dims 
+-------------
+           3
+(1 row)
+
+SELECT round(vector_norm('[1,1]')::numeric, 5);
+  round  
+---------
+ 1.41421
+(1 row)
+
+SELECT vector_norm('[3,4]');
+ vector_norm 
+-------------
+           5
+(1 row)
+
+SELECT vector_norm('[0,1]');
+ vector_norm 
+-------------
+           1
+(1 row)
+
+SELECT vector_norm('[3e37,4e37]')::real;
+ vector_norm 
+-------------
+       5e+37
+(1 row)
+
+SELECT l2_distance('[0,0]', '[3,4]');
+ l2_distance 
+-------------
+           5
+(1 row)
+
+SELECT l2_distance('[0,0]', '[0,1]');
+ l2_distance 
+-------------
+           1
+(1 row)
+
+SELECT l2_distance('[1,2]', '[3]');
+ERROR:  different vector dimensions 2 and 1
+SELECT l2_distance('[3e38]', '[-3e38]');
+ l2_distance 
+-------------
+    Infinity
+(1 row)
+
+SELECT inner_product('[1,2]', '[3,4]');
+ inner_product 
+---------------
+            11
+(1 row)
+
+SELECT inner_product('[1,2]', '[3]');
+ERROR:  different vector dimensions 2 and 1
+SELECT inner_product('[3e38]', '[3e38]');
+ inner_product 
+---------------
+      Infinity
+(1 row)
+
+SELECT cosine_distance('[1,2]', '[2,4]');
+ cosine_distance 
+-----------------
+               0
+(1 row)
+
+SELECT cosine_distance('[1,2]', '[0,0]');
+ cosine_distance 
+-----------------
+             NaN
+(1 row)
+
+SELECT cosine_distance('[1,1]', '[1,1]');
+ cosine_distance 
+-----------------
+               0
+(1 row)
+
+SELECT cosine_distance('[1,0]', '[0,2]');
+ cosine_distance 
+-----------------
+               1
+(1 row)
+
+SELECT cosine_distance('[1,1]', '[-1,-1]');
+ cosine_distance 
+-----------------
+               2
+(1 row)
+
+SELECT cosine_distance('[1,2]', '[3]');
+ERROR:  different vector dimensions 2 and 1
+SELECT cosine_distance('[1,1]', '[1.1,1.1]');
+ cosine_distance 
+-----------------
+               0
+(1 row)
+
+SELECT cosine_distance('[1,1]', '[-1.1,-1.1]');
+ cosine_distance 
+-----------------
+               2
+(1 row)
+
+SELECT cosine_distance('[3e38]', '[3e38]');
+ cosine_distance 
+-----------------
+             NaN
+(1 row)
+
+SELECT l1_distance('[0,0]', '[3,4]');
+ l1_distance 
+-------------
+           7
+(1 row)
+
+SELECT l1_distance('[0,0]', '[0,1]');
+ l1_distance 
+-------------
+           1
+(1 row)
+
+SELECT l1_distance('[1,2]', '[3]');
+ERROR:  different vector dimensions 2 and 1
+SELECT l1_distance('[3e38]', '[-3e38]');
+ l1_distance 
+-------------
+    Infinity
+(1 row)
+
+SELECT avg(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]']) v;
+    avg    
+-----------
+ [2,3.5,5]
+(1 row)
+
+SELECT avg(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]', NULL]) v;
+    avg    
+-----------
+ [2,3.5,5]
+(1 row)
+
+SELECT avg(v) FROM unnest(ARRAY[]::vector[]) v;
+ avg 
+-----
+ 
+(1 row)
+
+SELECT avg(v) FROM unnest(ARRAY['[1,2]'::vector, '[3]']) v;
+ERROR:  expected 2 dimensions, not 1
+SELECT avg(v) FROM unnest(ARRAY['[3e38]'::vector, '[3e38]']) v;
+   avg   
+---------
+ [3e+38]
+(1 row)
+
+SELECT vector_avg(array_agg(n)) FROM generate_series(1, 16002) n;
+ERROR:  vector cannot have more than 16000 dimensions
+SELECT sum(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]']) v;
+   sum    
+----------
+ [4,7,10]
+(1 row)
+
+SELECT sum(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]', NULL]) v;
+   sum    
+----------
+ [4,7,10]
+(1 row)
+
+SELECT sum(v) FROM unnest(ARRAY[]::vector[]) v;
+ sum 
+-----
+ 
+(1 row)
+
+SELECT sum(v) FROM unnest(ARRAY['[1,2]'::vector, '[3]']) v;
+ERROR:  different vector dimensions 2 and 1
+SELECT sum(v) FROM unnest(ARRAY['[3e38]'::vector, '[3e38]']) v;
+ERROR:  value out of range: overflow

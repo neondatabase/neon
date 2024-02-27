@@ -1,0 +1,9 @@
+select graphql.resolve(
+    query:='query ABC { anon }',
+    "operationName":='DEF'
+)
+                     resolve                      
+--------------------------------------------------
+ {"errors": [{"message": "Operation not found"}]}
+(1 row)
+
