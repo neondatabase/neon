@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     NeonEnvBuilder,
+    NeonPageserver,
     PgBin,
     VanillaPostgres,
     wait_for_last_flush_lsn,
@@ -839,11 +840,23 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     )
 
     # Deleting a stuck tenant should prompt it to go active
+    delete_lazy_activating(delete_tenant_id, env.pageserver)
+    tenant_ids.remove(delete_tenant_id)
+
+    # Check that all the stuck tenants proceed to active (apart from the one that deletes, and the one
+    # we detached)
+    wait_until(10, 1, all_active)
+    assert len(get_tenant_states()) == n_tenants - 2
+
+
+def delete_lazy_activating(delete_tenant_id: TenantId, pageserver: NeonPageserver):
+    pageserver_http = pageserver.http_client()
+
     with concurrent.futures.ThreadPoolExecutor() as executor:
         log.info("Starting background delete")
 
         def delete_tenant():
-            env.pageserver.http_client().tenant_delete(delete_tenant_id)
+            pageserver_http.tenant_delete(delete_tenant_id)
 
         background_delete = executor.submit(delete_tenant)
 
@@ -853,7 +866,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000 gen=[0-9a-f]+}}: Activating tenant \\(on-demand\\).*"
 
         def activated_on_demand():
-            assert env.pageserver.log_contains(log_match) is not None
+            assert pageserver.log_contains(log_match) is not None
 
         log.info(f"Waiting for activation message '{log_match}'")
         try:
@@ -868,12 +881,6 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
         # Poll for deletion to complete
         wait_tenant_status_404(pageserver_http, tenant_id=delete_tenant_id, iterations=40)
-        tenant_ids.remove(delete_tenant_id)
-
-    # Check that all the stuck tenants proceed to active (apart from the one that deletes, and the one
-    # we detached)
-    wait_until(10, 1, all_active)
-    assert len(get_tenant_states()) == n_tenants - 2
 
 
 def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
