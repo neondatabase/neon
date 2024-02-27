@@ -236,6 +236,7 @@ impl VectoredReadPlanner {
 
                     let prev_read_builder = current_read_builder.replace(next_read_builder);
 
+                    // `current_read_builder` is None in the first iteration of the outer loop
                     if let Some(read_builder) = prev_read_builder {
                         reads.push(read_builder.build());
                     }
