@@ -2820,8 +2820,7 @@ impl Timeline {
                                 (
                                     ReadableLayerDesc::Persistent {
                                         desc: (*layer).clone(),
-                                        lsn_floor,
-                                        lsn_ceil: cont_lsn,
+                                        lsn_range: lsn_floor..cont_lsn,
                                     },
                                     keyspace_accum.to_keyspace(),
                                 )

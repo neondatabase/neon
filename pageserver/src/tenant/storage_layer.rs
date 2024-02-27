@@ -209,8 +209,7 @@ impl Default for ValuesReconstructState {
 pub(crate) enum ReadableLayerDesc {
     Persistent {
         desc: PersistentLayerDesc,
-        lsn_floor: Lsn,
-        lsn_ceil: Lsn,
+        lsn_range: Range<Lsn>,
     },
     InMemory {
         handle: InMemoryLayerHandle,
@@ -309,14 +308,14 @@ impl Eq for ReadableLayerDescOrdered {}
 impl ReadableLayerDesc {
     pub(crate) fn get_lsn_floor(&self) -> Lsn {
         match self {
-            ReadableLayerDesc::Persistent { lsn_floor, .. } => *lsn_floor,
+            ReadableLayerDesc::Persistent { lsn_range, .. } => lsn_range.start,
             ReadableLayerDesc::InMemory { handle, .. } => handle.get_lsn_floor(),
         }
     }
 
     pub(crate) fn get_lsn_ceil(&self) -> Lsn {
         match self {
-            ReadableLayerDesc::Persistent { lsn_ceil, .. } => *lsn_ceil,
+            ReadableLayerDesc::Persistent { lsn_range, .. } => lsn_range.end,
             ReadableLayerDesc::InMemory { lsn_ceil, .. } => *lsn_ceil,
         }
     }
@@ -329,16 +328,12 @@ impl ReadableLayerDesc {
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         match self {
-            ReadableLayerDesc::Persistent {
-                desc,
-                lsn_floor,
-                lsn_ceil,
-            } => {
+            ReadableLayerDesc::Persistent { desc, lsn_range } => {
                 let layer = layer_manager.get_from_desc(desc);
                 layer
                     .get_values_reconstruct_data(
                         keyspace,
-                        *lsn_floor..*lsn_ceil,
+                        lsn_range.clone(),
                         reconstruct_state,
                         ctx,
                     )
