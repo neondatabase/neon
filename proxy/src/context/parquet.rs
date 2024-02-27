@@ -92,7 +92,7 @@ struct RequestData {
     /// Success is counted if we form a HTTP response with sql rows inside
     /// Or if we make it to proxy_pass
     success: bool,
-    /// Indicates id the cplane started the new compute node for this request.
+    /// Indicates if the cplane started the new compute node for this request.
     is_cold_start: Option<bool>,
     /// Tracks time from session start (HTTP request/libpq TCP handshake)
     /// Through to success/failure
