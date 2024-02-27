@@ -29,6 +29,9 @@ use super::{
 
 use utils::generation::Generation;
 
+#[cfg(test)]
+mod tests;
+
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
