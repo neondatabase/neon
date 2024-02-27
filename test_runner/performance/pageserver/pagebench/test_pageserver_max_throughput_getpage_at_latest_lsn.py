@@ -95,6 +95,11 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
 
 
 def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
+    """
+    Set up a template tenant which will be replicated by the test infra.
+    It's a pgbench tenant, initialized to a certain scale, and treated afterwards
+    with a repeat application of (pgbench simple-update workload, checkpoint, compact).
+    """
     # use a config that makes production of on-disk state timing-insensitive
     # as we ingest data into the tenant.
     config = {

@@ -44,8 +44,6 @@ def setup_pageserver_with_tenants(
 ) -> NeonEnv:
     """
     Utility function to set up a pageserver with a given number of identical tenants.
-    Each tenant is a pgbench tenant, initialize to a certain scale, and treated afterwards
-    with a repeat application of (pgbench simple-update workload, checkpoint, compact).
     """
 
     def doit(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
