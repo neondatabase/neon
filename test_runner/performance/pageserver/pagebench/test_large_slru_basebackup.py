@@ -64,11 +64,11 @@ def test_basebackup_with_high_slru_count(
 
     n_txns = 500000
 
-    def setup_wrapper(env: NeonEnv):
-        return setup_tenant_template(env, n_txns)
-
     env = setup_pageserver_with_tenants(
-        neon_env_builder, f"large_slru_count-{n_tenants}-{n_txns}", n_tenants, setup_wrapper
+        neon_env_builder,
+        f"large_slru_count-{n_tenants}-{n_txns}",
+        n_tenants,
+        lambda env: setup_tenant_template(env, n_txns),
     )
     run_benchmark(env, pg_bin, record, duration)
 
