@@ -2,7 +2,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Generate rust code from .proto protobuf.
     //
     // Note: we previously tried to use deterministic location at proto/ for
-    // easy location, but apparently interference with cachepot sometimes fails
+    // easy location, but apparently interference with sccache sometimes fails
     // the build then. Anyway, per cargo docs build script shouldn't output to
     // anywhere but $OUT_DIR.
     tonic_build::compile_protos("proto/broker.proto")
