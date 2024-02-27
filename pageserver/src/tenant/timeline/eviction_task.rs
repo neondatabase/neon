@@ -72,19 +72,21 @@ impl Timeline {
                     _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
                 };
 
-                let Ok(guard) = self_clone.gate.enter() else {
-                    return Ok(());
-                };
-
-                self_clone.eviction_task(cancel, &guard).await;
+                self_clone.eviction_task(cancel).await;
                 Ok(())
             },
         );
     }
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
-    async fn eviction_task(self: Arc<Self>, cancel: CancellationToken, guard: &GateGuard) {
+    async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
         use crate::tenant::tasks::random_init_delay;
+
+        // acquire the gate guard only once within a useful span
+        let Ok(guard) = self.gate.enter() else {
+            return;
+        };
+
         {
             let policy = self.get_eviction_policy();
             let period = match policy {
@@ -100,7 +102,9 @@ impl Timeline {
         let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
         loop {
             let policy = self.get_eviction_policy();
-            let cf = self.eviction_iteration(&policy, &cancel, guard, &ctx).await;
+            let cf = self
+                .eviction_iteration(&policy, &cancel, &guard, &ctx)
+                .await;
 
             match cf {
                 ControlFlow::Break(()) => break,
