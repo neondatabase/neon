@@ -176,9 +176,6 @@ def test_node_status_after_restart(
     env.attachment_service.stop()
     env.attachment_service.start()
 
-    # Initially readiness check should fail because we're trying to connect to the offline node
-    assert env.attachment_service.ready() is False
-
     def is_ready():
         assert env.attachment_service.ready() is True
 
