@@ -54,7 +54,7 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::pgdatadir_mapping::DirectoryKind;
+use crate::pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind};
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -172,6 +172,11 @@ pub struct TimelineResources {
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
+}
+
+pub(crate) struct AuxFilesState {
+    pub(crate) dir: Option<AuxFilesDirectory>,
+    pub(crate) n_deltas: usize,
 }
 
 pub struct Timeline {
@@ -357,6 +362,9 @@ pub struct Timeline {
     timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
+
+    /// Keep aux directory cache to avoid it's reconstruction on each update
+    pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
 }
 
 pub struct WalReceiverInfo {
@@ -1693,6 +1701,11 @@ impl Timeline {
                 gc_lock: tokio::sync::Mutex::default(),
 
                 timeline_get_throttle: resources.timeline_get_throttle,
+
+                aux_files: tokio::sync::Mutex::new(AuxFilesState {
+                    dir: None,
+                    n_deltas: 0,
+                }),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
