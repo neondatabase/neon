@@ -1687,7 +1687,6 @@ enum EvictionCancelled {
     LostToDownload,
     /// After eviction, there was a new layer access which cancelled the eviction.
     UpgradedBackOnAccess,
-    WantedDeleted,
 }
 
 impl EvictionCancelled {
@@ -1701,7 +1700,6 @@ impl EvictionCancelled {
             EvictionCancelled::AlreadyReinitialized => "already_reinitialized",
             EvictionCancelled::LostToDownload => "lost_to_download",
             EvictionCancelled::UpgradedBackOnAccess => "upgraded_back_on_access",
-            EvictionCancelled::WantedDeleted => "wanted_deleted",
         }
     }
 }
