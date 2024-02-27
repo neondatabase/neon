@@ -503,6 +503,7 @@ pub enum GetLogicalSizePriority {
 #[derive(enumset::EnumSetType)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
+    ForceImageLayerCreation,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1157,7 +1158,12 @@ impl Timeline {
                 // 3. Create new image layers for partitions that have been modified
                 // "enough".
                 let layers = self
-                    .create_image_layers(&partitioning, lsn, false, &image_ctx)
+                    .create_image_layers(
+                        &partitioning,
+                        lsn,
+                        flags.contains(CompactFlags::ForceImageLayerCreation),
+                        &image_ctx,
+                    )
                     .await
                     .map_err(anyhow::Error::from)?;
                 if let Some(remote_client) = &self.remote_client {
