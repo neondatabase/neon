@@ -132,6 +132,16 @@ files:
         query: |
           select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
 
+      - metric_name: connection_counts
+        type: gauge
+        help: 'Connection counts'
+        key_labels:
+          - datname
+          - state
+        values: [count]
+        query: |
+          select datname, state, count(*) as count from pg_stat_activity where state <> '' group by datname, state;
+
 build: |
   # Build cgroup-tools
   #
