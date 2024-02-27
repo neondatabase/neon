@@ -328,7 +328,7 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     assert_size_calculation_not_done()
 
     log.info(
-        f"try to delete the timeline using {deletion_method}, this should cancel size computation tasks and wait for them to finish"
+        f"delete the timeline using {deletion_method}, this should cancel size computation tasks and wait for them to finish"
     )
 
     if deletion_method == "tenant_detach":
@@ -337,6 +337,9 @@ def test_timeline_initial_logical_size_calculation_cancellation(
         timeline_delete_wait_completed(client, tenant_id, timeline_id)
     else:
         raise RuntimeError(deletion_method)
+
+    # timeline-calculate-logical-size-pause is still paused, but it doesn't
+    # matter because it's a pausable_failpoint, which can be cancelled by drop.
 
 
 def test_timeline_physical_size_init(neon_env_builder: NeonEnvBuilder):
