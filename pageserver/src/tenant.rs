@@ -200,6 +200,13 @@ pub(super) struct AttachedTenantConf {
 }
 
 impl AttachedTenantConf {
+    fn new(tenant_conf: TenantConfOpt, location: AttachedLocationConfig) -> Self {
+        Self {
+            tenant_conf,
+            location,
+        }
+    }
+
     fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => Ok(Self {

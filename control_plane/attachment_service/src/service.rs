@@ -1361,7 +1361,8 @@ impl Service {
         for (tenant_shard_id, new_gen) in incremented_generations {
             response.tenants.push(ReAttachResponseTenant {
                 id: tenant_shard_id,
-                gen: new_gen.into().unwrap(),
+                gen: new_gen.into(),
+                mode: LocationConfigMode::AttachedSingle,
             });
             // Apply the new generation number to our in-memory state
             let shard_state = tenants.get_mut(&tenant_shard_id);
