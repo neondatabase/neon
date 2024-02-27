@@ -36,11 +36,12 @@ use bytes::{Bytes, BytesMut};
 use pageserver_api::key::key_to_rel_block;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::TenantShardId;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
 use utils::lsn::Lsn;
+use utils::sync::heavier_once_cell;
 
 ///
 /// This is the real implementation that uses a Postgres process to
@@ -53,7 +54,7 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    redo_process: RwLock<Option<Arc<process::WalRedoProcess>>>,
+    redo_process: heavier_once_cell::OnceCell<Arc<process::WalRedoProcess>>,
 }
 
 ///
@@ -101,6 +102,7 @@ impl PostgresRedoManager {
                         self.conf.wal_redo_timeout,
                         pg_version,
                     )
+                    .await
                 };
                 img = Some(result?);
 
@@ -121,10 +123,11 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
+            .await
         }
     }
 
-    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
+    pub(crate) async fn status(&self) -> Option<WalRedoManagerStatus> {
         Some(WalRedoManagerStatus {
             last_redo_at: {
                 let at = *self.last_redo_at.lock().unwrap();
@@ -134,7 +137,7 @@ impl PostgresRedoManager {
                     chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
                 })
             },
-            pid: self.redo_process.read().unwrap().as_ref().map(|p| p.id()),
+            pid: self.redo_process.get_mut().await.map(|p| p.id()),
         })
     }
 }
@@ -152,30 +155,41 @@ impl PostgresRedoManager {
             tenant_shard_id,
             conf,
             last_redo_at: std::sync::Mutex::default(),
-            redo_process: RwLock::new(None),
+            redo_process: heavier_once_cell::OnceCell::default(),
         }
     }
 
     /// This type doesn't have its own background task to check for idleness: we
     /// rely on our owner calling this function periodically in its own housekeeping
     /// loops.
-    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+    pub(crate) async fn maybe_quiesce(&self, idle_timeout: Duration) {
         if let Ok(g) = self.last_redo_at.try_lock() {
             if let Some(last_redo_at) = *g {
                 if last_redo_at.elapsed() >= idle_timeout {
                     drop(g);
-                    let mut guard = self.redo_process.write().unwrap();
-                    *guard = None;
+                    // fallthrough
+                } else {
+                    return;
                 }
+            } else {
+                return;
             }
+        } else {
+            return;
         }
+        drop(
+            self.redo_process
+                .get_mut()
+                .await
+                .map(|mut guard| guard.take_and_deinit()),
+        );
     }
 
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
     #[allow(clippy::too_many_arguments)]
-    fn apply_batch_postgres(
+    async fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
@@ -192,46 +206,33 @@ impl PostgresRedoManager {
         let mut n_attempts = 0u32;
         loop {
             // launch the WAL redo process on first use
-            let proc: Arc<process::WalRedoProcess> = {
-                let proc_guard = self.redo_process.read().unwrap();
-                match &*proc_guard {
-                    None => {
-                        // "upgrade" to write lock to launch the process
-                        drop(proc_guard);
-                        let mut proc_guard = self.redo_process.write().unwrap();
-                        match &*proc_guard {
-                            None => {
-                                let start = Instant::now();
-                                let proc = Arc::new(
-                                    process::WalRedoProcess::launch(
-                                        self.conf,
-                                        self.tenant_shard_id,
-                                        pg_version,
-                                    )
-                                    .context("launch walredo process")?,
-                                );
-                                let duration = start.elapsed();
-                                WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM
-                                    .observe(duration.as_secs_f64());
-                                info!(
-                                    duration_ms = duration.as_millis(),
-                                    pid = proc.id(),
-                                    "launched walredo process"
-                                );
-                                *proc_guard = Some(Arc::clone(&proc));
-                                proc
-                            }
-                            Some(proc) => Arc::clone(proc),
-                        }
-                    }
-                    Some(proc) => Arc::clone(proc),
-                }
-            };
+            let proc_once_cell_guard_ref = self
+                .redo_process
+                .get_or_init(|init_permit| async move {
+                    let start = Instant::now();
+                    let proc = Arc::new(
+                        process::WalRedoProcess::launch(
+                            self.conf,
+                            self.tenant_shard_id,
+                            pg_version,
+                        )
+                        .context("launch walredo process")?,
+                    );
+                    let duration = start.elapsed();
+                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                    info!(
+                        duration_ms = duration.as_millis(),
+                        pid = proc.id(),
+                        "launched walredo process"
+                    );
+                    anyhow::Ok((proc, init_permit))
+                })
+                .await?;
 
             let started_at = std::time::Instant::now();
 
             // Relational WAL records are applied using wal-redo-postgres
-            let result = proc
+            let result = proc_once_cell_guard_ref
                 .apply_wal_records(rel, blknum, &base_img, records, wal_redo_timeout)
                 .context("apply_wal_records");
 
@@ -274,33 +275,30 @@ impl PostgresRedoManager {
                 );
                 // Avoid concurrent callers hitting the same issue.
                 // We can't prevent it from happening because we want to enable parallelism.
-                {
-                    let mut guard = self.redo_process.write().unwrap();
-                    match &*guard {
-                        Some(current_field_value) => {
-                            if Arc::ptr_eq(current_field_value, &proc) {
-                                // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
-                                *guard = None;
-                            }
+                let proc_clone = Arc::clone(&proc_once_cell_guard_ref);
+                drop(proc_once_cell_guard_ref); // otherwise, the .get_mut() in the next line would deadlock with us holding the guard
+                match self.redo_process.get_mut().await {
+                    Some(mut guard) => {
+                        if Arc::ptr_eq(&*guard, &proc_clone) {
+                            // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
+                            drop(guard.take_and_deinit());
                         }
-                        None => {
-                            // Another thread was faster to observe the error, and already took the process out of rotation.
-                        }
+                    }
+                    None => {
+                        // Another thread was faster to observe the error, and already took the process out of rotation.
                     }
                 }
                 // NB: there may still be other concurrent threads using `proc`.
                 // The last one will send SIGKILL when the underlying Arc reaches refcount 0.
-                // NB: it's important to drop(proc) after drop(guard). Otherwise we'd keep
-                // holding the lock while waiting for the process to exit.
                 // NB: the drop impl blocks the current threads with a wait() system call for
-                // the child process. We dropped the `guard` above so that other threads aren't
-                // affected. But, it's good that the current thread _does_ block to wait.
-                // If we instead deferred the waiting into the background / to tokio, it could
-                // happen that if walredo always fails immediately, we spawn processes faster
-                // than we can SIGKILL & `wait` for them to exit. By doing it the way we do here,
-                // we limit this risk of run-away to at most $num_runtimes * $num_executor_threads.
+                // the child process. We usually avoid stalling the executor thread that way,
+                // but, here it's actually somewhat good. If we instead deferred the waiting
+                // into the background / to tokio, it could happen that if walredo always fails
+                // immediately, we spawn processes faster han we can SIGKILL & `wait` for them to exit.
+                // By doing it the way we do here, e limit this risk of run-away to at most
+                // $num_runtimes * $num_executor_threads.
                 // This probably needs revisiting at some later point.
-                drop(proc);
+                drop(proc_clone);
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
             }
@@ -498,6 +496,13 @@ mod tests {
         }
         fn span(&self) -> tracing::Span {
             tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
+        }
+    }
+
+    impl Drop for RedoHarness {
+        fn drop(&mut self) {
+            self.span()
+                .in_scope(|| tracing::info!("RedoHarness dropping"));
         }
     }
 }
