@@ -1217,3 +1217,80 @@ jobs:
 
             time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/${PREFIX}/${FILENAME}
           done
+
+  compute-node-image-merged-base:
+    needs: [ check-permissions, build-buildtools-image, tag ]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ v14, v15, v16 ]
+    defaults:
+      run:
+        shell: sh -eu {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > ~/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              }
+            }
+          EOF
+
+      - name: Build merged image base
+        run: |
+          docker image build . -f Dockerfile.compute-node-simple -t neondatabase/tmp-compute-node-merged-base-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
+            --build-arg PG_VERSION=${{ matrix.version }} \
+            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}} \
+            --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
+          docker image push neondatabase/tmp-compute-node-merged-base-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+  compute-node-image-merged:
+    needs: [ tag, compute-node-image-merged-base ]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: sh -eu {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          echo ~
+          cat <<-EOF > ~/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              }
+            }
+          EOF
+
+      - name: Build merged image
+        run: |
+          docker image build . -f Dockerfile.compute-node-merged -t neondatabase/tmp-compute-node-merged:${{needs.tag.outputs.build-tag}} \
+            --build-arg TAG=${{needs.tag.outputs.build-tag}}
+          docker image push neondatabase/tmp-compute-node-merged:${{needs.tag.outputs.build-tag}}
