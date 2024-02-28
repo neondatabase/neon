@@ -44,7 +44,7 @@ pub(super) async fn authenticate(
             )
             .await
             .map_err(|e| {
-                warn!("error processing scram messages error = authentication timed out, execution time exeeded {} seconds", config.scram_protocol_timeout.as_secs());
+                warn!("error processing scram messages error = authentication timed out, execution time exceeded {} seconds", config.scram_protocol_timeout.as_secs());
                 auth::AuthError::user_timeout(e)
             })??;
 
