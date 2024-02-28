@@ -8,9 +8,9 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     tenant_get_shards,
-    wait_for_last_record_lsn,
 )
 from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
@@ -70,7 +70,7 @@ def wait_for_wal_ingest_metric(pageserver_http: PageserverHttpClient) -> float:
     # The metric gets initialised on the first update.
     # Retry a few times, but return 0 if it's stable.
     try:
-        return wait_until(3, 0.5, query)
+        return float(wait_until(3, 0.5, query))
     except Exception:
         return 0
 
