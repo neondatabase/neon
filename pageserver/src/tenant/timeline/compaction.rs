@@ -75,14 +75,13 @@ impl Timeline {
 
         let keyspace = self.collect_keyspace(end_lsn, ctx).await?;
         let mut adaptor = TimelineAdaptor::new(self, (end_lsn, keyspace));
-        let ctx_adaptor = RequestContextAdaptor(ctx.clone());
 
         pageserver_compaction::compact_tiered::compact_tiered(
             &mut adaptor,
             end_lsn,
             target_file_size,
             fanout,
-            &ctx_adaptor,
+            &ctx,
         )
         .await?;
 
@@ -143,13 +142,13 @@ impl CompactionJobExecutor for TimelineAdaptor {
     type DeltaLayer = ResidentDeltaLayer;
     type ImageLayer = ResidentImageLayer;
 
-    type RequestContext = RequestContextAdaptor;
+    type RequestContext = crate::context::RequestContext;
 
     async fn get_layers(
         &mut self,
         key_range: &Range<Key>,
         lsn_range: &Range<Lsn>,
-        _ctx: &RequestContextAdaptor,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<Vec<OwnArc<PersistentLayerDesc>>> {
         self.flush_updates().await?;
 
@@ -170,7 +169,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         &mut self,
         key_range: &Range<Key>,
         lsn: Lsn,
-        _ctx: &RequestContextAdaptor,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Range<Key>>> {
         if lsn == self.keyspace.0 {
             Ok(pageserver_compaction::helpers::intersect_keyspace(
@@ -206,7 +205,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         &mut self,
         lsn: Lsn,
         key_range: &Range<Key>,
-        ctx: &RequestContextAdaptor,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         Ok(self.create_image_impl(lsn, key_range, ctx).await?)
     }
@@ -216,7 +215,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         lsn_range: &Range<Lsn>,
         key_range: &Range<Key>,
         input_layers: &[ResidentDeltaLayer],
-        ctx: &RequestContextAdaptor,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
 
@@ -287,7 +286,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
     async fn delete_layer(
         &mut self,
         layer: &OwnArc<PersistentLayerDesc>,
-        _ctx: &RequestContextAdaptor,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         self.layers_to_delete.push(layer.clone().0);
         Ok(())
@@ -299,7 +298,7 @@ impl TimelineAdaptor {
         &mut self,
         lsn: Lsn,
         key_range: &Range<Key>,
-        ctx: &RequestContextAdaptor,
+        ctx: &RequestContext,
     ) -> Result<(), PageReconstructError> {
         let timer = self.timeline.metrics.create_images_time_histo.start_timer();
 
@@ -361,17 +360,7 @@ impl TimelineAdaptor {
     }
 }
 
-pub struct RequestContextAdaptor(pub RequestContext);
-
-impl std::ops::Deref for RequestContextAdaptor {
-    type Target = RequestContext;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl CompactionRequestContext for RequestContextAdaptor {}
+impl CompactionRequestContext for crate::context::RequestContext {}
 
 #[derive(Debug, Clone)]
 pub struct OwnArc<T>(pub Arc<T>);
@@ -451,7 +440,7 @@ impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
 
     async fn load_keys<'a>(
         &self,
-        ctx: &RequestContextAdaptor,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         self.0.load_keys(ctx).await
     }
