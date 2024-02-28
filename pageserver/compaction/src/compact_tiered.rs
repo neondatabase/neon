@@ -248,7 +248,6 @@ enum CompactionStrategy {
     CreateImage,
 }
 
-#[allow(dead_code)] // Todo
 struct CompactionJob<E: CompactionJobExecutor> {
     key_range: Range<E::Key>,
     lsn_range: Range<Lsn>,
