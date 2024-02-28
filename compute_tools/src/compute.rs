@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use tokio;
 use tokio_postgres;
@@ -777,25 +778,34 @@ impl ComputeNode {
         let connstr = self.connstr.clone();
         let mut client = match Client::connect(connstr.as_str(), NoTls) {
             Err(e) => {
-                info!(
-                    "cannot connect to postgres: {}, retrying with `zenith_admin` username",
-                    e
-                );
-                let mut zenith_admin_connstr = connstr.clone();
+                if let Some(code) = e.code() {
+                    if code == &SqlState::INVALID_PASSWORD {
+                        // connect with zenith_admin if cloud_admin could not authenticate
+                        info!(
+                            "cannot connect to postgres: {}, retrying with `zenith_admin` username",
+                            e
+                        );
+                        let mut zenith_admin_connstr = connstr.clone();
 
-                zenith_admin_connstr
-                    .set_username("zenith_admin")
-                    .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
+                        zenith_admin_connstr
+                            .set_username("zenith_admin")
+                            .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
 
-                let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
-                // Disable forwarding so that users don't get a cloud_admin role
-                client.simple_query("SET neon.forward_ddl = false")?;
-                client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
-                client.simple_query("GRANT zenith_admin TO cloud_admin")?;
-                drop(client);
+                        let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
+                        // Disable forwarding so that users don't get a cloud_admin role
+                        client.simple_query("SET neon.forward_ddl = false")?;
+                        client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
+                        client.simple_query("GRANT zenith_admin TO cloud_admin")?;
+                        drop(client);
 
-                // reconnect with connstring with expected name
-                Client::connect(connstr.as_str(), NoTls)?
+                        // reconnect with connstring with expected name
+                        Client::connect(connstr.as_str(), NoTls)?
+                    } else {
+                        return Err(e.into());
+                    }
+                } else {
+                    return Err(e.into());
+                }
             }
             Ok(client) => client,
         };
