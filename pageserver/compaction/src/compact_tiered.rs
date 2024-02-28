@@ -63,7 +63,7 @@ pub async fn compact_tiered<E: CompactionJobExecutor>(
         );
 
         // Identify the range of LSNs that belong to this level. We assume that
-        // each file in this level span an LSN range up to 1.75x target file
+        // each file in this level spans an LSN range up to 1.75x target file
         // size. That should give us enough slop that if we created a slightly
         // oversized L0 layer, e.g. because flushing the in-memory layer was
         // delayed for some reason, we don't consider the oversized layer to
@@ -345,7 +345,7 @@ where
     ///
     /// TODO: Currently, this is called exactly once for the level, and we
     /// decide whether to create new image layers to cover the whole level, or
-    /// write a new set of delta. In the future, this should try to partition
+    /// write a new set of deltas. In the future, this should try to partition
     /// the key space, and make the decision separately for each partition.
     async fn divide_job(&mut self, job_id: JobId, ctx: &E::RequestContext) -> anyhow::Result<()> {
         let job = &self.jobs[job_id.0];
