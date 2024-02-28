@@ -559,33 +559,19 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         let mut evict_layers = std::pin::pin!(evict_layers);
 
         let maximum_expected = std::time::Duration::from_secs(10);
-        let nag_every = std::time::Duration::from_secs(2);
 
-        match tokio::time::timeout(maximum_expected, &mut evict_layers).await {
-            Ok(tuple) => return tuple,
-            Err(_timeout) => {
-                tracing::info!(
-                    elapsed_ms = started_at.elapsed().as_millis(),
-                    "still ongoing"
-                );
-            }
+        let res = tokio::time::timeout(maximum_expected, &mut evict_layers).await;
+        let tuple = if let Ok(tuple) = res {
+            tuple
+        } else {
+            let elapsed = started_at.elapsed();
+            tracing::info!(elapsed_ms = elapsed.as_millis(), "still ongoing");
+            evict_layers.await
         };
 
-        loop {
-            let res = tokio::time::timeout(nag_every, &mut evict_layers).await;
-
-            let elapsed_ms = started_at.elapsed().as_millis();
-
-            match res {
-                Ok(tuple) => {
-                    tracing::info!(%elapsed_ms, "completed");
-                    return tuple;
-                }
-                Err(_timeout) => {
-                    tracing::info!(%elapsed_ms, "still ongoing");
-                }
-            }
-        }
+        let elapsed = started_at.elapsed();
+        tracing::info!(elapsed_ms = elapsed.as_millis(), "completed");
+        tuple
     };
 
     let evict_layers =
