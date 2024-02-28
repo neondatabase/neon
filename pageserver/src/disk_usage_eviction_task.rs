@@ -855,10 +855,6 @@ async fn collect_eviction_candidates(
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
             debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
 
-            METRICS
-                .tenant_layer_count
-                .observe(info.resident_layers.len() as f64);
-
             tenant_candidates.extend(info.resident_layers.into_iter());
             max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
 
@@ -923,6 +919,10 @@ async fn collect_eviction_candidates(
 
                     (partition, candidate)
                 });
+
+        METRICS
+            .tenant_layer_count
+            .observe(tenant_candidates.len() as f64);
 
         candidates.extend(tenant_candidates);
     }
