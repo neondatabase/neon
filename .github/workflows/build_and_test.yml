@@ -937,6 +937,7 @@ jobs:
           fi
 
       - name: Verify docker-compose example
+        timeout-minutes: 20
         run: env REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
 
       - name: Print logs and clean up
