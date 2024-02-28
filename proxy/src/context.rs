@@ -162,9 +162,7 @@ impl RequestMonitoring {
         self.success = true;
     }
 
-    pub fn log(self) -> Span {
-        self.span.clone()
-    }
+    pub fn log(self) {}
 }
 
 impl Drop for RequestMonitoring {

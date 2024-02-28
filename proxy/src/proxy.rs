@@ -107,6 +107,7 @@ pub async fn task_main(
             };
 
             let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+            let span = ctx.span.clone();
 
             let res = handle_client(
                 config,
@@ -116,13 +117,14 @@ pub async fn task_main(
                 ClientMode::Tcp,
                 endpoint_rate_limiter,
             )
+            .instrument(span.clone())
             .await;
 
             match res {
                 Err(e) => {
                     // todo: log and push to ctx the error kind
                     ctx.set_error_kind(e.get_error_kind());
-                    let span = ctx.log();
+                    ctx.log();
                     error!(parent: &span, "per-client task finished with an error: {e:#}");
                 }
                 Ok(None) => {
@@ -131,7 +133,7 @@ pub async fn task_main(
                 }
                 Ok(Some(p)) => {
                     ctx.set_success();
-                    let span = ctx.log();
+                    ctx.log();
                     match p.proxy_pass().instrument(span.clone()).await {
                         Ok(()) => {}
                         Err(e) => {
@@ -228,10 +230,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
-    info!(
-        protocol = ctx.protocol,
-        "handling interactive connection from client"
-    );
+    info!("handling interactive connection from client");
 
     let proto = ctx.protocol;
     let _client_gauge = NUM_CLIENT_CONNECTION_GAUGE
