@@ -615,6 +615,10 @@ impl TenantState {
             return None;
         };
 
+        // Advance the sequence before spawning a reconciler, so that sequence waiters
+        // can distinguish between before+after the reconcile completes.
+        self.sequence = self.sequence.next();
+
         let reconciler_cancel = cancel.child_token();
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
