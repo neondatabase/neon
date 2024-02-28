@@ -21,7 +21,6 @@ use tokio_postgres::ReadyForQueryStatus;
 use tokio_postgres::Transaction;
 use tracing::error;
 use tracing::info;
-use tracing::instrument;
 use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
@@ -291,7 +290,7 @@ pub async fn handle(
             // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
 
             let message = format!(
-                "HTTP-Connection timed out, execution time exeeded {} seconds",
+                "HTTP-Connection timed out, execution time exceeded {} seconds",
                 config.http_config.request_timeout.as_secs()
             );
             error!(message);
@@ -309,14 +308,6 @@ pub async fn handle(
     Ok(response)
 }
 
-#[instrument(
-    name = "sql-over-http",
-    skip_all,
-    fields(
-        pid = tracing::field::Empty,
-        conn_id = tracing::field::Empty
-    )
-)]
 async fn handle_inner(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
@@ -326,10 +317,7 @@ async fn handle_inner(
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[ctx.protocol])
         .guard();
-    info!(
-        protocol = ctx.protocol,
-        "handling interactive connection from client"
-    );
+    info!("handling interactive connection from client");
 
     //
     // Determine the destination and connection params
@@ -337,11 +325,7 @@ async fn handle_inner(
     let headers = request.headers();
     // TLS config should be there.
     let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
-    info!(
-        user = conn_info.user_info.user.as_str(),
-        project = conn_info.user_info.endpoint.as_str(),
-        "credentials"
-    );
+    info!(user = conn_info.user_info.user.as_str(), "credentials");
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
