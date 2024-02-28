@@ -144,7 +144,7 @@ impl ComputeUserInfoMaybeEndpoint {
             ctx.set_endpoint_id(ep.clone());
         }
 
-        info!(%user, project = endpoint.as_deref(), "credentials");
+        info!(%user, "credentials");
         if sni.is_some() {
             info!("Connection with sni");
             NUM_CONNECTION_ACCEPTED_BY_SNI
