@@ -548,7 +548,18 @@ impl VirtualFile {
         B: IoBufMut + Send,
     {
         let (buf, res) =
-            read_exact_at_impl(buf, offset, |buf, offset| self.read_at(buf, offset)).await;
+            read_exact_at_impl(buf, offset, None, |buf, offset| self.read_at(buf, offset)).await;
+        res.map(|()| buf)
+    }
+
+    pub async fn read_exact_at_n<B>(&self, buf: B, offset: u64, count: usize) -> Result<B, Error>
+    where
+        B: IoBufMut + Send,
+    {
+        let (buf, res) = read_exact_at_impl(buf, offset, Some(count), |buf, offset| {
+            self.read_at(buf, offset)
+        })
+        .await;
         res.map(|()| buf)
     }
 
@@ -682,6 +693,7 @@ impl VirtualFile {
 pub async fn read_exact_at_impl<B, F, Fut>(
     buf: B,
     mut offset: u64,
+    count: Option<usize>,
     mut read_at: F,
 ) -> (B, std::io::Result<()>)
 where
@@ -689,7 +701,15 @@ where
     F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
     Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
 {
-    let mut buf: tokio_epoll_uring::Slice<B> = buf.slice_full(); // includes all the uninitialized memory
+    let mut buf: tokio_epoll_uring::Slice<B> = match count {
+        Some(count) => {
+            assert!(count <= buf.bytes_total());
+            assert!(count > 0);
+            buf.slice(..count) // may include uninitialized memory
+        }
+        None => buf.slice_full(), // includes all the uninitialized memory
+    };
+
     while buf.bytes_total() != 0 {
         let res;
         (buf, res) = read_at(buf, offset).await;
@@ -779,7 +799,7 @@ mod test_read_exact_at_impl {
                 result: Ok(vec![b'a', b'b', b'c', b'd', b'e']),
             }]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -789,12 +809,32 @@ mod test_read_exact_at_impl {
     }
 
     #[tokio::test]
+    async fn test_with_count() {
+        let buf = Vec::with_capacity(5);
+        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
+            expectations: VecDeque::from(vec![Expectation {
+                offset: 0,
+                bytes_total: 3,
+                result: Ok(vec![b'a', b'b', b'c']),
+            }]),
+        }));
+
+        let (buf, res) = read_exact_at_impl(buf, 0, Some(3), |buf, offset| {
+            let mock_read_at = Arc::clone(&mock_read_at);
+            async move { mock_read_at.lock().await.read_at(buf, offset).await }
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(buf, vec![b'a', b'b', b'c']);
+    }
+
+    #[tokio::test]
     async fn test_empty_buf_issues_no_syscall() {
         let buf = Vec::new();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::new(),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -819,7 +859,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -850,7 +890,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })

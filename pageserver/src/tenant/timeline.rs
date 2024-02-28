@@ -777,8 +777,10 @@ impl Timeline {
             GetVectoredImpl::Vectored => {
                 let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
 
-                self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                    .await;
+                if self.conf.validate_vectored_get {
+                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                        .await;
+                }
 
                 vectored_res
             }
@@ -2892,8 +2894,7 @@ impl Timeline {
                                 (
                                     ReadableLayerDesc::Persistent {
                                         desc: (*layer).clone(),
-                                        lsn_floor,
-                                        lsn_ceil: cont_lsn,
+                                        lsn_range: lsn_floor..cont_lsn,
                                     },
                                     keyspace_accum.to_keyspace(),
                                 )
