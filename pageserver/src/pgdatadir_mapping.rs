@@ -15,7 +15,6 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
-use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
@@ -1499,7 +1498,7 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let mut writer = self.tline.writer().await;
+        let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
@@ -1538,23 +1537,13 @@ impl<'a> DatadirModification<'a> {
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let mut writer = self.tline.writer().await;
+        let writer = self.tline.writer().await;
 
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            let prev_pending_updates = std::mem::take(&mut self.pending_updates);
-
-            // The put_batch call below expects expects the inputs to be sorted by Lsn,
-            // so we do that first.
-            let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = prev_pending_updates
-                .into_iter()
-                .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (key, lsn, val)))
-                .kmerge_by(|lhs, rhs| lhs.1 .0 < rhs.1 .0)
-                .collect();
-
-            writer.put_batch(lsn_ordered_batch, ctx).await?;
+            writer.put_batch(&self.pending_updates, ctx).await?;
             self.pending_updates.clear();
         }
 
