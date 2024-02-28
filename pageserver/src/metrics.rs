@@ -2566,6 +2566,7 @@ pub fn preinitialize_metrics() {
     Lazy::force(&TENANT_MANAGER);
 
     Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
+    Lazy::force(&disk_usage_based_eviction::METRICS);
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
