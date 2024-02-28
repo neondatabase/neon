@@ -229,9 +229,9 @@ pub(crate) struct TenantPreload {
 pub(crate) enum SpawnMode {
     /// Activate as soon as possible
     Eager,
-    /// On-demand activation possibly before the tenants turn
+    /// Lazy activation in the background, with the option to skip the queue if the need comes up
     Lazy,
-    /// Locally created tenant
+    /// Tenant has been created during the lifetime of this process
     Create,
 }
 
