@@ -267,7 +267,7 @@ You can use [`flamegraph-rs`](https://github.com/flamegraph-rs/flamegraph) or th
 
 For cleaning up the source tree from build artifacts, run `make clean` in the source directory.
 
-For removing every artifact from build and configure steps, run `make distclean`, and also consider removing the cargo binaries in the `target` directory, as well as the database in the `.neon` directory. Note that removing the `.neon` directorz will remove your database, with all data in it. You have been warned!
+For removing every artifact from build and configure steps, run `make distclean`, and also consider removing the cargo binaries in the `target` directory, as well as the database in the `.neon` directory. Note that removing the `.neon` directory will remove your database, with all data in it. You have been warned!
 
 ## Documentation
 

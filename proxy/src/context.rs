@@ -5,6 +5,7 @@ use once_cell::sync::OnceCell;
 use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
+use tracing::{field::display, info_span, Span};
 use uuid::Uuid;
 
 use crate::{
@@ -29,6 +30,7 @@ pub struct RequestMonitoring {
     pub protocol: &'static str,
     first_packet: chrono::DateTime<Utc>,
     region: &'static str,
+    pub span: Span,
 
     // filled in as they are discovered
     project: Option<ProjectId>,
@@ -64,12 +66,21 @@ impl RequestMonitoring {
         protocol: &'static str,
         region: &'static str,
     ) -> Self {
+        let span = info_span!(
+            "connect_request",
+            %protocol,
+            ?session_id,
+            %peer_addr,
+            ep = tracing::field::Empty,
+        );
+
         Self {
             peer_addr,
             session_id,
             protocol,
             first_packet: Utc::now(),
             region,
+            span,
 
             project: None,
             branch: None,
@@ -101,8 +112,8 @@ impl RequestMonitoring {
     }
 
     pub fn set_project(&mut self, x: MetricsAuxInfo) {
+        self.set_endpoint_id(x.endpoint_id);
         self.branch = Some(x.branch_id);
-        self.endpoint_id = Some(x.endpoint_id);
         self.project = Some(x.project_id);
         self.cold_start_info = x.cold_start_info;
     }
@@ -112,6 +123,7 @@ impl RequestMonitoring {
     }
 
     pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+        self.span.record("ep", display(&endpoint_id));
         crate::metrics::CONNECTING_ENDPOINTS
             .with_label_values(&[self.protocol])
             .measure(&endpoint_id);
