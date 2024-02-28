@@ -891,7 +891,17 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN cd compute_tools && cargo build --locked --profile release-line-debug-size-lto
+RUN cd compute_tools && mold -run cargo build --locked --profile release-line-debug-size-lto
+
+#########################################################################################
+#
+# Final compute-tools image
+#
+#########################################################################################
+
+FROM debian:bullseye-slim AS compute-tools-image
+
+COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
 #########################################################################################
 #
