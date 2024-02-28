@@ -3844,7 +3844,7 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -3856,7 +3856,7 @@ mod tests {
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -3922,7 +3922,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
 
         #[allow(non_snake_case)]
         let TEST_KEY_A: Key = Key::from_hex("110000000033333333444444445500000001").unwrap();
@@ -3956,7 +3956,7 @@ mod tests {
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
-        let new_writer = newtline.writer().await;
+        let mut new_writer = newtline.writer().await;
         new_writer
             .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"), &ctx)
             .await?;
@@ -3988,7 +3988,7 @@ mod tests {
     ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         {
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             // Create a relation on the timeline
             writer
                 .put(
@@ -4013,7 +4013,7 @@ mod tests {
         }
         tline.freeze_and_flush().await?;
         {
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     *TEST_KEY,
@@ -4376,7 +4376,7 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4393,7 +4393,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4410,7 +4410,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4427,7 +4427,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4484,7 +4484,7 @@ mod tests {
         for _ in 0..repeat {
             for _ in 0..key_count {
                 test_key.field6 = blknum;
-                let writer = timeline.writer().await;
+                let mut writer = timeline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4655,7 +4655,7 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     test_key,
@@ -4676,7 +4676,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4744,7 +4744,7 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     test_key,
@@ -4773,7 +4773,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4850,7 +4850,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
