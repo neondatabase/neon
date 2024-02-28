@@ -1106,7 +1106,7 @@ impl TenantManager {
 
                 // Edge case: if we were called with SpawnMode::Create, but a Tenant already existed, then
                 // the caller thinks they're creating but the tenant already existed.  We must switch to
-                // Normal mode so that when starting this Tenant we properly probe remote storage for timelines,
+                // Eager mode so that when starting this Tenant we properly probe remote storage for timelines,
                 // rather than assuming it to be empty.
                 spawn_mode = SpawnMode::Eager;
             }
