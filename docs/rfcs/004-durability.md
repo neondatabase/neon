@@ -6,7 +6,7 @@ When do we consider the WAL record as durable, so that we can
 acknowledge the commit to the client and be reasonably certain that we
 will not lose the transaction?
 
-Zenith uses a group of WAL safekeeper nodes to hold the generated WAL.
+Neon uses a group of WAL safekeeper nodes to hold the generated WAL.
 A WAL record is considered durable, when it has been written to a
 majority of WAL safekeeper nodes. In this document, I use 5
 safekeepers, because I have five fingers. A WAL record is durable,
