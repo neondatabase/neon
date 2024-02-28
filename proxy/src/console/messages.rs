@@ -105,8 +105,8 @@ pub struct MetricsAuxInfo {
 #[serde(rename_all = "snake_case")]
 pub enum ColdStartInfo {
     No = 0,
-    Db = 1,
-    Compute = 2,
+    Pool = 1,
+    FirstStart = 2,
 }
 
 #[cfg(test)]
