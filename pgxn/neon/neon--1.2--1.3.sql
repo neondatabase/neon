@@ -5,5 +5,5 @@ RETURNS integer
 AS 'MODULE_PATHNAME', 'approximate_working_set_size'
 LANGUAGE C PARALLEL SAFE;
 
-GRANT EXECUTE ON FUNCTION approximate_working_set_size() TO pg_monitor;
+GRANT EXECUTE ON FUNCTION approximate_working_set_size(bool) TO pg_monitor;
 

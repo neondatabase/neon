@@ -136,12 +136,6 @@ lfc_disable(char const *op)
 		lfc_ctl->used = 0;
 		lfc_ctl->limit = 0;
 		dlist_init(&lfc_ctl->lru);
-		initHyperLogLog(&lfc_ctl->wss_estimation, HYPER_LOG_LOG_BIT_WIDTH);
-
-		/* We need hashes in shared memory */
-		pfree(lfc_ctl->wss_estimation.hashesArr);
-		memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
-		lfc_ctl->wss_estimation.hashesArr = lfc_ctl->hyperloglog_hashes;
 
 		if (lfc_desc > 0)
 		{
@@ -242,6 +236,14 @@ lfc_shmem_startup(void)
 		lfc_ctl->misses = 0;
 		lfc_ctl->writes = 0;
 		dlist_init(&lfc_ctl->lru);
+
+		/* Initialize hyper-log-log structure for estimating working set size */
+		initHyperLogLog(&lfc_ctl->wss_estimation, HYPER_LOG_LOG_BIT_WIDTH);
+
+		/* We need hashes in shared memory */
+		pfree(lfc_ctl->wss_estimation.hashesArr);
+		memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
+		lfc_ctl->wss_estimation.hashesArr = lfc_ctl->hyperloglog_hashes;
 
 		/* Recreate file cache on restart */
 		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
