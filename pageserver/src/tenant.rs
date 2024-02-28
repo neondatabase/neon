@@ -718,9 +718,9 @@ impl Tenant {
                 }
 
                 let attach_type = if matches!(mode, SpawnMode::Lazy) {
-                    // Before doing any I/O, wait for either or:
-                    // - A client to attempt to access to this tenant (on-demand loading)
-                    // - A permit to become available in the warmup semaphore (background warmup)
+                    // Before doing any I/O, wait for at least one of:
+                    // - A client attempting to access to this tenant (on-demand loading)
+                    // - A permit becoming available in the warmup semaphore (background warmup)
 
                     tokio::select!(
                         permit = tenant_clone.activate_now_sem.acquire() => {
