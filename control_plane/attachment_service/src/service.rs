@@ -1273,6 +1273,10 @@ impl Service {
                     }
                 }
 
+                // TODO: we need to recognize that this is an update, issue a DB
+                // transaction to update the shards, and _then_ apply in memory.  Need
+                // the tenant equivalent of node_configure()
+
                 shard.config = req.config.tenant_conf.clone();
                 shard.schedule(scheduler)?;
 

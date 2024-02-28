@@ -385,7 +385,7 @@ def test_sharding_service_onboarding(
         dest_tenant_after_conf_change["generation"] == dest_tenant_before_conf_change["generation"]
     )
     dest_tenant_conf_after = dest_ps.http_client().tenant_config(tenant_id)
-    assert dest_tenant_conf_after == TenantConfig.from_json(modified_tenant_conf)
+    assert dest_tenant_conf_after.tenant_specific_overrides == modified_tenant_conf
 
     env.attachment_service.consistency_check()
 

@@ -289,6 +289,14 @@ pub struct TenantConfig {
     pub timeline_get_throttle: Option<ThrottleConfig>,
 }
 
+impl TenantConfig {
+    pub fn merge(&mut self, other: &TenantConfig) {
+        if let Some(max_lsn_wal_lag) = &other.max_lsn_wal_lag {
+            self.max_lsn_wal_lag = Some(*max_lsn_wal_lag);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EvictionPolicy {
