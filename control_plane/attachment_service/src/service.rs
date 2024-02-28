@@ -1275,6 +1275,7 @@ impl Service {
                     }
                 }
 
+                shard.config = req.config.tenant_conf.clone();
                 shard.schedule(scheduler)?;
 
                 let maybe_waiter = shard.maybe_reconcile(
