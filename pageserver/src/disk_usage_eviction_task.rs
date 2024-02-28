@@ -58,6 +58,7 @@ use utils::{completion, id::TimelineId};
 
 use crate::{
     config::PageServerConf,
+    metrics::disk_usage_based_eviction::METRICS,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         self,
@@ -408,13 +409,23 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         "running disk usage based eviction due to pressure"
     );
 
-    let candidates =
+    let (candidates, collection_time) = {
+        let started_at = std::time::Instant::now();
         match collect_eviction_candidates(tenant_manager, eviction_order, cancel).await? {
             EvictionCandidates::Cancelled => {
                 return Ok(IterationOutcome::Cancelled);
             }
-            EvictionCandidates::Finished(partitioned) => partitioned,
-        };
+            EvictionCandidates::Finished(partitioned) => (partitioned, started_at.elapsed()),
+        }
+    };
+
+    METRICS.layers_collected.inc_by(candidates.len() as u64);
+
+    tracing::info!(
+        elapsed_ms = collection_time.as_millis(),
+        total_layers = candidates.len(),
+        "collection completed"
+    );
 
     // Debug-log the list of candidates
     let now = SystemTime::now();
@@ -445,9 +456,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
 
-    let selection = select_victims(&candidates, usage_pre);
+    let (evicted_amount, usage_planned) =
+        select_victims(&candidates, usage_pre).into_amount_and_planned();
 
-    let (evicted_amount, usage_planned) = selection.into_amount_and_planned();
+    METRICS.layers_selected.inc_by(evicted_amount as u64);
 
     // phase2: evict layers
 
@@ -476,6 +488,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             if let Some(next) = next {
                 match next {
                     Ok(Ok(file_size)) => {
+                        METRICS.layers_evicted.inc();
                         usage_assumed.add_available_bytes(file_size);
                     }
                     Ok(Err((
@@ -840,6 +853,7 @@ async fn collect_eviction_candidates(
             continue;
         }
 
+        let _timer = METRICS.tenant_collection_time.start_timer();
         // collect layers from all timelines in this tenant
         //
         // If one of the timelines becomes `!is_active()` during the iteration,
@@ -854,6 +868,11 @@ async fn collect_eviction_candidates(
             }
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
             debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
+
+            METRICS
+                .tenant_layer_count
+                .observe(info.resident_layers.len() as f64);
+
             tenant_candidates.extend(info.resident_layers.into_iter());
             max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
 
@@ -946,6 +965,8 @@ async fn collect_eviction_candidates(
             layer_info.resident_layers.len()
         );
 
+        let _timer = METRICS.tenant_collection_time.start_timer();
+
         layer_info
             .resident_layers
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
@@ -967,6 +988,9 @@ async fn collect_eviction_candidates(
                     )
                 });
 
+        METRICS
+            .tenant_layer_count
+            .observe(tenant_candidates.len() as f64);
         candidates.extend(tenant_candidates);
 
         tokio::task::yield_now().await;
