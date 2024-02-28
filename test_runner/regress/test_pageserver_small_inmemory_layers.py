@@ -86,7 +86,8 @@ def test_pageserver_small_inmemory_layers(
     The workload creates a number of timelines and writes some data to each,
     but not enough to trigger flushes via the `checkpoint_distance` config.
     """
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_configs()
+    env.start()
 
     last_flush_lsns = asyncio.run(workload(env, TIMELINE_COUNT, ENTRIES_PER_TIMELINE))
     wait_until_pageserver_is_caught_up(env, last_flush_lsns)
