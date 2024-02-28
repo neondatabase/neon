@@ -308,7 +308,7 @@ impl AttachmentService {
             )],
             background_process::InitialPidFile::Create(self.pid_file()),
             || async {
-                match self.status().await {
+                match self.ready().await {
                     Ok(_) => Ok(true),
                     Err(_) => Ok(false),
                 }
@@ -522,8 +522,8 @@ impl AttachmentService {
     }
 
     #[instrument(skip(self))]
-    pub async fn status(&self) -> anyhow::Result<()> {
-        self.dispatch::<(), ()>(Method::GET, "status".to_string(), None)
+    pub async fn ready(&self) -> anyhow::Result<()> {
+        self.dispatch::<(), ()>(Method::GET, "ready".to_string(), None)
             .await
     }
 
