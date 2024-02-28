@@ -8,7 +8,7 @@ use pageserver_api::shard::ShardIndex;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tracing::Instrument;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
@@ -208,10 +208,15 @@ impl Layer {
     /// If for a bad luck or blocking of the executor, we miss the actual eviction and the layer is
     /// re-downloaded, [`EvictionError::Downloaded`] is returned.
     ///
+    /// Timeout is mandatory, because waiting for eviction is only needed for our tests; eviction
+    /// will happen regardless the future returned by this method completing unless there is a
+    /// read access (currently including [`Layer::keep_resident`]) before eviction gets to
+    /// complete.
+    ///
     /// Technically cancellation safe, but cancelling might shift the viewpoint of what generation
     /// of download-evict cycle on retry.
-    pub(crate) async fn evict_and_wait(&self) -> Result<(), EvictionError> {
-        self.0.evict_and_wait().await
+    pub(crate) async fn evict_and_wait(&self, timeout: Duration) -> Result<(), EvictionError> {
+        self.0.evict_and_wait(timeout).await
     }
 
     /// Delete the layer file when the `self` gets dropped, also try to schedule a remote index upload
@@ -363,7 +368,7 @@ impl Layer {
     ///
     /// Does not start local deletion, use [`Self::delete_on_drop`] for that
     /// separatedly.
-    #[cfg(feature = "testing")]
+    #[cfg(any(feature = "testing", test))]
     pub(crate) fn wait_drop(&self) -> impl std::future::Future<Output = ()> + 'static {
         let mut rx = self.0.status.subscribe();
 
@@ -632,7 +637,7 @@ impl LayerInner {
 
     /// Cancellation safe, however dropping the future and calling this method again might result
     /// in a new attempt to evict OR join the previously started attempt.
-    pub(crate) async fn evict_and_wait(&self) -> Result<(), EvictionError> {
+    pub(crate) async fn evict_and_wait(&self, timeout: Duration) -> Result<(), EvictionError> {
         use tokio::sync::broadcast::error::RecvError;
 
         assert!(self.have_remote_client);
@@ -655,13 +660,13 @@ impl LayerInner {
             LAYER_IMPL_METRICS.inc_started_evictions();
         }
 
-        match rx.recv().await {
-            Ok(Status::Evicted) => Ok(()),
-            Ok(Status::Downloaded) => Err(EvictionError::Downloaded),
-            Err(RecvError::Closed) => {
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(Ok(Status::Evicted)) => Ok(()),
+            Ok(Ok(Status::Downloaded)) => Err(EvictionError::Downloaded),
+            Ok(Err(RecvError::Closed)) => {
                 unreachable!("sender cannot be dropped while we are in &self method")
             }
-            Err(RecvError::Lagged(_)) => {
+            Ok(Err(RecvError::Lagged(_))) => {
                 // this is quite unlikely, but we are blocking a lot in the async context, so
                 // we might be missing this because we are stuck on a LIFO slot on a thread
                 // which is busy blocking for a 1TB database create_image_layers.
@@ -674,6 +679,7 @@ impl LayerInner {
                     None => Ok(()),
                 }
             }
+            Err(_timeout) => Err(EvictionError::Timeout),
         }
     }
 
@@ -1195,6 +1201,9 @@ pub(crate) enum EvictionError {
     /// Evictions must always lose to downloads in races, and this time it happened.
     #[error("layer was downloaded instead")]
     Downloaded,
+
+    #[error("eviction did not happen within timeout")]
+    Timeout,
 }
 
 /// Error internal to the [`LayerInner::get_or_maybe_download`]

@@ -480,13 +480,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                     }
                     Ok(Err((
                         file_size,
-                        Some(EvictionError::NotFound | EvictionError::Downloaded),
+                        EvictionError::NotFound
+                        | EvictionError::Downloaded
+                        | EvictionError::Timeout,
                     ))) => {
-                        evictions_failed.file_sizes += file_size;
-                        evictions_failed.count += 1;
-                    }
-                    Ok(Err((file_size, None))) => {
-                        // count timeouted as failed evictions even if they might complete later
                         evictions_failed.file_sizes += file_size;
                         evictions_failed.count += 1;
                     }
@@ -513,18 +510,14 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 EvictionLayer::Attached(layer) => {
                     let file_size = layer.layer_desc().file_size;
                     js.spawn(async move {
-                        let evict_and_wait = layer.evict_and_wait();
-
                         // have a low eviction waiting timeout because our LRU calculations go stale fast;
                         // also individual layer evictions could hang because of bugs and we do not want to
                         // pause disk_usage_based_eviction for such.
                         let timeout = std::time::Duration::from_secs(5);
-                        let evict_and_wait = tokio::time::timeout(timeout, evict_and_wait);
 
-                        match evict_and_wait.await {
-                            Ok(Ok(())) => Ok(file_size),
-                            Ok(Err(e)) => Err((file_size, Some(e))),
-                            Err(_timeout) => Err((file_size, None)),
+                        match layer.evict_and_wait(timeout).await {
+                            Ok(()) => Ok(file_size),
+                            Err(e) => Err((file_size, e)),
                         }
                     });
                 }
