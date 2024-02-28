@@ -121,6 +121,10 @@ impl SecondaryTenant {
         })
     }
 
+    pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
+        self.tenant_shard_id
+    }
+
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
 
