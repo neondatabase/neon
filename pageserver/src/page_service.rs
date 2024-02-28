@@ -40,6 +40,7 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
@@ -1143,9 +1144,44 @@ impl PageServerHandler {
         // load_timeline_for_page sets shard_id, but get_cached_timeline_for_page doesn't
         set_tracing_field_shard_id(timeline);
 
-        let _timer = timeline
-            .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetPageAtLsn);
+        let start = Instant::now();
+        match ctx.micros_spent_throttled.open() {
+            Ok(()) => (),
+            Err(error) => {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                match LOGGED.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => {
+                        warn!(error, "error opening micros_spent_throttled, this message is only logged once per process lifetime");
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        scopeguard::defer!({
+            let elapsed = start.elapsed();
+            let ex_throttled = ctx
+                .micros_spent_throttled
+                .close_and_checked_sub_from(elapsed);
+            let ex_throttled = match ex_throttled {
+                Ok(res) => res,
+                Err(error) => {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    static LOGGED: AtomicBool = AtomicBool::new(false);
+                    match LOGGED.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    {
+                        Ok(_) => {
+                            warn!(error, "error deducting time spent throttled, this message is only logged once per process lifetime");
+                        }
+                        Err(_) => {}
+                    }
+                    elapsed
+                }
+            };
+            timeline
+                .query_metrics
+                .observe(metrics::SmgrQueryType::GetPageAtLsn, ex_throttled);
+        });
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =

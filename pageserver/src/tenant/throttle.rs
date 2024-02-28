@@ -9,7 +9,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
@@ -157,6 +157,21 @@ where
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
             let observation = Observation { wait_time };
             self.metric.observe_throttling(&observation);
+            // TODO: really, callers should do this
+            match ctx.micros_spent_throttled.add(wait_time) {
+                Ok(res) => res,
+                Err(error) => {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    static LOGGED: AtomicBool = AtomicBool::new(false);
+                    match LOGGED.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    {
+                        Ok(_) => {
+                            warn!(error, "error adding time spent throttled, this message is only logged once per process lifetime");
+                        }
+                        Err(_) => {}
+                    }
+                }
+            };
         }
     }
 }

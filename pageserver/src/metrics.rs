@@ -1137,6 +1137,10 @@ impl SmgrQueryTimePerTimeline {
             start: std::time::Instant::now(),
         }
     }
+    pub(crate) fn observe(&self, op: SmgrQueryType, duration: Duration) {
+        let metric = &self.metrics[op as usize];
+        metric.observe(duration.as_secs_f64())
+    }
 }
 
 #[cfg(test)]
