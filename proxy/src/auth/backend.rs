@@ -194,7 +194,6 @@ async fn auth_quirks(
             let res = hacks::password_hack_no_authentication(ctx, info, client).await?;
 
             ctx.set_endpoint_id(res.info.endpoint.clone());
-            tracing::Span::current().record("ep", &tracing::field::display(&res.info.endpoint));
             let password = match res.keys {
                 ComputeCredentialKeys::Password(p) => p,
                 _ => unreachable!("password hack should return a password"),

@@ -142,7 +142,6 @@ impl ComputeUserInfoMaybeEndpoint {
 
         if let Some(ep) = &endpoint {
             ctx.set_endpoint_id(ep.clone());
-            tracing::Span::current().record("ep", &tracing::field::display(ep));
         }
 
         info!(%user, project = endpoint.as_deref(), "credentials");

@@ -291,7 +291,7 @@ pub async fn handle(
             // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
 
             let message = format!(
-                "HTTP-Connection timed out, execution time exeeded {} seconds",
+                "HTTP-Connection timed out, execution time exceeded {} seconds",
                 config.http_config.request_timeout.as_secs()
             );
             error!(message);
