@@ -52,6 +52,7 @@ use compute_api::spec::RemoteExtSpec;
 use compute_api::spec::Role;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
+use pageserver_api::shard::ShardStripeSize;
 use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -735,7 +736,11 @@ impl Endpoint {
         }
     }
 
-    pub async fn reconfigure(&self, mut pageservers: Vec<(Host, u16)>) -> Result<()> {
+    pub async fn reconfigure(
+        &self,
+        mut pageservers: Vec<(Host, u16)>,
+        stripe_size: Option<ShardStripeSize>,
+    ) -> Result<()> {
         let mut spec: ComputeSpec = {
             let spec_path = self.endpoint_path().join("spec.json");
             let file = std::fs::File::open(spec_path)?;
@@ -765,6 +770,9 @@ impl Endpoint {
         let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
         assert!(!pageserver_connstr.is_empty());
         spec.pageserver_connstring = Some(pageserver_connstr);
+        if stripe_size.is_some() {
+            spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
+        }
 
         let client = reqwest::Client::new();
         let response = client

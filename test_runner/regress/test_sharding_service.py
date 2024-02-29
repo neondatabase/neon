@@ -1,7 +1,7 @@
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 import pytest
 from fixtures.log_helper import log
@@ -398,10 +398,12 @@ def test_sharding_service_compute_hook(
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
-    expect = {
+    expect: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
         "tenant_id": str(env.initial_tenant),
+        "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
     }
+    assert notifications[0] == expect
 
     env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
@@ -415,6 +417,7 @@ def test_sharding_service_compute_hook(
     log.info(f"notifications: {notifications}")
     expect = {
         "tenant_id": str(env.initial_tenant),
+        "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[1].id), "shard_number": 0}],
     }
 
@@ -430,9 +433,26 @@ def test_sharding_service_compute_hook(
 
     def received_restart_notification():
         assert len(notifications) == 3
-        assert notifications[1] == expect
+        assert notifications[2] == expect
 
     wait_until(10, 1, received_restart_notification)
+
+    # Splitting a tenant should cause its stripe size to become visible in the compute notification
+    env.attachment_service.tenant_shard_split(env.initial_tenant, shard_count=2)
+    expect = {
+        "tenant_id": str(env.initial_tenant),
+        "stripe_size": 32768,
+        "shards": [
+            {"node_id": int(env.pageservers[1].id), "shard_number": 0},
+            {"node_id": int(env.pageservers[1].id), "shard_number": 1},
+        ],
+    }
+
+    def received_split_notification():
+        assert len(notifications) == 4
+        assert notifications[3] == expect
+
+    wait_until(10, 1, received_split_notification)
 
     env.attachment_service.consistency_check()
 

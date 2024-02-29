@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use hyper::{Method, StatusCode};
-use pageserver_api::shard::{ShardIndex, ShardNumber, TenantShardId};
+use pageserver_api::shard::{ShardIndex, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -21,6 +21,9 @@ pub(crate) const API_CONCURRENCY: usize = 32;
 
 pub(super) struct ComputeHookTenant {
     shards: Vec<(ShardIndex, NodeId)>,
+    // A tenant is not obliged to advertise a ShardStripeSize until it has multiple shards.  Once
+    // at least one shard with ShardCount >1 is present, stripe_size must be set.
+    stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -33,6 +36,7 @@ struct ComputeHookNotifyRequestShard {
 #[derive(Serialize, Deserialize, Debug)]
 struct ComputeHookNotifyRequest {
     tenant_id: TenantId,
+    stripe_size: Option<ShardStripeSize>,
     shards: Vec<ComputeHookNotifyRequestShard>,
 }
 
@@ -89,6 +93,7 @@ impl ComputeHookTenant {
                         node_id: *node_id,
                     })
                     .collect(),
+                stripe_size: self.stripe_size,
             });
         } else {
             tracing::info!(
@@ -139,7 +144,11 @@ impl ComputeHook {
         };
         let cplane =
             ComputeControlPlane::load(env.clone()).expect("Error loading compute control plane");
-        let ComputeHookNotifyRequest { tenant_id, shards } = reconfigure_request;
+        let ComputeHookNotifyRequest {
+            tenant_id,
+            shards,
+            stripe_size,
+        } = reconfigure_request;
 
         let compute_pageservers = shards
             .into_iter()
@@ -156,7 +165,9 @@ impl ComputeHook {
         for (endpoint_name, endpoint) in &cplane.endpoints {
             if endpoint.tenant_id == tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring endpoint {}", endpoint_name,);
-                endpoint.reconfigure(compute_pageservers.clone()).await?;
+                endpoint
+                    .reconfigure(compute_pageservers.clone(), stripe_size)
+                    .await?;
             }
         }
 
@@ -271,17 +282,26 @@ impl ComputeHook {
         &self,
         tenant_shard_id: TenantShardId,
         node_id: NodeId,
+        stripe_size: ShardStripeSize,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let mut locked = self.state.lock().await;
         let entry = locked
             .entry(tenant_shard_id.tenant_id)
-            .or_insert_with(|| ComputeHookTenant { shards: Vec::new() });
+            .or_insert_with(|| ComputeHookTenant {
+                shards: Vec::new(),
+                stripe_size: None,
+            });
 
         let shard_index = ShardIndex {
             shard_count: tenant_shard_id.shard_count,
             shard_number: tenant_shard_id.shard_number,
         };
+
+        // We will advertise stripe size in notifications as soon as the tenant is multi-sharded.
+        if tenant_shard_id.shard_count.count() > 1 {
+            entry.stripe_size = Some(stripe_size);
+        }
 
         let mut set = false;
         for (existing_shard, existing_node) in &mut entry.shards {
