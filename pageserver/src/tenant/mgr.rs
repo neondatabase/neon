@@ -595,7 +595,7 @@ pub async fn init_tenant_mgr(
             shard_identity,
             Some(init_order.clone()),
             &TENANTS,
-            SpawnMode::Normal,
+            SpawnMode::Lazy,
             &ctx,
         ) {
             Ok(tenant) => {
@@ -1106,9 +1106,9 @@ impl TenantManager {
 
                 // Edge case: if we were called with SpawnMode::Create, but a Tenant already existed, then
                 // the caller thinks they're creating but the tenant already existed.  We must switch to
-                // Normal mode so that when starting this Tenant we properly probe remote storage for timelines,
+                // Eager mode so that when starting this Tenant we properly probe remote storage for timelines,
                 // rather than assuming it to be empty.
-                spawn_mode = SpawnMode::Normal;
+                spawn_mode = SpawnMode::Eager;
             }
             Some(TenantSlot::Secondary(state)) => {
                 info!("Shutting down secondary tenant");
@@ -1300,7 +1300,7 @@ impl TenantManager {
             shard_identity,
             None,
             self.tenants,
-            SpawnMode::Normal,
+            SpawnMode::Eager,
             ctx,
         )?;
 
@@ -1521,7 +1521,7 @@ impl TenantManager {
                 *child_shard,
                 child_location_conf,
                 None,
-                SpawnMode::Normal,
+                SpawnMode::Eager,
                 ctx,
             )
             .await?;
@@ -2064,7 +2064,7 @@ pub(crate) async fn load_tenant(
         shard_identity,
         None,
         &TENANTS,
-        SpawnMode::Normal,
+        SpawnMode::Eager,
         ctx,
     )
     .with_context(|| format!("Failed to schedule tenant processing in path {tenant_path:?}"))?;
