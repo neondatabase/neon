@@ -81,7 +81,7 @@ impl Timeline {
             end_lsn,
             target_file_size,
             fanout,
-            &ctx,
+            ctx,
         )
         .await?;
 
@@ -438,10 +438,7 @@ impl CompactionLayer<Key> for ResidentDeltaLayer {
 impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
-    async fn load_keys<'a>(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
+    async fn load_keys<'a>(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         self.0.load_keys(ctx).await
     }
 }
