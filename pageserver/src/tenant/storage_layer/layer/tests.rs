@@ -109,7 +109,10 @@ async fn smoke_test() {
     // Layer::keep_resident never downloads, but it might initialize if the layer file is found
     // downloaded locally.
     let none = layer.keep_resident().await.unwrap();
-    assert!(none.is_none(), "{none:?}");
+    assert!(
+        none.is_none(),
+        "Expected none, because eviction removed the local file, found: {none:?}"
+    );
 
     // plain downloading is rarely needed
     layer
