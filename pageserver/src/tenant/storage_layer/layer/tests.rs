@@ -332,6 +332,11 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 
     helper.release().await;
 
+    // the second_eviction gets to run here
+    //
+    // synchronize to be *strictly* after the second_eviction spawn_blocking run
+    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle).await;
+
     tokio::time::timeout(ADVANCE, &mut second_eviction)
         .await
         .expect("eviction goes through now that spawn_blocking is unclogged")
