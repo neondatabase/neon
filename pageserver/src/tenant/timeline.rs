@@ -5115,51 +5115,61 @@ impl<'a> TimelineWriter<'a> {
     ) -> anyhow::Result<&Arc<InMemoryLayer>> {
         match action {
             OpenLayerAction::Roll => {
-                let max_lsn = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
-                self.tl.freeze_inmem_layer_at(max_lsn).await;
-
-                let now = Instant::now();
-                *(self.last_freeze_ts.write().unwrap()) = now;
-
-                self.tl.flush_frozen_layers();
-
-                let current_size = self.write_guard.as_ref().unwrap().current_size;
-                if current_size > self.get_checkpoint_distance() {
-                    warn!("Flushed oversized open layer with size {}", current_size)
-                }
-
-                assert!(self.write_guard.is_some());
-
-                let layer = self.tl.get_layer_for_write(at).await?;
-                let initial_size = layer.size().await?;
-                self.write_guard.replace(TimelineWriterState::new(
-                    layer,
-                    initial_size,
-                    Lsn(max_lsn.0 + 1),
-                    now,
-                ));
+                let freeze_at = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
+                self.roll_layer(at, freeze_at).await?
             }
-            OpenLayerAction::Open => {
-                assert!(self.write_guard.is_none());
-
-                let layer = self.tl.get_layer_for_write(at).await?;
-                let initial_size = layer.size().await?;
-
-                let last_freeze_at = self.last_freeze_at.load();
-                let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
-                self.write_guard.replace(TimelineWriterState::new(
-                    layer,
-                    initial_size,
-                    last_freeze_at,
-                    last_freeze_ts,
-                ));
-            }
+            OpenLayerAction::Open => self.open_layer(at).await?,
             OpenLayerAction::None => {
                 assert!(self.write_guard.is_some());
             }
         }
 
         Ok(&self.write_guard.as_ref().unwrap().open_layer)
+    }
+
+    async fn open_layer(&mut self, at: Lsn) -> anyhow::Result<()> {
+        assert!(self.write_guard.is_none());
+
+        let layer = self.tl.get_layer_for_write(at).await?;
+        let initial_size = layer.size().await?;
+
+        let last_freeze_at = self.last_freeze_at.load();
+        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
+        self.write_guard.replace(TimelineWriterState::new(
+            layer,
+            initial_size,
+            last_freeze_at,
+            last_freeze_ts,
+        ));
+
+        Ok(())
+    }
+
+    async fn roll_layer(&mut self, new_layer_at: Lsn, freeze_at: Lsn) -> anyhow::Result<()> {
+        self.tl.freeze_inmem_layer_at(freeze_at).await;
+
+        let now = Instant::now();
+        *(self.last_freeze_ts.write().unwrap()) = now;
+
+        self.tl.flush_frozen_layers();
+
+        let current_size = self.write_guard.as_ref().unwrap().current_size;
+        if current_size > self.get_checkpoint_distance() {
+            warn!("Flushed oversized open layer with size {}", current_size)
+        }
+
+        assert!(self.write_guard.is_some());
+
+        let layer = self.tl.get_layer_for_write(new_layer_at).await?;
+        let initial_size = layer.size().await?;
+        self.write_guard.replace(TimelineWriterState::new(
+            layer,
+            initial_size,
+            Lsn(freeze_at.0 + 1),
+            now,
+        ));
+
+        Ok(())
     }
 
     fn get_open_layer_action(&self, lsn: Lsn, new_value_size: u64) -> OpenLayerAction {
