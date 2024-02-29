@@ -769,58 +769,6 @@ jobs:
         run: |
           rm -rf .docker-custom
 
-  compute-tools-image:
-    runs-on: [ self-hosted, gen3, large ]
-    needs: [ check-permissions, build-build-tools-image, tag ]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
-      # The default value is ~/.docker
-      - name: Set custom docker config directory
-        run: |
-          mkdir -p .docker-custom
-          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-
-      - uses: docker/login-action@v3
-        with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
-
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          build-args: |
-            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            BUILD_TAG=${{needs.tag.outputs.build-tag}}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
-          provenance: false
-          push: true
-          pull: true
-          file: Dockerfile.compute-tools
-          cache-from: type=registry,ref=neondatabase/compute-tools:cache
-          cache-to: type=registry,ref=neondatabase/compute-tools:cache,mode=max
-          tags: |
-            369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
-            neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
-
-      - name: Remove custom docker config directory
-        if: always()
-        run: |
-          rm -rf .docker-custom
-
   compute-node-image:
     needs: [ check-permissions, build-build-tools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
@@ -862,13 +810,14 @@ jobs:
           username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      - uses: docker/build-push-action@v5
+      - name: Build compute-node image
+        uses: docker/build-push-action@v5
         with:
           context: .
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version }}
-            BUILD_TAG=${{needs.tag.outputs.build-tag}}
+            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
           provenance: false
           push: true
@@ -879,6 +828,25 @@ jobs:
           tags: |
             369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
             neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+      - name: Build compute-tools image
+        # compute-tools are Postgres independent, so build it only once
+        if: ${{ matrix.version == 'v16' }}
+        uses: docker/build-push-action@v5
+        with:
+          target: compute-tools-image
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-node
+          tags: |
+            369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }}
+            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
 
       - name: Remove custom docker config directory
         if: always()
@@ -927,7 +895,7 @@ jobs:
           docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
   test-images:
-    needs: [ check-permissions, tag, neon-image, compute-node-image, compute-tools-image ]
+    needs: [ check-permissions, tag, neon-image, compute-node-image ]
     runs-on: [ self-hosted, gen3, small ]
 
     steps:
@@ -1249,3 +1217,4 @@ jobs:
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
       from-tag: ${{ needs.build-build-tools-image.outputs.image-tag }}
+    secrets: inherit
