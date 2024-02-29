@@ -1239,7 +1239,10 @@ impl Service {
         }
 
         let mut waiters = Vec::new();
-        let mut result = TenantLocationConfigResponse { shards: Vec::new() };
+        let mut result = TenantLocationConfigResponse {
+            shards: Vec::new(),
+            stripe_size: None,
+        };
         let maybe_create = {
             let mut locked = self.inner.write().unwrap();
             let result_tx = locked.result_tx.clone();
@@ -1251,6 +1254,11 @@ impl Service {
             for (shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
                 // Saw an existing shard: this is not a creation
                 create = false;
+
+                // Update stripe size
+                if result.stripe_size.is_none() && shard.shard.count.count() > 1 {
+                    result.stripe_size = Some(shard.shard.stripe_size);
+                }
 
                 // Note that for existing tenants we do _not_ respect the generation in the request: this is likely
                 // to be stale.  Once a tenant is created in this service, our view of generation is authoritative, and
@@ -1351,6 +1359,9 @@ impl Service {
         };
 
         let waiters = if let Some(create_req) = maybe_create {
+            if create_req.shard_parameters.count.count() > 1 {
+                result.stripe_size = Some(create_req.shard_parameters.stripe_size);
+            }
             let (create_resp, waiters) = self.do_tenant_create(create_req).await?;
             result.shards = create_resp
                 .shards
