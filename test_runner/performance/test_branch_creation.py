@@ -90,8 +90,10 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
 
 
 @pytest.mark.parametrize("n_branches", [500, 1024])
-# Test measures the latency of branch creation when creating a lot of branches.
 def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
+    """
+    Test measures the latency of branch creation when creating a lot of branches.
+    """
     env = neon_compare.env
 
     # seed the prng so we will measure the same structure every time
