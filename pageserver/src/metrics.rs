@@ -1023,10 +1023,18 @@ impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
         let ex_throttled = match ex_throttled {
             Ok(res) => res,
             Err(error) => {
-                static LOGGED: AtomicSmgrQueryTypeSet = AtomicSmgrQueryTypeSet::new();
-                if LOGGED.test_and_set(self.op) {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
+                    Lazy::new(|| {
+                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
+                            RateLimit::new(Duration::from_secs(10))
+                        })))
+                    });
+                let mut guard = LOGGED.lock().unwrap();
+                let rate_limit = &mut guard[self.op];
+                rate_limit.call(|| {
                     warn!(op=?self.op, error, "error deducting time spent throttled, this message is only logged once per process lifetime");
-                }
+                });
                 elapsed
             }
         };
@@ -1036,70 +1044,21 @@ impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
 
 #[derive(
     Debug,
+    Clone,
+    Copy,
     IntoStaticStr,
     strum_macros::EnumCount,
     strum_macros::EnumIter,
     strum_macros::FromRepr,
-    enumset::EnumSetType,
+    enum_map::Enum,
 )]
 #[strum(serialize_all = "snake_case")]
-#[enumset(repr = "u8")]
 pub enum SmgrQueryType {
     GetRelExists,
     GetRelSize,
     GetPageAtLsn,
     GetDbSize,
     GetSlruSegment,
-}
-
-struct AtomicSmgrQueryTypeSet {
-    value: std::sync::atomic::AtomicU8,
-}
-
-impl AtomicSmgrQueryTypeSet {
-    pub const fn new() -> Self {
-        AtomicSmgrQueryTypeSet {
-            value: AtomicU8::new(
-                // would love to
-                // ```
-                // enumset::EnumSet::<SmgrQueryType>::EMPTY.as_repr()
-                // ```
-                // But it's not const, see https://github.com/Lymia/enumset/issues/27
-                0,
-            ),
-        }
-    }
-    pub fn test_and_set(&self, v: SmgrQueryType) -> bool {
-        use std::sync::atomic::Ordering;
-        let res = self
-            .value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                let cur = enumset::EnumSet::<SmgrQueryType>::from_repr(cur);
-                if cur.contains(v) {
-                    None
-                } else {
-                    Some((cur | v).as_repr())
-                }
-            });
-        res.ok().is_some()
-    }
-}
-
-#[cfg(test)]
-mod test_atomic_smgr_query_type_set {
-    use super::*;
-    #[test]
-    fn test_basic() {
-        let set = AtomicSmgrQueryTypeSet::new();
-        // first set returns true
-        assert!(set.test_and_set(SmgrQueryType::GetPageAtLsn));
-        // try it again, should report false
-        assert!(!set.test_and_set(SmgrQueryType::GetPageAtLsn));
-        // set something that's not set before
-        assert!(set.test_and_set(SmgrQueryType::GetDbSize));
-        // flags are independent
-        assert!(!set.test_and_set(SmgrQueryType::GetPageAtLsn));
-    }
 }
 
 #[derive(Debug)]
@@ -1207,10 +1166,18 @@ impl SmgrQueryTimePerTimeline {
         match ctx.micros_spent_throttled.open() {
             Ok(()) => (),
             Err(error) => {
-                static LOGGED: AtomicSmgrQueryTypeSet = AtomicSmgrQueryTypeSet::new();
-                if LOGGED.test_and_set(op) {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
+                    Lazy::new(|| {
+                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
+                            RateLimit::new(Duration::from_secs(10))
+                        })))
+                    });
+                let mut guard = LOGGED.lock().unwrap();
+                let rate_limit = &mut guard[op];
+                rate_limit.call(|| {
                     warn!(?op, error, "error opening micros_spent_throttled, this message is only logged once per process lifetime");
-                }
+                });
             }
         }
         GlobalAndPerTimelineHistogramTimer {
@@ -2070,7 +2037,6 @@ use futures::Future;
 use pin_project_lite::pin_project;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};

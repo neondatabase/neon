@@ -2,7 +2,7 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -157,20 +157,19 @@ where
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
             let observation = Observation { wait_time };
             self.metric.observe_throttling(&observation);
-            // TODO: really, callers should do this
             match ctx.micros_spent_throttled.add(wait_time) {
                 Ok(res) => res,
                 Err(error) => {
-                    use std::sync::atomic::AtomicBool;
-                    static LOGGED: AtomicBool = AtomicBool::new(false);
-                    if LOGGED
-                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                        .is_ok()
-                    {
-                        warn!(error, "error adding time spent throttled, this message is only logged once per process lifetime");
-                    }
+                    use once_cell::sync::Lazy;
+                    use utils::rate_limit::RateLimit;
+                    static WARN_RATE_LIMIT: Lazy<Mutex<RateLimit>> =
+                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                    let mut guard = WARN_RATE_LIMIT.lock().unwrap();
+                    guard.call(move || {
+                        warn!(error, "error adding time spent throttled; this message is rate-limited globally");
+                    });
                 }
-            };
+            }
         }
     }
 }
