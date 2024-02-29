@@ -12,7 +12,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     TokenScope,
 )
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverHttpClient, TenantConfig
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     enable_remote_storage_versioning,
@@ -361,6 +361,31 @@ def test_sharding_service_onboarding(
     # The onboarded tenant should surviev a restart of pageserver
     dest_ps.stop()
     dest_ps.start()
+
+    # Having onboarded via /location_config, we should also be able to update the
+    # TenantConf part of LocationConf, without inadvertently resetting the generation
+    modified_tenant_conf = {"max_lsn_wal_lag": 1024 * 1024 * 1024 * 100}
+    dest_tenant_before_conf_change = dest_ps.http_client().tenant_status(tenant_id)
+
+    # The generation has moved on since we onboarded
+    assert generation != dest_tenant_before_conf_change["generation"]
+
+    virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "AttachedSingle",
+            "secondary_conf": None,
+            "tenant_conf": modified_tenant_conf,
+            # This is intentionally a stale generation
+            "generation": generation,
+        },
+    )
+    dest_tenant_after_conf_change = dest_ps.http_client().tenant_status(tenant_id)
+    assert (
+        dest_tenant_after_conf_change["generation"] == dest_tenant_before_conf_change["generation"]
+    )
+    dest_tenant_conf_after = dest_ps.http_client().tenant_config(tenant_id)
+    assert dest_tenant_conf_after.tenant_specific_overrides == modified_tenant_conf
 
     env.attachment_service.consistency_check()
 
