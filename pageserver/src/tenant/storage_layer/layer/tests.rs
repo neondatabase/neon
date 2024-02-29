@@ -142,8 +142,6 @@ async fn smoke_test() {
         .await
         .expect_err("should had timed out because two strong references exist");
 
-    println!("here");
-
     tokio::fs::metadata(&path)
         .await
         .expect("the local layer file still exists");
