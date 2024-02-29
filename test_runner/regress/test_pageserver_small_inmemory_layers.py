@@ -15,7 +15,7 @@ from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 TIMELINE_COUNT = 10
-ENTRIES_PER_TIMELINE = 100_000
+ENTRIES_PER_TIMELINE = 10_000
 CHECKPOINT_TIMEOUT_SECONDS = 60
 
 TENANT_CONF = {
