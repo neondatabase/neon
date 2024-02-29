@@ -80,5 +80,5 @@ WITH (fillfactor='100');
     file_cache_misses = plan_details.get("File Cache Misses")
 
     # Now you can assert the values
-    assert file_cache_hits >= 5000, f"Expected File Cache Hits to be 2409, got {file_cache_hits}"
+    assert file_cache_hits >= 5000, f"Expected File Cache Hits to be > 5000, got {file_cache_hits}"
     assert file_cache_misses == 0, f"Expected File Cache Misses to be 0, got {file_cache_misses}"
