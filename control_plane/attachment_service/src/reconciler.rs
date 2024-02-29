@@ -1,6 +1,6 @@
 use crate::persistence::Persistence;
 use crate::service;
-use control_plane::attachment_service::NodeAvailability;
+use pageserver_api::controller_api::NodeAvailability;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };

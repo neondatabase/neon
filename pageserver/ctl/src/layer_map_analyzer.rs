@@ -12,7 +12,7 @@ use std::collections::BinaryHeap;
 use std::ops::Range;
 use std::{fs, str};
 
-use pageserver::page_cache::PAGE_SZ;
+use pageserver::page_cache::{self, PAGE_SZ};
 use pageserver::repository::{Key, KEY_SIZE};
 use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
@@ -100,13 +100,15 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
 async fn get_holes(path: &Utf8Path, max_holes: usize, ctx: &RequestContext) -> Result<Vec<Hole>> {
-    let file = FileBlockReader::new(VirtualFile::open(path).await?);
-    let summary_blk = file.read_blk(0, ctx).await?;
+    let file = VirtualFile::open(path).await?;
+    let file_id = page_cache::next_file_id();
+    let block_reader = FileBlockReader::new(&file, file_id);
+    let summary_blk = block_reader.read_blk(0, ctx).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
         actual_summary.index_root_blk,
-        file,
+        block_reader,
     );
     // min-heap (reserve space for one more element added before eviction)
     let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);

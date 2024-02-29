@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use futures::Future;
 use pageserver_api::{
-    control_api::{
+    shard::TenantShardId,
+    upcall_api::{
         ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
     },
-    shard::TenantShardId,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::sync::CancellationToken;

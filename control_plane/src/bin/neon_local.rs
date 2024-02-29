@@ -8,14 +8,15 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
-use control_plane::attachment_service::{
-    AttachmentService, NodeAvailability, NodeConfigureRequest, NodeSchedulingPolicy,
-};
+use control_plane::attachment_service::AttachmentService;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::{InitForceMode, LocalEnv};
 use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::{broker, local_env};
+use pageserver_api::controller_api::{
+    NodeAvailability, NodeConfigureRequest, NodeSchedulingPolicy,
+};
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
 };

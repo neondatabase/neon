@@ -12,7 +12,7 @@ pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<
             }
             Ok(())
         }
-        (Scope::PageServerApi | Scope::GenerationsApi, _) => Err(AuthError(
+        (Scope::Admin | Scope::PageServerApi | Scope::GenerationsApi, _) => Err(AuthError(
             format!(
                 "JWT scope '{:?}' is ineligible for Safekeeper auth",
                 claims.scope

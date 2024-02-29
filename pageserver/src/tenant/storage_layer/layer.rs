@@ -29,6 +29,9 @@ use super::{
 
 use utils::generation::Generation;
 
+#[cfg(test)]
+mod tests;
+
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
@@ -267,7 +270,7 @@ impl Layer {
     pub(crate) async fn get_values_reconstruct_data(
         &self,
         keyspace: KeySpace,
-        end_lsn: Lsn,
+        lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
@@ -282,7 +285,7 @@ impl Layer {
             .record_access(LayerAccessKind::GetValueReconstructData, ctx);
 
         layer
-            .get_values_reconstruct_data(keyspace, end_lsn, reconstruct_data, &self.0, ctx)
+            .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
     }
@@ -1049,16 +1052,10 @@ impl LayerInner {
 
     /// `DownloadedLayer` is being dropped, so it calls this method.
     fn on_downloaded_layer_drop(self: Arc<LayerInner>, version: usize) {
-        let delete = self.wanted_deleted.load(Ordering::Acquire);
         let evict = self.wanted_evicted.load(Ordering::Acquire);
         let can_evict = self.have_remote_client;
 
-        if delete {
-            // do nothing now, only in LayerInner::drop -- this was originally implemented because
-            // we could had already scheduled the deletion at the time.
-            //
-            // FIXME: this is not true anymore, we can safely evict wanted deleted files.
-        } else if can_evict && evict {
+        if can_evict && evict {
             let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, %version);
 
             // downgrade for queueing, in case there's a tear down already ongoing we should not
@@ -1299,9 +1296,14 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     owner.desc.lsn_range.clone(),
                 ));
-                delta_layer::DeltaLayerInner::load(&owner.path, summary, ctx)
-                    .await
-                    .map(|res| res.map(LayerKind::Delta))
+                delta_layer::DeltaLayerInner::load(
+                    &owner.path,
+                    summary,
+                    Some(owner.conf.max_vectored_read_bytes),
+                    ctx,
+                )
+                .await
+                .map(|res| res.map(LayerKind::Delta))
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
@@ -1310,9 +1312,15 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     lsn,
                 ));
-                image_layer::ImageLayerInner::load(&owner.path, lsn, summary, ctx)
-                    .await
-                    .map(|res| res.map(LayerKind::Image))
+                image_layer::ImageLayerInner::load(
+                    &owner.path,
+                    lsn,
+                    summary,
+                    Some(owner.conf.max_vectored_read_bytes),
+                    ctx,
+                )
+                .await
+                .map(|res| res.map(LayerKind::Image))
             };
 
             match res {
@@ -1365,7 +1373,7 @@ impl DownloadedLayer {
     async fn get_values_reconstruct_data(
         &self,
         keyspace: KeySpace,
-        end_lsn: Lsn,
+        lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
         owner: &Arc<LayerInner>,
         ctx: &RequestContext,
@@ -1374,7 +1382,7 @@ impl DownloadedLayer {
 
         match self.get(owner, ctx).await.map_err(GetVectoredError::from)? {
             Delta(d) => {
-                d.get_values_reconstruct_data(keyspace, end_lsn, reconstruct_data, ctx)
+                d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
                     .await
             }
             Image(i) => {

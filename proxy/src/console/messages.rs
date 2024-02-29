@@ -98,6 +98,7 @@ pub struct MetricsAuxInfo {
     pub endpoint_id: EndpointId,
     pub project_id: ProjectId,
     pub branch_id: BranchId,
+    pub is_cold_start: Option<bool>,
 }
 
 #[cfg(test)]

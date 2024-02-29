@@ -373,12 +373,9 @@ async fn upload_tenant_heatmap(
     // Ensure that Tenant::shutdown waits for any upload in flight: this is needed because otherwise
     // when we delete a tenant, we might race with an upload in flight and end up leaving a heatmap behind
     // in remote storage.
-    let _guard = match tenant.gate.enter() {
-        Ok(g) => g,
-        Err(_) => {
-            tracing::info!("Skipping heatmap upload for tenant which is shutting down");
-            return Err(UploadHeatmapError::Cancelled);
-        }
+    let Ok(_guard) = tenant.gate.enter() else {
+        tracing::info!("Skipping heatmap upload for tenant which is shutting down");
+        return Err(UploadHeatmapError::Cancelled);
     };
 
     for (timeline_id, timeline) in timelines {

@@ -145,6 +145,7 @@ macro_rules! pausable_failpoint {
 
 pub mod blob_io;
 pub mod block_io;
+pub mod vectored_blob_io;
 
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
@@ -3461,9 +3462,8 @@ impl Tenant {
             // Run each timeline's flush in a task holding the timeline's gate: this
             // means that if this function's future is cancelled, the Timeline shutdown
             // will still wait for any I/O in here to complete.
-            let gate = match timeline.gate.enter() {
-                Ok(g) => g,
-                Err(_) => continue,
+            let Ok(gate) = timeline.gate.enter() else {
+                continue;
             };
             let jh = tokio::task::spawn(async move { flush_timeline(gate, timeline).await });
             results.push(jh);
@@ -3633,6 +3633,7 @@ pub(crate) mod harness {
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
+                compaction_algorithm: Some(tenant_conf.compaction_algorithm),
                 gc_horizon: Some(tenant_conf.gc_horizon),
                 gc_period: Some(tenant_conf.gc_period),
                 image_creation_threshold: Some(tenant_conf.image_creation_threshold),
@@ -3646,7 +3647,6 @@ pub(crate) mod harness {
                 evictions_low_residence_duration_metric_threshold: Some(
                     tenant_conf.evictions_low_residence_duration_metric_threshold,
                 ),
-                gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
                 timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
@@ -3853,7 +3853,7 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let mut writer = tline.writer().await;
+        let writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -3865,7 +3865,7 @@ mod tests {
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
-        let mut writer = tline.writer().await;
+        let writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -3931,7 +3931,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        let mut writer = tline.writer().await;
+        let writer = tline.writer().await;
 
         #[allow(non_snake_case)]
         let TEST_KEY_A: Key = Key::from_hex("110000000033333333444444445500000001").unwrap();
@@ -3965,7 +3965,7 @@ mod tests {
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
-        let mut new_writer = newtline.writer().await;
+        let new_writer = newtline.writer().await;
         new_writer
             .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"), &ctx)
             .await?;
@@ -3997,7 +3997,7 @@ mod tests {
     ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         {
-            let mut writer = tline.writer().await;
+            let writer = tline.writer().await;
             // Create a relation on the timeline
             writer
                 .put(
@@ -4022,7 +4022,7 @@ mod tests {
         }
         tline.freeze_and_flush().await?;
         {
-            let mut writer = tline.writer().await;
+            let writer = tline.writer().await;
             writer
                 .put(
                     *TEST_KEY,
@@ -4385,7 +4385,7 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let mut writer = tline.writer().await;
+        let writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4402,7 +4402,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let mut writer = tline.writer().await;
+        let writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4419,7 +4419,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let mut writer = tline.writer().await;
+        let writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4436,7 +4436,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let mut writer = tline.writer().await;
+        let writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4493,7 +4493,7 @@ mod tests {
         for _ in 0..repeat {
             for _ in 0..key_count {
                 test_key.field6 = blknum;
-                let mut writer = timeline.writer().await;
+                let writer = timeline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4664,7 +4664,7 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let mut writer = tline.writer().await;
+            let writer = tline.writer().await;
             writer
                 .put(
                     test_key,
@@ -4685,7 +4685,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let mut writer = tline.writer().await;
+                let writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4753,7 +4753,7 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let mut writer = tline.writer().await;
+            let writer = tline.writer().await;
             writer
                 .put(
                     test_key,
@@ -4782,7 +4782,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let mut writer = tline.writer().await;
+                let writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4859,7 +4859,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let mut writer = tline.writer().await;
+                let writer = tline.writer().await;
                 writer
                     .put(
                         test_key,

@@ -255,7 +255,7 @@ impl Scheduler {
 pub(crate) mod test_utils {
 
     use crate::node::Node;
-    use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
+    use pageserver_api::controller_api::{NodeAvailability, NodeSchedulingPolicy};
     use std::collections::HashMap;
     use utils::id::NodeId;
     /// Test helper: synthesize the requested number of nodes, all in active state.

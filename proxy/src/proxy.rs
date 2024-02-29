@@ -22,7 +22,6 @@ use crate::{
     stream::{PqStream, Stream},
     EndpointCacheKey,
 };
-use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
@@ -33,7 +32,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, Instrument};
 
 use self::{
     connect_compute::{connect_to_compute, TcpMechanism},
@@ -83,68 +82,67 @@ pub async fn task_main(
         let cancellation_handler = Arc::clone(&cancellation_handler);
         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
-        let session_span = info_span!(
-            "handle_client",
-            ?session_id,
-            peer_addr = tracing::field::Empty,
-            ep = tracing::field::Empty,
-        );
-
-        connections.spawn(
-            async move {
-                info!("accepted postgres client connection");
-
-                let mut socket = WithClientIp::new(socket);
-                let mut peer_addr = peer_addr.ip();
-                if let Some(addr) = socket.wait_for_addr().await? {
-                    peer_addr = addr.ip();
-                    tracing::Span::current().record("peer_addr", &tracing::field::display(addr));
-                } else if config.require_client_ip {
-                    bail!("missing required client IP");
+        connections.spawn(async move {
+            let mut socket = WithClientIp::new(socket);
+            let mut peer_addr = peer_addr.ip();
+            match socket.wait_for_addr().await {
+                Ok(Some(addr)) => peer_addr = addr.ip(),
+                Err(e) => {
+                    error!("per-client task finished with an error: {e:#}");
+                    return;
                 }
+                Ok(None) if config.require_client_ip => {
+                    error!("missing required client IP");
+                    return;
+                }
+                Ok(None) => {}
+            }
 
-                socket
-                    .inner
-                    .set_nodelay(true)
-                    .context("failed to set socket option")?;
+            match socket.inner.set_nodelay(true) {
+                Ok(()) => {},
+                Err(e) => {
+                    error!("per-client task finished with an error: failed to set socket option: {e:#}");
+                    return;
+                },
+            };
 
-                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+            let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+            let span = ctx.span.clone();
 
-                let res = handle_client(
-                    config,
-                    &mut ctx,
-                    cancellation_handler,
-                    socket,
-                    ClientMode::Tcp,
-                    endpoint_rate_limiter,
-                )
-                .await;
+            let res = handle_client(
+                config,
+                &mut ctx,
+                cancellation_handler,
+                socket,
+                ClientMode::Tcp,
+                endpoint_rate_limiter,
+            )
+            .instrument(span.clone())
+            .await;
 
-                match res {
-                    Err(e) => {
-                        // todo: log and push to ctx the error kind
-                        ctx.set_error_kind(e.get_error_kind());
-                        ctx.log();
-                        Err(e.into())
-                    }
-                    Ok(None) => {
-                        ctx.set_success();
-                        ctx.log();
-                        Ok(())
-                    }
-                    Ok(Some(p)) => {
-                        ctx.set_success();
-                        ctx.log();
-                        p.proxy_pass().await
+            match res {
+                Err(e) => {
+                    // todo: log and push to ctx the error kind
+                    ctx.set_error_kind(e.get_error_kind());
+                    ctx.log();
+                    error!(parent: &span, "per-client task finished with an error: {e:#}");
+                }
+                Ok(None) => {
+                    ctx.set_success();
+                    ctx.log();
+                }
+                Ok(Some(p)) => {
+                    ctx.set_success();
+                    ctx.log();
+                    match p.proxy_pass().instrument(span.clone()).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            error!(parent: &span, "per-client task finished with an error: {e:#}");
+                        }
                     }
                 }
             }
-            .unwrap_or_else(move |e| {
-                // Acknowledge that the task has finished with an error.
-                error!("per-client task finished with an error: {e:#}");
-            })
-            .instrument(session_span),
-        );
+        });
     }
 
     connections.close();
@@ -232,10 +230,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
-    info!(
-        protocol = ctx.protocol,
-        "handling interactive connection from client"
-    );
+    info!("handling interactive connection from client");
 
     let proto = ctx.protocol;
     let _client_gauge = NUM_CLIENT_CONNECTION_GAUGE

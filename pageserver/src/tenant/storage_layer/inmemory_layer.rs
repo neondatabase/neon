@@ -336,17 +336,32 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-
     pub(crate) async fn put_value(
         &self,
         key: Key,
         lsn: Lsn,
-        buf: &[u8],
+        val: &Value,
         ctx: &RequestContext,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
-        self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
+        self.put_value_locked(&mut inner, key, lsn, val, ctx).await
+    }
+
+    pub(crate) async fn put_values(
+        &self,
+        values: &HashMap<Key, Vec<(Lsn, Value)>>,
+        ctx: &RequestContext,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        self.assert_writable();
+        for (key, vals) in values {
+            for (lsn, val) in vals {
+                self.put_value_locked(&mut inner, *key, *lsn, val, ctx)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn put_value_locked(
@@ -354,16 +369,22 @@ impl InMemoryLayer {
         locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
         key: Key,
         lsn: Lsn,
-        buf: &[u8],
+        val: &Value,
         ctx: &RequestContext,
     ) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
 
         let off = {
+            // Avoid doing allocations for "small" values.
+            // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
+            // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
+            let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
+            buf.clear();
+            val.ser_into(&mut buf)?;
             locked_inner
                 .file
                 .write_blob(
-                    buf,
+                    &buf,
                     &RequestContextBuilder::extend(ctx)
                         .page_content_kind(PageContentKind::InMemoryLayer)
                         .build(),
@@ -391,12 +412,7 @@ impl InMemoryLayer {
     pub async fn freeze(&self, end_lsn: Lsn) {
         let inner = self.inner.write().await;
 
-        assert!(
-            self.start_lsn < end_lsn,
-            "{} >= {}",
-            self.start_lsn,
-            end_lsn
-        );
+        assert!(self.start_lsn < end_lsn);
         self.end_lsn.set(end_lsn).expect("end_lsn set only once");
 
         for vec_map in inner.index.values() {

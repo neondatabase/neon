@@ -160,13 +160,15 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
+        "compaction_algorithm": {
+            "kind": "Tiered",
+        },
         "eviction_policy": {
             "kind": "LayerAccessThreshold",
             "period": "20s",
             "threshold": "23h",
         },
         "evictions_low_residence_duration_metric_threshold": "2days",
-        "gc_feedback": True,
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
         "heatmap_period": "10m",
