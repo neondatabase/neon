@@ -147,11 +147,15 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
-        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    assert (
+        env.pageserver.log_contains(".*failed to perform remote task UploadLayer.*, will retry.*")
+        is not None
     )
-    assert env.pageserver.log_contains(
-        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    assert (
+        env.pageserver.log_contains(
+            ".*failed to perform remote task UploadMetadata.*, will retry.*"
+        )
+        is not None
     )
 
     ##### Stop the pageserver, erase its layer file to force it being downloaded from S3

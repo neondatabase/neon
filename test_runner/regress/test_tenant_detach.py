@@ -92,11 +92,15 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
-        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    assert (
+        env.pageserver.log_contains(".*failed to perform remote task UploadLayer.*, will retry.*")
+        is not None
     )
-    assert env.pageserver.log_contains(
-        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    assert (
+        env.pageserver.log_contains(
+            ".*failed to perform remote task UploadMetadata.*, will retry.*"
+        )
+        is not None
     )
 
     ps_metrics = pageserver_http.get_metrics()

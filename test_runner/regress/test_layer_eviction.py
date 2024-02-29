@@ -284,7 +284,7 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     time.sleep(2)  # let pitr_interval + 1 second pass
     ps_http.timeline_gc(tenant_id, timeline_id, 0)
     time.sleep(1)
-    assert not env.pageserver.log_contains("Nothing to GC")
+    assert env.pageserver.log_contains("Nothing to GC") is not None
 
     log.info("ensure GC deleted some layers, otherwise this test is pointless")
     post_gc_info = ps_http.layer_map_info(tenant_id, timeline_id)

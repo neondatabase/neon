@@ -531,8 +531,11 @@ def test_concurrent_timeline_delete_stuck_on(
     try:
 
         def first_call_hit_failpoint():
-            assert env.pageserver.log_contains(
-                f".*{child_timeline_id}.*at failpoint {stuck_failpoint}"
+            assert (
+                env.pageserver.log_contains(
+                    f".*{child_timeline_id}.*at failpoint {stuck_failpoint}"
+                )
+                is not None
             )
 
         wait_until(50, 0.1, first_call_hit_failpoint)
@@ -602,7 +605,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     at_failpoint_log_message = f".*{child_timeline_id}.*at failpoint {failpoint_name}.*"
 
     def hit_failpoint():
-        assert env.pageserver.log_contains(at_failpoint_log_message)
+        assert env.pageserver.log_contains(at_failpoint_log_message) is not None
 
     wait_until(50, 0.1, hit_failpoint)
 
@@ -612,7 +615,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(hangup_log_message)
 
     def got_hangup_log_message():
-        assert env.pageserver.log_contains(hangup_log_message)
+        assert env.pageserver.log_contains(hangup_log_message) is not None
 
     wait_until(50, 0.1, got_hangup_log_message)
 
@@ -624,7 +627,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     def first_request_finished():
         message = f".*DELETE.*{child_timeline_id}.*Cancelled request finished"
-        assert env.pageserver.log_contains(message)
+        assert env.pageserver.log_contains(message) is not None
 
     wait_until(50, 0.1, first_request_finished)
 
@@ -759,8 +762,11 @@ def test_delete_orphaned_objects(
 
     for orphan in orphans:
         assert not orphan.exists()
-        assert env.pageserver.log_contains(
-            f"deleting a file not referenced from index_part.json name={orphan.stem}"
+        assert (
+            env.pageserver.log_contains(
+                f"deleting a file not referenced from index_part.json name={orphan.stem}"
+            )
+            is not None
         )
 
     assert env.pageserver_remote_storage.index_path(env.initial_tenant, timeline_id).exists()

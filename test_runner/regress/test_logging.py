@@ -34,7 +34,7 @@ def test_logging_event_count(neon_env_builder: NeonEnvBuilder, level: str):
     def assert_logged():
         if not log_expected:
             return
-        assert env.pageserver.log_contains(f".*{msg_id}.*")
+        assert env.pageserver.log_contains(f".*{msg_id}.*") is not None
 
     wait_until(10, 0.5, assert_logged)
 

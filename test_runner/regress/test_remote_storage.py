@@ -120,11 +120,15 @@ def test_remote_storage_backup_and_restore(
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
-        ".*failed to perform remote task UploadLayer.*, will retry.*"
+    assert (
+        env.pageserver.log_contains(".*failed to perform remote task UploadLayer.*, will retry.*")
+        is not None
     )
-    assert env.pageserver.log_contains(
-        ".*failed to perform remote task UploadMetadata.*, will retry.*"
+    assert (
+        env.pageserver.log_contains(
+            ".*failed to perform remote task UploadMetadata.*, will retry.*"
+        )
+        is not None
     )
 
     ##### Stop the first pageserver instance, erase all its data
@@ -873,8 +877,11 @@ def test_compaction_waits_for_upload(
         ), "l0 should now be removed because of L0 => L1 compaction and completed uploads"
 
     # We should not have hit the error handling path in uploads where a uploaded file is gone
-    assert not env.pageserver.log_contains(
-        "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
+    assert (
+        not env.pageserver.log_contains(
+            "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
+        )
+        is not None
     )
 
 

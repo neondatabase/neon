@@ -36,7 +36,7 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     pg_bin.run_capture(["pgbench", "-i", "-s1", connstr])
 
     time.sleep(10)  # let compaction to be performed
-    assert env.pageserver.log_contains("compact-level0-phase1-return-same")
+    assert env.pageserver.log_contains("compact-level0-phase1-return-same") is not None
 
 
 def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
