@@ -75,7 +75,6 @@ def wait_for_wal_ingest_metric(pageserver_http: PageserverHttpClient) -> float:
         return 0
 
 
-@pytest.mark.repeat(10)
 @pytest.mark.parametrize("immediate_shutdown", [True, False])
 def test_pageserver_small_inmemory_layers(
     neon_env_builder: NeonEnvBuilder, immediate_shutdown: bool
