@@ -3,7 +3,9 @@ from fixtures.neon_fixtures import NeonEnv
 from fixtures.pg_version import PgVersion
 from fixtures.utils import wait_until
 
+import pytest
 
+@pytest.mark.repeat(50)
 def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
     env = neon_simple_env
     env.neon_cli.create_branch("test_neon_superuser_publisher", "empty")
