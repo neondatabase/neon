@@ -852,12 +852,9 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         # on-demand activation was triggered by the tenant deletion
         log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000 gen=[0-9a-f]+}}: Activating tenant \\(on-demand\\).*"
 
-        def activated_on_demand():
-            assert env.pageserver.log_contains(log_match) is not None
-
         log.info(f"Waiting for activation message '{log_match}'")
         try:
-            wait_until(10, 1, activated_on_demand)
+            wait_until(10, 1, lambda: env.pageserver.assert_log_contains(log_match))
         finally:
             log.info("Clearing failpoint")
             pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))

@@ -2348,7 +2348,9 @@ class NeonPageserver(PgProtocol):
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
 
-    def assert_log_contains(self, pattern: str, offset: None | LogCursor = None) -> Tuple[str, LogCursor]:
+    def assert_log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Tuple[str, LogCursor]:
         res = self.log_contains(pattern, offset=offset)
         assert res is not None
         return res
