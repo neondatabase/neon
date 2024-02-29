@@ -1555,7 +1555,6 @@ impl<'a> DatadirModification<'a> {
                 .collect();
 
             writer.put_batch(lsn_ordered_batch, ctx).await?;
-            self.pending_updates.clear();
         }
 
         if !self.pending_deletions.is_empty() {
