@@ -211,9 +211,9 @@ pub struct PageServerConf {
 
     pub log_format: LogFormat,
 
-    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup,
-    /// does not limit tenants loaded in response to client I/O.  A lower value implicitly deprioritizes
-    /// loading such tenants, vs. other work in the system.
+    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup or attach.
+    ///
+    /// A lower value implicitly deprioritizes loading such tenants, vs. other work in the system.
     pub concurrent_tenant_warmup: ConfigurableSemaphore,
 
     /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.

@@ -226,7 +226,11 @@ pub(crate) struct TenantPreload {
 /// When we spawn a tenant, there is a special mode for tenant creation that
 /// avoids trying to read anything from remote storage.
 pub(crate) enum SpawnMode {
-    Normal,
+    /// Activate as soon as possible
+    Eager,
+    /// Lazy activation in the background, with the option to skip the queue if the need comes up
+    Lazy,
+    /// Tenant has been created during the lifetime of this process
     Create,
 }
 
@@ -699,41 +703,37 @@ impl Tenant {
                     .and_then(|x| x.initial_tenant_load_remote.take());
 
                 enum AttachType<'a> {
-                    // During pageserver startup, we are attaching this tenant lazily in the background
-                    Warmup(tokio::sync::SemaphorePermit<'a>),
-                    // During pageserver startup, we are attaching this tenant as soon as we can,
-                    // because a client tried to access it.
+                    /// We are attaching this tenant lazily in the background.
+                    Warmup {
+                        _permit: tokio::sync::SemaphorePermit<'a>,
+                        during_startup: bool
+                    },
+                    /// We are attaching this tenant as soon as we can, because for example an
+                    /// endpoint tried to access it.
                     OnDemand,
-                    // During normal operations after startup, we are attaching a tenant.
+                    /// During normal operations after startup, we are attaching a tenant, and
+                    /// eager attach was requested.
                     Normal,
                 }
 
-                // Before doing any I/O, wait for either or:
-                // - A client to attempt to access to this tenant (on-demand loading)
-                // - A permit to become available in the warmup semaphore (background warmup)
-                //
-                // Some-ness of init_order is how we know if we're attaching during startup or later
-                // in process lifetime.
-                let attach_type = if init_order.is_some() {
+                let attach_type = if matches!(mode, SpawnMode::Lazy) {
+                    // Before doing any I/O, wait for at least one of:
+                    // - A client attempting to access to this tenant (on-demand loading)
+                    // - A permit becoming available in the warmup semaphore (background warmup)
+
                     tokio::select!(
-                        _ = tenant_clone.activate_now_sem.acquire() => {
+                        permit = tenant_clone.activate_now_sem.acquire() => {
+                            let _ = permit.expect("activate_now_sem is never closed");
                             tracing::info!("Activating tenant (on-demand)");
                             AttachType::OnDemand
                         },
-                        permit_result = conf.concurrent_tenant_warmup.inner().acquire() => {
-                            match permit_result {
-                                Ok(p) => {
-                                    tracing::info!("Activating tenant (warmup)");
-                                    AttachType::Warmup(p)
-                                }
-                                Err(_) => {
-                                    // This is unexpected: the warmup semaphore should stay alive
-                                    // for the lifetime of init_order.  Log a warning and proceed.
-                                    tracing::warn!("warmup_limit semaphore unexpectedly closed");
-                                    AttachType::Normal
-                                }
+                        permit = conf.concurrent_tenant_warmup.inner().acquire() => {
+                            let _permit = permit.expect("concurrent_tenant_warmup semaphore is never closed");
+                            tracing::info!("Activating tenant (warmup)");
+                            AttachType::Warmup {
+                                _permit,
+                                during_startup: init_order.is_some()
                             }
-
                         }
                         _ = tenant_clone.cancel.cancelled() => {
                             // This is safe, but should be pretty rare: it is interesting if a tenant
@@ -748,6 +748,8 @@ impl Tenant {
                         },
                     )
                 } else {
+                    // SpawnMode::{Create,Eager} always cause jumping ahead of the
+                    // concurrent_tenant_warmup queue
                     AttachType::Normal
                 };
 
@@ -755,7 +757,7 @@ impl Tenant {
                     (SpawnMode::Create, _) => {
                         None
                     },
-                    (SpawnMode::Normal, Some(remote_storage)) => {
+                    (SpawnMode::Eager | SpawnMode::Lazy, Some(remote_storage)) => {
                         let _preload_timer = TENANT.preload.start_timer();
                         let res = tenant_clone
                             .preload(remote_storage, task_mgr::shutdown_token())
@@ -768,7 +770,7 @@ impl Tenant {
                             }
                         }
                     }
-                    (SpawnMode::Normal, None) => {
+                    (_, None) => {
                         let _preload_timer = TENANT.preload.start_timer();
                         None
                     }
@@ -827,7 +829,7 @@ impl Tenant {
                 let attached = {
                     let _attach_timer = match mode {
                         SpawnMode::Create => None,
-                        SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
+                        SpawnMode::Eager | SpawnMode::Lazy => Some(TENANT.attach.start_timer()),
                     };
                     tenant_clone.attach(preload, mode, &ctx).await
                 };
@@ -849,7 +851,7 @@ impl Tenant {
                 // It also prevents the warmup proccess competing with the concurrency limit on
                 // logical size calculations: if logical size calculation semaphore is saturated,
                 // then warmup will wait for that before proceeding to the next tenant.
-                if let AttachType::Warmup(_permit) = attach_type {
+                if matches!(attach_type, AttachType::Warmup { during_startup: true, .. }) {
                     let mut futs: FuturesUnordered<_> = tenant_clone.timelines.lock().unwrap().values().cloned().map(|t| t.await_initial_logical_size()).collect();
                     tracing::info!("Waiting for initial logical sizes while warming up...");
                     while futs.next().await.is_some() {}
@@ -922,7 +924,7 @@ impl Tenant {
                 deleting: false,
                 timelines: HashMap::new(),
             },
-            (None, SpawnMode::Normal) => {
+            (None, _) => {
                 anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
             }
         };
@@ -3761,7 +3763,7 @@ pub(crate) mod harness {
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())
                 .await?;
-            tenant.attach(Some(preload), SpawnMode::Normal, ctx).await?;
+            tenant.attach(Some(preload), SpawnMode::Eager, ctx).await?;
 
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
