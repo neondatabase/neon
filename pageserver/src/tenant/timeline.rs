@@ -5184,6 +5184,11 @@ impl<'a> TimelineWriter<'a> {
             return OpenLayerAction::None;
         }
 
+        if state.current_size == 0 {
+            // Don't roll empty layers
+            return OpenLayerAction::None;
+        }
+
         let distance = lsn.widening_sub(state.cached_last_freeze_at);
         let proposed_open_layer_size = state.current_size + new_value_size;
 
