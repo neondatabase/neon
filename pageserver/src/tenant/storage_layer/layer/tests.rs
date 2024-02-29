@@ -298,7 +298,7 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 
     // because the keep_resident check alters wanted evicted without sending a message, we will
     // never get completed
-    let e = tokio::time::timeout(std::time::Duration::from_secs(3600), &mut evict_and_wait)
+    let e = tokio::time::timeout(ADVANCE, &mut evict_and_wait)
         .await
         .expect("no timeout, because keep_resident re-initialized")
         .expect_err("eviction should not have succeeded because re-initialized");
@@ -320,7 +320,8 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 
     let mut second_eviction = std::pin::pin!(layer.evict_and_wait(FOREVER));
 
-    tokio::time::timeout(std::time::Duration::from_secs(3600), &mut second_eviction)
+    // advance to the wait on the queue
+    tokio::time::timeout(ADVANCE, &mut second_eviction)
         .await
         .expect_err("timeout because spawn_blocking is clogged");
 
@@ -331,7 +332,7 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 
     helper.release().await;
 
-    tokio::time::timeout(std::time::Duration::from_secs(3600), &mut second_eviction)
+    tokio::time::timeout(ADVANCE, &mut second_eviction)
         .await
         .expect("eviction goes through now that spawn_blocking is unclogged")
         .expect("eviction should succeed, because version matches");
