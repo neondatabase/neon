@@ -2474,6 +2474,64 @@ pub(crate) mod tenant_throttling {
     }
 }
 
+pub(crate) mod disk_usage_based_eviction {
+    use super::*;
+
+    pub(crate) struct Metrics {
+        pub(crate) tenant_collection_time: Histogram,
+        pub(crate) tenant_layer_count: Histogram,
+        pub(crate) layers_collected: IntCounter,
+        pub(crate) layers_selected: IntCounter,
+        pub(crate) layers_evicted: IntCounter,
+    }
+
+    impl Default for Metrics {
+        fn default() -> Self {
+            let tenant_collection_time = register_histogram!(
+                "pageserver_disk_usage_based_eviction_tenant_collection_seconds",
+                "Time spent collecting layers from a tenant -- not normalized by collected layer amount",
+                vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
+            )
+            .unwrap();
+
+            let tenant_layer_count = register_histogram!(
+                "pageserver_disk_usage_based_eviction_tenant_collected_layers",
+                "Amount of layers gathered from a tenant",
+                vec![5.0, 50.0, 500.0, 5000.0, 50000.0]
+            )
+            .unwrap();
+
+            let layers_collected = register_int_counter!(
+                "pageserver_disk_usage_based_eviction_collected_layers_total",
+                "Amount of layers collected"
+            )
+            .unwrap();
+
+            let layers_selected = register_int_counter!(
+                "pageserver_disk_usage_based_eviction_select_layers_total",
+                "Amount of layers selected"
+            )
+            .unwrap();
+
+            let layers_evicted = register_int_counter!(
+                "pageserver_disk_usage_based_eviction_evicted_layers_total",
+                "Amount of layers successfully evicted"
+            )
+            .unwrap();
+
+            Self {
+                tenant_collection_time,
+                tenant_layer_count,
+                layers_collected,
+                layers_selected,
+                layers_evicted,
+            }
+        }
+    }
+
+    pub(crate) static METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
+}
+
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //
@@ -2508,6 +2566,7 @@ pub fn preinitialize_metrics() {
     Lazy::force(&TENANT_MANAGER);
 
     Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
+    Lazy::force(&disk_usage_based_eviction::METRICS);
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
