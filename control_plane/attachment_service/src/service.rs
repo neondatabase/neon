@@ -1419,7 +1419,7 @@ impl Service {
 
                         let maybe_waiter = shard.maybe_reconcile(
                             result_tx.clone(),
-                            &nodes,
+                            nodes,
                             &compute_hook,
                             &self.config,
                             &self.persistence,
