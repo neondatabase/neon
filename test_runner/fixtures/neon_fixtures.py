@@ -2180,6 +2180,11 @@ class NeonAttachmentService(MetricsGetter):
         self.stop(immediate=True)
 
 
+@dataclass
+class LogCursor:
+    _line_no: int
+
+
 class NeonPageserver(PgProtocol):
     """
     An object representing a running pageserver.
@@ -2344,12 +2349,9 @@ class NeonPageserver(PgProtocol):
             assert value == 0, f"Nonzero {metric} == {value}"
 
     def log_contains(
-        self, pattern: str, skip_until: "None | str | Callable[[str], bool]" = None
-    ) -> Optional[str]:
-        """
-        Check that the pageserver log contains a line that matches the given regex.
-        Use `skip_until` to limit the search to the suffix of the log that follows the first line that matches `skip_until`.
-        """
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Optional[Tuple[str, LogCursor]]:
+        """Check that the pageserver log contains a line that matches the given regex"""
         logfile = self.workdir / "pageserver.log"
         if not logfile.exists():
             log.warning(f"Skipping log check: {logfile} does not exist")
@@ -2357,39 +2359,22 @@ class NeonPageserver(PgProtocol):
 
         contains_re = re.compile(pattern)
 
-        skip_until_finder: Callable[[str], bool]
-        if skip_until is None:
-
-            def always_true_finder(_line: str) -> bool:
-                return True
-
-            skip_until_finder = always_true_finder
-        elif isinstance(skip_until, str):
-            skip_until_pattern_re = re.compile(skip_until)
-
-            def re_finder(_line: str) -> bool:
-                return skip_until_pattern_re.search(line) is not None
-
-            skip_until_finder = re_finder
-        else:
-            skip_until_finder = skip_until
-
         # XXX: Our rust logging machinery buffers the messages, so if you
         # call this function immediately after it's been logged, there is
         # no guarantee it is already present in the log file. This hasn't
         # been a problem in practice, our python tests are not fast enough
         # to hit that race condition.
-        skip_until_pattern_found = False
+        skip_until_line_no = 0 if offset is None else offset._line_no
+        cur_line_no = 0
         with logfile.open("r") as f:
             for line in f:
-                if not skip_until_pattern_found:
-                    skip_until_pattern_found = skip_until_finder(line)
-                if not skip_until_pattern_found:
+                if cur_line_no < skip_until_line_no:
+                    cur_line_no += 1
                     continue
                 if contains_re.search(line):
                     # found it!
-                    return line
-
+                    cur_line_no += 1
+                    return (line, LogCursor(cur_line_no))
         return None
 
     def tenant_attach(
