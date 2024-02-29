@@ -25,8 +25,6 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pagestore_client.h"
-#include "common/hashfn.h"
-#include "lib/hyperloglog.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include RELFILEINFO_HDR
@@ -62,7 +60,6 @@
 #define BLOCKS_PER_CHUNK	128 /* 1Mb chunk */
 #define MB					((uint64)1024*1024)
 
-#define HYPER_LOG_LOG_BIT_WIDTH   10
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ / BLOCKS_PER_CHUNK))
 
 typedef struct FileCacheEntry
@@ -87,8 +84,6 @@ typedef struct FileCacheControl
 	uint64		writes;
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
-	hyperLogLogState wss_estimation; /* estimation of wroking set size */
-	uint8_t		hyperloglog_hashes[(1 << HYPER_LOG_LOG_BIT_WIDTH) + 1];
 } FileCacheControl;
 
 static HTAB *lfc_hash;
@@ -236,14 +231,6 @@ lfc_shmem_startup(void)
 		lfc_ctl->misses = 0;
 		lfc_ctl->writes = 0;
 		dlist_init(&lfc_ctl->lru);
-
-		/* Initialize hyper-log-log structure for estimating working set size */
-		initHyperLogLog(&lfc_ctl->wss_estimation, HYPER_LOG_LOG_BIT_WIDTH);
-
-		/* We need hashes in shared memory */
-		pfree(lfc_ctl->wss_estimation.hashesArr);
-		memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
-		lfc_ctl->wss_estimation.hashesArr = lfc_ctl->hyperloglog_hashes;
 
 		/* Recreate file cache on restart */
 		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
@@ -542,11 +529,6 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-
-	/* Approximate working set */
-	tag.blockNum = blkno;
-	addHyperLogLog(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-
 	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
 	{
 		/* Page is not cached */
@@ -984,22 +966,4 @@ local_cache_pages(PG_FUNCTION_ARGS)
 	}
 	else
 		SRF_RETURN_DONE(funcctx);
-}
-
-PG_FUNCTION_INFO_V1(approximate_working_set_size);
-
-Datum
-approximate_working_set_size(PG_FUNCTION_ARGS)
-{
-	int32 dc = -1;
-	if (lfc_size_limit != 0)
-	{
-		bool reset = PG_GETARG_BOOL(0);
-		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
-		dc = (int32) estimateHyperLogLog(&lfc_ctl->wss_estimation);
-		if (reset)
-			memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
-		LWLockRelease(lfc_lock);
-	}
-	PG_RETURN_INT32(dc);
 }
