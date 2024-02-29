@@ -86,17 +86,23 @@ async fn smoke_test() {
 
     // evict_and_wait can timeout, but it doesn't cancel the evicting itself
     //
-    // ZERO for timeout works, because evicting will always need to use spawn_blocking which takes
-    // non-zero time.
-    match layer.evict_and_wait(std::time::Duration::ZERO).await {
-        Ok(()) => { /* but sometimes this spawn_blocking is fast enough */ }
-        Err(EvictionError::Timeout) => {
+    // ZERO for timeout does not work reliably, so first take up all spawn_blocking slots to
+    // artificially slow it down.
+    let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
+
+    match layer
+        .evict_and_wait(std::time::Duration::ZERO)
+        .await
+        .unwrap_err()
+    {
+        EvictionError::Timeout => {
             // expected, but note that the eviction is "still ongoing"
-            // exhaust spawn_blocking pool to ensure it is complete
+            helper.release().await;
+            // exhaust spawn_blocking pool to ensure it is now complete
             SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle)
                 .await;
         }
-        Err(other) => unreachable!("{other:?}"),
+        other => unreachable!("{other:?}"),
     }
 
     // only way to query if a layer is resident is to acquire a ResidentLayer instance.
