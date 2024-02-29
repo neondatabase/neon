@@ -657,6 +657,12 @@ impl LayerInner {
         if strong.is_some() {
             // drop the DownloadedLayer outside of the holding the guard
             drop(strong);
+
+            // idea here is that only one evicter should ever get to witness a strong reference,
+            // which means whenever get_or_maybe_download upgrades a weak, it must mark up a
+            // cancelled eviction and signal us, like it currently does.
+            //
+            // a second concurrent evict_and_wait will not see a strong reference.
             LAYER_IMPL_METRICS.inc_started_evictions();
         }
 
