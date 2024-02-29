@@ -2344,7 +2344,7 @@ class NeonPageserver(PgProtocol):
             assert value == 0, f"Nonzero {metric} == {value}"
 
     def log_contains(
-        self, pattern: str, skip_until: "None | str | Callable[[str], bool]"
+        self, pattern: str, skip_until: "None | str | Callable[[str], bool]" = None
     ) -> Optional[str]:
         """
         Check that the pageserver log contains a line that matches the given regex.
