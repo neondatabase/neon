@@ -1,4 +1,5 @@
-import os
+
+from pathlib import Path
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
@@ -7,8 +8,8 @@ from fixtures.neon_fixtures import NeonEnv
 def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    cache_dir = os.path.join(env.repo_dir, "file_cache")
-    os.mkdir(cache_dir)
+    cache_dir = Path(env.repo_dir) / "file_cache"
+    cache_dir.mkdir(exist_ok=True)
 
     branchname = "test_explain_with_lfc_stats"
     env.neon_cli.create_branch(branchname, "empty")
@@ -27,7 +28,7 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
 
     log.info(f"preparing some data in {endpoint.connstr()}")
 
-    DDL = """
+    ddl = """
 CREATE TABLE pgbench_accounts (
     aid bigint NOT NULL,
     bid integer,
@@ -40,7 +41,7 @@ CREATE TABLE pgbench_accounts (
 WITH (fillfactor='100');
 """
 
-    cur.execute(DDL)
+    cur.execute(ddl)
     cur.execute(
         "insert into pgbench_accounts(aid,bid,abalance,filler) select aid, (aid - 1) / 100000 + 1, 0, '' from generate_series(1, 100000) as aid;"
     )
