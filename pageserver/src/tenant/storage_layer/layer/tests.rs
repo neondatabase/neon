@@ -126,11 +126,13 @@ async fn smoke_test() {
     // deletion of the already unlinked from index_part.json remote file.
     //
     // marking a layer to be deleted on drop is irreversible; there is no technical reason against
-    // reversiblity, but currently it is not needed.
+    // reversiblity, but currently it is not needed so it is not provided.
     layer.delete_on_drop();
 
     let path = layer.local_path().to_owned();
 
+    // wait_drop produces an unconnected to Layer future which will resolve when the
+    // LayerInner::drop has completed.
     let mut wait_drop = std::pin::pin!(layer.wait_drop());
 
     // paused time doesn't really work well with timeouts and evict_and_wait, so delay pausing
