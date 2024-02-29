@@ -816,13 +816,7 @@ async fn tenant_attach_handler(
 
     let tenant = state
         .tenant_manager
-        .upsert_location(
-            tenant_shard_id,
-            location_conf,
-            None,
-            SpawnMode::Normal,
-            &ctx,
-        )
+        .upsert_location(tenant_shard_id, location_conf, None, SpawnMode::Eager, &ctx)
         .await?;
 
     let Some(tenant) = tenant else {
@@ -1418,6 +1412,7 @@ async fn put_tenant_location_config_handler(
 
     let request_data: TenantLocationConfigRequest = json_request(&mut request).await?;
     let flush = parse_query_param(&request, "flush_ms")?.map(Duration::from_millis);
+    let lazy = parse_query_param(&request, "lazy")?.unwrap_or(false);
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
@@ -1448,15 +1443,17 @@ async fn put_tenant_location_config_handler(
     let location_conf =
         LocationConf::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
+    // lazy==true queues up for activation or jumps the queue like normal when a compute connects,
+    // similar to at startup ordering.
+    let spawn_mode = if lazy {
+        tenant::SpawnMode::Lazy
+    } else {
+        tenant::SpawnMode::Eager
+    };
+
     let attached = state
         .tenant_manager
-        .upsert_location(
-            tenant_shard_id,
-            location_conf,
-            flush,
-            tenant::SpawnMode::Normal,
-            &ctx,
-        )
+        .upsert_location(tenant_shard_id, location_conf, flush, spawn_mode, &ctx)
         .await?
         .is_some();
 

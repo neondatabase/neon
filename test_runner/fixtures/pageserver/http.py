@@ -286,7 +286,11 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
 
     def tenant_location_conf(
-        self, tenant_id: Union[TenantId, TenantShardId], location_conf=dict[str, Any], flush_ms=None
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        location_conf=dict[str, Any],
+        flush_ms=None,
+        lazy: Optional[bool] = None,
     ):
         body = location_conf.copy()
         body["tenant_id"] = str(tenant_id)
@@ -294,6 +298,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         params = {}
         if flush_ms is not None:
             params["flush_ms"] = str(flush_ms)
+
+        if lazy is not None:
+            params["lazy"] = "true" if lazy else "false"
 
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/location_config",

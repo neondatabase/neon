@@ -2,6 +2,7 @@ import concurrent.futures
 import math
 import random
 import time
+from collections import defaultdict
 from contextlib import closing
 from pathlib import Path
 from typing import Optional
@@ -14,6 +15,7 @@ from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     NeonEnvBuilder,
+    NeonPageserver,
     PgBin,
     VanillaPostgres,
     wait_for_last_flush_lsn,
@@ -839,21 +841,39 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     )
 
     # Deleting a stuck tenant should prompt it to go active
+    # in some cases, it has already been activated because it's behind the detach
+    delete_lazy_activating(delete_tenant_id, env.pageserver, expect_attaching=False)
+    tenant_ids.remove(delete_tenant_id)
+
+    # Check that all the stuck tenants proceed to active (apart from the one that deletes, and the one
+    # we detached)
+    wait_until(10, 1, all_active)
+    assert len(get_tenant_states()) == n_tenants - 2
+
+
+def delete_lazy_activating(
+    delete_tenant_id: TenantId, pageserver: NeonPageserver, expect_attaching: bool
+):
+    pageserver_http = pageserver.http_client()
+
+    # Deletion itself won't complete due to our failpoint: Tenant::shutdown can't complete while calculating
+    # logical size is paused in a failpoint.  So instead we will use a log observation to check that
+    # on-demand activation was triggered by the tenant deletion
+    log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000 gen=[0-9a-f]+}}: Activating tenant \\(on-demand\\).*"
+
+    if expect_attaching:
+        assert pageserver_http.tenant_status(delete_tenant_id)["state"]["slug"] == "Attaching"
+
     with concurrent.futures.ThreadPoolExecutor() as executor:
         log.info("Starting background delete")
 
+        def activated_on_demand():
+            assert pageserver.log_contains(log_match) is not None
+
         def delete_tenant():
-            env.pageserver.http_client().tenant_delete(delete_tenant_id)
+            pageserver_http.tenant_delete(delete_tenant_id)
 
         background_delete = executor.submit(delete_tenant)
-
-        # Deletion itself won't complete due to our failpoint: Tenant::shutdown can't complete while calculating
-        # logical size is paused in a failpoint.  So instead we will use a log observation to check that
-        # on-demand activation was triggered by the tenant deletion
-        log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000 gen=[0-9a-f]+}}: Activating tenant \\(on-demand\\).*"
-
-        def activated_on_demand():
-            assert env.pageserver.log_contains(log_match) is not None
 
         log.info(f"Waiting for activation message '{log_match}'")
         try:
@@ -868,12 +888,6 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
         # Poll for deletion to complete
         wait_tenant_status_404(pageserver_http, tenant_id=delete_tenant_id, iterations=40)
-        tenant_ids.remove(delete_tenant_id)
-
-    # Check that all the stuck tenants proceed to active (apart from the one that deletes, and the one
-    # we detached)
-    wait_until(10, 1, all_active)
-    assert len(get_tenant_states()) == n_tenants - 2
 
 
 def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
@@ -939,3 +953,159 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     client.configure_failpoints(
         [("initial-size-calculation-permit-pause", "off"), ("walreceiver-after-ingest", "off")]
     )
+
+
+def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+
+    env = neon_env_builder.init_start()
+
+    # the supporting_second does nothing except queue behind env.initial_tenant
+    # for purposes of showing that eager_tenant breezes past the queue
+    supporting_second, _ = env.neon_cli.create_tenant()
+    eager_tenant, _ = env.neon_cli.create_tenant()
+
+    client = env.pageserver.http_client()
+    client.tenant_location_conf(
+        eager_tenant,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+
+    env.pageserver.stop()
+
+    # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
+    env.pageserver.start(
+        extra_env_vars={
+            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest=pause"
+        }
+    )
+
+    tenant_ids = [env.initial_tenant, supporting_second]
+
+    def get_tenant_states() -> dict[str, list[TenantId]]:
+        states = defaultdict(list)
+        for id in tenant_ids:
+            state = client.tenant_status(id)["state"]["slug"]
+            states[state].append(id)
+        return dict(states)
+
+    def one_is_active():
+        states = get_tenant_states()
+        log.info(f"{states}")
+        assert len(states["Active"]) == 1
+
+    wait_until(10, 1, one_is_active)
+
+    def other_is_attaching():
+        states = get_tenant_states()
+        assert len(states["Attaching"]) == 1
+
+    wait_until(10, 1, other_is_attaching)
+
+    def eager_tenant_is_active():
+        resp = client.tenant_status(eager_tenant)
+        assert resp["state"]["slug"] == "Active"
+
+    gen = env.attachment_service.attach_hook_issue(eager_tenant, env.pageserver.id)
+    client.tenant_location_conf(
+        eager_tenant,
+        {
+            "mode": "AttachedSingle",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": gen,
+        },
+        lazy=False,
+    )
+    wait_until(10, 1, eager_tenant_is_active)
+
+    other_is_attaching()
+
+    client.configure_failpoints(
+        [("timeline-calculate-logical-size-pause", "off"), ("walreceiver-after-ingest", "off")]
+    )
+
+
+@pytest.mark.parametrize("activation_method", ["endpoint", "branch", "delete"])
+def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_method: str):
+    # env.initial_tenant will take up this permit when attaching with lazy because of a failpoint activated after restart
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+
+    env = neon_env_builder.init_start()
+
+    # because this returns (also elsewhere in this file), we know that SpawnMode::Create skips the queue
+    lazy_tenant, _ = env.neon_cli.create_tenant()
+
+    client = env.pageserver.http_client()
+    client.tenant_location_conf(
+        lazy_tenant,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+
+    env.pageserver.stop()
+
+    # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
+    env.pageserver.start(
+        extra_env_vars={
+            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest=pause"
+        }
+    )
+
+    def initial_tenant_is_active():
+        resp = client.tenant_status(env.initial_tenant)
+        assert resp["state"]["slug"] == "Active"
+
+    wait_until(10, 1, initial_tenant_is_active)
+
+    # even though the initial tenant is now active, because it was startup time
+    # attach, it will consume the only permit because logical size calculation
+    # is paused.
+
+    gen = env.attachment_service.attach_hook_issue(lazy_tenant, env.pageserver.id)
+    client.tenant_location_conf(
+        lazy_tenant,
+        {
+            "mode": "AttachedSingle",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": gen,
+        },
+        lazy=True,
+    )
+
+    def lazy_tenant_is_attaching():
+        resp = client.tenant_status(lazy_tenant)
+        assert resp["state"]["slug"] == "Attaching"
+
+    # paused logical size calculation of env.initial_tenant is keeping it attaching
+    wait_until(10, 1, lazy_tenant_is_attaching)
+
+    for _ in range(5):
+        lazy_tenant_is_attaching()
+        time.sleep(0.5)
+
+    def lazy_tenant_is_active():
+        resp = client.tenant_status(lazy_tenant)
+        assert resp["state"]["slug"] == "Active"
+
+    if activation_method == "endpoint":
+        with env.endpoints.create_start("main", tenant_id=lazy_tenant):
+            # starting up the endpoint should make it jump the queue
+            wait_until(10, 1, lazy_tenant_is_active)
+    elif activation_method == "branch":
+        env.neon_cli.create_timeline("second_branch", lazy_tenant)
+        wait_until(10, 1, lazy_tenant_is_active)
+    elif activation_method == "delete":
+        delete_lazy_activating(lazy_tenant, env.pageserver, expect_attaching=True)
+    else:
+        raise RuntimeError(activation_method)
