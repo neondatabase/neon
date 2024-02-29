@@ -2488,33 +2488,33 @@ pub(crate) mod disk_usage_based_eviction {
     impl Default for Metrics {
         fn default() -> Self {
             let tenant_collection_time = register_histogram!(
-                "pageserver_dube_tenant_collection_seconds",
+                "pageserver_disk_usage_based_eviction_tenant_collection_seconds",
                 "Time spent collecting layers from a tenant -- not normalized by collected layer amount",
                 vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
             )
             .unwrap();
 
             let tenant_layer_count = register_histogram!(
-                "pageserver_dube_tenant_collected_layers",
+                "pageserver_disk_usage_based_eviction_tenant_collected_layers",
                 "Amount of layers gathered from a tenant",
                 vec![5.0, 50.0, 500.0, 5000.0, 50000.0]
             )
             .unwrap();
 
             let layers_collected = register_int_counter!(
-                "pageserver_dube_collected_layers_total",
+                "pageserver_disk_usage_based_eviction_collected_layers_total",
                 "Amount of layers collected"
             )
             .unwrap();
 
             let layers_selected = register_int_counter!(
-                "pageserver_dube_select_layers_total",
+                "pageserver_disk_usage_based_eviction_select_layers_total",
                 "Amount of layers selected"
             )
             .unwrap();
 
             let layers_evicted = register_int_counter!(
-                "pageserver_dube_evicted_layers_total",
+                "pageserver_disk_usage_based_eviction_evicted_layers_total",
                 "Amount of layers successfully evicted"
             )
             .unwrap();
