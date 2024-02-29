@@ -495,10 +495,7 @@ def test_emergency_relocate_with_branches_slow_replay(
         assert cur.fetchall() == [("before pause",), ("after pause",)]
 
     # Sanity check that the failpoint was reached
-    assert (
-        env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
-        is not None
-    )
+    assert env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
     assert time.time() - before_attach_time > 5
 
     # Clean up
@@ -635,10 +632,7 @@ def test_emergency_relocate_with_branches_createdb(
         assert query_scalar(cur, "SELECT count(*) FROM test_migrate_one") == 200
 
     # Sanity check that the failpoint was reached
-    assert (
-        env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
-        is not None
-    )
+    assert env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
     assert time.time() - before_attach_time > 5
 
     # Clean up

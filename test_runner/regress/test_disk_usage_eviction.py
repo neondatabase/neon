@@ -200,7 +200,7 @@ class EvictionEnv:
                 tenant_ps.http_client().timeline_wait_logical_size(tenant_id, timeline_id)
 
         def statvfs_called():
-            assert pageserver.log_contains(".*running mocked statvfs.*") is not None
+            assert pageserver.log_contains(".*running mocked statvfs.*")
 
         # we most likely have already completed multiple runs
         wait_until(10, 1, statvfs_called)
@@ -482,11 +482,8 @@ def test_pageserver_respects_overridden_resident_size(
     log.info(f"{response}")
 
     time.sleep(1)  # give log time to flush
-    assert (
-        env.neon_env.pageserver.log_contains(
-            GLOBAL_LRU_LOG_LINE,
-        )
-        is not None
+    assert not env.neon_env.pageserver.log_contains(
+        GLOBAL_LRU_LOG_LINE,
     ), "this test is pointless if it fell back to global LRU"
 
     (later_total_on_disk, _, _) = env.timelines_du(env.pageserver)
@@ -536,7 +533,7 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv, order: E
     assert actual_change >= target, "eviction must always evict more than target"
 
     time.sleep(1)  # give log time to flush
-    assert env.neon_env.pageserver.log_contains(GLOBAL_LRU_LOG_LINE) is not None
+    assert env.neon_env.pageserver.log_contains(GLOBAL_LRU_LOG_LINE)
     env.neon_env.pageserver.allowed_errors.append(".*" + GLOBAL_LRU_LOG_LINE)
 
 
@@ -770,7 +767,7 @@ def test_statvfs_error_handling(eviction_env: EvictionEnv):
         eviction_order=EvictionOrder.ABSOLUTE_ORDER,
     )
 
-    assert env.neon_env.pageserver.log_contains(".*statvfs failed.*EIO") is not None
+    assert env.neon_env.pageserver.log_contains(".*statvfs failed.*EIO")
     env.neon_env.pageserver.allowed_errors.append(".*statvfs failed.*EIO")
 
 
@@ -805,7 +802,7 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     )
 
     def relieved_log_message():
-        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved") is not None
+        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved")
 
     wait_until(10, 1, relieved_log_message)
 
@@ -849,7 +846,7 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
     )
 
     def relieved_log_message():
-        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved") is not None
+        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved")
 
     wait_until(10, 1, relieved_log_message)
 

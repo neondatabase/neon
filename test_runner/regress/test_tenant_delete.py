@@ -505,10 +505,10 @@ def test_tenant_delete_concurrent(
         return ps_http.tenant_delete(tenant_id)
 
     def hit_remove_failpoint():
-        assert env.pageserver.log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}") is not None
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")
 
     def hit_run_failpoint():
-        assert env.pageserver.log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}") is not None
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}")
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         background_200_req = executor.submit(delete_tenant)
@@ -612,17 +612,13 @@ def test_tenant_delete_races_timeline_creation(
     Thread(target=timeline_create).start()
 
     def hit_initdb_upload_failpoint():
-        assert (
-            env.pageserver.log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
-            is not None
-        )
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
 
     wait_until(100, 0.1, hit_initdb_upload_failpoint)
 
     def creation_connection_timed_out():
-        assert (
-            env.pageserver.log_contains("POST.*/timeline.* request was dropped before completing")
-            is not None
+        assert env.pageserver.log_contains(
+            "POST.*/timeline.* request was dropped before completing"
         )
 
     # Wait so that we hit the timeout and the connection is dropped
@@ -640,9 +636,8 @@ def test_tenant_delete_races_timeline_creation(
     Thread(target=tenant_delete).start()
 
     def deletion_arrived():
-        assert (
-            env.pageserver.log_contains(f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause")
-            is not None
+        assert env.pageserver.log_contains(
+            f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
         )
 
     wait_until(100, 0.1, deletion_arrived)
@@ -668,12 +663,9 @@ def test_tenant_delete_races_timeline_creation(
     )
 
     # Ensure that creation cancelled and deletion didn't end up in broken state or encountered the leftover temp file
-    assert env.pageserver.log_contains(CANCELLED_ERROR) is not None
-    assert (
-        not env.pageserver.log_contains(
-            ".*ERROR.*delete_tenant.*Timelines directory is not empty after all timelines deletion"
-        )
-        is not None
+    assert env.pageserver.log_contains(CANCELLED_ERROR)
+    assert not env.pageserver.log_contains(
+        ".*ERROR.*delete_tenant.*Timelines directory is not empty after all timelines deletion"
     )
 
     # Zero tenants remain (we deleted the default tenant)

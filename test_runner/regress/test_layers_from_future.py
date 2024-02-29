@@ -185,10 +185,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     # NB: the layer file is unlinked index part now, but, because we made the delete
     # operation stuck, the layer file itself is still in the remote_storage
     def delete_at_pause_point():
-        assert (
-            env.pageserver.log_contains(f".*{tenant_id}.*at failpoint.*{failpoint_name}")
-            is not None
-        )
+        assert env.pageserver.log_contains(f".*{tenant_id}.*at failpoint.*{failpoint_name}")
 
     wait_until(10, 0.5, delete_at_pause_point)
     future_layer_path = env.pageserver_remote_storage.remote_layer_path(
