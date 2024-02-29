@@ -655,6 +655,9 @@ pub fn handle_grants(
         // remove this code if possible. The worst thing that could happen is that
         // user won't be able to use public schema in NEW databases created in the
         // very OLD project.
+        //
+        // Also, alter default permissions so that relations created by extensions can be
+        // used by neon_superuser without permission issues.
         let grant_query = "DO $$\n\
                 BEGIN\n\
                     IF EXISTS(\n\
@@ -672,6 +675,15 @@ pub fn handle_grants(
                         THEN\n\
                             GRANT CREATE ON SCHEMA public TO web_access;\n\
                         END IF;\n\
+                    END IF;\n\
+                    IF EXISTS(\n\
+                        SELECT nspname\n\
+                        FROM pg_catalog.pg_namespace\n\
+                        WHERE nspname = 'public'\n\
+                    )\n\
+                    THEN\n\
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser WITH GRANT OPTION;\n\
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser WITH GRANT OPTION;\n\
                     END IF;\n\
                 END\n\
             $$;"
@@ -777,11 +789,12 @@ BEGIN
 END
 $$;"#,
         "GRANT pg_monitor TO neon_superuser WITH ADMIN OPTION",
-        // ensure tables created by superusers (i.e., when creating extensions) can be used by neon_superuser.
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser", // to-be removed in the future
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser", // to-be removed in the future
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser WITH GRANT OPTION",
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser WITH GRANT OPTION",
+        // Don't remove: these are some SQLs that we originally applied in migrations but turned out to execute somewhere else.
+        "",
+        "",
+        "",
+        "",
+        // Add new migrations below.
     ];
 
     let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
@@ -808,8 +821,13 @@ $$;"#,
     client.simple_query(query)?;
 
     while current_migration < migrations.len() {
-        info!("Running migration:\n{}\n", migrations[current_migration]);
-        client.simple_query(migrations[current_migration])?;
+        let migration = &migrations[current_migration];
+        if migration.is_empty() {
+            info!("Skip migration id={}", current_migration);
+        } else {
+            info!("Running migration:\n{}\n", migration);
+            client.simple_query(migration)?;
+        }
         current_migration += 1;
     }
     let setval = format!(

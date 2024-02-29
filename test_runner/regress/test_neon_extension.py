@@ -1,5 +1,6 @@
 from contextlib import closing
 
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
@@ -22,4 +23,9 @@ def test_neon_extension(neon_env_builder: NeonEnvBuilder):
             # IMPORTANT:
             # If the version has changed, the test should be updated.
             # Ensure that the default version is also updated in the neon.control file
-            assert cur.fetchone() == ("1.1",)
+            assert cur.fetchone() == ("1.2",)
+            cur.execute("SELECT * from neon.NEON_STAT_FILE_CACHE")
+            res = cur.fetchall()
+            log.info(res)
+            assert len(res) == 1
+            assert len(res[0]) == 5

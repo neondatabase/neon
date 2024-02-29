@@ -15,7 +15,6 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
-use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
@@ -35,6 +34,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
+
+const MAX_AUX_FILE_DELTAS: usize = 1024;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -157,7 +158,6 @@ impl Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
-            pending_aux_files: None,
             pending_directory_entries: Vec::new(),
             lsn,
         }
@@ -873,11 +873,6 @@ pub struct DatadirModification<'a> {
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
 
-    // If we already wrote any aux file changes in this modification, stash the latest dir.  If set,
-    // [`Self::put_file`] may assume that it is safe to emit a delta rather than checking
-    // if AUX_FILES_KEY is already set.
-    pending_aux_files: Option<AuxFilesDirectory>,
-
     /// For special "directory" keys that store key-value maps, track the size of the map
     /// if it was updated in this modification.
     pending_directory_entries: Vec<(DirectoryKind, usize)>,
@@ -1401,19 +1396,28 @@ impl<'a> DatadirModification<'a> {
             Some(Bytes::copy_from_slice(content))
         };
 
-        let dir = if let Some(mut dir) = self.pending_aux_files.take() {
+        let n_files;
+        let mut aux_files = self.tline.aux_files.lock().await;
+        if let Some(mut dir) = aux_files.dir.take() {
             // We already updated aux files in `self`: emit a delta and update our latest value
-
-            self.put(
-                AUX_FILES_KEY,
-                Value::WalRecord(NeonWalRecord::AuxFile {
-                    file_path: file_path.clone(),
-                    content: content.clone(),
-                }),
-            );
-
-            dir.upsert(file_path, content);
-            dir
+            dir.upsert(file_path.clone(), content.clone());
+            n_files = dir.files.len();
+            if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::Image(Bytes::from(
+                        AuxFilesDirectory::ser(&dir).context("serialize")?,
+                    )),
+                );
+                aux_files.n_deltas = 0;
+            } else {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                );
+                aux_files.n_deltas += 1;
+            }
+            aux_files.dir = Some(dir);
         } else {
             // Check if the AUX_FILES_KEY is initialized
             match self.get(AUX_FILES_KEY, ctx).await {
@@ -1428,7 +1432,8 @@ impl<'a> DatadirModification<'a> {
                         }),
                     );
                     dir.upsert(file_path, content);
-                    dir
+                    n_files = dir.files.len();
+                    aux_files.dir = Some(dir);
                 }
                 Err(
                     e @ (PageReconstructError::AncestorStopping(_)
@@ -1455,14 +1460,14 @@ impl<'a> DatadirModification<'a> {
                             AuxFilesDirectory::ser(&dir).context("serialize")?,
                         )),
                     );
-                    dir
+                    n_files = 1;
+                    aux_files.dir = Some(dir);
                 }
             }
-        };
+        }
 
         self.pending_directory_entries
-            .push((DirectoryKind::AuxFiles, dir.files.len()));
-        self.pending_aux_files = Some(dir);
+            .push((DirectoryKind::AuxFiles, n_files));
 
         Ok(())
     }
@@ -1493,7 +1498,7 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let mut writer = self.tline.writer().await;
+        let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
@@ -1532,23 +1537,13 @@ impl<'a> DatadirModification<'a> {
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let mut writer = self.tline.writer().await;
+        let writer = self.tline.writer().await;
 
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            let prev_pending_updates = std::mem::take(&mut self.pending_updates);
-
-            // The put_batch call below expects expects the inputs to be sorted by Lsn,
-            // so we do that first.
-            let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = prev_pending_updates
-                .into_iter()
-                .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (key, lsn, val)))
-                .kmerge_by(|lhs, rhs| lhs.1 .0 < rhs.1 .0)
-                .collect();
-
-            writer.put_batch(lsn_ordered_batch, ctx).await?;
+            writer.put_batch(&self.pending_updates, ctx).await?;
             self.pending_updates.clear();
         }
 

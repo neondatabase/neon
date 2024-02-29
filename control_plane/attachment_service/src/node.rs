@@ -1,4 +1,4 @@
-use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
+use pageserver_api::controller_api::{NodeAvailability, NodeSchedulingPolicy};
 use serde::Serialize;
 use utils::id::NodeId;
 

@@ -334,6 +334,12 @@ impl WalIngest {
                     {
                         self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
                     }
+                    trace!(
+                        "xlog_checkpoint.oldestActiveXid={}, checkpoint.oldestActiveXid={}",
+                        xlog_checkpoint.oldestActiveXid,
+                        self.checkpoint.oldestActiveXid
+                    );
+                    self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
 
                     // Write a new checkpoint key-value pair on every checkpoint record, even
                     // if nothing really changed. Not strictly required, but it seems nice to
@@ -358,6 +364,13 @@ impl WalIngest {
                     } else if let Some(path) = prefix.strip_prefix("neon-file:") {
                         modification.put_file(path, message, ctx).await?;
                     }
+                }
+            }
+            pg_constants::RM_STANDBY_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                if info == pg_constants::XLOG_RUNNING_XACTS {
+                    let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
+                    self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
                 }
             }
             _x => {

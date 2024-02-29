@@ -271,6 +271,8 @@ pub struct TenantConfig {
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
+    // defer parsing compaction_algorithm, like eviction_policy
+    pub compaction_algorithm: Option<CompactionAlgorithm>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -282,7 +284,6 @@ pub struct TenantConfig {
     pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
@@ -304,6 +305,13 @@ impl EvictionPolicy {
             EvictionPolicy::OnlyImitiate(_) => "OnlyImitiate",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum CompactionAlgorithm {
+    Legacy,
+    Tiered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -155,12 +155,23 @@ class NeonCompare(PgCompare):
             "size", timeline_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
 
-        metric_filters = {"tenant_id": str(self.tenant), "timeline_id": str(self.timeline)}
+        metric_filters = {
+            "tenant_id": str(self.tenant),
+            "timeline_id": str(self.timeline),
+            "file_kind": "layer",
+            "op_kind": "upload",
+        }
+        # use `started` (not `finished`) counters here, because some callers
+        # don't wait for upload queue to drain
         total_files = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_created_persistent_files_total", metric_filters
+            self.env.pageserver,
+            "pageserver_remote_timeline_client_calls_started_total",
+            metric_filters,
         )
         total_bytes = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_written_persistent_bytes_total", metric_filters
+            self.env.pageserver,
+            "pageserver_remote_timeline_client_bytes_started_total",
+            metric_filters,
         )
         self.zenbenchmark.record(
             "data_uploaded", total_bytes / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER

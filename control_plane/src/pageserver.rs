@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
+use pageserver_api::controller_api::NodeRegisterRequest;
 use pageserver_api::models::{
     self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
 };
@@ -30,7 +31,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::attachment_service::{AttachmentService, NodeRegisterRequest};
+use crate::attachment_service::AttachmentService;
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
@@ -115,7 +116,7 @@ impl PageServerNode {
             if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
-                    .generate_auth_token(&Claims::new(None, Scope::PageServerApi))
+                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
                     .unwrap();
                 overrides.push(format!("control_plane_api_token='{}'", jwt_token));
             }
@@ -352,6 +353,11 @@ impl PageServerNode {
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
                 .transpose()?,
+            compaction_algorithm: settings
+                .remove("compaction_algorithm")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Failed to parse 'compaction_algorithm' json")?,
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
@@ -391,11 +397,6 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
-            gc_feedback: settings
-                .remove("gc_feedback")
-                .map(|x| x.parse::<bool>())
-                .transpose()
-                .context("Failed to parse 'gc_feedback' as bool")?,
             heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
             lazy_slru_download: settings
                 .remove("lazy_slru_download")
@@ -460,6 +461,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'compaction_threshold' as an integer")?,
+                compaction_algorithm: settings
+                    .remove("compactin_algorithm")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("Failed to parse 'compaction_algorithm' json")?,
                 gc_horizon: settings
                     .remove("gc_horizon")
                     .map(|x| x.parse::<u64>())
@@ -501,11 +507,6 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-                gc_feedback: settings
-                    .remove("gc_feedback")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'gc_feedback' as bool")?,
                 heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
                 lazy_slru_download: settings
                     .remove("lazy_slru_download")

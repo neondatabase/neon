@@ -79,11 +79,36 @@ impl Secrets {
         "neon-storage-controller-control-plane-jwt-token";
     const PUBLIC_KEY_SECRET: &'static str = "neon-storage-controller-public-key";
 
+    const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
+    const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
+    const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
+    const PUBLIC_KEY_ENV: &'static str = "PUBLIC_KEY";
+
+    /// Load secrets from, in order of preference:
+    /// - CLI args if database URL is provided on the CLI
+    /// - Environment variables if DATABASE_URL is set.
+    /// - AWS Secrets Manager secrets
     async fn load(args: &Cli) -> anyhow::Result<Self> {
         match &args.database_url {
             Some(url) => Self::load_cli(url, args),
-            None => Self::load_aws_sm().await,
+            None => match std::env::var(Self::DATABASE_URL_ENV) {
+                Ok(database_url) => Self::load_env(database_url),
+                Err(_) => Self::load_aws_sm().await,
+            },
         }
+    }
+
+    fn load_env(database_url: String) -> anyhow::Result<Self> {
+        let public_key = match std::env::var(Self::PUBLIC_KEY_ENV) {
+            Ok(public_key) => Some(JwtAuth::from_key(public_key).context("Loading public key")?),
+            Err(_) => None,
+        };
+        Ok(Self {
+            database_url,
+            public_key,
+            jwt_token: std::env::var(Self::PAGESERVER_JWT_TOKEN_ENV).ok(),
+            control_plane_jwt_token: std::env::var(Self::CONTROL_PLANE_JWT_TOKEN_ENV).ok(),
+        })
     }
 
     async fn load_aws_sm() -> anyhow::Result<Self> {

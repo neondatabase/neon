@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utils::seqwait::MonotonicCounter;
 
+mod auth;
 mod compute_hook;
 pub mod http;
 pub mod metrics;
