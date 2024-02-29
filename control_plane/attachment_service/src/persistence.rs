@@ -397,11 +397,13 @@ impl Persistence {
         input_generation: Option<Generation>,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
+
         self.with_conn(move |conn| {
             let query = diesel::update(tenant_shards)
                 .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                 .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
                 .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32));
+
             if let Some(input_generation) = input_generation {
                 // Update includes generation column
                 query
@@ -422,6 +424,26 @@ impl Persistence {
                     ))
                     .execute(conn)?;
             }
+
+            Ok(())
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn update_tenant_config(
+        &self,
+        input_tenant_id: TenantId,
+        input_config: TenantConfig,
+    ) -> DatabaseResult<()> {
+        use crate::schema::tenant_shards::dsl::*;
+
+        self.with_conn(move |conn| {
+            diesel::update(tenant_shards)
+                .filter(tenant_id.eq(input_tenant_id.to_string()))
+                .set((config.eq(serde_json::to_string(&input_config).unwrap()),))
+                .execute(conn)?;
 
             Ok(())
         })

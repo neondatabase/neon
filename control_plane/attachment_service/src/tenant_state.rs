@@ -656,6 +656,10 @@ impl TenantState {
         // Reconcile already in flight for the current sequence?
         if let Some(handle) = &self.reconciler {
             if handle.sequence == self.sequence {
+                tracing::info!(
+                    "Reconciliation already in progress for sequence {:?}",
+                    self.sequence,
+                );
                 return Some(ReconcilerWaiter {
                     tenant_shard_id: self.tenant_shard_id,
                     seq_wait: self.waiter.clone(),
@@ -778,6 +782,17 @@ impl TenantState {
             error: self.last_error.clone(),
             seq: self.sequence,
         })
+    }
+
+    /// Called when a ReconcileResult has been emitted and the service is updating
+    /// our state: if the result is from a sequence >= my ReconcileHandle, then drop
+    /// the handle to indicate there is no longer a reconciliation in progress.
+    pub(crate) fn reconcile_complete(&mut self, sequence: Sequence) {
+        if let Some(reconcile_handle) = &self.reconciler {
+            if reconcile_handle.sequence <= sequence {
+                self.reconciler = None;
+            }
+        }
     }
 
     // If we had any state at all referring to this node ID, drop it.  Does not

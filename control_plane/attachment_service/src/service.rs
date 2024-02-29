@@ -14,10 +14,13 @@ use control_plane::attachment_service::{
 use diesel::result::DatabaseErrorKind;
 use futures::{stream::FuturesUnordered, StreamExt};
 use hyper::StatusCode;
-use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy,
-    TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
-    TenantLocateResponseShard, TenantShardMigrateRequest, TenantShardMigrateResponse,
+use pageserver_api::{
+    controller_api::{
+        NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy,
+        TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
+        TenantLocateResponseShard, TenantShardMigrateRequest, TenantShardMigrateResponse,
+    },
+    models::TenantConfigRequest,
 };
 use pageserver_api::{
     models::{
@@ -575,6 +578,9 @@ impl Service {
         // If the reconciler signals that it failed to notify compute, set this state on
         // the shard so that a future [`TenantState::maybe_reconcile`] will try again.
         tenant.pending_compute_notification = result.pending_compute_notification;
+
+        // Let the TenantState know it is idle.
+        tenant.reconcile_complete(result.sequence);
 
         match result.result {
             Ok(()) => {
@@ -1457,6 +1463,91 @@ impl Service {
         tracing::info!("Complete, returning {result:?}");
 
         Ok(result)
+    }
+
+    pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
+        let tenant_id = req.tenant_id;
+        let config = req.config;
+
+        self.persistence
+            .update_tenant_config(req.tenant_id, config.clone())
+            .await?;
+
+        let waiters = {
+            let mut waiters = Vec::new();
+            let mut locked = self.inner.write().unwrap();
+            let result_tx = locked.result_tx.clone();
+            let compute_hook = locked.compute_hook.clone();
+            let (nodes, tenants, _scheduler) = locked.parts_mut();
+            for (_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
+                shard.config = config.clone();
+                if let Some(waiter) = shard.maybe_reconcile(
+                    result_tx.clone(),
+                    nodes,
+                    &compute_hook,
+                    &self.config,
+                    &self.persistence,
+                    &self.gate,
+                    &self.cancel,
+                ) {
+                    waiters.push(waiter);
+                }
+            }
+            waiters
+        };
+
+        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+            // Treat this as success because we have stored the configuration.  If e.g.
+            // a node was unavailable at this time, it should not stop us accepting a
+            // configuration change.
+            tracing::warn!(%tenant_id, "Accepted configuration update but reconciliation failed: {e}");
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn tenant_config_get(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<HashMap<&str, serde_json::Value>, ApiError> {
+        let config = {
+            let locked = self.inner.read().unwrap();
+
+            match locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .next()
+            {
+                Some((_tenant_shard_id, shard)) => shard.config.clone(),
+                None => {
+                    return Err(ApiError::NotFound(
+                        anyhow::anyhow!("Tenant not found").into(),
+                    ))
+                }
+            }
+        };
+
+        // Unlike the pageserver, we do not have a set of global defaults: the config is
+        // entirely per-tenant.  Therefore the distinction between `tenant_specific_overrides`
+        // and `effective_config` in the response is meaningless, but we retain that syntax
+        // in order to remain compatible with the pageserver API.
+
+        let response = HashMap::from([
+            (
+                "tenant_specific_overrides",
+                serde_json::to_value(&config)
+                    .context("serializing tenant specific overrides")
+                    .map_err(ApiError::InternalServerError)?,
+            ),
+            (
+                "effective_config",
+                serde_json::to_value(&config)
+                    .context("serializing effective config")
+                    .map_err(ApiError::InternalServerError)?,
+            ),
+        ]);
+
+        Ok(response)
     }
 
     pub(crate) async fn tenant_time_travel_remote_storage(

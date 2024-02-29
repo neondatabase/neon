@@ -712,3 +712,41 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
         svc.request(
             "POST", f"{api}/upcall/v1/re-attach", headers=svc.headers(TokenScope.PAGE_SERVER_API)
         )
+
+
+def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
+    """
+    Validate the pageserver-compatible API endpoints for setting and getting tenant conf, without
+    supplying the whole LocationConf.
+    """
+
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+
+    http = env.attachment_service.pageserver_api()
+
+    default_value = "7days"
+    new_value = "1h"
+    http.set_tenant_config(tenant_id, {"pitr_interval": new_value})
+
+    # Ensure the change landed on the storage controller
+    readback_controller = http.tenant_config(tenant_id)
+    assert readback_controller.effective_config["pitr_interval"] == new_value
+    assert readback_controller.tenant_specific_overrides["pitr_interval"] == new_value
+
+    # Ensure the change made it down to the pageserver
+    readback_ps = env.pageservers[0].http_client().tenant_config(tenant_id)
+    assert readback_ps.effective_config["pitr_interval"] == new_value
+    assert readback_ps.tenant_specific_overrides["pitr_interval"] == new_value
+
+    # Omitting a value clears it.  This looks different in storage controller
+    # vs. pageserver API calls, because pageserver has defaults.
+    http.set_tenant_config(tenant_id, {})
+    readback_controller = http.tenant_config(tenant_id)
+    assert readback_controller.effective_config["pitr_interval"] is None
+    assert readback_controller.tenant_specific_overrides["pitr_interval"] is None
+    readback_ps = env.pageservers[0].http_client().tenant_config(tenant_id)
+    assert readback_ps.effective_config["pitr_interval"] == default_value
+    assert "pitr_interval" not in readback_ps.tenant_specific_overrides
+
+    env.attachment_service.consistency_check()

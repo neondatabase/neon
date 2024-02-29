@@ -4,7 +4,7 @@ use crate::PlacementPolicy;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
-    TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
+    TenantConfigRequest, TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
@@ -189,6 +189,27 @@ async fn handle_tenant_location_config(
             .tenant_location_config(tenant_id, config_req)
             .await?,
     )
+}
+
+async fn handle_tenant_config_set(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let config_req = json_request::<TenantConfigRequest>(&mut req).await?;
+
+    json_response(StatusCode::OK, service.tenant_config_set(config_req).await?)
+}
+
+async fn handle_tenant_config_get(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    json_response(StatusCode::OK, service.tenant_config_get(tenant_id)?)
 }
 
 async fn handle_tenant_time_travel_remote_storage(
@@ -564,6 +585,12 @@ pub fn make_router(
         })
         .delete("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(r, handle_tenant_delete)
+        })
+        .put("/v1/tenant/config", |r| {
+            tenant_service_handler(r, handle_tenant_config_set)
+        })
+        .get("/v1/tenant/:tenant_id/config", |r| {
+            tenant_service_handler(r, handle_tenant_config_get)
         })
         .put("/v1/tenant/:tenant_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
