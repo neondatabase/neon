@@ -28,7 +28,14 @@ from fixtures.remote_storage import (
     available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import print_gc_result, query_scalar, wait_until
+from fixtures.utils import (
+    assert_eq,
+    assert_ge,
+    assert_gt,
+    print_gc_result,
+    query_scalar,
+    wait_until,
+)
 from requests import ReadTimeout
 
 
@@ -120,10 +127,10 @@ def test_remote_storage_backup_and_restore(
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadLayer.*, will retry.*"
     )
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
@@ -292,9 +299,9 @@ def test_remote_storage_upload_queue_retries(
     print_gc_result(gc_result)
     assert gc_result["layers_removed"] > 0
 
-    wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-    wait_until(2, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
-    wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
+    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # let all future operations queue up
     configure_storage_sync_failpoints("return")
@@ -322,17 +329,17 @@ def test_remote_storage_upload_queue_retries(
     churn_while_failpoints_active_thread.start()
 
     # wait for churn thread's data to get stuck in the upload queue
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="upload") > 0)
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="index", op_kind="upload") >= 2)
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="delete") > 0)
+    wait_until(10, 0.1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(10, 0.1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 2))
+    wait_until(10, 0.1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
 
     # ... and wait for them to finish. Exponential back-off in upload queue, so, gracious timeouts.
-    wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-    wait_until(30, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
-    wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
+    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
     # so, give it some time to wrap up.
@@ -884,26 +891,23 @@ def wait_upload_queue_empty(
     wait_until(
         2,
         1,
-        lambda: get_queued_count(
-            client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"
-        )
-        == 0,
+        lambda: assert_eq(
+            get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"), 0
+        ),
     )
     wait_until(
         2,
         1,
-        lambda: get_queued_count(
-            client, tenant_id, timeline_id, file_kind="index", op_kind="upload"
-        )
-        == 0,
+        lambda: assert_eq(
+            get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload"), 0
+        ),
     )
     wait_until(
         2,
         1,
-        lambda: get_queued_count(
-            client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"
-        )
-        == 0,
+        lambda: assert_eq(
+            get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"), 0
+        ),
     )
 
 
