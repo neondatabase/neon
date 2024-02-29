@@ -2343,8 +2343,13 @@ class NeonPageserver(PgProtocol):
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
 
-    def log_contains(self, pattern: str) -> Optional[str]:
-        """Check that the pageserver log contains a line that matches the given regex"""
+    def log_contains(
+        self, pattern: str, skip_until: "None | str | Callable[[str], bool]"
+    ) -> Optional[str]:
+        """
+        Check that the pageserver log contains a line that matches the given regex.
+        Use `skip_until` to limit the search to the suffix of the log that follows the first line that matches `skip_until`.
+        """
         logfile = self.workdir / "pageserver.log"
         if not logfile.exists():
             log.warning(f"Skipping log check: {logfile} does not exist")
@@ -2352,13 +2357,35 @@ class NeonPageserver(PgProtocol):
 
         contains_re = re.compile(pattern)
 
+        skip_until_finder: Callable[[str], bool]
+        if skip_until is None:
+
+            def always_true_finder(_line: str) -> bool:
+                return True
+
+            skip_until_finder = always_true_finder
+        elif isinstance(skip_until, str):
+            skip_until_pattern_re = re.compile(skip_until)
+
+            def re_finder(_line: str) -> bool:
+                return skip_until_pattern_re.search(line) is not None
+
+            skip_until_finder = re_finder
+        else:
+            skip_until_finder = skip_until
+
         # XXX: Our rust logging machinery buffers the messages, so if you
         # call this function immediately after it's been logged, there is
         # no guarantee it is already present in the log file. This hasn't
         # been a problem in practice, our python tests are not fast enough
         # to hit that race condition.
+        skip_until_pattern_found = False
         with logfile.open("r") as f:
             for line in f:
+                if not skip_until_pattern_found:
+                    skip_until_pattern_found = skip_until_finder(line)
+                if not skip_until_pattern_found:
+                    continue
                 if contains_re.search(line):
                     # found it!
                     return line
