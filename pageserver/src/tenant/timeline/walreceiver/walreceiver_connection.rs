@@ -389,6 +389,17 @@ pub(super) async fn handle_walreceiver_connection(
             }
         }
 
+        {
+            // This is a hack. It piggybacks on the keepalive messages sent by the
+            // safekeeper in order to enforce `checkpoint_timeout` on the currently
+            // open layer. This hack doesn't provide a bound on the total size of
+            // in-memory layers on a pageserver. See https://github.com/neondatabase/neon/issues/6916.
+            let mut writer = timeline.writer().await;
+            if let Err(err) = writer.tick().await {
+                warn!("Timeline writer tick failed: {err}");
+            }
+        }
+
         if let Some(last_lsn) = status_update {
             let timeline_remote_consistent_lsn = timeline
                 .get_remote_consistent_lsn_visible()

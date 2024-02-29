@@ -5062,6 +5062,7 @@ impl Drop for TimelineWriter<'_> {
     }
 }
 
+#[derive(PartialEq)]
 enum OpenLayerAction {
     Roll,
     Open,
@@ -5108,6 +5109,49 @@ impl<'a> TimelineWriter<'a> {
         res
     }
 
+    /// "Tick" the timeline writer: it will roll the open layer if required
+    /// and do nothing else.
+    pub(crate) async fn tick(&mut self) -> anyhow::Result<()> {
+        self.open_layer_if_present().await?;
+
+        let last_record_lsn = self.get_last_record_lsn();
+        let action = self.get_open_layer_action(last_record_lsn, 0);
+        if action == OpenLayerAction::Roll {
+            self.roll_layer(last_record_lsn).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Populate the timeline writer state only if an in-memory layer
+    /// is already open.
+    async fn open_layer_if_present(&mut self) -> anyhow::Result<()> {
+        assert!(self.write_guard.is_none());
+
+        let open_layer = {
+            let guard = self.layers.read().await;
+            let layers = guard.layer_map();
+            match layers.open_layer {
+                Some(ref open_layer) => open_layer.clone(),
+                None => {
+                    return Ok(());
+                }
+            }
+        };
+
+        let initial_size = open_layer.size().await?;
+        let last_freeze_at = self.last_freeze_at.load();
+        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
+        self.write_guard.replace(TimelineWriterState::new(
+            open_layer,
+            initial_size,
+            last_freeze_at,
+            last_freeze_ts,
+        ));
+
+        Ok(())
+    }
+
     async fn handle_open_layer_action(
         &mut self,
         at: Lsn,
@@ -5116,7 +5160,8 @@ impl<'a> TimelineWriter<'a> {
         match action {
             OpenLayerAction::Roll => {
                 let freeze_at = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
-                self.roll_layer(at, freeze_at).await?
+                self.roll_layer(freeze_at).await?;
+                self.open_layer(at).await?;
             }
             OpenLayerAction::Open => self.open_layer(at).await?,
             OpenLayerAction::None => {
@@ -5128,8 +5173,6 @@ impl<'a> TimelineWriter<'a> {
     }
 
     async fn open_layer(&mut self, at: Lsn) -> anyhow::Result<()> {
-        assert!(self.write_guard.is_none());
-
         let layer = self.tl.get_layer_for_write(at).await?;
         let initial_size = layer.size().await?;
 
@@ -5145,7 +5188,9 @@ impl<'a> TimelineWriter<'a> {
         Ok(())
     }
 
-    async fn roll_layer(&mut self, new_layer_at: Lsn, freeze_at: Lsn) -> anyhow::Result<()> {
+    async fn roll_layer(&mut self, freeze_at: Lsn) -> anyhow::Result<()> {
+        assert!(self.write_guard.is_some());
+
         self.tl.freeze_inmem_layer_at(freeze_at).await;
 
         let now = Instant::now();
@@ -5157,17 +5202,6 @@ impl<'a> TimelineWriter<'a> {
         if current_size > self.get_checkpoint_distance() {
             warn!("Flushed oversized open layer with size {}", current_size)
         }
-
-        assert!(self.write_guard.is_some());
-
-        let layer = self.tl.get_layer_for_write(new_layer_at).await?;
-        let initial_size = layer.size().await?;
-        self.write_guard.replace(TimelineWriterState::new(
-            layer,
-            initial_size,
-            Lsn(freeze_at.0 + 1),
-            now,
-        ));
 
         Ok(())
     }
@@ -5209,9 +5243,7 @@ impl<'a> TimelineWriter<'a> {
             );
 
             OpenLayerAction::Roll
-        } else if state.current_size > 0
-            && proposed_open_layer_size >= self.get_checkpoint_distance()
-        {
+        } else if proposed_open_layer_size >= self.get_checkpoint_distance() {
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 lsn, state.current_size, proposed_open_layer_size
