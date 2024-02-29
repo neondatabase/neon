@@ -38,7 +38,7 @@ async def run_worker(env: NeonEnv, entries: int) -> Tuple[TenantId, TimelineId, 
         finally:
             await conn.close(timeout=10)
 
-        last_flush_lsn = Lsn(ep.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
+        last_flush_lsn = Lsn(ep.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
         return tenant, timeline, last_flush_lsn
 
 
