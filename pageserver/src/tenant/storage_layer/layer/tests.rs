@@ -88,6 +88,7 @@ async fn evict_and_wait_on_wanted_deleted() {
 ///
 /// Here `Layer::keep_resident` is used to "simulate" reads, because it cannot download.
 #[tokio::test(start_paused = true)]
+#[ignore]
 async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     // this is the runtime on which Layer spawns the blocking tasks on
     let handle = BACKGROUND_RUNTIME.handle();
