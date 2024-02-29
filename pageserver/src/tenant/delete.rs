@@ -420,7 +420,7 @@ impl DeleteTenantFlow {
             .expect("cant be stopping or broken");
 
         tenant
-            .attach(preload, super::SpawnMode::Normal, ctx)
+            .attach(preload, super::SpawnMode::Eager, ctx)
             .await
             .context("attach")?;
 
