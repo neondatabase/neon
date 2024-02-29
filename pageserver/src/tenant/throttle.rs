@@ -161,14 +161,13 @@ where
             match ctx.micros_spent_throttled.add(wait_time) {
                 Ok(res) => res,
                 Err(error) => {
-                    use std::sync::atomic::{AtomicBool, Ordering};
+                    use std::sync::atomic::AtomicBool;
                     static LOGGED: AtomicBool = AtomicBool::new(false);
-                    match LOGGED.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    if LOGGED
+                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
                     {
-                        Ok(_) => {
-                            warn!(error, "error adding time spent throttled, this message is only logged once per process lifetime");
-                        }
-                        Err(_) => {}
+                        warn!(error, "error adding time spent throttled, this message is only logged once per process lifetime");
                     }
                 }
             };

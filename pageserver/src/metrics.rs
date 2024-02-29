@@ -11,6 +11,7 @@ use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, IntoEnumIterator, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
+use tracing::warn;
 use utils::id::TimelineId;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -1005,34 +1006,100 @@ impl GlobalAndPerTimelineHistogram {
     }
 }
 
-struct GlobalAndPerTimelineHistogramTimer<'a> {
+struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     h: &'a GlobalAndPerTimelineHistogram,
+    ctx: &'c RequestContext,
     start: std::time::Instant,
+    op: SmgrQueryType,
 }
 
-impl<'a> Drop for GlobalAndPerTimelineHistogramTimer<'a> {
+impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
-        self.h.observe(elapsed.as_secs_f64());
+        let ex_throttled = self
+            .ctx
+            .micros_spent_throttled
+            .close_and_checked_sub_from(elapsed);
+        let ex_throttled = match ex_throttled {
+            Ok(res) => res,
+            Err(error) => {
+                static LOGGED: AtomicSmgrQueryTypeSet = AtomicSmgrQueryTypeSet::new();
+                if LOGGED.test_and_set(self.op) {
+                    warn!(op=?self.op, error, "error deducting time spent throttled, this message is only logged once per process lifetime");
+                }
+                elapsed
+            }
+        };
+        self.h.observe(ex_throttled.as_secs_f64());
     }
 }
 
 #[derive(
     Debug,
-    Clone,
-    Copy,
     IntoStaticStr,
     strum_macros::EnumCount,
     strum_macros::EnumIter,
     strum_macros::FromRepr,
+    enumset::EnumSetType,
 )]
 #[strum(serialize_all = "snake_case")]
+#[enumset(repr = "u8")]
 pub enum SmgrQueryType {
     GetRelExists,
     GetRelSize,
     GetPageAtLsn,
     GetDbSize,
     GetSlruSegment,
+}
+
+struct AtomicSmgrQueryTypeSet {
+    value: std::sync::atomic::AtomicU8,
+}
+
+impl AtomicSmgrQueryTypeSet {
+    pub const fn new() -> Self {
+        AtomicSmgrQueryTypeSet {
+            value: AtomicU8::new(
+                // would love to
+                // ```
+                // enumset::EnumSet::<SmgrQueryType>::EMPTY.as_repr()
+                // ```
+                // But it's not const, see https://github.com/Lymia/enumset/issues/27
+                0,
+            ),
+        }
+    }
+    pub fn test_and_set(&self, v: SmgrQueryType) -> bool {
+        use std::sync::atomic::Ordering;
+        let res = self
+            .value
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                let cur = enumset::EnumSet::<SmgrQueryType>::from_repr(cur);
+                if cur.contains(v) {
+                    None
+                } else {
+                    Some((cur | v).as_repr())
+                }
+            });
+        res.ok().is_some()
+    }
+}
+
+#[cfg(test)]
+mod test_atomic_smgr_query_type_set {
+    use super::*;
+    #[test]
+    fn test_basic() {
+        let set = AtomicSmgrQueryTypeSet::new();
+        // first set returns true
+        assert!(set.test_and_set(SmgrQueryType::GetPageAtLsn));
+        // try it again, should report false
+        assert!(!set.test_and_set(SmgrQueryType::GetPageAtLsn));
+        // set something that's not set before
+        assert!(set.test_and_set(SmgrQueryType::GetDbSize));
+        // flags are independent
+        assert!(!set.test_and_set(SmgrQueryType::GetPageAtLsn));
+    }
 }
 
 #[derive(Debug)]
@@ -1130,16 +1197,28 @@ impl SmgrQueryTimePerTimeline {
         });
         Self { metrics }
     }
-    pub(crate) fn start_timer(&self, op: SmgrQueryType) -> impl Drop + '_ {
+    pub(crate) fn start_timer<'c: 'a, 'a>(
+        &'a self,
+        op: SmgrQueryType,
+        ctx: &'c RequestContext,
+    ) -> impl Drop + '_ {
         let metric = &self.metrics[op as usize];
+        let start = Instant::now();
+        match ctx.micros_spent_throttled.open() {
+            Ok(()) => (),
+            Err(error) => {
+                static LOGGED: AtomicSmgrQueryTypeSet = AtomicSmgrQueryTypeSet::new();
+                if LOGGED.test_and_set(op) {
+                    warn!(?op, error, "error opening micros_spent_throttled, this message is only logged once per process lifetime");
+                }
+            }
+        }
         GlobalAndPerTimelineHistogramTimer {
             h: metric,
-            start: std::time::Instant::now(),
+            ctx,
+            start,
+            op,
         }
-    }
-    pub(crate) fn observe(&self, op: SmgrQueryType, duration: Duration) {
-        let metric = &self.metrics[op as usize];
-        metric.observe(duration.as_secs_f64())
     }
 }
 
@@ -1148,6 +1227,11 @@ mod smgr_query_time_tests {
     use pageserver_api::shard::TenantShardId;
     use strum::IntoEnumIterator;
     use utils::id::{TenantId, TimelineId};
+
+    use crate::{
+        context::{DownloadBehavior, RequestContext},
+        task_mgr::TaskKind,
+    };
 
     // Regression test, we used hard-coded string constants before using an enum.
     #[test]
@@ -1197,7 +1281,8 @@ mod smgr_query_time_tests {
             let (pre_global, pre_per_tenant_timeline) = get_counts();
             assert_eq!(pre_per_tenant_timeline, 0);
 
-            let timer = metrics.start_timer(*op);
+            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
+            let timer = metrics.start_timer(*op, &ctx);
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();
@@ -1985,6 +2070,7 @@ use futures::Future;
 use pin_project_lite::pin_project;
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
