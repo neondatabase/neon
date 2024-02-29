@@ -303,8 +303,8 @@ impl Timeline {
             stats = join_all => {
                 if stats.candidates == stats.not_evictable {
                     debug!(stats=?stats, "eviction iteration complete");
-                } else if stats.errors > 0 || stats.not_evictable > 0 {
-                    // do not warn on timeouts, in overloaded situations they are normal
+                } else if stats.errors > 0 || stats.not_evictable > 0 || stats.timeouts > 0 {
+                    // reminder: timeouts are not eviction cancellations
                     warn!(stats=?stats, "eviction iteration complete");
                 } else {
                     info!(stats=?stats, "eviction iteration complete");
