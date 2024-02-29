@@ -2351,6 +2351,8 @@ class NeonPageserver(PgProtocol):
     def assert_log_contains(
         self, pattern: str, offset: None | LogCursor = None
     ) -> Tuple[str, LogCursor]:
+        """Convenient for use inside wait_until()"""
+
         res = self.log_contains(pattern, offset=offset)
         assert res is not None
         return res
