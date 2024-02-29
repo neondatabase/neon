@@ -427,3 +427,49 @@ impl SpawnBlockingPoolHelper {
             .await
     }
 }
+
+#[test]
+fn spawn_blocking_pool_helper_actually_works() {
+    // create a custom runtime for which we know and control how many blocking threads it has
+    //
+    // because the amount is not configurable for our helper, expect the same amount as
+    // BACKGROUND_RUNTIME using the tokio defaults would have.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(512)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let handle = rt.handle();
+
+    rt.block_on(async move {
+        // this will not return until all threads are spun up and actually executing the code
+        // waiting on `consumed` to be `SpawnBlockingPoolHelper::release`'d.
+        let consumed = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
+
+        println!("consumed");
+
+        let mut jh = std::pin::pin!(tokio::task::spawn_blocking(move || {
+            // this will not get to run before we release
+        }));
+
+        println!("spawned");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut jh)
+            .await
+            .expect_err("the task should not have gotten to run yet");
+
+        println!("tried to join");
+
+        consumed.release().await;
+
+        println!("released");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), jh)
+            .await
+            .expect("no timeout")
+            .expect("no join error");
+
+        println!("joined");
+    });
+}
