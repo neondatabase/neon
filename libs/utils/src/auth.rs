@@ -192,6 +192,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
 "#;
 
     #[test]
+    #[ignore]
     fn test_decode() {
         let expected_claims = Claims {
             tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),

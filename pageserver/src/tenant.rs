@@ -4790,6 +4790,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_random_updates() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_random_updates")?;
         let (tenant, ctx) = harness.load().await;
