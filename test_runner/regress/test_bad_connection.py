@@ -17,7 +17,7 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_branch("test_compute_pageserver_connection_stress")
     try:
         endpoint = env.endpoints.create_start("test_compute_pageserver_connection_stress")
-    except:
+    except Exception:
         pageserver_http.configure_failpoints(("simulated-bad-compute-connection", "off"))
         # We might still fail to get the basebackup, so just turn off the failpoint here
         endpoint = env.endpoints.create_start("test_compute_pageserver_connection_stress")
