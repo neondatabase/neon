@@ -445,6 +445,7 @@ impl Service {
                         tenant_conf: models::TenantConfig::default(),
                     },
                     None,
+                    false,
                 )
                 .await
             {

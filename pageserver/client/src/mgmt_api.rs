@@ -251,17 +251,18 @@ impl Client {
         tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<std::time::Duration>,
+        lazy: bool,
     ) -> Result<()> {
         let req_body = TenantLocationConfigRequest {
             tenant_id: tenant_shard_id,
             config,
         };
         let path = format!(
-            "{}/v1/tenant/{}/location_config",
+            "{}/v1/tenant/{}/location_config?lazy={lazy}",
             self.mgmt_api_endpoint, tenant_shard_id
         );
         let path = if let Some(flush_ms) = flush_ms {
-            format!("{}?flush_ms={}", path, flush_ms.as_millis())
+            format!("{}&flush_ms={}", path, flush_ms.as_millis())
         } else {
             path
         };

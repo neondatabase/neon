@@ -114,11 +114,16 @@ impl Reconciler {
             .locations
             .insert(node.id, ObservedStateLocation { conf: None });
 
+        // 'lazy' mode means that a tenant's activiation will be subject to a concurrency limit
+        // in the pageserver: this is the safer way to attach a tenant, as it avoids thundering
+        // herd I/O when attaching many tenants at the same time.
+        let lazy = true;
+
         tracing::info!("location_config({}) calling: {:?}", node_id, config);
         let client =
             mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
         client
-            .location_config(self.tenant_shard_id, config.clone(), flush_ms)
+            .location_config(self.tenant_shard_id, config.clone(), flush_ms, lazy)
             .await?;
         tracing::info!("location_config({}) complete: {:?}", node_id, config);
 
