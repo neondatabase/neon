@@ -3,10 +3,8 @@ use super::super::download_retry;
 use super::super::TEMP_DOWNLOAD_EXTENSION;
 use crate::config::PageServerConf;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::remote_timeline_client::download_cancellable;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::BUFFER_SIZE;
-use crate::tenant::remote_timeline_client::DOWNLOAD_TIMEOUT;
 use crate::tenant::storage_layer::LayerFileName;
 use crate::virtual_file::on_fatal_io_error;
 use crate::virtual_file::VirtualFile;
@@ -24,14 +22,13 @@ use anyhow::anyhow;
 use utils::crashsafe;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::TimelineId;
-use utils::timeout::timeout_cancellable;
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
 /// in the metadata. (In the future, we might do more cross-checks, like CRC validation)
 ///
 /// Returns the size of the downloaded file.
-pub(crate) async fn download_layer_file_legacy<'a>(
+pub(crate) async fn download_layer_file<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
     tenant_shard_id: TenantShardId,
@@ -73,23 +70,11 @@ pub(crate) async fn download_layer_file_legacy<'a>(
                 .with_context(|| format!("create a destination file for layer '{temp_file_path}'"))
                 .map_err(DownloadError::Other)?;
 
-            // Cancellation safety: it is safe to cancel this future, because it isn't writing to a local
-            // file: the write to local file doesn't start until after the request header is returned
-            // and we start draining the body stream below
-            let mut download = download_cancellable(cancel, storage.download(&remote_path))
-                .await
-                .with_context(|| {
-                    format!(
-                    "open a download stream for layer with remote storage path '{remote_path:?}'"
-                )
-                })
-                .map_err(DownloadError::Other)?;
+            let mut download = storage.download(&remote_path, cancel).await?;
 
-            // Cancellation safety: it is safe to cancel this future because it is writing into a temporary file,
-            // and we will unlink the temporary file if there is an error.  This unlink is important because we
-            // are in a retry loop, and we wouldn't want to leave behind a rogue write I/O to a file that
-            // we will imminiently try and write to again.
-            match timeout_cancellable(DOWNLOAD_TIMEOUT, cancel, async move {
+            // This async block is the tokio-epoll-uring version of tokio::io::copy_buf
+            // TODO: abstract away & unit test.
+            let bytes_amount = async move {
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored()
                 let mut buf = BytesMut::with_capacity(BUFFER_SIZE);
@@ -113,32 +98,19 @@ pub(crate) async fn download_layer_file_legacy<'a>(
                         bytes_amount += u64::try_from(n).unwrap();
                     }
                 }
-                Ok((destination_file, bytes_amount))
-            })
-            .await
-            .with_context(|| {
-                format!(
-                    "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
-                )
-            })
-            .map_err(DownloadError::Other)?
-            {
-                Ok(b) => Ok(b),
+                Ok(bytes_amount)
+            }
+            .await;
+
+            match bytes_amount {
+                Ok(bytes_amount) => Ok((destination_file, bytes_amount)),
                 Err(e) => {
-                    // Remove incomplete files: on restart Timeline would do this anyway, but we must
-                    // do it here for the retry case.
                     if let Err(e) = tokio::fs::remove_file(&temp_file_path).await {
                         on_fatal_io_error(&e, &format!("Removing temporary file {temp_file_path}"));
                     }
-                    Err(e)
+                    Err(e.into())
                 }
             }
-            .with_context(|| {
-                format!(
-                    "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
-                )
-            })
-            .map_err(DownloadError::Other)
         },
         &format!("download {remote_path:?}"),
         cancel,
@@ -152,13 +124,45 @@ pub(crate) async fn download_layer_file_legacy<'a>(
         )));
     }
 
-    todo!("implement tokio-epoll-uring version of crashsafe::durable_rename and use it here; also needed by follow-up of https://github.com/neondatabase/neon/pull/6731");
+    // not using sync_data because it can lose file size update
+    destination_file
+        .sync_all()
+        .await
+        .with_context(|| format!("failed to fsync source file at {temp_file_path}"))
+        .map_err(DownloadError::Other)?;
+    drop(destination_file);
 
-    fs::rename(&temp_file_path, &local_path)
+    // TODO: use io_engine rename() once we have it
+    std::fs::rename(&temp_file_path, &local_path)
         .await
         .with_context(|| format!("rename download layer file to {local_path}"))
         .map_err(DownloadError::Other)?;
 
+      // We just need to fsync the directory in which these inodes are linked,
++                        // which we know to be the timeline directory.
++                        //
++                        // We use fatal_err() below because the after write_to_disk returns with success
+,
++                        // the in-memory state of the filesystem already has the layer file in its final
+ place,
++                        // and subsequent pageserver code could think it's durable while it really isn't
+.
+.
++                        let timeline_dir =
++                            VirtualFile::open(&self_clone.conf.timeline_path(
++                                &self_clone.tenant_shard_id,
++                                &self_clone.timeline_id,
++                            ))
++                            .await
++                            .fatal_err("VirtualFile::open for timeline dir fsync");
++                        timeline_dir
++                            .sync_all()
++                            .await
++                            .fatal_err("VirtualFile::sync_all timeline dir");
+
+    VirtualFile::open(&local_path).await.
+
+    // FIXME: should fsync the directory, not the destination file
     crashsafe::fsync_async(&local_path)
         .await
         .with_context(|| format!("fsync layer file {local_path}"))

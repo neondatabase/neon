@@ -23,7 +23,7 @@ pub async fn download_layer_file<'a>(
     match crate::virtual_file::io_engine::get() {
         crate::virtual_file::io_engine::IoEngine::NotSet => panic!("unset"),
         crate::virtual_file::io_engine::IoEngine::StdFs => {
-            legacy::download_layer_file_legacy(
+            legacy::download_layer_file(
                 conf,
                 storage,
                 tenant_shard_id,
@@ -36,7 +36,7 @@ pub async fn download_layer_file<'a>(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
-            tokio_epoll_uring::download_layer_file_legacy(
+            tokio_epoll_uring::download_layer_file(
                 conf,
                 storage,
                 tenant_shard_id,
