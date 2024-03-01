@@ -432,7 +432,7 @@ def test_deletion_queue_recovery(
 
     main_pageserver.start()
 
-    def assert_deletions_submitted(n: int):
+    def assert_deletions_submitted(n: int) -> None:
         assert ps_http.get_metric_value("pageserver_deletion_queue_submitted_total") == n
 
     # After restart, issue a flush to kick the deletion frontend to do recovery.
