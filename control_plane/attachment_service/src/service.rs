@@ -1320,17 +1320,21 @@ impl Service {
                 // Saw an existing shard: this is not a creation
                 create = false;
 
-                // Note that for existing tenants we do _not_ respect the generation in the request, unless our current
-                // generation is set to INITIAL_GENERATION (i.e. we have not seen a valid generation yet).  This is because
-                // once a tenant is created in this service, our view of generation is authoritative, and
-                // callers' generations may be ignored.  This represents a one-way migration of tenants from the outer
-                // cloud control plane into this service.
-
-                let set_generation = if shard.generation.is_none() {
-                    // Requests don't ordinarily specify generation in secondary, but if it is provided respect it
-                    req.config.generation.map(Generation::new)
-                } else {
-                    None
+                // Shards may have initially been created by a Secondary request, where we
+                // would have left generation as None.
+                //
+                // We only update generation the first time we see an attached-mode request,
+                // and if there is no existing generation set. The caller is responsible for
+                // ensuring that no non-storage-controller pageserver ever uses a higher
+                // generation than they passed in here.
+                use LocationConfigMode::*;
+                let set_generation = match req.config.mode {
+                    AttachedMulti | AttachedSingle | AttachedStale
+                        if shard.generation.is_none() =>
+                    {
+                        req.config.generation.map(Generation::new)
+                    }
+                    _ => None,
                 };
 
                 if shard.policy != placement_policy
@@ -1347,12 +1351,21 @@ impl Service {
             }
 
             if create {
+                use LocationConfigMode::*;
+                let generation = match req.config.mode {
+                    AttachedMulti | AttachedSingle | AttachedStale => req.config.generation,
+                    // If a caller provided a generation in a non-attached request, ignore it
+                    // and leave our generation as None: this enables a subsequent update to set
+                    // the generation when setting an attached mode for the first time.
+                    _ => None,
+                };
+
                 CreateOrUpdate::Create(
                     // Synthesize a creation request
                     (
                         TenantCreateRequest {
                             new_tenant_id: TenantShardId::unsharded(tenant_id),
-                            generation: req.config.generation,
+                            generation,
                             shard_parameters: ShardParameters {
                                 // Must preserve the incoming shard_count do distinguish unsharded (0)
                                 // from single-sharded (1): this distinction appears in the S3 keys of the tenant.
