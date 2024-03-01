@@ -152,7 +152,6 @@ pub(crate) mod ephemeral_file;
 pub mod layer_map;
 
 pub mod metadata;
-mod par_fsync;
 pub mod remote_timeline_client;
 pub mod storage_layer;
 
