@@ -7,6 +7,8 @@
 //!
 //! Then use [`get`] and  [`super::OpenOptions`].
 
+use tracing::Instrument;
+
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -61,7 +63,6 @@ pub(super) fn init(engine_kind: IoEngineKind) {
     set(engine_kind);
 }
 
-/// TODO: longer-term this should only be visible to VirtualFile
 pub(crate) fn get() -> IoEngine {
     let cur = IoEngine::try_from(IO_ENGINE.load(Ordering::Relaxed)).unwrap();
     if cfg!(test) {
@@ -144,6 +145,31 @@ impl IoEngine {
                     }),
                 )
             }
+        }
+    }
+
+    /// If we switch a user of [`tokio::fs`] to use [`super::io_engine`],
+    /// they'd start blocking the executor thread if [`IoEngine::StdFs`] is configured
+    /// whereas before the switch to [`super::io_engine`], that wasn't the case.
+    /// This method helps avoid such a regression.
+    ///
+    /// Panics if the `spawn_blocking` fails, see [`tokio::task::JoinError`] for reasons why that can happen.
+    pub(crate) async fn spawn_blocking_and_block_on_if_std<Fut, R>(&self, work: Fut) -> R
+    where
+        Fut: 'static + Send + std::future::Future<Output = R>,
+        R: 'static + Send,
+    {
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                let span = tracing::info_span!("spawn_blocking_block_on_if_std");
+                tokio::task::spawn_blocking({
+                    move || tokio::runtime::Handle::current().block_on(work.instrument(span))
+                })
+                .await
+                .expect("failed to join blocking code most likely it panicked, panicking as well")
+            }
+            IoEngine::TokioEpollUring => work.await,
         }
     }
 }

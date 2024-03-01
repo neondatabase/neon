@@ -6,8 +6,8 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::BUFFER_SIZE;
 use crate::tenant::storage_layer::LayerFileName;
-use crate::virtual_file::on_fatal_io_error;
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
+use anyhow::anyhow;
 use anyhow::Context;
 use bytes::BytesMut;
 use futures::StreamExt;
@@ -15,11 +15,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::fs;
-
 use tokio_util::sync::CancellationToken;
-
-use anyhow::anyhow;
-use utils::crashsafe;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::TimelineId;
 
@@ -39,9 +35,8 @@ pub(crate) async fn download_layer_file<'a>(
 ) -> Result<u64, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
-    let local_path = conf
-        .timeline_path(&tenant_shard_id, &timeline_id)
-        .join(layer_file_name.file_name());
+    let timeline_path = conf.timeline_path(&tenant_shard_id, &timeline_id);
+    let local_path = timeline_path.join(layer_file_name.file_name());
 
     let remote_path = remote_layer_path(
         &tenant_shard_id.tenant_id,
@@ -74,7 +69,7 @@ pub(crate) async fn download_layer_file<'a>(
 
             // This async block is the tokio-epoll-uring version of tokio::io::copy_buf
             // TODO: abstract away & unit test.
-            let bytes_amount = async move {
+            let bytes_amount = async {
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored()
                 let mut buf = BytesMut::with_capacity(BUFFER_SIZE);
@@ -132,41 +127,32 @@ pub(crate) async fn download_layer_file<'a>(
         .map_err(DownloadError::Other)?;
     drop(destination_file);
 
-    // TODO: use io_engine rename() once we have it
-    std::fs::rename(&temp_file_path, &local_path)
+    fail::fail_point!("remote-storage-download-pre-rename", |_| {
+        Err(DownloadError::Other(anyhow!(
+            "remote-storage-download-pre-rename failpoint triggered"
+        )))
+    });
+
+    fs::rename(&temp_file_path, &local_path)
         .await
         .with_context(|| format!("rename download layer file to {local_path}"))
         .map_err(DownloadError::Other)?;
 
-      // We just need to fsync the directory in which these inodes are linked,
-+                        // which we know to be the timeline directory.
-+                        //
-+                        // We use fatal_err() below because the after write_to_disk returns with success
-,
-+                        // the in-memory state of the filesystem already has the layer file in its final
- place,
-+                        // and subsequent pageserver code could think it's durable while it really isn't
-.
-.
-+                        let timeline_dir =
-+                            VirtualFile::open(&self_clone.conf.timeline_path(
-+                                &self_clone.tenant_shard_id,
-+                                &self_clone.timeline_id,
-+                            ))
-+                            .await
-+                            .fatal_err("VirtualFile::open for timeline dir fsync");
-+                        timeline_dir
-+                            .sync_all()
-+                            .await
-+                            .fatal_err("VirtualFile::sync_all timeline dir");
-
-    VirtualFile::open(&local_path).await.
-
-    // FIXME: should fsync the directory, not the destination file
-    crashsafe::fsync_async(&local_path)
-        .await
-        .with_context(|| format!("fsync layer file {local_path}"))
-        .map_err(DownloadError::Other)?;
+    // We use fatal_err() below because the after the rename above,
+    // the in-memory state of the filesystem already has the layer file in its final place,
+    // and subsequent pageserver code could think it's durable while it really isn't.
+    let work = async move {
+        let timeline_dir = VirtualFile::open(&timeline_path)
+            .await
+            .fatal_err("VirtualFile::open for timeline dir fsync");
+        timeline_dir
+            .sync_all()
+            .await
+            .fatal_err("VirtualFile::sync_all timeline dir");
+    };
+    crate::virtual_file::io_engine::get()
+        .spawn_blocking_and_block_on_if_std(work)
+        .await;
 
     tracing::debug!("download complete: {local_path}");
 

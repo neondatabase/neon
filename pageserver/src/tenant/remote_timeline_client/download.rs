@@ -14,15 +14,13 @@ use tokio::io::AsyncSeekExt;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-
 use utils::backoff;
 
 use crate::config::PageServerConf;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::remote_timeline_client::{remote_timelines_path};
+use crate::tenant::remote_timeline_client::remote_timelines_path;
 
 use crate::tenant::Generation;
-
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode};
 
