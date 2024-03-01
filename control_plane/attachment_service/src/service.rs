@@ -1151,9 +1151,12 @@ impl Service {
 
         let (waiters, response_shards) = {
             let mut locked = self.inner.write().unwrap();
-            let (_nodes, tenants, scheduler) = locked.parts_mut();
+            let result_tx = locked.result_tx.clone();
+            let compute_hook = locked.compute_hook.clone();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
 
             let mut response_shards = Vec::new();
+            let mut schcedule_error = None;
 
             for tenant_shard_id in create_ids {
                 tracing::info!("Creating shard {tenant_shard_id}...");
@@ -1190,23 +1193,20 @@ impl Service {
                         continue;
                     }
                     Entry::Vacant(entry) => {
-                        let mut state = TenantState::new(
+                        let state = entry.insert(TenantState::new(
                             tenant_shard_id,
                             ShardIdentity::from_params(
                                 tenant_shard_id.shard_number,
                                 &create_req.shard_parameters,
                             ),
                             placement_policy.clone(),
-                        );
+                        ));
 
                         state.generation = initial_generation;
                         state.config = create_req.config.clone();
-
-                        state.schedule(scheduler).map_err(|e| {
-                            ApiError::Conflict(format!(
-                                "Failed to schedule shard {tenant_shard_id}: {e}"
-                            ))
-                        })?;
+                        if let Err(e) = state.schedule(scheduler) {
+                            schcedule_error = Some(e);
+                        }
 
                         // Only include shards in result if we are attaching: the purpose
                         // of the response is to tell the caller where the shards are attached.
@@ -1220,24 +1220,27 @@ impl Service {
                                 generation: generation.into().unwrap(),
                             });
                         }
-                        entry.insert(state)
                     }
                 };
             }
 
-            // Take a snapshot of pageservers
-            let pageservers = locked.nodes.clone();
+            // If we failed to schedule shards, then they are still created in the controller,
+            // but we return an error to the requester to avoid a silent failure when someone
+            // tries to e.g. create a tenant whose placement policy requires more nodes than
+            // are present in the system.  We do this here rather than in the above loop, to
+            // avoid situations where we only create a subset of shards in the tenant.
+            if let Some(e) = schcedule_error {
+                return Err(ApiError::Conflict(format!(
+                    "Failed to schedule shard(s): {e}"
+                )));
+            }
 
-            let result_tx = locked.result_tx.clone();
-            let compute_hook = locked.compute_hook.clone();
-
-            let waiters = locked
-                .tenants
+            let waiters = tenants
                 .range_mut(TenantShardId::tenant_range(tenant_id))
                 .filter_map(|(_shard_id, shard)| {
                     shard.maybe_reconcile(
                         result_tx.clone(),
-                        &pageservers,
+                        nodes,
                         &compute_hook,
                         &self.config,
                         &self.persistence,
