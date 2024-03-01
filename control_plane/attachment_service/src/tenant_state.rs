@@ -448,10 +448,19 @@ impl TenantState {
         // more work on the same pageservers we're already using.
         let mut modified = false;
 
-        // Remove any intent state that should no longer be present
+        // Add/remove nodes to fulfil policy
         use PlacementPolicy::*;
         match self.policy {
             Single => {
+                // Should have exactly one attached, and zero secondaries
+                if !self.intent.secondary.is_empty() {
+                    self.intent.clear_secondary(scheduler);
+                    modified = true;
+                }
+
+                let (modified_attached, _attached_node_id) = self.schedule_attached(scheduler)?;
+                modified |= modified_attached;
+
                 if !self.intent.secondary.is_empty() {
                     self.intent.clear_secondary(scheduler);
                     modified = true;
@@ -474,35 +483,7 @@ impl TenantState {
                     self.intent.pop_secondary(scheduler);
                     modified = true;
                 }
-            }
-            Secondary => {
-                while self.intent.secondary.len() > 1 {
-                    // We have no particular preference for one secondary location over another: just
-                    // arbitrarily drop from the end
-                    self.intent.pop_secondary(scheduler);
-                    modified = true;
-                }
-            }
-            Detached => {
-                if self.intent.get_attached().is_some() || !self.intent.get_secondary().is_empty() {
-                    self.intent.clear(scheduler);
-                    modified = true;
-                }
-            }
-        }
 
-        match self.policy {
-            Single => {
-                // Should have exactly one attached, and zero secondaries
-                let (modified_attached, _attached_node_id) = self.schedule_attached(scheduler)?;
-                modified |= modified_attached;
-
-                if !self.intent.secondary.is_empty() {
-                    self.intent.clear_secondary(scheduler);
-                    modified = true;
-                }
-            }
-            Double(secondary_count) => {
                 // Should have exactly one attached, and N secondaries
                 let (modified_attached, attached_node_id) = self.schedule_attached(scheduler)?;
                 modified |= modified_attached;
@@ -526,9 +507,19 @@ impl TenantState {
                     self.intent.push_secondary(scheduler, node_id);
                     modified = true;
                 }
+                while self.intent.secondary.len() > 1 {
+                    // We have no particular preference for one secondary location over another: just
+                    // arbitrarily drop from the end
+                    self.intent.pop_secondary(scheduler);
+                    modified = true;
+                }
             }
             Detached => {
                 // Never add locations in this mode
+                if self.intent.get_attached().is_some() || !self.intent.get_secondary().is_empty() {
+                    self.intent.clear(scheduler);
+                    modified = true;
+                }
             }
         }
 
