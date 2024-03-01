@@ -252,8 +252,14 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
     let span = info_span!("blocking");
     tokio::task::spawn_blocking(move || {
+        // there are situations where we lose scraped metrics under load, try to gather some clues
+        // since all nodes are queried this, keep the message count low.
+        let spawn_delay = started_at.elapsed();
+
         let _span = span.entered();
+
         let metrics = metrics::gather();
+
         let res = encoder
             .encode(&metrics, &mut writer)
             .and_then(|_| writer.flush().map_err(|e| e.into()));
@@ -263,11 +269,19 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
                 tracing::info!(
                     bytes = writer.flushed_bytes(),
                     elapsed_ms = started_at.elapsed().as_millis(),
+                    spawning_ms = spawn_delay.as_millis(),
                     "responded /metrics"
                 );
             }
             Err(e) => {
-                tracing::warn!("failed to write out /metrics response: {e:#}");
+                // there is a chance that this error is not the BrokenPipe we generate in the writer
+                // for "closed connection", but it is highly unlikely.
+                tracing::warn!(
+                    after_bytes = writer.flushed_bytes(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    spawning_ms = spawn_delay.as_millis(),
+                    "failed to write out /metrics response: {e:?}"
+                );
                 // semantics of this error are quite... unclear. we want to error the stream out to
                 // abort the response to somehow notify the client that we failed.
                 //
