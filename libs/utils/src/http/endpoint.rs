@@ -254,22 +254,33 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
     tokio::task::spawn_blocking(move || {
         // there are situations where we lose scraped metrics under load, try to gather some clues
         // since all nodes are queried this, keep the message count low.
-        let spawn_delay = started_at.elapsed();
+        let spawned_at = std::time::Instant::now();
 
         let _span = span.entered();
 
         let metrics = metrics::gather();
 
+        let gathered_at = std::time::Instant::now();
+
         let res = encoder
             .encode(&metrics, &mut writer)
             .and_then(|_| writer.flush().map_err(|e| e.into()));
+
+        let encoded_at = std::time::Instant::now();
+
+        let spawned_in = spawned_at - started_at;
+        let collected_in = gathered_at - spawned_at;
+        let encoded_in = encoded_at - gathered_at;
+        let total = encoded_at - started_at;
 
         match res {
             Ok(()) => {
                 tracing::info!(
                     bytes = writer.flushed_bytes(),
-                    elapsed_ms = started_at.elapsed().as_millis(),
-                    spawning_ms = spawn_delay.as_millis(),
+                    total_ms = total.as_millis(),
+                    spawning_ms = spawned_in.as_millis(),
+                    collection_ms = collected_in.as_millis(),
+                    encoding_ms = encoded_in.as_millis(),
                     "responded /metrics"
                 );
             }
@@ -278,8 +289,10 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
                 // for "closed connection", but it is highly unlikely.
                 tracing::warn!(
                     after_bytes = writer.flushed_bytes(),
-                    elapsed_ms = started_at.elapsed().as_millis(),
-                    spawning_ms = spawn_delay.as_millis(),
+                    total_ms = total.as_millis(),
+                    spawning_ms = spawned_in.as_millis(),
+                    collection_ms = collected_in.as_millis(),
+                    encoding_ms = encoded_in.as_millis(),
                     "failed to write out /metrics response: {e:?}"
                 );
                 // semantics of this error are quite... unclear. we want to error the stream out to
