@@ -21,17 +21,16 @@ use futures::Future;
 use md5;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};
 
 use super::{
+    heatmap::HeatMapTenant,
     scheduler::{self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs},
-    CommandRequest,
+    CommandRequest, UploadCommand,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
 use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
-
-use super::{heatmap::HeatMapTenant, UploadCommand};
 
 pub(super) async fn heatmap_uploader_task(
     tenant_manager: Arc<TenantManager>,
@@ -374,12 +373,9 @@ async fn upload_tenant_heatmap(
     // Ensure that Tenant::shutdown waits for any upload in flight: this is needed because otherwise
     // when we delete a tenant, we might race with an upload in flight and end up leaving a heatmap behind
     // in remote storage.
-    let _guard = match tenant.gate.enter() {
-        Ok(g) => g,
-        Err(_) => {
-            tracing::info!("Skipping heatmap upload for tenant which is shutting down");
-            return Err(UploadHeatmapError::Cancelled);
-        }
+    let Ok(_guard) = tenant.gate.enter() else {
+        tracing::info!("Skipping heatmap upload for tenant which is shutting down");
+        return Err(UploadHeatmapError::Cancelled);
     };
 
     for (timeline_id, timeline) in timelines {
@@ -417,10 +413,10 @@ async fn upload_tenant_heatmap(
         || async {
             let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
             remote_storage
-                .upload_storage_object(bytes, size, &path)
+                .upload_storage_object(bytes, size, &path, cancel)
                 .await
         },
-        |_| false,
+        TimeoutOrCancel::caused_by_cancel,
         3,
         u32::MAX,
         "Uploading heatmap",

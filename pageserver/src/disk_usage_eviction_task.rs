@@ -58,6 +58,7 @@ use utils::{completion, id::TimelineId};
 
 use crate::{
     config::PageServerConf,
+    metrics::disk_usage_based_eviction::METRICS,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         self,
@@ -65,7 +66,6 @@ use crate::{
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
         storage_layer::{AsLayerDesc, EvictionError, Layer, LayerFileName},
-        Timeline,
     },
 };
 
@@ -351,7 +351,6 @@ pub enum IterationOutcome<U> {
     Finished(IterationOutcomeFinished<U>),
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct IterationOutcomeFinished<U> {
     /// The actual usage observed before we started the iteration.
@@ -366,7 +365,6 @@ pub struct IterationOutcomeFinished<U> {
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 struct AssumedUsage<U> {
     /// The expected value for `after`, after phase 2.
     projected_after: U,
@@ -374,14 +372,12 @@ struct AssumedUsage<U> {
     failed: LayerCount,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct PlannedUsage<U> {
     respecting_tenant_min_resident_size: U,
     fallback_to_global_lru: Option<U>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Serialize)]
 struct LayerCount {
     file_sizes: u64,
@@ -413,13 +409,23 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         "running disk usage based eviction due to pressure"
     );
 
-    let candidates =
+    let (candidates, collection_time) = {
+        let started_at = std::time::Instant::now();
         match collect_eviction_candidates(tenant_manager, eviction_order, cancel).await? {
             EvictionCandidates::Cancelled => {
                 return Ok(IterationOutcome::Cancelled);
             }
-            EvictionCandidates::Finished(partitioned) => partitioned,
-        };
+            EvictionCandidates::Finished(partitioned) => (partitioned, started_at.elapsed()),
+        }
+    };
+
+    METRICS.layers_collected.inc_by(candidates.len() as u64);
+
+    tracing::info!(
+        elapsed_ms = collection_time.as_millis(),
+        total_layers = candidates.len(),
+        "collection completed"
+    );
 
     // Debug-log the list of candidates
     let now = SystemTime::now();
@@ -450,9 +456,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
 
-    let selection = select_victims(&candidates, usage_pre);
+    let (evicted_amount, usage_planned) =
+        select_victims(&candidates, usage_pre).into_amount_and_planned();
 
-    let (evicted_amount, usage_planned) = selection.into_amount_and_planned();
+    METRICS.layers_selected.inc_by(evicted_amount as u64);
 
     // phase2: evict layers
 
@@ -481,9 +488,15 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             if let Some(next) = next {
                 match next {
                     Ok(Ok(file_size)) => {
+                        METRICS.layers_evicted.inc();
                         usage_assumed.add_available_bytes(file_size);
                     }
-                    Ok(Err((file_size, EvictionError::NotFound | EvictionError::Downloaded))) => {
+                    Ok(Err((
+                        file_size,
+                        EvictionError::NotFound
+                        | EvictionError::Downloaded
+                        | EvictionError::Timeout,
+                    ))) => {
                         evictions_failed.file_sizes += file_size;
                         evictions_failed.count += 1;
                     }
@@ -499,7 +512,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
             // calling again when consumed_all is fine as evicted is fused.
             let Some((_partition, candidate)) = evicted.next() else {
-                consumed_all = true;
+                if !consumed_all {
+                    tracing::info!("all evictions started, waiting");
+                    consumed_all = true;
+                }
                 continue;
             };
 
@@ -507,11 +523,15 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 EvictionLayer::Attached(layer) => {
                     let file_size = layer.layer_desc().file_size;
                     js.spawn(async move {
-                        layer
-                            .evict_and_wait()
-                            .await
-                            .map(|()| file_size)
-                            .map_err(|e| (file_size, e))
+                        // have a low eviction waiting timeout because our LRU calculations go stale fast;
+                        // also individual layer evictions could hang because of bugs and we do not want to
+                        // pause disk_usage_based_eviction for such.
+                        let timeout = std::time::Duration::from_secs(5);
+
+                        match layer.evict_and_wait(timeout).await {
+                            Ok(()) => Ok(file_size),
+                            Err(e) => Err((file_size, e)),
+                        }
                     });
                 }
                 EvictionLayer::Secondary(layer) => {
@@ -532,6 +552,30 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
         (usage_assumed, evictions_failed)
     };
+
+    let started_at = std::time::Instant::now();
+
+    let evict_layers = async move {
+        let mut evict_layers = std::pin::pin!(evict_layers);
+
+        let maximum_expected = std::time::Duration::from_secs(10);
+
+        let res = tokio::time::timeout(maximum_expected, &mut evict_layers).await;
+        let tuple = if let Ok(tuple) = res {
+            tuple
+        } else {
+            let elapsed = started_at.elapsed();
+            tracing::info!(elapsed_ms = elapsed.as_millis(), "still ongoing");
+            evict_layers.await
+        };
+
+        let elapsed = started_at.elapsed();
+        tracing::info!(elapsed_ms = elapsed.as_millis(), "completed");
+        tuple
+    };
+
+    let evict_layers =
+        evict_layers.instrument(tracing::info_span!("evict_layers", layers=%evicted_amount));
 
     let (usage_assumed, evictions_failed) = tokio::select! {
         tuple = evict_layers => { tuple },
@@ -565,7 +609,6 @@ pub(crate) struct EvictionSecondaryLayer {
 #[derive(Clone)]
 pub(crate) enum EvictionLayer {
     Attached(Layer),
-    #[allow(dead_code)]
     Secondary(EvictionSecondaryLayer),
 }
 
@@ -768,6 +811,8 @@ async fn collect_eviction_candidates(
     eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<EvictionCandidates> {
+    const LOG_DURATION_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(10);
+
     // get a snapshot of the list of tenants
     let tenants = tenant::mgr::list_tenants()
         .await
@@ -796,6 +841,8 @@ async fn collect_eviction_candidates(
             continue;
         }
 
+        let started_at = std::time::Instant::now();
+
         // collect layers from all timelines in this tenant
         //
         // If one of the timelines becomes `!is_active()` during the iteration,
@@ -810,6 +857,7 @@ async fn collect_eviction_candidates(
             }
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
             debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
+
             tenant_candidates.extend(info.resident_layers.into_iter());
             max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
 
@@ -875,7 +923,25 @@ async fn collect_eviction_candidates(
                     (partition, candidate)
                 });
 
+        METRICS
+            .tenant_layer_count
+            .observe(tenant_candidates.len() as f64);
+
         candidates.extend(tenant_candidates);
+
+        let elapsed = started_at.elapsed();
+        METRICS
+            .tenant_collection_time
+            .observe(elapsed.as_secs_f64());
+
+        if elapsed > LOG_DURATION_THRESHOLD {
+            tracing::info!(
+                tenant_id=%tenant.tenant_shard_id().tenant_id,
+                shard_id=%tenant.tenant_shard_id().shard_slug(),
+                elapsed_ms = elapsed.as_millis(),
+                "collection took longer than threshold"
+            );
+        }
     }
 
     // Note: the same tenant ID might be hit twice, if it transitions from attached to
@@ -890,17 +956,19 @@ async fn collect_eviction_candidates(
         },
     );
 
-    for secondary_tenant in secondary_tenants {
+    for tenant in secondary_tenants {
         // for secondary tenants we use a sum of on_disk layers and already evicted layers. this is
         // to prevent repeated disk usage based evictions from completely draining less often
         // updating secondaries.
-        let (mut layer_info, total_layers) = secondary_tenant.get_layers_for_eviction();
+        let (mut layer_info, total_layers) = tenant.get_layers_for_eviction();
 
         debug_assert!(
             total_layers >= layer_info.resident_layers.len(),
             "total_layers ({total_layers}) must be at least the resident_layers.len() ({})",
             layer_info.resident_layers.len()
         );
+
+        let started_at = std::time::Instant::now();
 
         layer_info
             .resident_layers
@@ -923,9 +991,27 @@ async fn collect_eviction_candidates(
                     )
                 });
 
+        METRICS
+            .tenant_layer_count
+            .observe(tenant_candidates.len() as f64);
         candidates.extend(tenant_candidates);
 
         tokio::task::yield_now().await;
+
+        let elapsed = started_at.elapsed();
+
+        METRICS
+            .tenant_collection_time
+            .observe(elapsed.as_secs_f64());
+
+        if elapsed > LOG_DURATION_THRESHOLD {
+            tracing::info!(
+                tenant_id=%tenant.tenant_shard_id().tenant_id,
+                shard_id=%tenant.tenant_shard_id().shard_slug(),
+                elapsed_ms = elapsed.as_millis(),
+                "collection took longer than threshold"
+            );
+        }
     }
 
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
@@ -999,30 +1085,6 @@ impl<U: Usage> VictimSelection<U> {
         };
 
         (self.amount, planned)
-    }
-}
-
-struct TimelineKey(Arc<Timeline>);
-
-impl PartialEq for TimelineKey {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for TimelineKey {}
-
-impl std::hash::Hash for TimelineKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).hash(state);
-    }
-}
-
-impl std::ops::Deref for TimelineKey {
-    type Target = Timeline;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
     }
 }
 
@@ -1105,7 +1167,6 @@ mod filesystem_level_usage {
     use super::DiskUsageEvictionTaskConfig;
 
     #[derive(Debug, Clone, Copy)]
-    #[allow(dead_code)]
     pub struct Usage<'a> {
         config: &'a DiskUsageEvictionTaskConfig,
 

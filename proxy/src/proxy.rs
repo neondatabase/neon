@@ -10,7 +10,7 @@ pub mod wake_compute;
 
 use crate::{
     auth,
-    cancellation::{self, CancelMap},
+    cancellation::{self, CancellationHandler},
     compute,
     config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
@@ -22,7 +22,6 @@ use crate::{
     stream::{PqStream, Stream},
     EndpointCacheKey,
 };
-use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
@@ -33,7 +32,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, Instrument};
 
 use self::{
     connect_compute::{connect_to_compute, TcpMechanism},
@@ -62,6 +61,7 @@ pub async fn task_main(
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    cancellation_handler: Arc<CancellationHandler>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -72,7 +72,6 @@ pub async fn task_main(
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
-    let cancel_map = Arc::new(CancelMap::default());
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -80,71 +79,70 @@ pub async fn task_main(
         let (socket, peer_addr) = accept_result?;
 
         let session_id = uuid::Uuid::new_v4();
-        let cancel_map = Arc::clone(&cancel_map);
+        let cancellation_handler = Arc::clone(&cancellation_handler);
         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
-        let session_span = info_span!(
-            "handle_client",
-            ?session_id,
-            peer_addr = tracing::field::Empty,
-            ep = tracing::field::Empty,
-        );
-
-        connections.spawn(
-            async move {
-                info!("accepted postgres client connection");
-
-                let mut socket = WithClientIp::new(socket);
-                let mut peer_addr = peer_addr.ip();
-                if let Some(addr) = socket.wait_for_addr().await? {
-                    peer_addr = addr.ip();
-                    tracing::Span::current().record("peer_addr", &tracing::field::display(addr));
-                } else if config.require_client_ip {
-                    bail!("missing required client IP");
+        connections.spawn(async move {
+            let mut socket = WithClientIp::new(socket);
+            let mut peer_addr = peer_addr.ip();
+            match socket.wait_for_addr().await {
+                Ok(Some(addr)) => peer_addr = addr.ip(),
+                Err(e) => {
+                    error!("per-client task finished with an error: {e:#}");
+                    return;
                 }
+                Ok(None) if config.require_client_ip => {
+                    error!("missing required client IP");
+                    return;
+                }
+                Ok(None) => {}
+            }
 
-                socket
-                    .inner
-                    .set_nodelay(true)
-                    .context("failed to set socket option")?;
+            match socket.inner.set_nodelay(true) {
+                Ok(()) => {},
+                Err(e) => {
+                    error!("per-client task finished with an error: failed to set socket option: {e:#}");
+                    return;
+                },
+            };
 
-                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+            let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+            let span = ctx.span.clone();
 
-                let res = handle_client(
-                    config,
-                    &mut ctx,
-                    cancel_map,
-                    socket,
-                    ClientMode::Tcp,
-                    endpoint_rate_limiter,
-                )
-                .await;
+            let res = handle_client(
+                config,
+                &mut ctx,
+                cancellation_handler,
+                socket,
+                ClientMode::Tcp,
+                endpoint_rate_limiter,
+            )
+            .instrument(span.clone())
+            .await;
 
-                match res {
-                    Err(e) => {
-                        // todo: log and push to ctx the error kind
-                        ctx.set_error_kind(e.get_error_kind());
-                        ctx.log();
-                        Err(e.into())
-                    }
-                    Ok(None) => {
-                        ctx.set_success();
-                        ctx.log();
-                        Ok(())
-                    }
-                    Ok(Some(p)) => {
-                        ctx.set_success();
-                        ctx.log();
-                        p.proxy_pass().await
+            match res {
+                Err(e) => {
+                    // todo: log and push to ctx the error kind
+                    ctx.set_error_kind(e.get_error_kind());
+                    ctx.log();
+                    error!(parent: &span, "per-client task finished with an error: {e:#}");
+                }
+                Ok(None) => {
+                    ctx.set_success();
+                    ctx.log();
+                }
+                Ok(Some(p)) => {
+                    ctx.set_success();
+                    ctx.log();
+                    match p.proxy_pass().instrument(span.clone()).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            error!(parent: &span, "per-client task finished with an error: {e:#}");
+                        }
                     }
                 }
             }
-            .unwrap_or_else(move |e| {
-                // Acknowledge that the task has finished with an error.
-                error!("per-client task finished with an error: {e:#}");
-            })
-            .instrument(session_span),
-        );
+        });
     }
 
     connections.close();
@@ -163,14 +161,14 @@ pub enum ClientMode {
 
 /// Abstracts the logic of handling TCP vs WS clients
 impl ClientMode {
-    fn allow_cleartext(&self) -> bool {
+    pub fn allow_cleartext(&self) -> bool {
         match self {
             ClientMode::Tcp => false,
             ClientMode::Websockets { .. } => true,
         }
     }
 
-    fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
+    pub fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
         match self {
             ClientMode::Tcp => config.allow_self_signed_compute,
             ClientMode::Websockets { .. } => false,
@@ -227,15 +225,12 @@ impl ReportableError for ClientRequestError {
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    cancel_map: Arc<CancelMap>,
+    cancellation_handler: Arc<CancellationHandler>,
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
-    info!(
-        protocol = ctx.protocol,
-        "handling interactive connection from client"
-    );
+    info!("handling interactive connection from client");
 
     let proto = ctx.protocol;
     let _client_gauge = NUM_CLIENT_CONNECTION_GAUGE
@@ -253,8 +248,8 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
-                return Ok(cancel_map
-                    .cancel_session(cancel_key_data)
+                return Ok(cancellation_handler
+                    .cancel_session(cancel_key_data, ctx.session_id)
                     .await
                     .map(|()| None)?)
             }
@@ -287,7 +282,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     }
 
     let user = user_info.get_user().to_owned();
-    let (mut node_info, user_info) = match user_info
+    let user_info = match user_info
         .authenticate(
             ctx,
             &mut stream,
@@ -306,19 +301,16 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
-    node_info.allow_self_signed_compute = mode.allow_self_signed_compute(config);
-
-    let aux = node_info.aux.clone();
     let mut node = connect_to_compute(
         ctx,
         &TcpMechanism { params: &params },
-        node_info,
         &user_info,
+        mode.allow_self_signed_compute(config),
     )
     .or_else(|e| stream.throw_error(e))
     .await?;
 
-    let session = cancel_map.get_session();
+    let session = cancellation_handler.get_session();
     prepare_client_connection(&node, &session, &mut stream).await?;
 
     // Before proxy passing, forward to compute whatever data is left in the
@@ -330,10 +322,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     Ok(Some(ProxyPassthrough {
         client: stream,
+        aux: node.aux.clone(),
         compute: node,
-        aux,
         req: _request_gauge,
         conn: _client_gauge,
+        cancel: session,
     }))
 }
 

@@ -2,8 +2,12 @@ use crate::{background_process, local_env::LocalEnv};
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper::Method;
 use pageserver_api::{
+    controller_api::{
+        NodeConfigureRequest, NodeRegisterRequest, TenantCreateResponse, TenantLocateResponse,
+        TenantShardMigrateRequest, TenantShardMigrateResponse,
+    },
     models::{
-        ShardParameters, TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
+        TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
         TimelineCreateRequest, TimelineInfo,
     },
     shard::TenantShardId,
@@ -11,12 +15,12 @@ use pageserver_api::{
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::str::FromStr;
+use std::{fs, str::FromStr};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
 use utils::{
-    auth::{Claims, Scope},
+    auth::{encode_from_key_file, Claims, Scope},
     id::{NodeId, TenantId},
 };
 
@@ -24,7 +28,7 @@ pub struct AttachmentService {
     env: LocalEnv,
     listen: String,
     path: Utf8PathBuf,
-    jwt_token: Option<String>,
+    private_key: Option<Vec<u8>>,
     public_key: Option<String>,
     postgres_port: u16,
     client: reqwest::Client,
@@ -55,126 +59,6 @@ pub struct InspectResponse {
     pub attachment: Option<(u32, NodeId)>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct TenantCreateResponseShard {
-    pub shard_id: TenantShardId,
-    pub node_id: NodeId,
-    pub generation: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TenantCreateResponse {
-    pub shards: Vec<TenantCreateResponseShard>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct NodeRegisterRequest {
-    pub node_id: NodeId,
-
-    pub listen_pg_addr: String,
-    pub listen_pg_port: u16,
-
-    pub listen_http_addr: String,
-    pub listen_http_port: u16,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct NodeConfigureRequest {
-    pub node_id: NodeId,
-
-    pub availability: Option<NodeAvailability>,
-    pub scheduling: Option<NodeSchedulingPolicy>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct TenantLocateResponseShard {
-    pub shard_id: TenantShardId,
-    pub node_id: NodeId,
-
-    pub listen_pg_addr: String,
-    pub listen_pg_port: u16,
-
-    pub listen_http_addr: String,
-    pub listen_http_port: u16,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TenantLocateResponse {
-    pub shards: Vec<TenantLocateResponseShard>,
-    pub shard_params: ShardParameters,
-}
-
-/// Explicitly migrating a particular shard is a low level operation
-/// TODO: higher level "Reschedule tenant" operation where the request
-/// specifies some constraints, e.g. asking it to get off particular node(s)
-#[derive(Serialize, Deserialize, Debug)]
-pub struct TenantShardMigrateRequest {
-    pub tenant_shard_id: TenantShardId,
-    pub node_id: NodeId,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy)]
-pub enum NodeAvailability {
-    // Normal, happy state
-    Active,
-    // Offline: Tenants shouldn't try to attach here, but they may assume that their
-    // secondary locations on this node still exist.  Newly added nodes are in this
-    // state until we successfully contact them.
-    Offline,
-}
-
-impl FromStr for NodeAvailability {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "active" => Ok(Self::Active),
-            "offline" => Ok(Self::Offline),
-            _ => Err(anyhow::anyhow!("Unknown availability state '{s}'")),
-        }
-    }
-}
-
-/// FIXME: this is a duplicate of the type in the attachment_service crate, because the
-/// type needs to be defined with diesel traits in there.
-#[derive(Serialize, Deserialize, Clone, Copy)]
-pub enum NodeSchedulingPolicy {
-    Active,
-    Filling,
-    Pause,
-    Draining,
-}
-
-impl FromStr for NodeSchedulingPolicy {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "active" => Ok(Self::Active),
-            "filling" => Ok(Self::Filling),
-            "pause" => Ok(Self::Pause),
-            "draining" => Ok(Self::Draining),
-            _ => Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
-        }
-    }
-}
-
-impl From<NodeSchedulingPolicy> for String {
-    fn from(value: NodeSchedulingPolicy) -> String {
-        use NodeSchedulingPolicy::*;
-        match value {
-            Active => "active",
-            Filling => "filling",
-            Pause => "pause",
-            Draining => "draining",
-        }
-        .to_string()
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct TenantShardMigrateResponse {}
-
 impl AttachmentService {
     pub fn from_env(env: &LocalEnv) -> Self {
         let path = Utf8PathBuf::from_path_buf(env.base_data_dir.clone())
@@ -204,12 +88,11 @@ impl AttachmentService {
             .pageservers
             .first()
             .expect("Config is validated to contain at least one pageserver");
-        let (jwt_token, public_key) = match ps_conf.http_auth_type {
+        let (private_key, public_key) = match ps_conf.http_auth_type {
             AuthType::Trust => (None, None),
             AuthType::NeonJWT => {
-                let jwt_token = env
-                    .generate_auth_token(&Claims::new(None, Scope::PageServerApi))
-                    .unwrap();
+                let private_key_path = env.get_private_key_path();
+                let private_key = fs::read(private_key_path).expect("failed to read private key");
 
                 // If pageserver auth is enabled, this implicitly enables auth for this service,
                 // using the same credentials.
@@ -235,7 +118,7 @@ impl AttachmentService {
                 } else {
                     std::fs::read_to_string(&public_key_path).expect("Can't read public key")
                 };
-                (Some(jwt_token), Some(public_key))
+                (Some(private_key), Some(public_key))
             }
         };
 
@@ -243,7 +126,7 @@ impl AttachmentService {
             env: env.clone(),
             path,
             listen,
-            jwt_token,
+            private_key,
             public_key,
             postgres_port,
             client: reqwest::ClientBuilder::new()
@@ -397,7 +280,10 @@ impl AttachmentService {
         .into_iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
-        if let Some(jwt_token) = &self.jwt_token {
+        if let Some(private_key) = &self.private_key {
+            let claims = Claims::new(None, Scope::PageServerApi);
+            let jwt_token =
+                encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
             args.push(format!("--jwt-token={jwt_token}"));
         }
 
@@ -422,7 +308,7 @@ impl AttachmentService {
             )],
             background_process::InitialPidFile::Create(self.pid_file()),
             || async {
-                match self.status().await {
+                match self.ready().await {
                     Ok(_) => Ok(true),
                     Err(_) => Ok(false),
                 }
@@ -468,6 +354,20 @@ impl AttachmentService {
         Ok(())
     }
 
+    fn get_claims_for_path(path: &str) -> anyhow::Result<Option<Claims>> {
+        let category = match path.find('/') {
+            Some(idx) => &path[..idx],
+            None => path,
+        };
+
+        match category {
+            "status" | "ready" => Ok(None),
+            "control" | "debug" => Ok(Some(Claims::new(None, Scope::Admin))),
+            "v1" => Ok(Some(Claims::new(None, Scope::PageServerApi))),
+            _ => Err(anyhow::anyhow!("Failed to determine claims for {}", path)),
+        }
+    }
+
     /// Simple HTTP request wrapper for calling into attachment service
     async fn dispatch<RQ, RS>(
         &self,
@@ -493,11 +393,16 @@ impl AttachmentService {
         if let Some(body) = body {
             builder = builder.json(&body)
         }
-        if let Some(jwt_token) = &self.jwt_token {
-            builder = builder.header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {jwt_token}"),
-            );
+        if let Some(private_key) = &self.private_key {
+            println!("Getting claims for path {}", path);
+            if let Some(required_claims) = Self::get_claims_for_path(&path)? {
+                println!("Got claims {:?} for path {}", required_claims, path);
+                let jwt_token = encode_from_key_file(&required_claims, private_key)?;
+                builder = builder.header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {jwt_token}"),
+                );
+            }
         }
 
         let response = builder.send().await?;
@@ -617,8 +522,8 @@ impl AttachmentService {
     }
 
     #[instrument(skip(self))]
-    pub async fn status(&self) -> anyhow::Result<()> {
-        self.dispatch::<(), ()>(Method::GET, "status".to_string(), None)
+    pub async fn ready(&self) -> anyhow::Result<()> {
+        self.dispatch::<(), ()>(Method::GET, "ready".to_string(), None)
             .await
     }
 

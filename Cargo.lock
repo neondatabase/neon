@@ -284,8 +284,10 @@ dependencies = [
  "diesel_migrations",
  "futures",
  "git-version",
+ "humantime",
  "hyper",
  "metrics",
+ "once_cell",
  "pageserver_api",
  "pageserver_client",
  "postgres_connection",
@@ -1640,6 +1642,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "desim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "hex",
+ "parking_lot 0.12.1",
+ "rand 0.8.5",
+ "scopeguard",
+ "smallvec",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "diesel"
 version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1797,6 +1815,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e875f1719c16de097dee81ed675e2d9bb63096823ed3f0ca827b7dea3028bbbb"
 dependencies = [
  "enumset_derive",
+ "serde",
 ]
 
 [[package]]
@@ -2247,11 +2266,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.8.2"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0761a1b9491c4f2e3d66aa0f62d0fba0af9a0e2852e4d48ea506632a4b56e6aa"
+checksum = "e8094feaf31ff591f651a2664fb9cfd92bba7a60ce3197265e9482ebe753c8f7"
 dependencies = [
- "hashbrown 0.13.2",
+ "hashbrown 0.14.0",
 ]
 
 [[package]]
@@ -2740,6 +2759,17 @@ name = "lazycell"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
+
+[[package]]
+name = "leaky-bucket"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eb491abd89e9794d50f93c8db610a29509123e3fbbc9c8c67a528e9391cd853"
+dependencies = [
+ "parking_lot 0.12.1",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "libc"
@@ -3432,6 +3462,7 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-compression",
  "async-stream",
  "async-trait",
@@ -3459,6 +3490,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "itertools",
+ "leaky-bucket",
  "md5",
  "metrics",
  "nix 0.27.1",
@@ -3466,6 +3498,7 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "pageserver_api",
+ "pageserver_compaction",
  "pin-project-lite",
  "postgres",
  "postgres-protocol",
@@ -3520,7 +3553,9 @@ dependencies = [
  "const_format",
  "enum-map",
  "hex",
+ "humantime",
  "humantime-serde",
+ "itertools",
  "postgres_ffi",
  "rand 0.8.5",
  "serde",
@@ -3551,6 +3586,53 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "utils",
+ "workspace_hack",
+]
+
+[[package]]
+name = "pageserver_compaction"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-stream",
+ "async-trait",
+ "byteorder",
+ "bytes",
+ "chrono",
+ "clap",
+ "const_format",
+ "consumption_metrics",
+ "criterion",
+ "crossbeam-utils",
+ "either",
+ "fail",
+ "flate2",
+ "futures",
+ "git-version",
+ "hex",
+ "hex-literal",
+ "humantime",
+ "humantime-serde",
+ "itertools",
+ "metrics",
+ "once_cell",
+ "pageserver_api",
+ "pin-project-lite",
+ "rand 0.8.5",
+ "smallvec",
+ "svg_fmt",
+ "sync_wrapper",
+ "thiserror",
+ "tokio",
+ "tokio-io-timeout",
+ "tokio-util",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber",
+ "url",
+ "utils",
+ "walkdir",
  "workspace_hack",
 ]
 
@@ -3936,6 +4018,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol",
  "rand 0.8.5",
+ "serde",
  "thiserror",
  "tokio",
  "tracing",
@@ -4419,6 +4502,7 @@ dependencies = [
  "futures",
  "futures-util",
  "http-types",
+ "humantime",
  "hyper",
  "itertools",
  "metrics",
@@ -4430,6 +4514,7 @@ dependencies = [
  "serde_json",
  "test-context",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "toml_edit",
  "tracing",
@@ -4827,6 +4912,7 @@ dependencies = [
  "clap",
  "const_format",
  "crc32c",
+ "desim",
  "fail",
  "fs2",
  "futures",
@@ -4842,6 +4928,7 @@ dependencies = [
  "postgres_backend",
  "postgres_ffi",
  "pq_proto",
+ "rand 0.8.5",
  "regex",
  "remote_storage",
  "reqwest",
@@ -4862,8 +4949,10 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utils",
+ "walproposer",
  "workspace_hack",
 ]
 
@@ -6324,6 +6413,7 @@ dependencies = [
  "hex-literal",
  "hyper",
  "jsonwebtoken",
+ "leaky-bucket",
  "metrics",
  "nix 0.27.1",
  "once_cell",

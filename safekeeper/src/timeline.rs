@@ -286,6 +286,29 @@ impl SharedState {
             .cloned()
             .collect()
     }
+
+    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
+    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
+    /// offloading.
+    /// While it is safe to use inmem values for determining horizon,
+    /// we use persistent to make possible normal states less surprising.
+    fn get_horizon_segno(
+        &self,
+        wal_backup_enabled: bool,
+        extra_horizon_lsn: Option<Lsn>,
+    ) -> XLogSegNo {
+        let state = &self.sk.state;
+
+        use std::cmp::min;
+        let mut horizon_lsn = min(state.remote_consistent_lsn, state.peer_horizon_lsn);
+        if wal_backup_enabled {
+            horizon_lsn = min(horizon_lsn, state.backup_lsn);
+        }
+        if let Some(extra_horizon_lsn) = extra_horizon_lsn {
+            horizon_lsn = min(horizon_lsn, extra_horizon_lsn);
+        }
+        horizon_lsn.segment_number(state.server.wal_seg_size as usize)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -353,6 +376,12 @@ pub struct Timeline {
 
     /// Directory where timeline state is stored.
     pub timeline_dir: Utf8PathBuf,
+
+    /// Should we keep WAL on disk for active replication connections.
+    /// Especially useful for sharding, when different shards process WAL
+    /// with different speed.
+    // TODO: add `Arc<SafeKeeperConf>` here instead of adding each field separately.
+    walsenders_keep_horizon: bool,
 }
 
 impl Timeline {
@@ -386,6 +415,7 @@ impl Timeline {
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
+            walsenders_keep_horizon: conf.walsenders_keep_horizon,
         })
     }
 
@@ -418,6 +448,7 @@ impl Timeline {
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
+            walsenders_keep_horizon: conf.walsenders_keep_horizon,
         })
     }
 
@@ -817,10 +848,20 @@ impl Timeline {
             bail!(TimelineError::Cancelled(self.ttid));
         }
 
+        // If enabled, we use LSN of the most lagging walsender as a WAL removal horizon.
+        // This allows to get better read speed for pageservers that are lagging behind,
+        // at the cost of keeping more WAL on disk.
+        let replication_horizon_lsn = if self.walsenders_keep_horizon {
+            self.walsenders.laggard_lsn()
+        } else {
+            None
+        };
+
         let horizon_segno: XLogSegNo;
         let remover = {
             let shared_state = self.write_shared_state().await;
-            horizon_segno = shared_state.sk.get_horizon_segno(wal_backup_enabled);
+            horizon_segno =
+                shared_state.get_horizon_segno(wal_backup_enabled, replication_horizon_lsn);
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(()); // nothing to do
             }

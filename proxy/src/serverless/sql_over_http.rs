@@ -12,7 +12,7 @@ use hyper::StatusCode;
 use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Value;
-use tokio::join;
+use tokio::try_join;
 use tokio_postgres::error::DbError;
 use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::GenericClient;
@@ -21,7 +21,6 @@ use tokio_postgres::ReadyForQueryStatus;
 use tokio_postgres::Transaction;
 use tracing::error;
 use tracing::info;
-use tracing::instrument;
 use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
@@ -32,7 +31,6 @@ use crate::auth::ComputeUserInfoParseError;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
-use crate::error::ReportableError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
@@ -165,9 +163,12 @@ fn get_conn_info(
     let mut options = Option::None;
 
     for (key, value) in pairs {
-        if key == "options" {
-            options = Some(NeonOptions::parse_options_raw(&value));
-            break;
+        match &*key {
+            "options" => {
+                options = Some(NeonOptions::parse_options_raw(&value));
+            }
+            "application_name" => ctx.set_application(Some(value.into())),
+            _ => {}
         }
     }
 
@@ -283,11 +284,13 @@ pub async fn handle(
                 )?
             }
         },
-        Err(e) => {
-            ctx.set_error_kind(e.get_error_kind());
+        Err(_) => {
+            // TODO: when http error classification is done, distinguish between
+            // timeout on sql vs timeout in proxy/cplane
+            // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
 
             let message = format!(
-                "HTTP-Connection timed out, execution time exeeded {} seconds",
+                "HTTP-Connection timed out, execution time exceeded {} seconds",
                 config.http_config.request_timeout.as_secs()
             );
             error!(message);
@@ -305,7 +308,6 @@ pub async fn handle(
     Ok(response)
 }
 
-#[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
@@ -315,10 +317,7 @@ async fn handle_inner(
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[ctx.protocol])
         .guard();
-    info!(
-        protocol = ctx.protocol,
-        "handling interactive connection from client"
-    );
+    info!("handling interactive connection from client");
 
     //
     // Determine the destination and connection params
@@ -326,11 +325,7 @@ async fn handle_inner(
     let headers = request.headers();
     // TLS config should be there.
     let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
-    info!(
-        user = conn_info.user_info.user.as_str(),
-        project = conn_info.user_info.endpoint.as_str(),
-        "credentials"
-    );
+    info!(user = conn_info.user_info.user.as_str(), "credentials");
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
@@ -359,12 +354,10 @@ async fn handle_inner(
     let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
     let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
-    let paused = ctx.latency_timer.pause();
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
     };
-    drop(paused);
     info!(request_content_length, "request size in bytes");
     HTTP_CONTENT_LENGTH.observe(request_content_length as f64);
 
@@ -380,24 +373,24 @@ async fn handle_inner(
         let body = hyper::body::to_bytes(request.into_body())
             .await
             .map_err(anyhow::Error::from)?;
+        info!(length = body.len(), "request payload read");
         let payload: Payload = serde_json::from_slice(&body)?;
         Ok::<Payload, anyhow::Error>(payload) // Adjust error type accordingly
     };
 
     let authenticate_and_connect = async {
         let keys = backend.authenticate(ctx, &conn_info).await?;
-        backend
+        let client = backend
             .connect_to_compute(ctx, conn_info, keys, !allow_pool)
-            .await
+            .await?;
+        // not strictly necessary to mark success here,
+        // but it's just insurance for if we forget it somewhere else
+        ctx.latency_timer.success();
+        Ok::<_, anyhow::Error>(client)
     };
 
     // Run both operations in parallel
-    let (payload_result, auth_and_connect_result) =
-        join!(fetch_and_process_request, authenticate_and_connect,);
-
-    // Handle the results
-    let payload = payload_result?; // Handle errors appropriately
-    let mut client = auth_and_connect_result?; // Handle errors appropriately
+    let (payload, mut client) = try_join!(fetch_and_process_request, authenticate_and_connect)?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -420,6 +413,7 @@ async fn handle_inner(
             results
         }
         Payload::Batch(statements) => {
+            info!("starting transaction");
             let (inner, mut discard) = client.inner();
             let mut builder = inner.build_transaction();
             if let Some(isolation_level) = txn_isolation_level {
@@ -449,6 +443,7 @@ async fn handle_inner(
             .await
             {
                 Ok(results) => {
+                    info!("commit");
                     let status = transaction.commit().await.map_err(|e| {
                         // if we cannot commit - for now don't return connection to pool
                         // TODO: get a query status from the error
@@ -459,6 +454,7 @@ async fn handle_inner(
                     results
                 }
                 Err(err) => {
+                    info!("rollback");
                     let status = transaction.rollback().await.map_err(|e| {
                         // if we cannot rollback - for now don't return connection to pool
                         // TODO: get a query status from the error
@@ -533,8 +529,10 @@ async fn query_to_json<T: GenericClient>(
     raw_output: bool,
     default_array_mode: bool,
 ) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
+    info!("executing query");
     let query_params = data.params;
     let row_stream = client.query_raw_txt(&data.query, query_params).await?;
+    info!("finished executing query");
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
@@ -568,6 +566,13 @@ async fn query_to_json<T: GenericClient>(
         command_tag_split.next()
     }
     .and_then(|s| s.parse::<i64>().ok());
+
+    info!(
+        rows = rows.len(),
+        ?ready,
+        command_tag,
+        "finished reading rows"
+    );
 
     let mut fields = vec![];
     let mut columns = vec![];

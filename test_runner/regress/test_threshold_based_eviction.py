@@ -179,6 +179,6 @@ def test_threshold_based_eviction(
     assert len(post.remote_layers) > 0, "some layers should be evicted once it's stabilized"
     assert len(post.local_layers) > 0, "the imitate accesses should keep some layers resident"
 
-    assert env.pageserver.log_contains(
-        metrics_refused_log_line
+    assert (
+        env.pageserver.log_contains(metrics_refused_log_line) is not None
     ), "ensure the metrics collection worker ran"

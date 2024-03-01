@@ -24,7 +24,7 @@ use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
-use crate::{cancellation::CancelMap, config::ProxyConfig};
+use crate::{cancellation::CancellationHandler, config::ProxyConfig};
 use futures::StreamExt;
 use hyper::{
     server::{
@@ -34,13 +34,14 @@ use hyper::{
     Body, Method, Request, Response,
 };
 
+use std::convert::Infallible;
 use std::net::IpAddr;
 use std::task::Poll;
 use std::{future::ready, sync::Arc};
 use tls_listener::TlsListener;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{error, info, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
 
 pub const SERVERLESS_DRIVER_SNI: &str = "api";
@@ -50,6 +51,7 @@ pub async fn task_main(
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    cancellation_handler: Arc<CancellationHandler>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
@@ -87,7 +89,10 @@ pub async fn task_main(
             return Ok(());
         }
     };
-    let tls_acceptor: tokio_rustls::TlsAcceptor = tls_config.to_server_config().into();
+    let mut tls_server_config = rustls::ServerConfig::clone(&tls_config.to_server_config());
+    // prefer http2, but support http/1.1
+    tls_server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let tls_acceptor: tokio_rustls::TlsAcceptor = Arc::new(tls_server_config).into();
 
     let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
     let _ = addr_incoming.set_nodelay(true);
@@ -115,7 +120,7 @@ pub async fn task_main(
             let backend = backend.clone();
             let ws_connections = ws_connections.clone();
             let endpoint_rate_limiter = endpoint_rate_limiter.clone();
-
+            let cancellation_handler = cancellation_handler.clone();
             async move {
                 let peer_addr = match client_addr {
                     Some(addr) => addr,
@@ -127,27 +132,22 @@ pub async fn task_main(
                         let backend = backend.clone();
                         let ws_connections = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
+                        let cancellation_handler = cancellation_handler.clone();
 
                         async move {
-                            let cancel_map = Arc::new(CancelMap::default());
-                            let session_id = uuid::Uuid::new_v4();
-
-                            request_handler(
-                                req,
-                                config,
-                                backend,
-                                ws_connections,
-                                cancel_map,
-                                session_id,
-                                peer_addr.ip(),
-                                endpoint_rate_limiter,
+                            Ok::<_, Infallible>(
+                                request_handler(
+                                    req,
+                                    config,
+                                    backend,
+                                    ws_connections,
+                                    cancellation_handler,
+                                    peer_addr.ip(),
+                                    endpoint_rate_limiter,
+                                )
+                                .await
+                                .map_or_else(|e| e.into_response(), |r| r),
                             )
-                            .instrument(info_span!(
-                                "serverless",
-                                session = %session_id,
-                                %peer_addr,
-                            ))
-                            .await
                         }
                     },
                 )))
@@ -205,11 +205,12 @@ async fn request_handler(
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
-    cancel_map: Arc<CancelMap>,
-    session_id: uuid::Uuid,
+    cancellation_handler: Arc<CancellationHandler>,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Body>, ApiError> {
+    let session_id = uuid::Uuid::new_v4();
+
     let host = request
         .headers()
         .get("host")
@@ -219,37 +220,40 @@ async fn request_handler(
 
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
-        info!(session_id = ?session_id, "performing websocket upgrade");
+        let ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+        let span = ctx.span.clone();
+        info!(parent: &span, "performing websocket upgrade");
 
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         ws_connections.spawn(
             async move {
-                let ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
-
                 if let Err(e) = websocket::serve_websocket(
                     config,
                     ctx,
                     websocket,
-                    cancel_map,
+                    cancellation_handler,
                     host,
                     endpoint_rate_limiter,
                 )
                 .await
                 {
-                    error!(session_id = ?session_id, "error in websocket connection: {e:#}");
+                    error!("error in websocket connection: {e:#}");
                 }
             }
-            .in_current_span(),
+            .instrument(span),
         );
 
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
         let ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+        let span = ctx.span.clone();
 
-        sql_over_http::handle(config, ctx, request, backend).await
+        sql_over_http::handle(config, ctx, request, backend)
+            .instrument(span)
+            .await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")

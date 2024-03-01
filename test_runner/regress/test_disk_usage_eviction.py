@@ -200,7 +200,7 @@ class EvictionEnv:
                 tenant_ps.http_client().timeline_wait_logical_size(tenant_id, timeline_id)
 
         def statvfs_called():
-            assert pageserver.log_contains(".*running mocked statvfs.*")
+            pageserver.assert_log_contains(".*running mocked statvfs.*")
 
         # we most likely have already completed multiple runs
         wait_until(10, 1, statvfs_called)
@@ -533,7 +533,7 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv, order: E
     assert actual_change >= target, "eviction must always evict more than target"
 
     time.sleep(1)  # give log time to flush
-    assert env.neon_env.pageserver.log_contains(GLOBAL_LRU_LOG_LINE)
+    env.neon_env.pageserver.assert_log_contains(GLOBAL_LRU_LOG_LINE)
     env.neon_env.pageserver.allowed_errors.append(".*" + GLOBAL_LRU_LOG_LINE)
 
 
@@ -767,7 +767,7 @@ def test_statvfs_error_handling(eviction_env: EvictionEnv):
         eviction_order=EvictionOrder.ABSOLUTE_ORDER,
     )
 
-    assert env.neon_env.pageserver.log_contains(".*statvfs failed.*EIO")
+    env.neon_env.pageserver.assert_log_contains(".*statvfs failed.*EIO")
     env.neon_env.pageserver.allowed_errors.append(".*statvfs failed.*EIO")
 
 
@@ -801,10 +801,9 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
         eviction_order=EvictionOrder.ABSOLUTE_ORDER,
     )
 
-    def relieved_log_message():
-        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved")
-
-    wait_until(10, 1, relieved_log_message)
+    wait_until(
+        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+    )
 
     def less_than_max_usage_pct():
         post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
@@ -845,10 +844,9 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
         eviction_order=EvictionOrder.ABSOLUTE_ORDER,
     )
 
-    def relieved_log_message():
-        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved")
-
-    wait_until(10, 1, relieved_log_message)
+    wait_until(
+        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+    )
 
     def more_than_min_avail_bytes_freed():
         post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
@@ -893,37 +891,14 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
         # in its heatmap
         ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    # Configure the secondary pageserver to have a phony small disk size
-    ps_secondary.stop()
     total_size, _, _ = env.timelines_du(ps_secondary)
-    blocksize = 512
-    total_blocks = (total_size + (blocksize - 1)) // blocksize
+    evict_bytes = total_size // 3
 
-    min_avail_bytes = total_size // 3
-
-    env.pageserver_start_with_disk_usage_eviction(
-        ps_secondary,
-        period="1s",
-        max_usage_pct=100,
-        min_avail_bytes=min_avail_bytes,
-        mock_behavior={
-            "type": "Success",
-            "blocksize": blocksize,
-            "total_blocks": total_blocks,
-            # Only count layer files towards used bytes in the mock_statvfs.
-            # This avoids accounting for metadata files & tenant conf in the tests.
-            "name_filter": ".*__.*",
-        },
-        eviction_order=EvictionOrder.ABSOLUTE_ORDER,
-    )
-
-    def relieved_log_message():
-        assert ps_secondary.log_contains(".*disk usage pressure relieved")
-
-    wait_until(10, 1, relieved_log_message)
+    response = ps_secondary.http_client().disk_usage_eviction_run({"evict_bytes": evict_bytes})
+    log.info(f"{response}")
 
     post_eviction_total_size, _, _ = env.timelines_du(ps_secondary)
 
     assert (
-        total_size - post_eviction_total_size >= min_avail_bytes
-    ), "we requested at least min_avail_bytes worth of free space"
+        total_size - post_eviction_total_size >= evict_bytes
+    ), "we requested at least evict_bytes worth of free space"

@@ -7,6 +7,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
+    poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
@@ -73,16 +74,19 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    # We will make no effort to avoid stale attachments
     for ps in env.pageservers:
         ps.allowed_errors.extend(
             [
+                # We will make no effort to avoid stale attachments
                 ".*Dropped remote consistent LSN updates.*",
                 ".*Dropping stale deletions.*",
                 # page_service_conn_main{peer_addr=[::1]:41176}: query handler for 'pagestream 3b19aec5038c796f64b430b30a555121 d07776761d44050b8aab511df1657d83' failed: Tenant 3b19aec5038c796f64b430b30a555121 not found
                 ".*query handler.*Tenant.*not found.*",
                 # page_service_conn_main{peer_addr=[::1]:45552}: query handler for 'pagestream 414ede7ad50f775a8e7d9ba0e43b9efc a43884be16f44b3626482b6981b2c745' failed: Tenant 414ede7ad50f775a8e7d9ba0e43b9efc is not active
                 ".*query handler.*Tenant.*not active.*",
+                # this shutdown case is logged at WARN severity by the time it bubbles up to logical size calculation code
+                # WARN ...: initial size calculation failed: downloading failed, possibly for shutdown
+                ".*downloading failed, possibly for shutdown",
             ]
         )
 
@@ -224,9 +228,8 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     Test the sequence of location states that are used in a live migration.
     """
     neon_env_builder.num_pageservers = 2
-    neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-    )
+    remote_storage_kind = RemoteStorageKind.MOCK_S3
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind=remote_storage_kind)
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
     tenant_id = env.initial_tenant
@@ -342,6 +345,12 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
 
     workload.churn_rows(64, pageserver_b.id)
     workload.validate(pageserver_b.id)
+    del workload
+
+    # Check that deletion works properly on a tenant that was live-migrated
+    # (reproduce https://github.com/neondatabase/neon/issues/6802)
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
+    tenant_delete_wait_completed(pageserver_b.http_client(), tenant_id, iterations)
 
 
 def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
@@ -498,7 +507,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # Scrub the remote storage
     # ========================
     # This confirms that the scrubber isn't upset by the presence of the heatmap
-    S3Scrubber(neon_env_builder.test_output_dir, neon_env_builder).scan_metadata()
+    S3Scrubber(neon_env_builder).scan_metadata()
 
     # Detach secondary and delete tenant
     # ===================================

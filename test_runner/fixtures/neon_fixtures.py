@@ -17,6 +17,7 @@ import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from fcntl import LOCK_EX, LOCK_UN, flock
 from functools import cached_property
 from itertools import chain, product
@@ -27,6 +28,7 @@ from urllib.parse import quote, urlparse
 
 import asyncpg
 import backoff
+import httpx
 import jwt
 import psycopg2
 import pytest
@@ -46,6 +48,7 @@ from urllib3.util.retry import Retry
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
+from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
     DEFAULT_PAGESERVER_ALLOWED_ERRORS,
     scan_pageserver_log_for_errors,
@@ -386,7 +389,8 @@ class PgProtocol:
 class AuthKeys:
     priv: str
 
-    def generate_token(self, *, scope: str, **token_data: str) -> str:
+    def generate_token(self, *, scope: TokenScope, **token_data: Any) -> str:
+        token_data = {key: str(val) for key, val in token_data.items()}
         token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
         # cast(Any, self.priv)
 
@@ -399,14 +403,23 @@ class AuthKeys:
         return token
 
     def generate_pageserver_token(self) -> str:
-        return self.generate_token(scope="pageserverapi")
+        return self.generate_token(scope=TokenScope.PAGE_SERVER_API)
 
     def generate_safekeeper_token(self) -> str:
-        return self.generate_token(scope="safekeeperdata")
+        return self.generate_token(scope=TokenScope.SAFEKEEPER_DATA)
 
     # generate token giving access to only one tenant
     def generate_tenant_token(self, tenant_id: TenantId) -> str:
-        return self.generate_token(scope="tenant", tenant_id=str(tenant_id))
+        return self.generate_token(scope=TokenScope.TENANT, tenant_id=str(tenant_id))
+
+
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class TokenScope(str, Enum):
+    ADMIN = "admin"
+    PAGE_SERVER_API = "pageserverapi"
+    GENERATIONS_API = "generations_api"
+    SAFEKEEPER_DATA = "safekeeperdata"
+    TENANT = "tenant"
 
 
 class NeonEnvBuilder:
@@ -486,6 +499,11 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
+        self.pageserver_get_vectored_impl: Optional[str] = None
+        if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
+            self.pageserver_get_vectored_impl = "vectored"
+            log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
+
         assert test_name.startswith(
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
@@ -505,7 +523,7 @@ class NeonEnvBuilder:
 
     def init_start(
         self,
-        initial_tenant_conf: Optional[Dict[str, str]] = None,
+        initial_tenant_conf: Optional[Dict[str, Any]] = None,
         default_remote_storage_if_missing: bool = True,
         initial_tenant_shard_count: Optional[int] = None,
         initial_tenant_shard_stripe_size: Optional[int] = None,
@@ -899,7 +917,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    S3Scrubber(self.test_output_dir, self).scan_metadata()
+                    S3Scrubber(self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -1053,6 +1071,8 @@ class NeonEnv:
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+            if config.pageserver_get_vectored_impl is not None:
+                ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1094,6 +1114,13 @@ class NeonEnv:
         # Attachment service starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.attachment_service.start()
+
+        def attachment_service_ready():
+            assert self.attachment_service.ready() is True
+
+        # Wait for attachment service readiness to prevent unnecessary post start-up
+        # reconcile.
+        wait_until(30, 1, attachment_service_ready)
 
         # Start up broker, pageserver and all safekeepers
         futs = []
@@ -1488,7 +1515,7 @@ class NeonCli(AbstractNeonCli):
         self,
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
-        conf: Optional[Dict[str, str]] = None,
+        conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         set_default: bool = False,
@@ -1913,7 +1940,14 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
-class NeonAttachmentService:
+class AttachmentServiceApiException(Exception):
+    def __init__(self, message, status_code: int):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+class NeonAttachmentService(MetricsGetter):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
@@ -1931,34 +1965,60 @@ class NeonAttachmentService:
             self.running = False
         return self
 
+    @staticmethod
+    def raise_api_exception(res: requests.Response):
+        try:
+            res.raise_for_status()
+        except requests.RequestException as e:
+            try:
+                msg = res.json()["msg"]
+            except:  # noqa: E722
+                msg = ""
+            raise AttachmentServiceApiException(msg, res.status_code) from e
+
     def pageserver_api(self) -> PageserverHttpClient:
         """
         The attachment service implements a subset of the pageserver REST API, for mapping
         per-tenant actions into per-shard actions (e.g. timeline creation).  Tests should invoke those
         functions via the HttpClient, as an implicit check that these APIs remain compatible.
         """
-        return PageserverHttpClient(self.env.attachment_service_port, lambda: True)
+        auth_token = None
+        if self.auth_enabled:
+            auth_token = self.env.auth_keys.generate_token(scope=TokenScope.PAGE_SERVER_API)
+        return PageserverHttpClient(self.env.attachment_service_port, lambda: True, auth_token)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
-        kwargs["headers"] = self.headers()
-        return requests.request(method, *args, **kwargs)
+        resp = requests.request(method, *args, **kwargs)
+        NeonAttachmentService.raise_api_exception(resp)
 
-    def headers(self) -> Dict[str, str]:
+        return resp
+
+    def headers(self, scope: Optional[TokenScope]) -> Dict[str, str]:
         headers = {}
-        if self.auth_enabled:
-            jwt_token = self.env.auth_keys.generate_pageserver_token()
+        if self.auth_enabled and scope is not None:
+            jwt_token = self.env.auth_keys.generate_token(scope=scope)
             headers["Authorization"] = f"Bearer {jwt_token}"
 
         return headers
 
+    def get_metrics(self) -> Metrics:
+        res = self.request("GET", f"{self.env.attachment_service_api}/metrics")
+        return parse_metrics(res.text)
+
     def ready(self) -> bool:
-        resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
-        if resp.status_code == 503:
+        status = None
+        try:
+            resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
+            status = resp.status_code
+        except AttachmentServiceApiException as e:
+            status = e.status_code
+
+        if status == 503:
             return False
-        elif resp.status_code == 200:
+        elif status == 200:
             return True
         else:
-            raise RuntimeError(f"Unexpected status {resp.status_code} from readiness endpoint")
+            raise RuntimeError(f"Unexpected status {status} from readiness endpoint")
 
     def attach_hook_issue(
         self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
@@ -1967,21 +2027,19 @@ class NeonAttachmentService:
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
-            headers=self.headers(),
+            headers=self.headers(TokenScope.ADMIN),
         )
-        response.raise_for_status()
         gen = response.json()["gen"]
         assert isinstance(gen, int)
         return gen
 
     def attach_hook_drop(self, tenant_shard_id: Union[TenantId, TenantShardId]):
-        response = self.request(
+        self.request(
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": None},
-            headers=self.headers(),
+            headers=self.headers(TokenScope.ADMIN),
         )
-        response.raise_for_status()
 
     def inspect(self, tenant_shard_id: Union[TenantId, TenantShardId]) -> Optional[tuple[int, int]]:
         """
@@ -1991,9 +2049,8 @@ class NeonAttachmentService:
             "POST",
             f"{self.env.attachment_service_api}/debug/v1/inspect",
             json={"tenant_shard_id": str(tenant_shard_id)},
-            headers=self.headers(),
+            headers=self.headers(TokenScope.ADMIN),
         )
-        response.raise_for_status()
         json = response.json()
         log.info(f"Response: {json}")
         if json["attachment"]:
@@ -2013,14 +2070,15 @@ class NeonAttachmentService:
             "POST",
             f"{self.env.attachment_service_api}/control/v1/node",
             json=body,
-            headers=self.headers(),
-        ).raise_for_status()
+            headers=self.headers(TokenScope.ADMIN),
+        )
 
     def node_list(self):
         response = self.request(
-            "GET", f"{self.env.attachment_service_api}/control/v1/node", headers=self.headers()
+            "GET",
+            f"{self.env.attachment_service_api}/control/v1/node",
+            headers=self.headers(TokenScope.ADMIN),
         )
-        response.raise_for_status()
         return response.json()
 
     def node_configure(self, node_id, body: dict[str, Any]):
@@ -2030,8 +2088,8 @@ class NeonAttachmentService:
             "PUT",
             f"{self.env.attachment_service_api}/control/v1/node/{node_id}/config",
             json=body,
-            headers=self.headers(),
-        ).raise_for_status()
+            headers=self.headers(TokenScope.ADMIN),
+        )
 
     def tenant_create(
         self,
@@ -2056,8 +2114,12 @@ class NeonAttachmentService:
             for k, v in tenant_config.items():
                 body[k] = v
 
-        response = self.request("POST", f"{self.env.attachment_service_api}/v1/tenant", json=body)
-        response.raise_for_status()
+        response = self.request(
+            "POST",
+            f"{self.env.attachment_service_api}/v1/tenant",
+            json=body,
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
         log.info(f"tenant_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
@@ -2065,9 +2127,10 @@ class NeonAttachmentService:
         :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
         """
         response = self.request(
-            "GET", f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/locate"
+            "GET",
+            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/locate",
+            headers=self.headers(TokenScope.ADMIN),
         )
-        response.raise_for_status()
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
         return shards
@@ -2077,22 +2140,33 @@ class NeonAttachmentService:
             "PUT",
             f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/shard_split",
             json={"new_shard_count": shard_count},
+            headers=self.headers(TokenScope.ADMIN),
         )
-        response.raise_for_status()
         body = response.json()
         log.info(f"tenant_shard_split success: {body}")
         shards: list[TenantShardId] = body["new_shards"]
         return shards
 
     def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
-        response = self.request(
+        self.request(
             "PUT",
             f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_shard_id}/migrate",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
+            headers=self.headers(TokenScope.ADMIN),
         )
-        response.raise_for_status()
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
+
+    def consistency_check(self):
+        """
+        Throw an exception if the service finds any inconsistencies in its state
+        """
+        self.request(
+            "POST",
+            f"{self.env.attachment_service_api}/debug/v1/consistency_check",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        log.info("Attachment service passed consistency check")
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
@@ -2104,6 +2178,11 @@ class NeonAttachmentService:
         tb: Optional[TracebackType],
     ):
         self.stop(immediate=True)
+
+
+@dataclass
+class LogCursor:
+    _line_no: int
 
 
 class NeonPageserver(PgProtocol):
@@ -2269,7 +2348,18 @@ class NeonPageserver(PgProtocol):
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
 
-    def log_contains(self, pattern: str) -> Optional[str]:
+    def assert_log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Tuple[str, LogCursor]:
+        """Convenient for use inside wait_until()"""
+
+        res = self.log_contains(pattern, offset=offset)
+        assert res is not None
+        return res
+
+    def log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Optional[Tuple[str, LogCursor]]:
         """Check that the pageserver log contains a line that matches the given regex"""
         logfile = self.workdir / "pageserver.log"
         if not logfile.exists():
@@ -2283,12 +2373,17 @@ class NeonPageserver(PgProtocol):
         # no guarantee it is already present in the log file. This hasn't
         # been a problem in practice, our python tests are not fast enough
         # to hit that race condition.
+        skip_until_line_no = 0 if offset is None else offset._line_no
+        cur_line_no = 0
         with logfile.open("r") as f:
             for line in f:
+                if cur_line_no < skip_until_line_no:
+                    cur_line_no += 1
+                    continue
                 if contains_re.search(line):
                     # found it!
-                    return line
-
+                    cur_line_no += 1
+                    return (line, LogCursor(cur_line_no))
         return None
 
     def tenant_attach(
@@ -2839,12 +2934,36 @@ class NeonProxy(PgProtocol):
         )
 
         if expected_code is not None:
-            assert response.status_code == kwargs["expected_code"], f"response: {response.json()}"
+            assert response.status_code == expected_code, f"response: {response.json()}"
         return response.json()
+
+    async def http2_query(self, query, args, **kwargs):
+        # TODO maybe use default values if not provided
+        user = kwargs["user"]
+        password = kwargs["password"]
+        expected_code = kwargs.get("expected_code")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        async with httpx.AsyncClient(
+            http2=True, verify=str(self.test_output_dir / "proxy.crt")
+        ) as client:
+            response = await client.post(
+                f"https://{self.domain}:{self.external_http_port}/sql",
+                json={"query": query, "params": args},
+                headers={
+                    "Content-Type": "application/sql",
+                    "Neon-Connection-String": connstr,
+                    "Neon-Pool-Opt-In": "true",
+                },
+            )
+            assert response.http_version == "HTTP/2"
+
+            if expected_code is not None:
+                assert response.status_code == expected_code, f"response: {response.json()}"
+            return response.json()
 
     def get_metrics(self) -> str:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
-        request_result.raise_for_status()
         return request_result.text
 
     @staticmethod
@@ -3054,6 +3173,8 @@ class Endpoint(PgProtocol):
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
+
+        config_lines = ["neon.primary_is_running=on"] + config_lines
         self.config(config_lines)
 
         return self
@@ -3659,9 +3780,9 @@ class SafekeeperHttpClient(requests.Session):
 
 
 class S3Scrubber:
-    def __init__(self, log_dir: Path, env: NeonEnvBuilder):
+    def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
         self.env = env
-        self.log_dir = log_dir
+        self.log_dir = log_dir or env.test_output_dir
 
     def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
@@ -3682,7 +3803,7 @@ class S3Scrubber:
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(
-            self.log_dir,
+            self.env.test_output_dir,
             args,
             echo_stderr=True,
             echo_stdout=True,
@@ -3760,7 +3881,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"config|config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
+    r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 
 
@@ -3967,27 +4088,24 @@ def list_files_to_compare(pgdata_dir: Path) -> List[str]:
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint: Endpoint):
-    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
-
     # Get the timeline ID. We need it for the 'basebackup' command
     timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
+    # many tests already checkpoint, but do it just in case
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CHECKPOINT")
+
+    # wait for pageserver to catch up
+    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
     # stop postgres to ensure that files won't change
     endpoint.stop()
-
-    # Read the shutdown checkpoint's LSN
-    pg_controldata_path = os.path.join(pg_bin.pg_bin_path, "pg_controldata")
-    cmd = f"{pg_controldata_path} -D {endpoint.pgdata_dir}"
-    result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-    checkpoint_lsn = re.findall(
-        "Latest checkpoint location:\\s+([0-9A-F]+/[0-9A-F]+)", result.stdout
-    )[0]
-    log.debug(f"last checkpoint at {checkpoint_lsn}")
 
     # Take a basebackup from pageserver
     restored_dir_path = env.repo_dir / f"{endpoint.endpoint_id}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
 
+    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
     psql_path = os.path.join(pg_bin.pg_bin_path, "psql")
 
     pageserver_id = env.attachment_service.locate(endpoint.tenant_id)[0]["node_id"]
@@ -3995,7 +4113,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.get_pageserver(pageserver_id).service_port.pg}  \
-            -c 'basebackup {endpoint.tenant_id} {timeline_id} {checkpoint_lsn}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline_id}'  \
          | tar -x -C {restored_dir_path}
     """
 
@@ -4098,6 +4216,21 @@ def tenant_get_shards(
     else:
         # Assume an unsharded tenant
         return [(TenantShardId(tenant_id, 0, 0), override_pageserver or env.pageserver)]
+
+
+def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
+    primary_lsn = Lsn(
+        primary.safe_psql_scalar("SELECT pg_current_wal_flush_lsn()", log_query=False)
+    )
+    while True:
+        secondary_lsn = Lsn(
+            secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
+        )
+        caught_up = secondary_lsn >= primary_lsn
+        log.info(f"caughtup={caught_up}, primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}")
+        if caught_up:
+            return
+        time.sleep(1)
 
 
 def wait_for_last_flush_lsn(

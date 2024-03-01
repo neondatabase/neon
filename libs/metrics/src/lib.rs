@@ -115,7 +115,6 @@ pub fn set_build_info_metric(revision: &str, build_tag: &str) {
 // performed by the process.
 // We know the size of the block, so we can determine the I/O bytes out of it.
 // The value might be not 100% exact, but should be fine for Prometheus metrics in this case.
-#[allow(clippy::unnecessary_cast)]
 fn update_rusage_metrics() {
     let rusage_stats = get_rusage_stats();
 
@@ -202,6 +201,11 @@ impl<P: Atomic> GenericCounterPairVec<P> {
     pub fn with_label_values(&self, vals: &[&str]) -> GenericCounterPair<P> {
         self.get_metric_with_label_values(vals).unwrap()
     }
+
+    pub fn remove_label_values(&self, res: &mut [Result<()>; 2], vals: &[&str]) {
+        res[0] = self.inc.remove_label_values(vals);
+        res[1] = self.dec.remove_label_values(vals);
+    }
 }
 
 impl<P: Atomic> GenericCounterPair<P> {
@@ -245,6 +249,15 @@ impl<P: Atomic> GenericCounterPair<P> {
     #[inline]
     pub fn dec_by(&self, v: P::T) {
         self.dec.inc_by(v);
+    }
+}
+
+impl<P: Atomic> Clone for GenericCounterPair<P> {
+    fn clone(&self) -> Self {
+        Self {
+            inc: self.inc.clone(),
+            dec: self.dec.clone(),
+        }
     }
 }
 

@@ -32,7 +32,7 @@ use remote_storage::GenericRemoteStorage;
 
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-use utils::{completion::Barrier, fs_ext, id::TimelineId, sync::gate::Gate};
+use utils::{completion::Barrier, id::TimelineId, sync::gate::Gate};
 
 enum DownloadCommand {
     Download(TenantShardId),
@@ -121,6 +121,10 @@ impl SecondaryTenant {
         })
     }
 
+    pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
+        self.tenant_shard_id
+    }
+
     pub(crate) async fn shutdown(&self) {
         self.cancel.cancel();
 
@@ -133,7 +137,7 @@ impl SecondaryTenant {
     }
 
     pub(crate) fn set_tenant_conf(&self, config: &TenantConfOpt) {
-        *(self.tenant_conf.lock().unwrap()) = *config;
+        *(self.tenant_conf.lock().unwrap()) = config.clone();
     }
 
     /// For API access: generate a LocationConfig equivalent to the one that would be used to
@@ -144,13 +148,13 @@ impl SecondaryTenant {
 
         let conf = models::LocationConfigSecondary { warm: conf.warm };
 
-        let tenant_conf = *self.tenant_conf.lock().unwrap();
+        let tenant_conf = self.tenant_conf.lock().unwrap().clone();
         models::LocationConfig {
             mode: models::LocationConfigMode::Secondary,
             generation: None,
             secondary_conf: Some(conf),
             shard_number: self.tenant_shard_id.shard_number.0,
-            shard_count: self.tenant_shard_id.shard_count.0,
+            shard_count: self.tenant_shard_id.shard_count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
             tenant_conf: tenant_conf.into(),
         }
@@ -164,16 +168,17 @@ impl SecondaryTenant {
         self.detail.lock().unwrap().get_layers_for_eviction(self)
     }
 
+    /// Cancellation safe, but on cancellation the eviction will go through
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline_id, name=%name))]
     pub(crate) async fn evict_layer(
-        &self,
+        self: &Arc<Self>,
         conf: &PageServerConf,
         timeline_id: TimelineId,
         name: LayerFileName,
     ) {
         debug_assert_current_span_has_tenant_id();
 
-        let _guard = match self.gate.enter() {
+        let guard = match self.gate.enter() {
             Ok(g) => g,
             Err(_) => {
                 tracing::debug!("Dropping layer evictions, secondary tenant shutting down",);
@@ -187,35 +192,57 @@ impl SecondaryTenant {
             .timeline_path(&self.tenant_shard_id, &timeline_id)
             .join(name.file_name());
 
-        // We tolerate ENOENT, because between planning eviction and executing
-        // it, the secondary downloader could have seen an updated heatmap that
-        // resulted in a layer being deleted.
-        // Other local I/O errors are process-fatal: these should never happen.
-        tokio::fs::remove_file(path)
-            .await
-            .or_else(fs_ext::ignore_not_found)
-            .fatal_err("Deleting layer during eviction");
+        let this = self.clone();
 
-        // Update the timeline's state.  This does not have to be synchronized with
-        // the download process, because:
-        // - If downloader is racing with us to remove a file (e.g. because it is
-        //   removed from heatmap), then our mutual .remove() operations will both
-        //   succeed.
-        // - If downloader is racing with us to download the object (this would require
-        //   multiple eviction iterations to race with multiple download iterations), then
-        //   if we remove it from the state, the worst that happens is the downloader
-        //   downloads it again before re-inserting, or we delete the file but it remains
-        //   in the state map (in which case it will be downloaded if this secondary
-        //   tenant transitions to attached and tries to access it)
-        //
-        // The important assumption here is that the secondary timeline state does not
-        // have to 100% match what is on disk, because it's a best-effort warming
-        // of the cache.
-        let mut detail = self.detail.lock().unwrap();
-        if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
-            timeline_detail.on_disk_layers.remove(&name);
-            timeline_detail.evicted_at.insert(name, now);
-        }
+        // spawn it to be cancellation safe
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            // We tolerate ENOENT, because between planning eviction and executing
+            // it, the secondary downloader could have seen an updated heatmap that
+            // resulted in a layer being deleted.
+            // Other local I/O errors are process-fatal: these should never happen.
+            let deleted = std::fs::remove_file(path);
+
+            let not_found = deleted
+                .as_ref()
+                .is_err_and(|x| x.kind() == std::io::ErrorKind::NotFound);
+
+            let deleted = if not_found {
+                false
+            } else {
+                deleted
+                    .map(|()| true)
+                    .fatal_err("Deleting layer during eviction")
+            };
+
+            if !deleted {
+                // skip updating accounting and putting perhaps later timestamp
+                return;
+            }
+
+            // Update the timeline's state.  This does not have to be synchronized with
+            // the download process, because:
+            // - If downloader is racing with us to remove a file (e.g. because it is
+            //   removed from heatmap), then our mutual .remove() operations will both
+            //   succeed.
+            // - If downloader is racing with us to download the object (this would require
+            //   multiple eviction iterations to race with multiple download iterations), then
+            //   if we remove it from the state, the worst that happens is the downloader
+            //   downloads it again before re-inserting, or we delete the file but it remains
+            //   in the state map (in which case it will be downloaded if this secondary
+            //   tenant transitions to attached and tries to access it)
+            //
+            // The important assumption here is that the secondary timeline state does not
+            // have to 100% match what is on disk, because it's a best-effort warming
+            // of the cache.
+            let mut detail = this.detail.lock().unwrap();
+            if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
+                timeline_detail.on_disk_layers.remove(&name);
+                timeline_detail.evicted_at.insert(name, now);
+            }
+        })
+        .await
+        .expect("secondary eviction should not have panicked");
     }
 }
 

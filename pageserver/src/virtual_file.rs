@@ -25,7 +25,6 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
-use utils::fs_ext;
 
 pub use pageserver_api::models::virtual_file as api;
 pub(crate) mod io_engine;
@@ -405,47 +404,34 @@ impl VirtualFile {
         Ok(vfile)
     }
 
-    /// Writes a file to the specified `final_path` in a crash safe fasion
+    /// Async version of [`::utils::crashsafe::overwrite`].
     ///
-    /// The file is first written to the specified tmp_path, and in a second
-    /// step, the tmp path is renamed to the final path. As renames are
-    /// atomic, a crash during the write operation will never leave behind a
-    /// partially written file.
-    pub async fn crashsafe_overwrite<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
-        final_path: &Utf8Path,
-        tmp_path: &Utf8Path,
+    /// # NB:
+    ///
+    /// Doesn't actually use the [`VirtualFile`] file descriptor cache, but,
+    /// it did at an earlier time.
+    /// And it will use this module's [`io_engine`] in the near future, so, leaving it here.
+    pub async fn crashsafe_overwrite<B: BoundedBuf<Buf = Buf> + Send, Buf: IoBuf + Send>(
+        final_path: Utf8PathBuf,
+        tmp_path: Utf8PathBuf,
         content: B,
     ) -> std::io::Result<()> {
-        let Some(final_path_parent) = final_path.parent() else {
-            return Err(std::io::Error::from_raw_os_error(
-                nix::errno::Errno::EINVAL as i32,
-            ));
-        };
-        std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
-        let mut file = Self::open_with_options(
-            tmp_path,
-            OpenOptions::new()
-                .write(true)
-                // Use `create_new` so that, if we race with ourselves or something else,
-                // we bail out instead of causing damage.
-                .create_new(true),
-        )
-        .await?;
-        let (_content, res) = file.write_all(content).await;
-        res?;
-        file.sync_all().await?;
-        drop(file); // before the rename, that's important!
-                    // renames are atomic
-        std::fs::rename(tmp_path, final_path)?;
-        // Only open final path parent dirfd now, so that this operation only
-        // ever holds one VirtualFile fd at a time.  That's important because
-        // the current `find_victim_slot` impl might pick the same slot for both
-        // VirtualFile., and it eventually does a blocking write lock instead of
-        // try_lock.
-        let final_parent_dirfd =
-            Self::open_with_options(final_path_parent, OpenOptions::new().read(true)).await?;
-        final_parent_dirfd.sync_all().await?;
-        Ok(())
+        // TODO: use tokio_epoll_uring if configured as `io_engine`.
+        // See https://github.com/neondatabase/neon/issues/6663
+
+        tokio::task::spawn_blocking(move || {
+            let slice_storage;
+            let content_len = content.bytes_init();
+            let content = if content.bytes_init() > 0 {
+                slice_storage = Some(content.slice(0..content_len));
+                slice_storage.as_deref().expect("just set it to Some()")
+            } else {
+                &[]
+            };
+            utils::crashsafe::overwrite(&final_path, &tmp_path, content)
+        })
+        .await
+        .expect("blocking task is never aborted")
     }
 
     /// Call File::sync_all() on the underlying File.
@@ -575,7 +561,18 @@ impl VirtualFile {
         B: IoBufMut + Send,
     {
         let (buf, res) =
-            read_exact_at_impl(buf, offset, |buf, offset| self.read_at(buf, offset)).await;
+            read_exact_at_impl(buf, offset, None, |buf, offset| self.read_at(buf, offset)).await;
+        res.map(|()| buf)
+    }
+
+    pub async fn read_exact_at_n<B>(&self, buf: B, offset: u64, count: usize) -> Result<B, Error>
+    where
+        B: IoBufMut + Send,
+    {
+        let (buf, res) = read_exact_at_impl(buf, offset, Some(count), |buf, offset| {
+            self.read_at(buf, offset)
+        })
+        .await;
         res.map(|()| buf)
     }
 
@@ -735,6 +732,7 @@ impl VirtualFile {
 pub async fn read_exact_at_impl<B, F, Fut>(
     buf: B,
     mut offset: u64,
+    count: Option<usize>,
     mut read_at: F,
 ) -> (B, std::io::Result<()>)
 where
@@ -742,7 +740,15 @@ where
     F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
     Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
 {
-    let mut buf: tokio_epoll_uring::Slice<B> = buf.slice_full(); // includes all the uninitialized memory
+    let mut buf: tokio_epoll_uring::Slice<B> = match count {
+        Some(count) => {
+            assert!(count <= buf.bytes_total());
+            assert!(count > 0);
+            buf.slice(..count) // may include uninitialized memory
+        }
+        None => buf.slice_full(), // includes all the uninitialized memory
+    };
+
     while buf.bytes_total() != 0 {
         let res;
         (buf, res) = read_at(buf, offset).await;
@@ -832,7 +838,7 @@ mod test_read_exact_at_impl {
                 result: Ok(vec![b'a', b'b', b'c', b'd', b'e']),
             }]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -842,12 +848,32 @@ mod test_read_exact_at_impl {
     }
 
     #[tokio::test]
+    async fn test_with_count() {
+        let buf = Vec::with_capacity(5);
+        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
+            expectations: VecDeque::from(vec![Expectation {
+                offset: 0,
+                bytes_total: 3,
+                result: Ok(vec![b'a', b'b', b'c']),
+            }]),
+        }));
+
+        let (buf, res) = read_exact_at_impl(buf, 0, Some(3), |buf, offset| {
+            let mock_read_at = Arc::clone(&mock_read_at);
+            async move { mock_read_at.lock().await.read_at(buf, offset).await }
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(buf, vec![b'a', b'b', b'c']);
+    }
+
+    #[tokio::test]
     async fn test_empty_buf_issues_no_syscall() {
         let buf = Vec::new();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::new(),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -872,7 +898,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -903,7 +929,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -1384,7 +1410,7 @@ mod tests {
         let path = testdir.join("myfile");
         let tmp_path = testdir.join("myfile.tmp");
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo".to_vec())
+        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
@@ -1393,7 +1419,7 @@ mod tests {
         assert!(!tmp_path.exists());
         drop(file);
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"bar".to_vec())
+        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
@@ -1415,7 +1441,7 @@ mod tests {
         std::fs::write(&tmp_path, "some preexisting junk that should be removed").unwrap();
         assert!(tmp_path.exists());
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo".to_vec())
+        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
 

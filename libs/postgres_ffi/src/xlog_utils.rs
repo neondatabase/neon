@@ -119,11 +119,6 @@ pub fn generate_pg_control(
     // Generate new pg_control needed for bootstrap
     checkpoint.redo = normalize_lsn(lsn, WAL_SEGMENT_SIZE).0;
 
-    //reset some fields we don't want to preserve
-    //TODO Check this.
-    //We may need to determine the value from twophase data.
-    checkpoint.oldestActiveXid = 0;
-
     //save new values in pg_control
     pg_control.checkPoint = 0;
     pg_control.checkPointCopy = checkpoint;
@@ -336,7 +331,10 @@ impl CheckPoint {
     /// Returns 'true' if the XID was updated.
     pub fn update_next_xid(&mut self, xid: u32) -> bool {
         // nextXid should be greater than any XID in WAL, so increment provided XID and check for wraparround.
-        let mut new_xid = std::cmp::max(xid.wrapping_add(1), pg_constants::FIRST_NORMAL_TRANSACTION_ID);
+        let mut new_xid = std::cmp::max(
+            xid.wrapping_add(1),
+            pg_constants::FIRST_NORMAL_TRANSACTION_ID,
+        );
         // To reduce number of metadata checkpoints, we forward align XID on XID_CHECKPOINT_INTERVAL.
         // XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
         new_xid =
@@ -431,11 +429,11 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
 #[repr(C)]
 #[derive(Serialize)]
-struct XlLogicalMessage {
-    db_id: Oid,
-    transactional: uint32, // bool, takes 4 bytes due to alignment in C structures
-    prefix_size: uint64,
-    message_size: uint64,
+pub struct XlLogicalMessage {
+    pub db_id: Oid,
+    pub transactional: uint32, // bool, takes 4 bytes due to alignment in C structures
+    pub prefix_size: uint64,
+    pub message_size: uint64,
 }
 
 impl XlLogicalMessage {

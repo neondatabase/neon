@@ -34,7 +34,7 @@ use crate::{
     },
 };
 
-use utils::completion;
+use utils::{completion, sync::gate::GateGuard};
 
 use super::Timeline;
 
@@ -81,10 +81,17 @@ impl Timeline {
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
         use crate::tenant::tasks::random_init_delay;
+
+        // acquire the gate guard only once within a useful span
+        let Ok(guard) = self.gate.enter() else {
+            return;
+        };
+
         {
             let policy = self.get_eviction_policy();
             let period = match policy {
                 EvictionPolicy::LayerAccessThreshold(lat) => lat.period,
+                EvictionPolicy::OnlyImitiate(lat) => lat.period,
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
             if random_init_delay(period, &cancel).await.is_err() {
@@ -95,7 +102,9 @@ impl Timeline {
         let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
         loop {
             let policy = self.get_eviction_policy();
-            let cf = self.eviction_iteration(&policy, &cancel, &ctx).await;
+            let cf = self
+                .eviction_iteration(&policy, &cancel, &guard, &ctx)
+                .await;
 
             match cf {
                 ControlFlow::Break(()) => break,
@@ -116,42 +125,59 @@ impl Timeline {
         self: &Arc<Self>,
         policy: &EvictionPolicy,
         cancel: &CancellationToken,
+        gate: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<(), Instant> {
         debug!("eviction iteration: {policy:?}");
-        match policy {
+        let start = Instant::now();
+        let (period, threshold) = match policy {
             EvictionPolicy::NoEviction => {
                 // check again in 10 seconds; XXX config watch mechanism
-                ControlFlow::Continue(Instant::now() + Duration::from_secs(10))
+                return ControlFlow::Continue(Instant::now() + Duration::from_secs(10));
             }
             EvictionPolicy::LayerAccessThreshold(p) => {
-                let start = Instant::now();
-                match self.eviction_iteration_threshold(p, cancel, ctx).await {
+                match self
+                    .eviction_iteration_threshold(p, cancel, gate, ctx)
+                    .await
+                {
                     ControlFlow::Break(()) => return ControlFlow::Break(()),
                     ControlFlow::Continue(()) => (),
                 }
-                let elapsed = start.elapsed();
-                crate::tenant::tasks::warn_when_period_overrun(
-                    elapsed,
-                    p.period,
-                    BackgroundLoopKind::Eviction,
-                );
-                crate::metrics::EVICTION_ITERATION_DURATION
-                    .get_metric_with_label_values(&[
-                        &format!("{}", p.period.as_secs()),
-                        &format!("{}", p.threshold.as_secs()),
-                    ])
-                    .unwrap()
-                    .observe(elapsed.as_secs_f64());
-                ControlFlow::Continue(start + p.period)
+                (p.period, p.threshold)
             }
-        }
+            EvictionPolicy::OnlyImitiate(p) => {
+                if self.imitiate_only(p, cancel, gate, ctx).await.is_break() {
+                    return ControlFlow::Break(());
+                }
+                (p.period, p.threshold)
+            }
+        };
+
+        let elapsed = start.elapsed();
+        crate::tenant::tasks::warn_when_period_overrun(
+            elapsed,
+            period,
+            BackgroundLoopKind::Eviction,
+        );
+        // FIXME: if we were to mix policies on a pageserver, we would have no way to sense this. I
+        // don't think that is a relevant fear however, and regardless the imitation should be the
+        // most costly part.
+        crate::metrics::EVICTION_ITERATION_DURATION
+            .get_metric_with_label_values(&[
+                &format!("{}", period.as_secs()),
+                &format!("{}", threshold.as_secs()),
+            ])
+            .unwrap()
+            .observe(elapsed.as_secs_f64());
+
+        ControlFlow::Continue(start + period)
     }
 
     async fn eviction_iteration_threshold(
         self: &Arc<Self>,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
+        gate: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
@@ -167,42 +193,19 @@ impl Timeline {
             _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
-        // If we evict layers but keep cached values derived from those layers, then
-        // we face a storm of on-demand downloads after pageserver restart.
-        // The reason is that the restart empties the caches, and so, the values
-        // need to be re-computed by accessing layers, which we evicted while the
-        // caches were filled.
-        //
-        // Solutions here would be one of the following:
-        // 1. Have a persistent cache.
-        // 2. Count every access to a cached value to the access stats of all layers
-        //    that were accessed to compute the value in the first place.
-        // 3. Invalidate the caches at a period of < p.threshold/2, so that the values
-        //    get re-computed from layers, thereby counting towards layer access stats.
-        // 4. Make the eviction task imitate the layer accesses that typically hit caches.
-        //
-        // We follow approach (4) here because in Neon prod deployment:
-        // - page cache is quite small => high churn => low hit rate
-        //   => eviction gets correct access stats
-        // - value-level caches such as logical size & repatition have a high hit rate,
-        //   especially for inactive tenants
-        //   => eviction sees zero accesses for these
-        //   => they cause the on-demand download storm on pageserver restart
-        //
-        // We should probably move to persistent caches in the future, or avoid
-        // having inactive tenants attached to pageserver in the first place.
-        match self.imitate_layer_accesses(p, cancel, ctx).await {
+        match self.imitate_layer_accesses(p, cancel, gate, ctx).await {
             ControlFlow::Break(()) => return ControlFlow::Break(()),
             ControlFlow::Continue(()) => (),
         }
 
-        #[allow(dead_code)]
         #[derive(Debug, Default)]
         struct EvictionStats {
             candidates: usize,
             evicted: usize,
             errors: usize,
             not_evictable: usize,
+            timeouts: usize,
+            #[allow(dead_code)]
             skipped_for_shutdown: usize,
         }
 
@@ -239,12 +242,7 @@ impl Timeline {
                     }
                 };
 
-                let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
-                    // We only use this fallback if there's an implementation error.
-                    // `latest_activity` already does rate-limited warn!() log.
-                    debug!(layer=%hist_layer, "last_activity returns None, using SystemTime::now");
-                    SystemTime::now()
-                });
+                let last_activity_ts = hist_layer.access_stats().latest_activity_or_now();
 
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
@@ -270,7 +268,11 @@ impl Timeline {
                 let layer = guard.drop_eviction_guard();
                 if no_activity_for > p.threshold {
                     // this could cause a lot of allocations in some cases
-                    js.spawn(async move { layer.evict_and_wait().await });
+                    js.spawn(async move {
+                        layer
+                            .evict_and_wait(std::time::Duration::from_secs(5))
+                            .await
+                    });
                     stats.candidates += 1;
                 }
             }
@@ -282,6 +284,9 @@ impl Timeline {
                     Ok(Ok(())) => stats.evicted += 1,
                     Ok(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
                         stats.not_evictable += 1;
+                    }
+                    Ok(Err(EvictionError::Timeout)) => {
+                        stats.timeouts += 1;
                     }
                     Err(je) if je.is_cancelled() => unreachable!("not used"),
                     Err(je) if je.is_panic() => {
@@ -298,7 +303,8 @@ impl Timeline {
             stats = join_all => {
                 if stats.candidates == stats.not_evictable {
                     debug!(stats=?stats, "eviction iteration complete");
-                } else if stats.errors > 0 || stats.not_evictable > 0 {
+                } else if stats.errors > 0 || stats.not_evictable > 0 || stats.timeouts > 0 {
+                    // reminder: timeouts are not eviction cancellations
                     warn!(stats=?stats, "eviction iteration complete");
                 } else {
                     info!(stats=?stats, "eviction iteration complete");
@@ -312,11 +318,59 @@ impl Timeline {
         ControlFlow::Continue(())
     }
 
+    /// Like `eviction_iteration_threshold`, but without any eviction. Eviction will be done by
+    /// disk usage based eviction task.
+    async fn imitiate_only(
+        self: &Arc<Self>,
+        p: &EvictionPolicyLayerAccessThreshold,
+        cancel: &CancellationToken,
+        gate: &GateGuard,
+        ctx: &RequestContext,
+    ) -> ControlFlow<()> {
+        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
+            BackgroundLoopKind::Eviction,
+            ctx,
+        );
+
+        let _permit = tokio::select! {
+            permit = acquire_permit => permit,
+            _ = cancel.cancelled() => return ControlFlow::Break(()),
+            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
+        };
+
+        self.imitate_layer_accesses(p, cancel, gate, ctx).await
+    }
+
+    /// If we evict layers but keep cached values derived from those layers, then
+    /// we face a storm of on-demand downloads after pageserver restart.
+    /// The reason is that the restart empties the caches, and so, the values
+    /// need to be re-computed by accessing layers, which we evicted while the
+    /// caches were filled.
+    ///
+    /// Solutions here would be one of the following:
+    /// 1. Have a persistent cache.
+    /// 2. Count every access to a cached value to the access stats of all layers
+    ///    that were accessed to compute the value in the first place.
+    /// 3. Invalidate the caches at a period of < p.threshold/2, so that the values
+    ///    get re-computed from layers, thereby counting towards layer access stats.
+    /// 4. Make the eviction task imitate the layer accesses that typically hit caches.
+    ///
+    /// We follow approach (4) here because in Neon prod deployment:
+    /// - page cache is quite small => high churn => low hit rate
+    ///   => eviction gets correct access stats
+    /// - value-level caches such as logical size & repatition have a high hit rate,
+    ///   especially for inactive tenants
+    ///   => eviction sees zero accesses for these
+    ///   => they cause the on-demand download storm on pageserver restart
+    ///
+    /// We should probably move to persistent caches in the future, or avoid
+    /// having inactive tenants attached to pageserver in the first place.
     #[instrument(skip_all)]
     async fn imitate_layer_accesses(
         &self,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
+        gate: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_zero() {
@@ -335,7 +389,7 @@ impl Timeline {
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_timeline_cached_layer_accesses(ctx).await;
+                self.imitate_timeline_cached_layer_accesses(gate, ctx).await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now())
             }
         }
@@ -375,12 +429,21 @@ impl Timeline {
 
     /// Recompute the values which would cause on-demand downloads during restart.
     #[instrument(skip_all)]
-    async fn imitate_timeline_cached_layer_accesses(&self, ctx: &RequestContext) {
+    async fn imitate_timeline_cached_layer_accesses(
+        &self,
+        guard: &GateGuard,
+        ctx: &RequestContext,
+    ) {
         let lsn = self.get_last_record_lsn();
 
         // imitiate on-restart initial logical size
         let size = self
-            .calculate_logical_size(lsn, LogicalSizeCalculationCause::EvictionTaskImitation, ctx)
+            .calculate_logical_size(
+                lsn,
+                LogicalSizeCalculationCause::EvictionTaskImitation,
+                guard,
+                ctx,
+            )
             .instrument(info_span!("calculate_logical_size"))
             .await;
 

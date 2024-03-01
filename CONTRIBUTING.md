@@ -74,16 +74,11 @@ We're using the following approach to make it work:
 
 For details see [`approved-for-ci-run.yml`](.github/workflows/approved-for-ci-run.yml)
 
-## How do I add the "pinned" tag to an buildtools image?
-We use the `pinned` tag for `Dockerfile.buildtools` build images in our CI/CD setup, currently adding the `pinned` tag is a manual operation.
+## How do I make build-tools image "pinned"
 
-You can call it from GitHub UI: https://github.com/neondatabase/neon/actions/workflows/update_build_tools_image.yml,
-or using GitHub CLI:
+It's possible to update the `pinned` tag of the `build-tools` image using the `pin-build-tools-image.yml` workflow.
 
 ```bash
-gh workflow -R neondatabase/neon run update_build_tools_image.yml \
-            -f from-tag=6254913013 \
-            -f to-tag=pinned \
-
-# Default `-f to-tag` is `pinned`, so the parameter can be omitted.
+gh workflow -R neondatabase/neon run pin-build-tools-image.yml \
+            -f from-tag=cc98d9b00d670f182c507ae3783342bd7e64c31e
 ```

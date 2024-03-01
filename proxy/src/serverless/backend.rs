@@ -1,10 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use tracing::info;
+use tracing::{field::display, info};
 
 use crate::{
-    auth::{backend::ComputeCredentialKeys, check_peer_addr_is_in_list, AuthError},
+    auth::{backend::ComputeCredentials, check_peer_addr_is_in_list, AuthError},
     compute,
     config::ProxyConfig,
     console::{
@@ -15,7 +15,7 @@ use crate::{
     proxy::connect_compute::ConnectMechanism,
 };
 
-use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool, APP_NAME};
+use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
 
 pub struct PoolingBackend {
     pub pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
@@ -27,12 +27,12 @@ impl PoolingBackend {
         &self,
         ctx: &mut RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> Result<ComputeCredentialKeys, AuthError> {
+    ) -> Result<ComputeCredentials, AuthError> {
         let user_info = conn_info.user_info.clone();
         let backend = self.config.auth_backend.as_ref().map(|_| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
         if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
-            return Err(AuthError::ip_address_not_allowed());
+            return Err(AuthError::ip_address_not_allowed(ctx.peer_addr));
         }
         let cached_secret = match maybe_secret {
             Some(secret) => secret,
@@ -49,13 +49,17 @@ impl PoolingBackend {
         };
         let auth_outcome =
             crate::auth::validate_password_and_exchange(&conn_info.password, secret)?;
-        match auth_outcome {
+        let res = match auth_outcome {
             crate::sasl::Outcome::Success(key) => Ok(key),
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
                 Err(AuthError::auth_failed(&*conn_info.user_info.user))
             }
-        }
+        };
+        res.map(|key| ComputeCredentials {
+            info: user_info,
+            keys: key,
+        })
     }
 
     // Wake up the destination if needed. Code here is a bit involved because
@@ -66,7 +70,7 @@ impl PoolingBackend {
         &self,
         ctx: &mut RequestMonitoring,
         conn_info: ConnInfo,
-        keys: ComputeCredentialKeys,
+        keys: ComputeCredentials,
         force_new: bool,
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         let maybe_client = if !force_new {
@@ -81,27 +85,9 @@ impl PoolingBackend {
             return Ok(client);
         }
         let conn_id = uuid::Uuid::new_v4();
+        tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        ctx.set_application(Some(APP_NAME));
-        let backend = self
-            .config
-            .auth_backend
-            .as_ref()
-            .map(|_| conn_info.user_info.clone());
-
-        let mut node_info = backend
-            .wake_compute(ctx)
-            .await?
-            .ok_or(HttpConnError::NoComputeInfo)?;
-
-        match keys {
-            #[cfg(any(test, feature = "testing"))]
-            ComputeCredentialKeys::Password(password) => node_info.config.password(password),
-            ComputeCredentialKeys::AuthKeys(auth_keys) => node_info.config.auth_keys(auth_keys),
-        };
-
-        ctx.set_project(node_info.aux.clone());
-
+        let backend = self.config.auth_backend.as_ref().map(|_| keys);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
@@ -109,8 +95,8 @@ impl PoolingBackend {
                 conn_info,
                 pool: self.pool.clone(),
             },
-            node_info,
             &backend,
+            false, // do not allow self signed compute for http flow
         )
         .await
     }
@@ -129,8 +115,6 @@ pub enum HttpConnError {
     AuthError(#[from] AuthError),
     #[error("wake_compute returned error")]
     WakeCompute(#[from] WakeComputeError),
-    #[error("wake_compute returned nothing")]
-    NoComputeInfo,
 }
 
 struct TokioMechanism {

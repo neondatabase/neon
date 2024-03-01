@@ -15,7 +15,7 @@ use utils::id::TenantId;
 /// A unique identifier of a persistent layer. This is different from `LayerDescriptor`, which is only used in the
 /// benchmarks. This struct contains all necessary information to find the image / delta layer. It also provides
 /// a unified way to generate layer information like file name.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistentLayerDesc {
     pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,

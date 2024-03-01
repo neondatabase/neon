@@ -171,16 +171,8 @@ async fn task_main(
                     .context("failed to set socket option")?;
 
                 info!(%peer_addr, "serving");
-                let mut ctx =
-                    RequestMonitoring::new(session_id, peer_addr.ip(), "sni_router", "sni");
-                handle_client(
-                    &mut ctx,
-                    dest_suffix,
-                    tls_config,
-                    tls_server_end_point,
-                    socket,
-                )
-                .await
+                let ctx = RequestMonitoring::new(session_id, peer_addr.ip(), "sni_router", "sni");
+                handle_client(ctx, dest_suffix, tls_config, tls_server_end_point, socket).await
             }
             .unwrap_or_else(|e| {
                 // Acknowledge that the task has finished with an error.
@@ -248,7 +240,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 async fn handle_client(
-    ctx: &mut RequestMonitoring,
+    mut ctx: RequestMonitoring,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
