@@ -10,7 +10,7 @@ mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use enumset::EnumSet;
 use fail::fail_point;
 use futures::stream::StreamExt;
@@ -3422,26 +3422,10 @@ impl Timeline {
                 let _g = span.entered();
                 let new_delta =
                     Handle::current().block_on(frozen_layer.write_to_disk(&self_clone, &ctx))?;
-                let new_delta_path = new_delta.local_path().to_owned();
 
-                // Sync it to disk.
-                //
-                // We must also fsync the timeline dir to ensure the directory entries for
-                // new layer files are durable.
-                //
-                // NB: timeline dir must be synced _after_ the file contents are durable.
-                // So, two separate fsyncs are required, they mustn't be batched.
-                //
-                // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
-                // files to flush, the fsync overhead can be reduces as follows:
-                // 1. write them all to temporary file names
-                // 2. fsync them
-                // 3. rename to the final name
-                // 4. fsync the parent directory.
-                // Note that (1),(2),(3) today happen inside write_to_disk().
-                //
-                // FIXME: the writer already fsyncs all data, only rename needs to be fsynced here
-                par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
+                // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
+                // We just need to fsync the directory in which these inodes are linked,
+                // which we know to be the timeline directory.
                 par_fsync::par_fsync(&[self_clone
                     .conf
                     .timeline_path(&self_clone.tenant_shard_id, &self_clone.timeline_id)])
@@ -3674,25 +3658,10 @@ impl Timeline {
             }
         }
 
-        // Sync the new layer to disk before adding it to the layer map, to make sure
-        // we don't garbage collect something based on the new layer, before it has
-        // reached the disk.
-        //
-        // We must also fsync the timeline dir to ensure the directory entries for
-        // new layer files are durable
-        //
-        // Compaction creates multiple image layers. It would be better to create them all
-        // and fsync them all in parallel.
-        let all_paths = image_layers
-            .iter()
-            .map(|layer| layer.local_path().to_owned())
-            .collect::<Vec<_>>();
-
-        par_fsync::par_fsync_async(&all_paths)
-            .await
-            .context("fsync of newly created layer files")?;
-
-        if !all_paths.is_empty() {
+        // The writer.finish() above already did the fsync of the inodes.
+        // We just need to fsync the directory in which these inodes are linked,
+        // which we know to be the timeline directory.
+        if !image_layers.is_empty() {
             par_fsync::par_fsync_async(&[self
                 .conf
                 .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
@@ -4279,22 +4248,12 @@ impl Timeline {
                 }
             }
 
-            // FIXME: the writer already fsyncs all data, only rename needs to be fsynced here
-            let layer_paths: Vec<Utf8PathBuf> = new_layers
-                .iter()
-                .map(|l| l.local_path().to_owned())
-                .collect();
-
-            // Fsync all the layer files and directory using multiple threads to
-            // minimize latency.
-            par_fsync::par_fsync_async(&layer_paths)
-                .await
-                .context("fsync all new layers")?;
-
+            // The writer.finish() above already did the fsync of the inodes.
+            // We just need to fsync the directory in which these inodes are linked,
+            // which we know to be the timeline directory.
             let timeline_dir = self
                 .conf
                 .timeline_path(&self.tenant_shard_id, &self.timeline_id);
-
             par_fsync::par_fsync_async(&[timeline_dir])
                 .await
                 .context("fsync of timeline dir")?;
