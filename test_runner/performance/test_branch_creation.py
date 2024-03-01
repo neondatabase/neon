@@ -98,7 +98,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
     env = neon_compare.env
 
     # seed the prng so we will measure the same structure every time
-    random.seed("2024-02-29")
+    rng = random.Random("2024-02-29")
 
     env.neon_cli.create_branch("b0")
 
@@ -109,7 +109,8 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
 
     for i in range(n_branches):
         # random a source branch
-        p = random.randint(0, i)
+        p = rng.randint(0, i)
+
         timer = timeit.default_timer()
         env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(p))
         dur = timeit.default_timer() - timer
