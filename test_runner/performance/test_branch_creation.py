@@ -7,11 +7,14 @@ from contextlib import closing
 from typing import List
 
 import pytest
-from fixtures.benchmark_fixture import MetricReport
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonPageserver
 from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.types import Lsn
+from fixtures.utils import wait_until
+from prometheus_client.samples import Sample
 
 
 def _record_branch_creation_durations(neon_compare: NeonCompare, durs: List[float]):
@@ -123,6 +126,50 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
         branch_creation_durations.append(dur)
 
     _record_branch_creation_durations(neon_compare, branch_creation_durations)
+
+    endpoint.stop_and_destroy()
+
+    env.pageserver.restart()
+    env.pageserver.quiesce_tenants()
+
+    wait_and_record_startup_metrics(env.pageserver, neon_compare.zenbenchmark, "restart_after")
+
+
+def wait_and_record_startup_metrics(
+    pageserver: NeonPageserver, target: NeonBenchmarker, prefix: str
+):
+    """
+    Waits until all startup metrics have non-zero values on the pageserver, then records them on the target
+    """
+
+    client = pageserver.http_client()
+
+    expected_labels = set(
+        [
+            "background_jobs_can_start",
+            "complete",
+            "initial",
+            "initial_tenant_load",
+            "initial_tenant_load_remote",
+        ]
+    )
+
+    def metrics_are_filled() -> List[Sample]:
+        m = client.get_metrics()
+        samples = m.query_all("pageserver_startup_duration_seconds")
+        # we should not have duplicate labels
+        matching = [
+            x for x in samples if x.labels.get("phase") in expected_labels and x.value > 0.0
+        ]
+        assert len(matching) == len(expected_labels)
+        return matching
+
+    samples = wait_until(10, 1, metrics_are_filled)
+
+    for sample in samples:
+        phase = sample.labels["phase"]
+        name = f"{prefix}.{phase}"
+        target.record(name, sample.value, "s", MetricReport.LOWER_IS_BETTER)
 
 
 # Test measures the branch creation time when branching from a timeline with a lot of relations.
