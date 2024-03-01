@@ -206,8 +206,8 @@ def wait_for_last_record_lsn(
             return current_lsn
         if i % 10 == 0:
             log.info(
-                "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                    lsn, current_lsn, i + 1
+                "{}/{} waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
+                    tenant, timeline, lsn, current_lsn, i + 1
                 )
             )
         time.sleep(0.1)
