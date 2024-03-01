@@ -452,6 +452,7 @@ jobs:
       matrix:
         build_type: [ debug, release ]
         pg_version: [ v14, v15, v16 ]
+        pageserver_virtual_file_io_engine: [ std-fs, tokio-epoll-uring ]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -474,7 +475,7 @@ jobs:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
-          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: ${{ matrix.pageserver_virtual_file_io_engine }}
           PAGESERVER_GET_VECTORED_IMPL: vectored
 
       # Temporary disable this step until we figure out why it's so flaky
@@ -537,6 +538,7 @@ jobs:
         # the amount of groups (N) should be reflected in `extra_params: --splits N ...`
         pytest_split_group: [ 1, 2, 3, 4, 5 ]
         build_type: [ release ]
+        pageserver_virtual_file_io_engine: [ std-fs, tokio-epoll-uring ]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -554,7 +556,7 @@ jobs:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
-          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: "${{ matrix.pageserver_virtual_file_io_engine }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 

@@ -61,7 +61,8 @@ pub(super) fn init(engine_kind: IoEngineKind) {
     set(engine_kind);
 }
 
-pub(super) fn get() -> IoEngine {
+/// TODO: longer-term this should only be visible to VirtualFile
+pub(crate) fn get() -> IoEngine {
     let cur = IoEngine::try_from(IO_ENGINE.load(Ordering::Relaxed)).unwrap();
     if cfg!(test) {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE";
