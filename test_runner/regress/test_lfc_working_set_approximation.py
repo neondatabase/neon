@@ -1,16 +1,17 @@
-import os
+from pathlib import Path
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import query_scalar
 
 
-def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
+def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    cache_dir = os.path.join(env.repo_dir, "file_cache")
-    os.mkdir(cache_dir)
+    cache_dir = Path(env.repo_dir) / "file_cache"
+    cache_dir.mkdir(exist_ok=True)
 
-    branchname = "test_explain_with_lfc_stats"
+    branchname = "test_approximate_working_set_size"
     env.neon_cli.create_branch(branchname, "empty")
     log.info(f"Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}")
     endpoint = env.endpoints.create_start(
@@ -24,10 +25,11 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
     )
 
     cur = endpoint.connect().cursor()
+    cur.execute("create extension if not exists neon")
 
     log.info(f"preparing some data in {endpoint.connstr()}")
 
-    DDL = """
+    ddl = """
 CREATE TABLE pgbench_accounts (
     aid bigint NOT NULL,
     bid integer,
@@ -40,54 +42,34 @@ CREATE TABLE pgbench_accounts (
 WITH (fillfactor='100');
 """
 
-    cur.execute(DDL)
-    cur.execute("ALTER TABLE ONLY pgbench_accounts ADD CONSTRAINT pgbench_accounts_pkey PRIMARY KEY (aid)")
+    cur.execute(ddl)
+    # prepare index access below
+    cur.execute(
+        "ALTER TABLE ONLY pgbench_accounts ADD CONSTRAINT pgbench_accounts_pkey PRIMARY KEY (aid)"
+    )
     cur.execute(
         "insert into pgbench_accounts(aid,bid,abalance,filler) select aid, (aid - 1) / 100000 + 1, 0, '' from generate_series(1, 100000) as aid;"
     )
-    log.info("verifying approximate working set size for INSERT - should match the table size")
-    cur.execute("")
-    log.info(f"warming up caches with sequential scan in {endpoint.connstr()}")
-    result = cur.execute("select approximate_working_set_size(false)").fetchall()
-    assert( len(result) == 1 )
-    assert( len(result[0]) == 1 )
-    blocks = result[0][0]    
-    assert( blocks < 30000 and blocks > 15000 )
-
-    log.info("running explain analyze without LFC values to verify they do not show up in the plan")
-    cur.execute("EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM pgbench_accounts WHERE abalance > 0")
-    rows = cur.fetchall()
-    plan = "\n".join([r[0] for r in rows])
-    log.debug(plan)
-    assert "Seq Scan on pgbench_accounts" in plan
-    assert "Buffers: shared hit" in plan
-    assert "File cache: hits=" not in plan
-    log.info("running explain analyze WITH LFC values to verify they do now show up")
+    # ensure correct query plans and stats
+    cur.execute("vacuum ANALYZE pgbench_accounts")
+    # determine table size - working set should approximate table size after sequential scan
+    pages = query_scalar(cur, "SELECT relpages FROM pg_class WHERE relname = 'pgbench_accounts'")
+    log.info(f"pgbench_accounts has {pages} pages, resetting working set to zero")
+    cur.execute("select approximate_working_set_size(true)")
     cur.execute(
-        "EXPLAIN (ANALYZE, BUFFERS,FILECACHE) SELECT * FROM pgbench_accounts WHERE abalance > 0"
+        'SELECT count(*) FROM pgbench_accounts WHERE abalance > 0 or jsonb_column_extended @> \'{"tell everyone": [{"Neon": "IsCool"}]}\'::jsonb'
     )
-    rows = cur.fetchall()
-    plan = "\n".join([r[0] for r in rows])
-    log.debug(plan)
-    assert "Seq Scan on pgbench_accounts" in plan
-    assert "Buffers: shared hit" in plan
-    assert "File cache: hits=" in plan
-    log.info("running explain analyze WITH LFC values to verify json output")
-    cur.execute(
-        "EXPLAIN (ANALYZE, BUFFERS,FILECACHE, FORMAT JSON) SELECT * FROM pgbench_accounts WHERE abalance > 0"
-    )
-    jsonplan = cur.fetchall()[0][0]
-    log.debug(jsonplan)
-    # Directly access the 'Plan' part of the first element of the JSON array
-    plan_details = jsonplan[0]["Plan"]
-
-    # Extract "File Cache Hits" and "File Cache Misses"
-    file_cache_hits = plan_details.get("File Cache Hits")
-    file_cache_misses = plan_details.get("File Cache Misses")
-
-    # Now you can assert the values
-    assert file_cache_hits >= 5000, f"Expected File Cache Hits to be > 5000, got {file_cache_hits}"
-    assert file_cache_misses == 0, f"Expected File Cache Misses to be 0, got {file_cache_misses}"
-
-
-def check_working_set_size
+    # verify working set size after sequential scan matches table size and reset working set for next test
+    blocks = query_scalar(cur, "select approximate_working_set_size(true)")
+    log.info(f"working set size after sequential scan on pgbench_accounts {blocks}")
+    assert blocks > pages * 0.8 and blocks < pages * 1.2
+    # run a few point queries with index lookup
+    cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid =   4242")
+    cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid =  54242")
+    cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid = 104242")
+    cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid = 204242")
+    # verify working set size after some index access of a few select pages only
+    blocks = query_scalar(cur, "select approximate_working_set_size(true)")
+    log.info(f"working set size after some index access of a few select pages only {blocks}")
+    assert blocks < 10
+    cur.execute("drop table pgbench_accounts")
