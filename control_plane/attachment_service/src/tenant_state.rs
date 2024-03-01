@@ -53,8 +53,11 @@ pub(crate) struct TenantState {
     pub(crate) sequence: Sequence,
 
     // Latest generation number: next time we attach, increment this
-    // and use the incremented number when attaching
-    pub(crate) generation: Generation,
+    // and use the incremented number when attaching.
+    //
+    // None represents an incompletely onboarded tenant via the [`Service::location_config`]
+    // API, where this tenant may only run in PlacementPolicy::Secondary.
+    pub(crate) generation: Option<Generation>,
 
     // High level description of how the tenant should be set up.  Provided
     // externally.
@@ -181,6 +184,13 @@ impl IntentState {
         }
     }
 
+    /// Remove the last secondary node from the list of secondaries
+    pub(crate) fn pop_secondary(&mut self, scheduler: &mut Scheduler) {
+        if let Some(node_id) = self.secondary.pop() {
+            scheduler.node_dec_ref(node_id);
+        }
+    }
+
     pub(crate) fn clear(&mut self, scheduler: &mut Scheduler) {
         if let Some(old_attached) = self.attached.take() {
             scheduler.node_dec_ref(old_attached);
@@ -208,11 +218,13 @@ impl IntentState {
         &self.secondary
     }
 
-    /// When a node goes offline, we update intents to avoid using it
-    /// as their attached pageserver.
+    /// If the node is in use as the attached location, demote it into
+    /// the list of secondary locations.  This is used when a node goes offline,
+    /// and we want to use a different node for attachment, but not permanently
+    /// forget the location on the offline node.
     ///
     /// Returns true if a change was made
-    pub(crate) fn notify_offline(&mut self, node_id: NodeId) -> bool {
+    pub(crate) fn demote_attached(&mut self, node_id: NodeId) -> bool {
         if self.attached == Some(node_id) {
             // TODO: when scheduler starts tracking attached + secondary counts separately, we will
             // need to call into it here.
@@ -315,7 +327,7 @@ pub(crate) struct ReconcileResult {
     pub(crate) result: Result<(), ReconcileError>,
 
     pub(crate) tenant_shard_id: TenantShardId,
-    pub(crate) generation: Generation,
+    pub(crate) generation: Option<Generation>,
     pub(crate) observed: ObservedState,
 
     /// Set [`TenantState::pending_compute_notification`] from this flag
@@ -340,7 +352,7 @@ impl TenantState {
             tenant_shard_id,
             policy,
             intent: IntentState::default(),
-            generation: Generation::new(0),
+            generation: Some(Generation::new(0)),
             shard,
             observed: ObservedState::default(),
             config: TenantConfig::default(),
@@ -438,10 +450,16 @@ impl TenantState {
         // more work on the same pageservers we're already using.
         let mut modified = false;
 
+        // Add/remove nodes to fulfil policy
         use PlacementPolicy::*;
         match self.policy {
             Single => {
                 // Should have exactly one attached, and zero secondaries
+                if !self.intent.secondary.is_empty() {
+                    self.intent.clear_secondary(scheduler);
+                    modified = true;
+                }
+
                 let (modified_attached, _attached_node_id) = self.schedule_attached(scheduler)?;
                 modified |= modified_attached;
 
@@ -451,6 +469,23 @@ impl TenantState {
                 }
             }
             Double(secondary_count) => {
+                let retain_secondaries = if self.intent.attached.is_none()
+                    && scheduler.node_preferred(&self.intent.secondary).is_some()
+                {
+                    // If we have no attached, and one of the secondaries is elegible to be promoted, retain
+                    // one more secondary than we usually would, as one of them will become attached futher down this function.
+                    secondary_count + 1
+                } else {
+                    secondary_count
+                };
+
+                while self.intent.secondary.len() > retain_secondaries {
+                    // We have no particular preference for one secondary location over another: just
+                    // arbitrarily drop from the end
+                    self.intent.pop_secondary(scheduler);
+                    modified = true;
+                }
+
                 // Should have exactly one attached, and N secondaries
                 let (modified_attached, attached_node_id) = self.schedule_attached(scheduler)?;
                 modified |= modified_attached;
@@ -463,15 +498,28 @@ impl TenantState {
                     modified = true;
                 }
             }
-            Detached => {
-                // Should have no attached or secondary pageservers
-                if self.intent.attached.is_some() {
-                    self.intent.set_attached(scheduler, None);
+            Secondary => {
+                if let Some(node_id) = self.intent.get_attached() {
+                    // Populate secondary by demoting the attached node
+                    self.intent.demote_attached(*node_id);
+                    modified = true;
+                } else if self.intent.secondary.is_empty() {
+                    // Populate secondary by scheduling a fresh node
+                    let node_id = scheduler.schedule_shard(&[])?;
+                    self.intent.push_secondary(scheduler, node_id);
                     modified = true;
                 }
-
-                if !self.intent.secondary.is_empty() {
-                    self.intent.clear_secondary(scheduler);
+                while self.intent.secondary.len() > 1 {
+                    // We have no particular preference for one secondary location over another: just
+                    // arbitrarily drop from the end
+                    self.intent.pop_secondary(scheduler);
+                    modified = true;
+                }
+            }
+            Detached => {
+                // Never add locations in this mode
+                if self.intent.get_attached().is_some() || !self.intent.get_secondary().is_empty() {
+                    self.intent.clear(scheduler);
                     modified = true;
                 }
             }
@@ -518,7 +566,12 @@ impl TenantState {
 
     fn dirty(&self) -> bool {
         if let Some(node_id) = self.intent.attached {
-            let wanted_conf = attached_location_conf(self.generation, &self.shard, &self.config);
+            // Maybe panic: it is a severe bug if we try to attach while generation is null.
+            let generation = self
+                .generation
+                .expect("Attempted to enter attached state without a generation");
+
+            let wanted_conf = attached_location_conf(generation, &self.shard, &self.config);
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -596,6 +649,10 @@ impl TenantState {
         // Reconcile already in flight for the current sequence?
         if let Some(handle) = &self.reconciler {
             if handle.sequence == self.sequence {
+                tracing::info!(
+                    "Reconciliation already in progress for sequence {:?}",
+                    self.sequence,
+                );
                 return Some(ReconcilerWaiter {
                     tenant_shard_id: self.tenant_shard_id,
                     seq_wait: self.waiter.clone(),
@@ -614,6 +671,10 @@ impl TenantState {
             // Shutting down, don't start a reconciler
             return None;
         };
+
+        // Advance the sequence before spawning a reconciler, so that sequence waiters
+        // can distinguish between before+after the reconcile completes.
+        self.sequence = self.sequence.next();
 
         let reconciler_cancel = cancel.child_token();
         let mut reconciler = Reconciler {
@@ -716,6 +777,17 @@ impl TenantState {
         })
     }
 
+    /// Called when a ReconcileResult has been emitted and the service is updating
+    /// our state: if the result is from a sequence >= my ReconcileHandle, then drop
+    /// the handle to indicate there is no longer a reconciliation in progress.
+    pub(crate) fn reconcile_complete(&mut self, sequence: Sequence) {
+        if let Some(reconcile_handle) = &self.reconciler {
+            if reconcile_handle.sequence <= sequence {
+                self.reconciler = None;
+            }
+        }
+    }
+
     // If we had any state at all referring to this node ID, drop it.  Does not
     // attempt to reschedule.
     pub(crate) fn deref_node(&mut self, node_id: NodeId) {
@@ -736,13 +808,8 @@ impl TenantState {
             shard_number: self.tenant_shard_id.shard_number.0 as i32,
             shard_count: self.tenant_shard_id.shard_count.literal() as i32,
             shard_stripe_size: self.shard.stripe_size.0 as i32,
-            generation: self.generation.into().unwrap_or(0) as i32,
-            generation_pageserver: self
-                .intent
-                .get_attached()
-                .map(|n| n.0 as i64)
-                .unwrap_or(i64::MAX),
-
+            generation: self.generation.map(|g| g.into().unwrap_or(0) as i32),
+            generation_pageserver: self.intent.get_attached().map(|n| n.0 as i64),
             placement_policy: serde_json::to_string(&self.policy).unwrap(),
             config: serde_json::to_string(&self.config).unwrap(),
             splitting: SplitState::default(),
@@ -805,8 +872,10 @@ pub(crate) mod tests {
         assert_ne!(attached_node_id, secondary_node_id);
 
         // Notifying the attached node is offline should demote it to a secondary
-        let changed = tenant_state.intent.notify_offline(attached_node_id);
+        let changed = tenant_state.intent.demote_attached(attached_node_id);
         assert!(changed);
+        assert!(tenant_state.intent.attached.is_none());
+        assert_eq!(tenant_state.intent.secondary.len(), 2);
 
         // Update the scheduler state to indicate the node is offline
         nodes.get_mut(&attached_node_id).unwrap().availability = NodeAvailability::Offline;
