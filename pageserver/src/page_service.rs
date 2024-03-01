@@ -1115,7 +1115,10 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = match self.get_cached_timeline_for_page(req) {
-            Ok(tl) => tl,
+            Ok(tl) => {
+                set_tracing_field_shard_id(tl);
+                tl
+            }
             Err(key) => {
                 match self
                     .load_timeline_for_page(tenant_id, timeline_id, key)
@@ -1139,9 +1142,6 @@ impl PageServerHandler {
                 }
             }
         };
-
-        // load_timeline_for_page sets shard_id, but get_cached_timeline_for_page doesn't
-        set_tracing_field_shard_id(timeline);
 
         let _timer = timeline
             .query_metrics
