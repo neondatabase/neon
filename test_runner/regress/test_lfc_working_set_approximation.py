@@ -25,7 +25,7 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     )
 
     cur = endpoint.connect().cursor()
-    cur.execute("create extension if not exists neon")
+    cur.execute("create extension neon")
 
     log.info(f"preparing some data in {endpoint.connstr()}")
 
