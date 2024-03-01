@@ -62,7 +62,7 @@ WITH (fillfactor='100');
     # verify working set size after sequential scan matches table size and reset working set for next test
     blocks = query_scalar(cur, "select approximate_working_set_size(true)")
     log.info(f"working set size after sequential scan on pgbench_accounts {blocks}")
-    assert blocks > pages * 0.8 and blocks < pages * 1.2
+    assert pages * 0.8 < blocks < pages * 1.2
     # run a few point queries with index lookup
     cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid =   4242")
     cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid =  54242")
