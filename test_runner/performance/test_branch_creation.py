@@ -91,7 +91,8 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
 
 @pytest.mark.repeat(5)
 @pytest.mark.parametrize("n_branches", [500, 1024])
-def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
+@pytest.mark.parametrize("shape", ["one_ancestor", "random"])
+def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape: str):
     """
     Test measures the latency of branch creation when creating a lot of branches.
     """
@@ -108,11 +109,16 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
     branch_creation_durations = []
 
     for i in range(n_branches):
-        # random a source branch
-        p = rng.randint(0, i)
+        if shape == "random":
+            parent = f"b{rng.randint(0, i)}"
+        elif shape == "one_ancestor":
+            parent = "b0"
+        else:
+            raise RuntimeError(f"unimplemented shape: {shape}")
 
         timer = timeit.default_timer()
-        env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(p))
+        # each of these uploads to remote storage before completion
+        env.neon_cli.create_branch(f"b{i + 1}", parent)
         dur = timeit.default_timer() - timer
         branch_creation_durations.append(dur)
 
