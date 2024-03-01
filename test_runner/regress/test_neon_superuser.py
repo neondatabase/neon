@@ -1,9 +1,12 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.pg_version import PgVersion
+from fixtures.pg_version import PgVersion, skip_on_postgres
 from fixtures.utils import wait_until
 
 
+@skip_on_postgres(
+    PgVersion.V15, reason="skip on pg15 due to https://github.com/neondatabase/neon/issues/6969"
+)
 def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
     env = neon_simple_env
     env.neon_cli.create_branch("test_neon_superuser_publisher", "empty")

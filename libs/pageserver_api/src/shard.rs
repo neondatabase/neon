@@ -6,7 +6,6 @@ use crate::{
 };
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
-use thiserror;
 use utils::id::TenantId;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
@@ -656,10 +655,7 @@ fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Ke
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use bincode;
-    use utils::{id::TenantId, Hex};
+    use utils::Hex;
 
     use super::*;
 

@@ -116,7 +116,7 @@ def test_sharding_service_smoke(
     # Marking a pageserver offline should migrate tenants away from it.
     env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
-    def node_evacuated(node_id: int):
+    def node_evacuated(node_id: int) -> None:
         counts = get_node_shard_counts(env, tenant_ids)
         assert counts[node_id] == 0
 
@@ -407,7 +407,7 @@ def test_sharding_service_compute_hook(
 
     env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
-    def node_evacuated(node_id: int):
+    def node_evacuated(node_id: int) -> None:
         counts = get_node_shard_counts(env, [env.initial_tenant])
         assert counts[node_id] == 0
 
