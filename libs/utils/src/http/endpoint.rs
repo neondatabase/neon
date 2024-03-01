@@ -156,6 +156,10 @@ pub struct ChannelWriter {
     buffer: BytesMut,
     pub tx: mpsc::Sender<std::io::Result<Bytes>>,
     written: usize,
+    /// Time spent waiting for the channel to make progress. It is not the same as time to upload a
+    /// buffer because we cannot know anything about that, but this should allow us to understand
+    /// the actual time taken without the time spent `std::thread::park`ed.
+    wait_time: std::time::Duration,
 }
 
 impl ChannelWriter {
@@ -168,6 +172,7 @@ impl ChannelWriter {
             buffer: BytesMut::with_capacity(buf_len).split_off(buf_len / 2),
             tx,
             written: 0,
+            wait_time: std::time::Duration::ZERO,
         }
     }
 
@@ -179,6 +184,8 @@ impl ChannelWriter {
 
         tracing::trace!(n, "flushing");
         let ready = self.buffer.split().freeze();
+
+        let wait_started_at = std::time::Instant::now();
 
         // not ideal to call from blocking code to block_on, but we are sure that this
         // operation does not spawn_blocking other tasks
@@ -192,6 +199,9 @@ impl ChannelWriter {
             // sending it to the client.
             Ok(())
         });
+
+        self.wait_time += wait_started_at.elapsed();
+
         if res.is_err() {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
@@ -201,6 +211,10 @@ impl ChannelWriter {
 
     pub fn flushed_bytes(&self) -> usize {
         self.written
+    }
+
+    pub fn wait_time(&self) -> std::time::Duration {
+        self.wait_time
     }
 }
 
@@ -266,11 +280,14 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
             .encode(&metrics, &mut writer)
             .and_then(|_| writer.flush().map_err(|e| e.into()));
 
+        // this instant is not when we finally got the full response sent, sending is done by hyper
+        // in another task.
         let encoded_at = std::time::Instant::now();
 
         let spawned_in = spawned_at - started_at;
         let collected_in = gathered_at - spawned_at;
-        let encoded_in = encoded_at - gathered_at;
+        // remove the wait time here in case the tcp connection was clogged
+        let encoded_in = encoded_at - gathered_at - writer.wait_time();
         let total = encoded_at - started_at;
 
         match res {
