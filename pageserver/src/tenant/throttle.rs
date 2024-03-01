@@ -166,7 +166,7 @@ where
                         Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
                     let mut guard = WARN_RATE_LIMIT.lock().unwrap();
                     guard.call(move || {
-                        warn!(error, "error adding time spent throttled; this message is rate-limited globally");
+                        warn!(error, "error adding time spent throttled; this message is logged at a global rate limit");
                     });
                 }
             }

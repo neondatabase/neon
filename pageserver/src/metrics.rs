@@ -1033,7 +1033,7 @@ impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
                 let mut guard = LOGGED.lock().unwrap();
                 let rate_limit = &mut guard[self.op];
                 rate_limit.call(|| {
-                    warn!(op=?self.op, error, "error deducting time spent throttled, this message is only logged once per process lifetime");
+                    warn!(op=?self.op, error, "error deducting time spent throttled; this message is logged at a global rate limit");
                 });
                 elapsed
             }
@@ -1176,7 +1176,7 @@ impl SmgrQueryTimePerTimeline {
                 let mut guard = LOGGED.lock().unwrap();
                 let rate_limit = &mut guard[op];
                 rate_limit.call(|| {
-                    warn!(?op, error, "error opening micros_spent_throttled, this message is only logged once per process lifetime");
+                    warn!(?op, error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
                 });
             }
         }
