@@ -3671,7 +3671,7 @@ impl Timeline {
         // We just need to fsync the directory in which these inodes are linked,
         // which we know to be the timeline directory.
         if !image_layers.is_empty() {
-            // We use fatal_err() below because the after write_to_disk returns with success,
+            // We use fatal_err() below because the after writer.finish() returns with success,
             // the in-memory state of the filesystem already has the layer file in its final place,
             // and subsequent pageserver code could think it's durable while it really isn't.
             let timeline_dir = VirtualFile::open(
@@ -4270,7 +4270,7 @@ impl Timeline {
             // We just need to fsync the directory in which these inodes are linked,
             // which we know to be the timeline directory.
             //
-            // We use fatal_err() below because the after write_to_disk returns with success,
+            // We use fatal_err() below because the after writer.finish() returns with success,
             // the in-memory state of the filesystem already has the layer file in its final place,
             // and subsequent pageserver code could think it's durable while it really isn't.
             let timeline_dir = VirtualFile::open(
