@@ -92,7 +92,6 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
     _record_branch_creation_durations(neon_compare, branch_creation_durations)
 
 
-@pytest.mark.repeat(5)
 @pytest.mark.parametrize("n_branches", [500, 1024])
 @pytest.mark.parametrize("shape", ["one_ancestor", "random"])
 def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape: str):
