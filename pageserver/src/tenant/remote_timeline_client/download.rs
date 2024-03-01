@@ -151,13 +151,18 @@ pub async fn download_layer_file<'a>(
     // We use fatal_err() below because the after the rename above,
     // the in-memory state of the filesystem already has the layer file in its final place,
     // and subsequent pageserver code could think it's durable while it really isn't.
-    let timeline_dir = VirtualFile::open(&timeline_path)
-        .await
-        .fatal_err("VirtualFile::open for timeline dir fsync");
-    timeline_dir
-        .sync_all()
-        .await
-        .fatal_err("VirtualFile::sync_all timeline dir");
+    let work = async move {
+        let timeline_dir = VirtualFile::open(&timeline_path)
+            .await
+            .fatal_err("VirtualFile::open for timeline dir fsync");
+        timeline_dir
+            .sync_all()
+            .await
+            .fatal_err("VirtualFile::sync_all timeline dir");
+    };
+    crate::virtual_file::io_engine::get()
+        .spawn_blocking_and_block_on_if_std(work)
+        .await;
 
     tracing::debug!("download complete: {local_path}");
 
