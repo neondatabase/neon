@@ -791,7 +791,9 @@ impl ComputeNode {
                         .set_username("zenith_admin")
                         .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
 
-                    let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
+                    let mut client =
+                        Client::connect(zenith_admin_connstr.as_str(), NoTls)
+                            .context("broken cloud_admin credential: tried connecting with cloud_admin but could not authenticate, and zenith_admin does not work either")?;
                     // Disable forwarding so that users don't get a cloud_admin role
                     client.simple_query("SET neon.forward_ddl = false")?;
                     client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
