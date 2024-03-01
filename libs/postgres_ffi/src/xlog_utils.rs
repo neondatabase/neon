@@ -331,10 +331,7 @@ impl CheckPoint {
     /// Returns 'true' if the XID was updated.
     pub fn update_next_xid(&mut self, xid: u32) -> bool {
         // nextXid should be greater than any XID in WAL, so increment provided XID and check for wraparround.
-        let mut new_xid = std::cmp::max(
-            xid.wrapping_add(1),
-            pg_constants::FIRST_NORMAL_TRANSACTION_ID,
-        );
+        let mut new_xid = std::cmp::max(xid.wrapping_add(1), pg_constants::FIRST_NORMAL_TRANSACTION_ID);
         // To reduce number of metadata checkpoints, we forward align XID on XID_CHECKPOINT_INTERVAL.
         // XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
         new_xid =
