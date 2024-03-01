@@ -21,7 +21,6 @@
 use byteorder::{ReadBytesExt, BE};
 use bytes::{BufMut, Bytes, BytesMut};
 use either::Either;
-use hex;
 use std::{cmp::Ordering, io, result};
 use thiserror::Error;
 use tracing::error;
@@ -700,8 +699,6 @@ impl<const L: usize> BuildNode<L> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::context::DownloadBehavior;
-    use crate::task_mgr::TaskKind;
     use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReaderRef};
     use rand::Rng;
     use std::collections::BTreeMap;

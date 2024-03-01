@@ -623,9 +623,7 @@ fn file_exists(file_path: &Utf8Path) -> anyhow::Result<bool> {
 mod fs_tests {
     use super::*;
 
-    use bytes::Bytes;
     use camino_tempfile::tempdir;
-    use futures_util::Stream;
     use std::{collections::HashMap, io::Write};
 
     async fn read_and_check_metadata(

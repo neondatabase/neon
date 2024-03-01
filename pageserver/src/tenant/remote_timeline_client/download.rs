@@ -40,7 +40,7 @@ pub(crate) use layer_file::download_layer_file;
 
 const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
-pub fn is_temp_download_file(path: &Utf8Path) -> bool {
+pub(crate) fn is_temp_download_file(path: &Utf8Path) -> bool {
     let extension = path.extension();
     match extension {
         Some(TEMP_DOWNLOAD_EXTENSION) => true,

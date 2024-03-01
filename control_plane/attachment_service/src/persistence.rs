@@ -7,8 +7,10 @@ use self::split_state::SplitState;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use diesel::pg::PgConnection;
-use diesel::prelude::*;
-use diesel::Connection;
+use diesel::{
+    Connection, ExpressionMethods, Insertable, QueryDsl, QueryResult, Queryable, RunQueryDsl,
+    Selectable, SelectableHelper,
+};
 use pageserver_api::controller_api::NodeSchedulingPolicy;
 use pageserver_api::models::TenantConfig;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
