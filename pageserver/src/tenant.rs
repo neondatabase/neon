@@ -109,7 +109,6 @@ pub use pageserver_api::models::TenantState;
 use tokio::sync::Semaphore;
 
 static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
-use toml_edit;
 use utils::{
     crashsafe,
     generation::Generation,
@@ -2384,7 +2383,7 @@ impl Tenant {
             self.tenant_shard_id,
             self.generation,
             self.shard_identity,
-            self.walredo_mgr.as_ref().map(Arc::clone),
+            self.walredo_mgr.clone(),
             resources,
             pg_version,
             state,
@@ -3593,25 +3592,18 @@ pub async fn dump_layerfile_from_path(
 #[cfg(test)]
 pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
-    use camino::Utf8PathBuf;
     use once_cell::sync::OnceCell;
     use pageserver_api::models::ShardParameters;
     use pageserver_api::shard::ShardIndex;
-    use std::fs;
-    use std::sync::Arc;
     use utils::logging;
-    use utils::lsn::Lsn;
 
     use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::walredo::apply_neon;
-    use crate::{
-        config::PageServerConf, repository::Key, tenant::Tenant, walrecord::NeonWalRecord,
-    };
+    use crate::{repository::Key, walrecord::NeonWalRecord};
 
     use super::*;
-    use crate::tenant::config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
-    use utils::id::{TenantId, TimelineId};
+    use utils::id::TenantId;
 
     pub const TIMELINE_ID: TimelineId =
         TimelineId::from_array(hex!("11223344556677881122334455667788"));
@@ -3840,10 +3832,8 @@ mod tests {
     use crate::DEFAULT_PG_VERSION;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use once_cell::sync::Lazy;
     use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
-    use tokio_util::sync::CancellationToken;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));

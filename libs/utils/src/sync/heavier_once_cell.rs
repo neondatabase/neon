@@ -239,7 +239,6 @@ mod tests {
     use std::{
         convert::Infallible,
         pin::{pin, Pin},
-        sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
 

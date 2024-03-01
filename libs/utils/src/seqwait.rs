@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 
-use std::cmp::{Eq, Ordering, PartialOrd};
+use std::cmp::{Eq, Ordering};
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
 use std::mem;
@@ -249,7 +249,6 @@ where
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::time::Duration;
 
     impl MonotonicCounter<i32> for i32 {
         fn cnt_advance(&mut self, val: i32) {

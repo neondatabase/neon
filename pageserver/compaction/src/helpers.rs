@@ -6,7 +6,6 @@ use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use pin_project_lite::pin_project;
-use std::cmp::Ord;
 use std::collections::BinaryHeap;
 use std::collections::VecDeque;
 use std::future::Future;

@@ -1915,17 +1915,16 @@ impl Drop for TimelineMetrics {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
-        let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
-            let _ =
-                RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+            let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
-        let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         if let Some(metric) = Lazy::get(&DIRECTORY_ENTRIES_COUNT) {
-            let _ = metric.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+            let _ = metric.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
-        let _ = EVICTIONS.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
