@@ -44,6 +44,11 @@ pub enum NeonWalRecord {
         moff: MultiXactOffset,
         members: Vec<MultiXactMember>,
     },
+    /// Update the map of AUX files, either writing or dropping an entry
+    AuxFile {
+        file_path: String,
+        content: Option<Bytes>,
+    },
 }
 
 impl NeonWalRecord {
@@ -764,6 +769,42 @@ impl XlLogicalMessage {
             transactional: buf.get_u32_le() != 0, // 4-bytes alignment
             prefix_size: buf.get_u64_le() as usize,
             message_size: buf.get_u64_le() as usize,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlRunningXacts {
+    pub xcnt: u32,
+    pub subxcnt: u32,
+    pub subxid_overflow: bool,
+    pub next_xid: TransactionId,
+    pub oldest_running_xid: TransactionId,
+    pub latest_completed_xid: TransactionId,
+    pub xids: Vec<TransactionId>,
+}
+
+impl XlRunningXacts {
+    pub fn decode(buf: &mut Bytes) -> XlRunningXacts {
+        let xcnt = buf.get_u32_le();
+        let subxcnt = buf.get_u32_le();
+        let subxid_overflow = buf.get_u32_le() != 0;
+        let next_xid = buf.get_u32_le();
+        let oldest_running_xid = buf.get_u32_le();
+        let latest_completed_xid = buf.get_u32_le();
+        let mut xids = Vec::new();
+        for _ in 0..(xcnt + subxcnt) {
+            xids.push(buf.get_u32_le());
+        }
+        XlRunningXacts {
+            xcnt,
+            subxcnt,
+            subxid_overflow,
+            next_xid,
+            oldest_running_xid,
+            latest_completed_xid,
+            xids,
         }
     }
 }

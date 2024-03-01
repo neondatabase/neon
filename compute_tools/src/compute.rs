@@ -28,6 +28,8 @@ use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
+use nix::sys::signal::{kill, Signal};
+
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
@@ -324,7 +326,8 @@ impl ComputeNode {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Instant::now();
 
-        let mut config = postgres::Config::from_str(&spec.pageserver_connstr)?;
+        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
+        let mut config = postgres::Config::from_str(shard0_connstr)?;
 
         // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.
@@ -1319,5 +1322,19 @@ LIMIT 100",
             remote_ext_metrics.total_ext_download_size += download_size;
         }
         Ok(remote_ext_metrics)
+    }
+}
+
+pub fn forward_termination_signal() {
+    let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
+    if ss_pid != 0 {
+        let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
+        kill(ss_pid, Signal::SIGTERM).ok();
+    }
+    let pg_pid = PG_PID.load(Ordering::SeqCst);
+    if pg_pid != 0 {
+        let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
+        // use 'immediate' shutdown (SIGQUIT): https://www.postgresql.org/docs/current/server-shutdown.html
+        kill(pg_pid, Signal::SIGQUIT).ok();
     }
 }

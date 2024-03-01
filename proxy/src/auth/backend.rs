@@ -194,7 +194,6 @@ async fn auth_quirks(
             let res = hacks::password_hack_no_authentication(ctx, info, client).await?;
 
             ctx.set_endpoint_id(res.info.endpoint.clone());
-            tracing::Span::current().record("ep", &tracing::field::display(&res.info.endpoint));
             let password = match res.keys {
                 ComputeCredentialKeys::Password(p) => p,
                 _ => unreachable!("password hack should return a password"),
@@ -209,7 +208,7 @@ async fn auth_quirks(
 
     // check allowed list
     if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
-        return Err(auth::AuthError::ip_address_not_allowed());
+        return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr));
     }
     let cached_secret = match maybe_secret {
         Some(secret) => secret,

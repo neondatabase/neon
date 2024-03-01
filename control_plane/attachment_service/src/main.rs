@@ -6,6 +6,7 @@
 ///
 use anyhow::{anyhow, Context};
 use attachment_service::http::make_router;
+use attachment_service::metrics::preinitialize_metrics;
 use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
 use aws_config::{self, BehaviorVersion, Region};
@@ -15,6 +16,7 @@ use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use std::sync::Arc;
 use tokio::signal::unix::SignalKind;
+use tokio_util::sync::CancellationToken;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
 
@@ -77,11 +79,36 @@ impl Secrets {
         "neon-storage-controller-control-plane-jwt-token";
     const PUBLIC_KEY_SECRET: &'static str = "neon-storage-controller-public-key";
 
+    const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
+    const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
+    const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
+    const PUBLIC_KEY_ENV: &'static str = "PUBLIC_KEY";
+
+    /// Load secrets from, in order of preference:
+    /// - CLI args if database URL is provided on the CLI
+    /// - Environment variables if DATABASE_URL is set.
+    /// - AWS Secrets Manager secrets
     async fn load(args: &Cli) -> anyhow::Result<Self> {
         match &args.database_url {
             Some(url) => Self::load_cli(url, args),
-            None => Self::load_aws_sm().await,
+            None => match std::env::var(Self::DATABASE_URL_ENV) {
+                Ok(database_url) => Self::load_env(database_url),
+                Err(_) => Self::load_aws_sm().await,
+            },
         }
+    }
+
+    fn load_env(database_url: String) -> anyhow::Result<Self> {
+        let public_key = match std::env::var(Self::PUBLIC_KEY_ENV) {
+            Ok(public_key) => Some(JwtAuth::from_key(public_key).context("Loading public key")?),
+            Err(_) => None,
+        };
+        Ok(Self {
+            database_url,
+            public_key,
+            jwt_token: std::env::var(Self::PAGESERVER_JWT_TOKEN_ENV).ok(),
+            control_plane_jwt_token: std::env::var(Self::CONTROL_PLANE_JWT_TOKEN_ENV).ok(),
+        })
     }
 
     async fn load_aws_sm() -> anyhow::Result<Self> {
@@ -204,6 +231,8 @@ async fn async_main() -> anyhow::Result<()> {
         logging::Output::Stdout,
     )?;
 
+    preinitialize_metrics();
+
     let args = Cli::parse();
     tracing::info!(
         "version: {}, launch_timestamp: {}, build_tag {}, state at {}, listening on {}",
@@ -237,15 +266,23 @@ async fn async_main() -> anyhow::Result<()> {
     let auth = secrets
         .public_key
         .map(|jwt_auth| Arc::new(SwappableJwtAuth::new(jwt_auth)));
-    let router = make_router(service, auth)
+    let router = make_router(service.clone(), auth)
         .build()
         .map_err(|err| anyhow!(err))?;
     let router_service = utils::http::RouterService::new(router).unwrap();
-    let server = hyper::Server::from_tcp(http_listener)?.serve(router_service);
 
+    // Start HTTP server
+    let server_shutdown = CancellationToken::new();
+    let server = hyper::Server::from_tcp(http_listener)?
+        .serve(router_service)
+        .with_graceful_shutdown({
+            let server_shutdown = server_shutdown.clone();
+            async move {
+                server_shutdown.cancelled().await;
+            }
+        });
     tracing::info!("Serving on {0}", args.listen);
-
-    tokio::task::spawn(server);
+    let server_task = tokio::task::spawn(server);
 
     // Wait until we receive a signal
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
@@ -265,6 +302,17 @@ async fn async_main() -> anyhow::Result<()> {
             tracing::error!("Failed to write JSON on shutdown: {e}")
         }
     }
+
+    // Stop HTTP server first, so that we don't have to service requests
+    // while shutting down Service
+    server_shutdown.cancel();
+    if let Err(e) = server_task.await {
+        tracing::error!("Error joining HTTP server task: {e}")
+    }
+    tracing::info!("Joined HTTP server task");
+
+    service.shutdown().await;
+    tracing::info!("Service shutdown complete");
 
     std::process::exit(0);
 }

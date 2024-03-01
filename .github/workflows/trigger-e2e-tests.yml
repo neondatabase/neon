@@ -9,7 +9,7 @@ on:
 defaults:
   run:
     shell: bash -euxo pipefail {0}
-    
+
 env:
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
   E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -51,6 +51,8 @@ jobs:
             echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
+            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
@@ -115,4 +117,3 @@ jobs:
                 \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
               }
             }"
- 

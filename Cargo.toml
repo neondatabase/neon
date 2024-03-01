@@ -5,6 +5,7 @@ members = [
     "control_plane",
     "control_plane/attachment_service",
     "pageserver",
+    "pageserver/compaction",
     "pageserver/ctl",
     "pageserver/client",
     "pageserver/pagebench",
@@ -97,6 +98,7 @@ ipnet = "2.9.0"
 itertools = "0.10"
 jsonwebtoken = "9"
 lasso = "0.7"
+leaky-bucket = "1.0.1"
 libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"
@@ -198,6 +200,7 @@ consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }

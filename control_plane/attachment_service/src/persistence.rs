@@ -6,10 +6,10 @@ use std::time::Duration;
 use self::split_state::SplitState;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
-use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
+use pageserver_api::controller_api::NodeSchedulingPolicy;
 use pageserver_api::models::TenantConfig;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
 use serde::{Deserialize, Serialize};
@@ -130,30 +130,41 @@ impl Persistence {
     }
 
     /// At startup, populate the list of nodes which our shards may be placed on
-    pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<Node>> {
-        let nodes: Vec<Node> = self
+    pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
+        let nodes: Vec<NodePersistence> = self
             .with_conn(move |conn| -> DatabaseResult<_> {
-                Ok(crate::schema::nodes::table
-                    .load::<NodePersistence>(conn)?
-                    .into_iter()
-                    .map(|n| Node {
-                        id: NodeId(n.node_id as u64),
-                        // At startup we consider a node offline until proven otherwise.
-                        availability: NodeAvailability::Offline,
-                        scheduling: NodeSchedulingPolicy::from_str(&n.scheduling_policy)
-                            .expect("Bad scheduling policy in DB"),
-                        listen_http_addr: n.listen_http_addr,
-                        listen_http_port: n.listen_http_port as u16,
-                        listen_pg_addr: n.listen_pg_addr,
-                        listen_pg_port: n.listen_pg_port as u16,
-                    })
-                    .collect::<Vec<Node>>())
+                Ok(crate::schema::nodes::table.load::<NodePersistence>(conn)?)
             })
             .await?;
 
         tracing::info!("list_nodes: loaded {} nodes", nodes.len());
 
         Ok(nodes)
+    }
+
+    pub(crate) async fn update_node(
+        &self,
+        input_node_id: NodeId,
+        input_scheduling: NodeSchedulingPolicy,
+    ) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        let updated = self
+            .with_conn(move |conn| {
+                let updated = diesel::update(nodes)
+                    .filter(node_id.eq(input_node_id.0 as i64))
+                    .set((scheduling_policy.eq(String::from(input_scheduling)),))
+                    .execute(conn)?;
+                Ok(updated)
+            })
+            .await?;
+
+        if updated != 1 {
+            Err(DatabaseError::Logical(format!(
+                "Node {node_id:?} not found for update",
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// At startup, load the high level state for shards, such as their config + policy.  This will
@@ -222,7 +233,7 @@ impl Persistence {
             let tenant_shard_id = TenantShardId {
                 tenant_id: TenantId::from_str(tsp.tenant_id.as_str())?,
                 shard_number: ShardNumber(tsp.shard_number as u8),
-                shard_count: ShardCount(tsp.shard_count as u8),
+                shard_count: ShardCount::new(tsp.shard_count as u8),
             };
 
             tenants_map.insert(tenant_shard_id, tsp);
@@ -318,7 +329,7 @@ impl Persistence {
                 tenant_id: TenantId::from_str(tsp.tenant_id.as_str())
                     .map_err(|e| DatabaseError::Logical(format!("Malformed tenant id: {e}")))?,
                 shard_number: ShardNumber(tsp.shard_number as u8),
-                shard_count: ShardCount(tsp.shard_count as u8),
+                shard_count: ShardCount::new(tsp.shard_count as u8),
             };
             result.insert(tenant_shard_id, Generation::new(tsp.generation as u32));
         }
@@ -340,7 +351,7 @@ impl Persistence {
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                     .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
-                    .filter(shard_count.eq(tenant_shard_id.shard_count.0 as i32))
+                    .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
                     .set((
                         generation.eq(generation + 1),
                         generation_pageserver.eq(node_id.0 as i64),
@@ -362,7 +373,7 @@ impl Persistence {
             let updated = diesel::update(tenant_shards)
                 .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                 .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
-                .filter(shard_count.eq(tenant_shard_id.shard_count.0 as i32))
+                .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
                 .set((
                     generation_pageserver.eq(i64::MAX),
                     placement_policy.eq(serde_json::to_string(&PlacementPolicy::Detached).unwrap()),
@@ -381,7 +392,6 @@ impl Persistence {
     //
     // We create the child shards here, so that they will be available for increment_generation calls
     // if some pageserver holding a child shard needs to restart before the overall tenant split is complete.
-    #[allow(dead_code)]
     pub(crate) async fn begin_shard_split(
         &self,
         old_shard_count: ShardCount,
@@ -393,21 +403,19 @@ impl Persistence {
             conn.transaction(|conn| -> DatabaseResult<()> {
                 // Mark parent shards as splitting
 
-                let expect_parent_records = std::cmp::max(1, old_shard_count.0);
-
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
-                    .filter(shard_count.eq(old_shard_count.0 as i32))
+                    .filter(shard_count.eq(old_shard_count.literal() as i32))
                     .set((splitting.eq(1),))
                     .execute(conn)?;
                 if u8::try_from(updated)
                     .map_err(|_| DatabaseError::Logical(
                         format!("Overflow existing shard count {} while splitting", updated))
-                    )? != expect_parent_records {
+                    )? != old_shard_count.count() {
                     // Perhaps a deletion or another split raced with this attempt to split, mutating
                     // the parent shards that we intend to split. In this case the split request should fail.
                     return Err(DatabaseError::Logical(
-                        format!("Unexpected existing shard count {updated} when preparing tenant for split (expected {expect_parent_records})")
+                        format!("Unexpected existing shard count {updated} when preparing tenant for split (expected {})", old_shard_count.count())
                     ));
                 }
 
@@ -419,7 +427,7 @@ impl Persistence {
                     let mut parent = crate::schema::tenant_shards::table
                         .filter(tenant_id.eq(parent_shard_id.tenant_id.to_string()))
                         .filter(shard_number.eq(parent_shard_id.shard_number.0 as i32))
-                        .filter(shard_count.eq(parent_shard_id.shard_count.0 as i32))
+                        .filter(shard_count.eq(parent_shard_id.shard_count.literal() as i32))
                         .load::<TenantShardPersistence>(conn)?;
                     let parent = if parent.len() != 1 {
                         return Err(DatabaseError::Logical(format!(
@@ -449,7 +457,6 @@ impl Persistence {
 
     // When we finish shard splitting, we must atomically clean up the old shards
     // and insert the new shards, and clear the splitting marker.
-    #[allow(dead_code)]
     pub(crate) async fn complete_shard_split(
         &self,
         split_tenant_id: TenantId,
@@ -461,7 +468,7 @@ impl Persistence {
                 // Drop parent shards
                 diesel::delete(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
-                    .filter(shard_count.eq(old_shard_count.0 as i32))
+                    .filter(shard_count.eq(old_shard_count.literal() as i32))
                     .execute(conn)?;
 
                 // Clear sharding flag
@@ -481,7 +488,7 @@ impl Persistence {
 }
 
 /// Parts of [`crate::tenant_state::TenantState`] that are stored durably
-#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone)]
+#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
 #[diesel(table_name = crate::schema::tenant_shards)]
 pub(crate) struct TenantShardPersistence {
     #[serde(default)]
@@ -510,7 +517,7 @@ pub(crate) struct TenantShardPersistence {
 }
 
 /// Parts of [`crate::node::Node`] that are stored durably
-#[derive(Serialize, Deserialize, Queryable, Selectable, Insertable)]
+#[derive(Serialize, Deserialize, Queryable, Selectable, Insertable, Eq, PartialEq)]
 #[diesel(table_name = crate::schema::nodes)]
 pub(crate) struct NodePersistence {
     pub(crate) node_id: i64,

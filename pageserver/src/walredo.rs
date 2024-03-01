@@ -22,7 +22,7 @@
 mod process;
 
 /// Code to apply [`NeonWalRecord`]s.
-mod apply_neon;
+pub(crate) mod apply_neon;
 
 use crate::config::PageServerConf;
 use crate::metrics::{

@@ -16,8 +16,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  actionlint:
+  check-permissions:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
+
+  actionlint:
+    needs: [ check-permissions ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

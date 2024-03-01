@@ -35,6 +35,8 @@ use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
+const MAX_AUX_FILE_DELTAS: usize = 1024;
+
 #[derive(Debug)]
 pub enum LsnForTimestamp {
     /// Found commits both before and after the given timestamp
@@ -870,6 +872,9 @@ pub struct DatadirModification<'a> {
     pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
+
+    /// For special "directory" keys that store key-value maps, track the size of the map
+    /// if it was updated in this modification.
     pending_directory_entries: Vec<(DirectoryKind, usize)>,
 }
 
@@ -1384,31 +1389,86 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
-            Ok(buf) => AuxFilesDirectory::des(&buf)?,
-            Err(e) => {
-                // This is expected: historical databases do not have the key.
-                debug!("Failed to get info about AUX files: {}", e);
-                AuxFilesDirectory {
-                    files: HashMap::new(),
+        let file_path = path.to_string();
+        let content = if content.is_empty() {
+            None
+        } else {
+            Some(Bytes::copy_from_slice(content))
+        };
+
+        let n_files;
+        let mut aux_files = self.tline.aux_files.lock().await;
+        if let Some(mut dir) = aux_files.dir.take() {
+            // We already updated aux files in `self`: emit a delta and update our latest value
+            dir.upsert(file_path.clone(), content.clone());
+            n_files = dir.files.len();
+            if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::Image(Bytes::from(
+                        AuxFilesDirectory::ser(&dir).context("serialize")?,
+                    )),
+                );
+                aux_files.n_deltas = 0;
+            } else {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                );
+                aux_files.n_deltas += 1;
+            }
+            aux_files.dir = Some(dir);
+        } else {
+            // Check if the AUX_FILES_KEY is initialized
+            match self.get(AUX_FILES_KEY, ctx).await {
+                Ok(dir_bytes) => {
+                    let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
+                    // Key is already set, we may append a delta
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::WalRecord(NeonWalRecord::AuxFile {
+                            file_path: file_path.clone(),
+                            content: content.clone(),
+                        }),
+                    );
+                    dir.upsert(file_path, content);
+                    n_files = dir.files.len();
+                    aux_files.dir = Some(dir);
+                }
+                Err(
+                    e @ (PageReconstructError::AncestorStopping(_)
+                    | PageReconstructError::Cancelled
+                    | PageReconstructError::AncestorLsnTimeout(_)),
+                ) => {
+                    // Important that we do not interpret a shutdown error as "not found" and thereby
+                    // reset the map.
+                    return Err(e.into());
+                }
+                // FIXME: PageReconstructError doesn't have an explicit variant for key-not-found, so
+                // we are assuming that all _other_ possible errors represents a missing key.  If some
+                // other error occurs, we may incorrectly reset the map of aux files.
+                Err(PageReconstructError::Other(_) | PageReconstructError::WalRedo(_)) => {
+                    // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                    let mut dir = AuxFilesDirectory {
+                        files: HashMap::new(),
+                    };
+                    dir.upsert(file_path, content);
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::Image(Bytes::from(
+                            AuxFilesDirectory::ser(&dir).context("serialize")?,
+                        )),
+                    );
+                    n_files = 1;
+                    aux_files.dir = Some(dir);
                 }
             }
-        };
-        let path = path.to_string();
-        if content.is_empty() {
-            dir.files.remove(&path);
-        } else {
-            dir.files.insert(path, Bytes::copy_from_slice(content));
         }
-        self.pending_directory_entries
-            .push((DirectoryKind::AuxFiles, dir.files.len()));
 
-        self.put(
-            AUX_FILES_KEY,
-            Value::Image(Bytes::from(
-                AuxFilesDirectory::ser(&dir).context("serialize")?,
-            )),
-        );
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFiles, n_files));
+
         Ok(())
     }
 
@@ -1618,8 +1678,18 @@ struct RelDirectory {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct AuxFilesDirectory {
-    files: HashMap<String, Bytes>,
+pub(crate) struct AuxFilesDirectory {
+    pub(crate) files: HashMap<String, Bytes>,
+}
+
+impl AuxFilesDirectory {
+    pub(crate) fn upsert(&mut self, key: String, value: Option<Bytes>) {
+        if let Some(value) = value {
+            self.files.insert(key, value);
+        } else {
+            self.files.remove(&key);
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1655,8 +1725,60 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
-    //use super::repo_harness::*;
-    //use super::*;
+    use hex_literal::hex;
+    use utils::id::TimelineId;
+
+    use super::*;
+
+    use crate::{tenant::harness::TenantHarness, DEFAULT_PG_VERSION};
+
+    /// Test a round trip of aux file updates, from DatadirModification to reading back from the Timeline
+    #[tokio::test]
+    async fn aux_files_round_trip() -> anyhow::Result<()> {
+        let name = "aux_files_round_trip";
+        let harness = TenantHarness::create(name)?;
+
+        pub const TIMELINE_ID: TimelineId =
+            TimelineId::from_array(hex!("11223344556677881122334455667788"));
+
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        let tline = tline.raw_timeline().unwrap();
+
+        // First modification: insert two keys
+        let mut modification = tline.begin_modification(Lsn(0x1000));
+        modification.put_file("foo/bar1", b"content1", &ctx).await?;
+        modification.set_lsn(Lsn(0x1008))?;
+        modification.put_file("foo/bar2", b"content2", &ctx).await?;
+        modification.commit(&ctx).await?;
+        let expect_1008 = HashMap::from([
+            ("foo/bar1".to_string(), Bytes::from_static(b"content1")),
+            ("foo/bar2".to_string(), Bytes::from_static(b"content2")),
+        ]);
+
+        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        assert_eq!(readback, expect_1008);
+
+        // Second modification: update one key, remove the other
+        let mut modification = tline.begin_modification(Lsn(0x2000));
+        modification.put_file("foo/bar1", b"content3", &ctx).await?;
+        modification.set_lsn(Lsn(0x2008))?;
+        modification.put_file("foo/bar2", b"", &ctx).await?;
+        modification.commit(&ctx).await?;
+        let expect_2008 =
+            HashMap::from([("foo/bar1".to_string(), Bytes::from_static(b"content3"))]);
+
+        let readback = tline.list_aux_files(Lsn(0x2008), &ctx).await?;
+        assert_eq!(readback, expect_2008);
+
+        // Reading back in time works
+        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        assert_eq!(readback, expect_1008);
+
+        Ok(())
+    }
 
     /*
         fn assert_current_logical_size<R: Repository>(timeline: &DatadirTimeline<R>, lsn: Lsn) {

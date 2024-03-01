@@ -13,10 +13,41 @@ use utils::id::TenantId;
 pub struct ShardNumber(pub u8);
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
-pub struct ShardCount(pub u8);
+pub struct ShardCount(u8);
 
 impl ShardCount {
     pub const MAX: Self = Self(u8::MAX);
+
+    /// The internal value of a ShardCount may be zero, which means "1 shard, but use
+    /// legacy format for TenantShardId that excludes the shard suffix", also known
+    /// as `TenantShardId::unsharded`.
+    ///
+    /// This method returns the actual number of shards, i.e. if our internal value is
+    /// zero, we return 1 (unsharded tenants have 1 shard).
+    pub fn count(&self) -> u8 {
+        if self.0 > 0 {
+            self.0
+        } else {
+            1
+        }
+    }
+
+    /// The literal internal value: this is **not** the number of shards in the
+    /// tenant, as we have a special zero value for legacy unsharded tenants.  Use
+    /// [`Self::count`] if you want to know the cardinality of shards.
+    pub fn literal(&self) -> u8 {
+        self.0
+    }
+
+    pub fn is_unsharded(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// `v` may be zero, or the number of shards in the tenant.  `v` is what
+    /// [`Self::literal`] would return.
+    pub fn new(val: u8) -> Self {
+        Self(val)
+    }
 }
 
 impl ShardNumber {
@@ -86,7 +117,7 @@ impl TenantShardId {
     }
 
     pub fn is_unsharded(&self) -> bool {
-        self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
+        self.shard_number == ShardNumber(0) && self.shard_count.is_unsharded()
     }
 
     /// Convenience for dropping the tenant_id and just getting the ShardIndex: this
@@ -471,10 +502,12 @@ impl ShardIdentity {
     pub fn is_key_disposable(&self, key: &Key) -> bool {
         if key_is_shard0(key) {
             // Q: Why can't we dispose of shard0 content if we're not shard 0?
-            // A: because the WAL ingestion logic currently ingests some shard 0
-            //    content on all shards, even though it's only read on shard 0.  If we
-            //    dropped it, then subsequent WAL ingest to these keys would encounter
-            //    an error.
+            // A1: because the WAL ingestion logic currently ingests some shard 0
+            //     content on all shards, even though it's only read on shard 0.  If we
+            //     dropped it, then subsequent WAL ingest to these keys would encounter
+            //     an error.
+            // A2: because key_is_shard0 also covers relation size keys, which are written
+            //     on all shards even though they're only maintained accurately on shard 0.
             false
         } else {
             !self.is_key_local(key)

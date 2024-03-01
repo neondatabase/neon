@@ -567,114 +567,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
-
-  /v1/tenant/{tenant_id}/attach:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      description: |
-        Schedules attach operation to happen in the background for the given tenant.
-        As soon as the caller sends this request, it must assume the pageserver
-        starts writing to the tenant's S3 state unless it receives one of the
-        distinguished errors below that state otherwise.
-
-        If a client receives a not-distinguished response, e.g., a network timeout,
-        it MUST retry the /attach request and poll again for the tenant's
-        attachment status.
-
-        After the client has received a 202, it MUST poll the tenant's
-        attachment status (field `attachment_status`) to reach state `attached`.
-        If the `attachment_status` is missing, the client MUST retry the `/attach`
-        request (goto previous paragraph). This is a robustness measure in case the tenant
-        status endpoint is buggy, but the attach operation is ongoing.
-
-        There is no way to cancel an in-flight request.
-
-        In any case, the client
-        * MUST NOT ASSUME that the /attach request has been lost in the network,
-        * MUST NOT ASSUME that the request has been lost, based on the observation
-          that a subsequent tenant status request returns 404. The request may
-          still be in flight. It must be retried.
-
-        The client SHOULD supply a `TenantConfig` for the tenant in the request body.
-        Settings specified in the config override the pageserver's defaults.
-        It is guaranteed that the config settings are applied before the pageserver
-        starts operating on the tenant. E.g., if the config specifies a specific
-        PITR interval for a tenant, then that setting will be in effect before the
-        pageserver starts the garbage collection loop. This enables a client to
-        guarantee a specific PITR setting across detach/attach cycles.
-        The pageserver will reject the request if it cannot parse the config, or
-        if there are any unknown fields in it.
-
-        If the client does not supply a config, the pageserver will use its defaults.
-        This behavior is deprecated: https://github.com/neondatabase/neon/issues/4282
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TenantAttachRequest"
-      responses:
-        "202":
-          description: Tenant attaching scheduled
-        "400":
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "404":
-          description: Timeline not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "409":
-          description: |
-            The tenant is already known to Pageserver in some way,
-            and hence this `/attach` call has been rejected.
-
-            Some examples of how this can happen:
-            - tenant was created on this pageserver
-            - tenant attachment was started by an earlier call to `/attach`.
-
-            Callers should poll the tenant status's `attachment_status` field,
-            like for status 202. See the longer description for `POST /attach`
-            for details.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ConflictError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
-
-
   /v1/tenant/{tenant_id}/location_config:
     parameters:
       - name: tenant_id
@@ -687,6 +579,12 @@ paths:
         required: false
         schema:
           type: integer
+      - name: lazy
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: Set to true for attaches to queue up until activated by compute. Eager (false) is the default.
     put:
       description: |
         Configures a _tenant location_, that is how a particular pageserver handles
@@ -770,66 +668,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
-  /v1/tenant/{tenant_id}/detach:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-      - name: detach_ignored
-        in: query
-        required: false
-        schema:
-          type: boolean
-        description: |
-          When true, allow to detach a tenant which state is ignored.
-    post:
-      description: |
-        Remove tenant data (including all corresponding timelines) from pageserver's memory and file system.
-        Files on the remote storage are not affected.
-      responses:
-        "200":
-          description: Tenant detached
-        "400":
-          description: Error when no tenant id found in path parameters
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "404":
-          description: Tenant not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
-
-
   /v1/tenant/{tenant_id}/ignore:
     parameters:
       - name: tenant_id
@@ -1379,6 +1217,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
+  /v1/utilization:
+    get:
+      description: |
+        Returns the pageservers current utilization and fitness score for new tenants.
+
+      responses:
+        "200":
+            description: Pageserver utilization and fitness score
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/PageserverUtilization"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 components:
   securitySchemes:
     JWT:
@@ -1442,16 +1299,6 @@ components:
     TenantLoadRequest:
       type: object
       properties:
-        generation:
-          type: integer
-          description: Attachment generation number.
-    TenantAttachRequest:
-      type: object
-      required:
-        - config
-      properties:
-        config:
-          $ref: '#/components/schemas/TenantConfig'
         generation:
           type: integer
           description: Attachment generation number.
@@ -1690,6 +1537,33 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
+
+    PageserverUtilization:
+      type: object
+      required:
+        - disk_usage_bytes
+        - free_space_bytes
+        - utilization_score
+      properties:
+        disk_usage_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The amount of disk space currently utilized by layer files.
+        free_space_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The amount of usable disk space left.
+        utilization_score:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854775807
+          default: 9223372036854775807
+          description: |
+            Lower is better score for how good this pageserver would be for the next tenant.
+            The default or maximum value can be returned in situations when a proper score cannot (yet) be calculated.
 
     Error:
       type: object
