@@ -52,7 +52,10 @@ pub mod defaults {
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
-    pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
+    // The default limit on WAL lag should be set to avoid causing disconnects under high throughput
+    // scenarios: since the broker stats are updated ~1/s, a value of 1GiB should be sufficient for
+    // throughputs up to 1GiB/s per timeline.
+    pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 1024 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
