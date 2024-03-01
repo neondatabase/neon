@@ -1,6 +1,7 @@
 use pageserver_api::shard::TenantShardId;
 
 use rand::seq::SliceRandom;
+use tracing::info;
 use utils::id::TenantTimelineId;
 
 use tokio::task::JoinSet;
@@ -75,15 +76,22 @@ async fn timeline_task(
     // TODO: support sharding
     let tenant_shard_id = TenantShardId::unsharded(timeline.tenant_id);
 
-    let mut layers = mgmt_api_client
-        .layer_map_info(tenant_shard_id, timeline.timeline_id)
-        .await
-        .unwrap();
-
+    let mut layers = None;
     loop {
+        if layers.is_none() {
+            layers = Some(
+                mgmt_api_client
+                    .layer_map_info(tenant_shard_id, timeline.timeline_id)
+                    .await
+                    .unwrap(),
+            );
+        }
+
         let layer = {
             let mut rng = rand::thread_rng();
             layers
+                .as_mut()
+                .unwrap()
                 .historic_layers
                 .choose_mut(&mut rng)
                 .expect("no layers")
@@ -97,7 +105,7 @@ async fn timeline_task(
         } else {
             Action::Evict
         };
-        match action {
+        let did_it = match action {
             Action::Evict => mgmt_api_client
                 .layer_evict(
                     tenant_shard_id,
@@ -114,7 +122,13 @@ async fn timeline_task(
                 )
                 .await
                 .unwrap(),
+        };
+        if !did_it {
+            info!("local copy of layer map appears out of sync, re-downloading");
+            layers = None;
+        } else {
+            info!("did it");
+            layer.set_remote(layer.is_remote());
         }
-        layer.set_remote(layer.is_remote());
     }
 }

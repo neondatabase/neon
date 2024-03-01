@@ -89,6 +89,7 @@ pub(crate) async fn download_layer_file<'a>(
                         let res;
                         (buf, res) = destination_file.write_all(buf).await;
                         let nwritten = res?;
+                        buf.clear();
                         assert_eq!(nwritten, n);
                         bytes_amount += u64::try_from(n).unwrap();
                     }
