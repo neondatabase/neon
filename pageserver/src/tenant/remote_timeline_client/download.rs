@@ -14,14 +14,14 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use utils::{backoff, crashsafe};
+use utils::backoff;
 
 use crate::config::PageServerConf;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::Generation;
-use crate::virtual_file::on_fatal_io_error;
+use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode};
 use utils::crashsafe::path_with_suffix_extension;
@@ -50,9 +50,8 @@ pub async fn download_layer_file<'a>(
 ) -> Result<u64, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
-    let local_path = conf
-        .timeline_path(&tenant_shard_id, &timeline_id)
-        .join(layer_file_name.file_name());
+    let timeline_path = conf.timeline_path(&tenant_shard_id, &timeline_id);
+    let local_path = timeline_path.join(layer_file_name.file_name());
 
     let remote_path = remote_layer_path(
         &tenant_shard_id.tenant_id,
@@ -149,10 +148,16 @@ pub async fn download_layer_file<'a>(
         .with_context(|| format!("rename download layer file to {local_path}"))
         .map_err(DownloadError::Other)?;
 
-    crashsafe::fsync_async(&local_path)
+    // We use fatal_err() below because the after the rename above,
+    // the in-memory state of the filesystem already has the layer file in its final place,
+    // and subsequent pageserver code could think it's durable while it really isn't.
+    let timeline_dir = VirtualFile::open(&timeline_path)
         .await
-        .with_context(|| format!("fsync layer file {local_path}"))
-        .map_err(DownloadError::Other)?;
+        .fatal_err("VirtualFile::open for timeline dir fsync");
+    timeline_dir
+        .sync_all()
+        .await
+        .fatal_err("VirtualFile::sync_all timeline dir");
 
     tracing::debug!("download complete: {local_path}");
 
