@@ -72,4 +72,3 @@ WITH (fillfactor='100');
     blocks = query_scalar(cur, "select approximate_working_set_size(true)")
     log.info(f"working set size after some index access of a few select pages only {blocks}")
     assert blocks < 10
-    cur.execute("drop table pgbench_accounts")
