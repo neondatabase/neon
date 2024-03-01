@@ -104,9 +104,10 @@ pub struct MetricsAuxInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ColdStartInfo {
-    No = 0,
-    Pool = 1,
-    FirstStart = 2,
+    Unknown = 0,
+    Warm = 1,
+    PoolHit = 2,
+    PoolMiss = 3,
 }
 
 #[cfg(test)]
@@ -119,7 +120,7 @@ mod tests {
             "endpoint_id": "endpoint",
             "project_id": "project",
             "branch_id": "branch",
-            "is_cold_start": "compute",
+            "cold_start_info": "unknown",
         })
     }
 
