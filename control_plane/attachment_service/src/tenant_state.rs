@@ -218,8 +218,10 @@ impl IntentState {
         &self.secondary
     }
 
-    /// When a node goes offline, we update intents to avoid using it
-    /// as their attached pageserver.
+    /// When if the node is in use as the attached location, demote it into
+    /// the list of secondary locations.  This is used when a node goes offline,
+    /// and we want to use a different node for attachment, but not permanently
+    /// forget the location on the offline node.
     ///
     /// Returns true if a change was made
     pub(crate) fn demote_attached(&mut self, node_id: NodeId) -> bool {
