@@ -372,9 +372,10 @@ impl Persistence {
             })
             .await?;
 
+        // Generation is always non-null in the rseult: if the generation column had been NULL, then we
+        // should have experienced an SQL Confilict error while executing a query that tries to increment it.
+        debug_assert!(updated.generation.is_some());
         let Some(g) = updated.generation else {
-            // If the generation column had been NULL, then we should have experienced an SQL Confilict error
-            // while executing a query that tries to increment it.
             return Err(DatabaseError::Logical(
                 "Generation should always be set after incrementing".to_string(),
             )

@@ -981,8 +981,11 @@ impl Service {
                 continue;
             };
 
+            // If [`Persistence::re_attach`] selected this shard, it must have alread
+            // had a generation set.
+            debug_assert!(shard_state.generation.is_some());
             let Some(old_gen) = shard_state.generation else {
-                // Should never happen: [`Persistence::re_attach`] would only return incremented generation
+                // Should never happen:  would only return incremented generation
                 // for a tenant that already had a non-null generation.
                 return Err(ApiError::InternalServerError(anyhow::anyhow!(
                     "Generation must be set while re-attaching"

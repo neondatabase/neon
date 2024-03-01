@@ -434,9 +434,10 @@ impl Reconciler {
 
         // If the attached pageserver is not attached, do so now.
         if let Some(node_id) = self.intent.attached {
+            // If we are in an attached policy, then generation must have been set (null generations
+            // are only present when a tenant is initially loaded with a secondary policy)
+            debug_assert!(self.generation.is_some());
             let Some(generation) = self.generation else {
-                // This should never happen: we do not enter an attached PlacementPolicy without
-                // initializing the generation for a tenant.
                 return Err(ReconcileError::Other(anyhow::anyhow!(
                     "Attempted to attach with NULL generation"
                 )));
