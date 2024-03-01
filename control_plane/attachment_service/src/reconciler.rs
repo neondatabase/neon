@@ -464,20 +464,20 @@ impl Reconciler {
                         Some(ObservedStateLocation {
                             conf: Some(observed),
                         }) => {
-                            // If mode and generation are the same, it follows that only the configuration has changed
-                            let config_update = observed.generation == wanted_conf.generation
-                                && observed.mode == wanted_conf.mode;
+                            let generations_match = observed.generation == wanted_conf.generation;
 
-                            // Usually the short-lived attachment modes (multi and stale) are only used
-                            // in the case of [`Self::live_migrate`], but it is simple to handle them correctly
-                            // here too.  Locations are allowed to go Single->Stale and Multi->Single within the same generation.
-                            let mode_transition = observed.generation == wanted_conf.generation
-                                && ((observed.mode == LocationConfigMode::AttachedSingle
-                                    && wanted_conf.mode == LocationConfigMode::AttachedStale)
-                                    || (observed.mode == LocationConfigMode::AttachedMulti
-                                        && wanted_conf.mode == LocationConfigMode::AttachedSingle));
+                            use LocationConfigMode::*;
+                            let mode_transition_requires_gen_inc =
+                                match (observed.mode, wanted_conf.mode) {
+                                    // Usually the short-lived attachment modes (multi and stale) are only used
+                                    // in the case of [`Self::live_migrate`], but it is simple to handle them correctly
+                                    // here too.  Locations are allowed to go Single->Stale and Multi->Single within the same generation.
+                                    (AttachedSingle, AttachedStale) => false,
+                                    (AttachedMulti, AttachedSingle) => false,
+                                    (lhs, rhs) => lhs != rhs,
+                                };
 
-                            !(config_update || mode_transition)
+                            !generations_match || mode_transition_requires_gen_inc
                         }
                     };
 
