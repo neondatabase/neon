@@ -4,6 +4,7 @@ pub mod utilization;
 pub use utilization::PageserverUtilization;
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
@@ -562,7 +563,7 @@ pub struct TimelineInfo {
     pub walreceiver_status: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerMapInfo {
     pub in_memory_layers: Vec<InMemoryLayerInfo>,
     pub historic_layers: Vec<HistoricLayerInfo>,
@@ -580,7 +581,7 @@ pub enum LayerAccessKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerAccessStatFullDetails {
     pub when_millis_since_epoch: u64,
-    pub task_kind: &'static str,
+    pub task_kind: Cow<'static, str>,
     pub access_kind: LayerAccessKind,
 }
 
@@ -639,23 +640,23 @@ impl LayerResidenceEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerAccessStats {
     pub access_count_by_access_kind: HashMap<LayerAccessKind, u64>,
-    pub task_kind_access_flag: Vec<&'static str>,
+    pub task_kind_access_flag: Vec<Cow<'static, str>>,
     pub first: Option<LayerAccessStatFullDetails>,
     pub accesses_history: HistoryBufferWithDropCounter<LayerAccessStatFullDetails, 16>,
     pub residence_events_history: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum InMemoryLayerInfo {
     Open { lsn_start: Lsn },
     Frozen { lsn_start: Lsn, lsn_end: Lsn },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum HistoricLayerInfo {
     Delta {
@@ -675,6 +676,32 @@ pub enum HistoricLayerInfo {
         remote: bool,
         access_stats: LayerAccessStats,
     },
+}
+
+impl HistoricLayerInfo {
+    pub fn layer_file_name(&self) -> &str {
+        match self {
+            HistoricLayerInfo::Delta {
+                layer_file_name, ..
+            } => layer_file_name,
+            HistoricLayerInfo::Image {
+                layer_file_name, ..
+            } => layer_file_name,
+        }
+    }
+    pub fn is_remote(&self) -> bool {
+        match self {
+            HistoricLayerInfo::Delta { remote, .. } => *remote,
+            HistoricLayerInfo::Image { remote, .. } => *remote,
+        }
+    }
+    pub fn set_remote(&mut self, value: bool) {
+        let field = match self {
+            HistoricLayerInfo::Delta { remote, .. } => remote,
+            HistoricLayerInfo::Image { remote, .. } => remote,
+        };
+        *field = value;
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

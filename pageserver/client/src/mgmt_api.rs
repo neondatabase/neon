@@ -389,4 +389,54 @@ impl Client {
             .await
             .map_err(Error::ReceiveBody)
     }
+
+    pub async fn layer_map_info(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<LayerMapInfo> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/layer",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id,
+        );
+        self.get(&uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn layer_evict(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        layer_file_name: &str,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/layer/{}",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id, layer_file_name
+        );
+        self.request(Method::DELETE, uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn layer_ondemand_download(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        layer_file_name: &str,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/layer/{}",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id, layer_file_name
+        );
+        self.request(Method::GET, uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
 }
