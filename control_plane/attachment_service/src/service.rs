@@ -899,6 +899,7 @@ impl Service {
                             tenant_state.generation.unwrap(),
                             &tenant_state.shard,
                             &tenant_state.config,
+                            false,
                         )),
                     },
                 )]);
@@ -2424,7 +2425,12 @@ impl Service {
                     child_observed.insert(
                         pageserver,
                         ObservedStateLocation {
-                            conf: Some(attached_location_conf(generation, &child_shard, &config)),
+                            conf: Some(attached_location_conf(
+                                generation,
+                                &child_shard,
+                                &config,
+                                matches!(policy, PlacementPolicy::Double(n) if n > 0),
+                            )),
                         },
                     );
 
