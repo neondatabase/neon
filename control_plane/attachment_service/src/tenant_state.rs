@@ -218,7 +218,7 @@ impl IntentState {
         &self.secondary
     }
 
-    /// When if the node is in use as the attached location, demote it into
+    /// If the node is in use as the attached location, demote it into
     /// the list of secondary locations.  This is used when a node goes offline,
     /// and we want to use a different node for attachment, but not permanently
     /// forget the location on the offline node.
