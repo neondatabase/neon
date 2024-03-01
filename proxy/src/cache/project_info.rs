@@ -358,8 +358,7 @@ impl Cache for ProjectInfoCacheImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{console::AuthSecret, scram::ServerSecret};
-    use std::{sync::Arc, time::Duration};
+    use crate::scram::ServerSecret;
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {

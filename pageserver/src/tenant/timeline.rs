@@ -1512,10 +1512,14 @@ impl Timeline {
             return Ok(None);
         };
 
-        match local_layer.evict_and_wait().await {
+        // curl has this by default
+        let timeout = std::time::Duration::from_secs(120);
+
+        match local_layer.evict_and_wait(timeout).await {
             Ok(()) => Ok(Some(true)),
             Err(EvictionError::NotFound) => Ok(Some(false)),
             Err(EvictionError::Downloaded) => Ok(Some(false)),
+            Err(EvictionError::Timeout) => Ok(Some(false)),
         }
     }
 }
@@ -5157,8 +5161,7 @@ mod tests {
         let harness =
             TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
 
-        let ctx = any_context();
-        let tenant = harness.do_try_load(&ctx).await.unwrap();
+        let (tenant, ctx) = harness.load().await;
         let timeline = tenant
             .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
             .await
@@ -5172,8 +5175,10 @@ mod tests {
             .expect("should had been resident")
             .drop_eviction_guard();
 
-        let first = async { layer.evict_and_wait().await };
-        let second = async { layer.evict_and_wait().await };
+        let forever = std::time::Duration::from_secs(120);
+
+        let first = layer.evict_and_wait(forever);
+        let second = layer.evict_and_wait(forever);
 
         let (first, second) = tokio::join!(first, second);
 
@@ -5190,12 +5195,6 @@ mod tests {
             }
             other => unreachable!("unexpected {:?}", other),
         }
-    }
-
-    fn any_context() -> crate::context::RequestContext {
-        use crate::context::*;
-        use crate::task_mgr::*;
-        RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
     }
 
     async fn find_some_layer(timeline: &Timeline) -> Layer {

@@ -19,8 +19,6 @@ use utils::{bin_ser::LeSer, id::TenantTimelineId};
 
 use crate::SafeKeeperConf;
 
-use std::convert::TryInto;
-
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 7;
 
@@ -219,12 +217,9 @@ impl Storage for FileStorage {
 
 #[cfg(test)]
 mod test {
-    use super::FileStorage;
     use super::*;
-    use crate::SafeKeeperConf;
-    use anyhow::Result;
     use tokio::fs;
-    use utils::{id::TenantTimelineId, lsn::Lsn};
+    use utils::lsn::Lsn;
 
     fn stub_conf() -> SafeKeeperConf {
         let workdir = camino_tempfile::tempdir().unwrap().into_path();

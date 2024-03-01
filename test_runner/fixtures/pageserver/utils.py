@@ -20,7 +20,7 @@ def assert_tenant_state(
     tenant: TenantId,
     expected_state: str,
     message: Optional[str] = None,
-):
+) -> None:
     tenant_status = pageserver_http.tenant_status(tenant)
     log.info(f"tenant_status: {tenant_status}")
     assert tenant_status["state"]["slug"] == expected_state, message or tenant_status
@@ -206,8 +206,8 @@ def wait_for_last_record_lsn(
             return current_lsn
         if i % 10 == 0:
             log.info(
-                "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                    lsn, current_lsn, i + 1
+                "{}/{} waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
+                    tenant, timeline, lsn, current_lsn, i + 1
                 )
             )
         time.sleep(0.1)
@@ -292,7 +292,7 @@ def timeline_delete_wait_completed(
     iterations: int = 20,
     interval: Optional[float] = None,
     **delete_args,
-):
+) -> None:
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
     wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations, interval)
 
@@ -302,7 +302,7 @@ def assert_prefix_empty(
     remote_storage: Optional[RemoteStorage],
     prefix: Optional[str] = None,
     allowed_postfix: Optional[str] = None,
-):
+) -> None:
     assert remote_storage is not None
     response = list_prefix(remote_storage, prefix)
     keys = response["KeyCount"]
