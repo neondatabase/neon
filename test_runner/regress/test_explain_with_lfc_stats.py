@@ -51,7 +51,7 @@ WITH (fillfactor='100');
     log.info("running explain analyze without LFC values to verify they do not show up in the plan")
     cur.execute("EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM pgbench_accounts WHERE abalance > 0")
     rows = cur.fetchall()
-    plan = "\n".join([r[0] for r in rows])
+    plan = "\n".join(r[0] for r in rows)
     log.debug(plan)
     assert "Seq Scan on pgbench_accounts" in plan
     assert "Buffers: shared hit" in plan
@@ -61,7 +61,7 @@ WITH (fillfactor='100');
         "EXPLAIN (ANALYZE, BUFFERS,FILECACHE) SELECT * FROM pgbench_accounts WHERE abalance > 0"
     )
     rows = cur.fetchall()
-    plan = "\n".join([r[0] for r in rows])
+    plan = "\n".join(r[0] for r in rows)
     log.debug(plan)
     assert "Seq Scan on pgbench_accounts" in plan
     assert "Buffers: shared hit" in plan
