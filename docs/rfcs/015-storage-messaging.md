@@ -2,7 +2,7 @@
 
 Created on 19.01.22
 
-Initially created [here](https://github.com/neondb/rfcs/pull/16) by @kelvich.
+Initially created [here](https://github.com/neondatabase/rfcs/pull/16) by @kelvich.
 
 That it is an alternative to (014-safekeeper-gossip)[]
 

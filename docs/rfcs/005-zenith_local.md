@@ -32,8 +32,8 @@ Ideally, just one binary that incorporates all elements we need.
 #### Components:
 
 - **neon-CLI** - interface for end-users.  Turns commands to REST requests and handles responses to show them in a user-friendly way.  
-CLI proposal is here https://github.com/libneon/rfcs/blob/003-laptop-cli.md/003-laptop-cli.md
-WIP code is here: https://github.com/libneon/postgres/tree/main/pageserver/src/bin/cli
+CLI proposal is here https://github.com/neondatabase/rfcs/blob/003-laptop-cli.md/003-laptop-cli.md
+WIP code is here: https://github.com/neondatabase/postgres/tree/main/pageserver/src/bin/cli
 
 - **neon-console** - WEB UI with same functionality as CLI.
 >Note: not for the first release.
@@ -44,7 +44,7 @@ WIP code is here: https://github.com/libneon/postgres/tree/main/pageserver/src/b
 - **neon-pageserver** - consists of a storage and WAL-replaying service (modified PG in current implementation).
 > Question: Probably, for local setup we should be able to bypass page-storage and interact directly with S3 to avoid double caching in shared buffers and page-server?
 
-WIP code is here: https://github.com/libneon/postgres/tree/main/pageserver/src
+WIP code is here: https://github.com/neondatabase/postgres/tree/main/pageserver/src
 
 - **neon-S3** - stores base images of the database and WAL in S3 object storage. Import and export images from/to neon.
 > Question: How should it operate in a local setup? Will we manage it ourselves or ask user to provide credentials for existing S3 object storage (i.e. minio)?
@@ -55,11 +55,11 @@ WIP code is ???
 - **neon-safekeeper** - receives WAL from postgres, stores it durably, answers to Postgres that "sync" is succeed.
 > Question: How should it operate in a local setup? In my understanding it should push WAL directly to S3 (if we use it) or store all data locally (if we use local page storage). The latter option seems meaningless (extra overhead and no gain), but it is still good to test the system.
 
-WIP code is here: https://github.com/libneon/postgres/tree/main/src/bin/safekeeper
+WIP code is here: https://github.com/neondatabase/postgres/tree/main/src/bin/safekeeper
 
 - **neon-computenode** - bottomless PostgreSQL, ideally upstream, but for a start - our modified version. User can quickly create and destroy them and work with it as a regular postgres database.
  
- WIP code is in main branch and here: https://github.com/libneon/postgres/commits/compute_node
+ WIP code is in main branch and here: https://github.com/neondatabase/postgres/commits/compute_node
 
 #### REST API:
 
