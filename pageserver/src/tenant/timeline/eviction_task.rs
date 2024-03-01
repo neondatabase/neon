@@ -204,6 +204,7 @@ impl Timeline {
             evicted: usize,
             errors: usize,
             not_evictable: usize,
+            timeouts: usize,
             #[allow(dead_code)]
             skipped_for_shutdown: usize,
         }
@@ -267,7 +268,11 @@ impl Timeline {
                 let layer = guard.drop_eviction_guard();
                 if no_activity_for > p.threshold {
                     // this could cause a lot of allocations in some cases
-                    js.spawn(async move { layer.evict_and_wait().await });
+                    js.spawn(async move {
+                        layer
+                            .evict_and_wait(std::time::Duration::from_secs(5))
+                            .await
+                    });
                     stats.candidates += 1;
                 }
             }
@@ -279,6 +284,9 @@ impl Timeline {
                     Ok(Ok(())) => stats.evicted += 1,
                     Ok(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
                         stats.not_evictable += 1;
+                    }
+                    Ok(Err(EvictionError::Timeout)) => {
+                        stats.timeouts += 1;
                     }
                     Err(je) if je.is_cancelled() => unreachable!("not used"),
                     Err(je) if je.is_panic() => {
@@ -295,7 +303,8 @@ impl Timeline {
             stats = join_all => {
                 if stats.candidates == stats.not_evictable {
                     debug!(stats=?stats, "eviction iteration complete");
-                } else if stats.errors > 0 || stats.not_evictable > 0 {
+                } else if stats.errors > 0 || stats.not_evictable > 0 || stats.timeouts > 0 {
+                    // reminder: timeouts are not eviction cancellations
                     warn!(stats=?stats, "eviction iteration complete");
                 } else {
                     info!(stats=?stats, "eviction iteration complete");

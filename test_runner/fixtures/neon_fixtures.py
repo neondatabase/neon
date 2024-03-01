@@ -2180,6 +2180,11 @@ class NeonAttachmentService(MetricsGetter):
         self.stop(immediate=True)
 
 
+@dataclass
+class LogCursor:
+    _line_no: int
+
+
 class NeonPageserver(PgProtocol):
     """
     An object representing a running pageserver.
@@ -2343,7 +2348,18 @@ class NeonPageserver(PgProtocol):
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
 
-    def log_contains(self, pattern: str) -> Optional[str]:
+    def assert_log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Tuple[str, LogCursor]:
+        """Convenient for use inside wait_until()"""
+
+        res = self.log_contains(pattern, offset=offset)
+        assert res is not None
+        return res
+
+    def log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Optional[Tuple[str, LogCursor]]:
         """Check that the pageserver log contains a line that matches the given regex"""
         logfile = self.workdir / "pageserver.log"
         if not logfile.exists():
@@ -2357,12 +2373,17 @@ class NeonPageserver(PgProtocol):
         # no guarantee it is already present in the log file. This hasn't
         # been a problem in practice, our python tests are not fast enough
         # to hit that race condition.
+        skip_until_line_no = 0 if offset is None else offset._line_no
+        cur_line_no = 0
         with logfile.open("r") as f:
             for line in f:
+                if cur_line_no < skip_until_line_no:
+                    cur_line_no += 1
+                    continue
                 if contains_re.search(line):
                     # found it!
-                    return line
-
+                    cur_line_no += 1
+                    return (line, LogCursor(cur_line_no))
         return None
 
     def tenant_attach(
