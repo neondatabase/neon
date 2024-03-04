@@ -18,8 +18,6 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use postgres::{Client, NoTls};
-use tokio;
-use tokio_postgres;
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;

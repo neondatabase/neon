@@ -1132,11 +1132,9 @@ jobs:
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main \
+            gh workflow --repo neondatabase/aws run deploy-proxy-prod.yml --ref main \
               -f deployPgSniRouter=true \
               -f deployProxy=true \
-              -f deployStorage=false \
-              -f deployStorageBroker=false \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           else

@@ -43,7 +43,6 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
-use hex;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;

@@ -9,7 +9,7 @@ use attachment_service::http::make_router;
 use attachment_service::metrics::preinitialize_metrics;
 use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
-use aws_config::{self, BehaviorVersion, Region};
+use aws_config::{BehaviorVersion, Region};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use diesel::Connection;

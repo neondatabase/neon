@@ -1,7 +1,5 @@
-use tracing;
-use tracing::error;
-use tracing::info;
 use tracing::instrument;
+use tracing::{error, info};
 
 use crate::metrics::WalRedoKillCause;
 use crate::metrics::WAL_REDO_PROCESS_COUNTERS;

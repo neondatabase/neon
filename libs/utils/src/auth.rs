@@ -1,7 +1,6 @@
 // For details about authentication see docs/authentication.md
 
 use arc_swap::ArcSwap;
-use serde;
 use std::{borrow::Cow, fmt::Display, fs, sync::Arc};
 
 use anyhow::Result;
