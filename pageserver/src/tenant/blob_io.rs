@@ -12,7 +12,7 @@
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
 use bytes::{BufMut, BytesMut};
-use tokio_epoll_uring::{BoundedBuf, Slice};
+use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
@@ -127,7 +127,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// You need to make sure that the internal buffer is empty, otherwise
     /// data will be written in wrong order.
     #[inline(always)]
-    async fn write_all_unbuffered<B: BoundedBuf>(
+    async fn write_all_unbuffered<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         src_buf: B,
     ) -> (B::Buf, Result<(), Error>) {
@@ -162,7 +162,10 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     }
 
     /// Internal, possibly buffered, write function
-    async fn write_all<B: BoundedBuf>(&mut self, src_buf: B) -> (B::Buf, Result<(), Error>) {
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        src_buf: B,
+    ) -> (B::Buf, Result<(), Error>) {
         if !BUFFERED {
             assert!(self.buf.is_empty());
             return self.write_all_unbuffered(src_buf).await;
@@ -210,7 +213,10 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
 
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
-    pub async fn write_blob<B: BoundedBuf>(&mut self, srcbuf: B) -> (B::Buf, Result<u64, Error>) {
+    pub async fn write_blob<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        srcbuf: B,
+    ) -> (B::Buf, Result<u64, Error>) {
         let offset = self.offset;
 
         let len = srcbuf.bytes_init();
