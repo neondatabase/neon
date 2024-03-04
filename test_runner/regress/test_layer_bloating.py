@@ -6,6 +6,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     logical_replication_sync,
+    wait_for_last_flush_lsn,
 )
 from fixtures.pg_version import PgVersion
 
@@ -52,6 +53,7 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
     cur.execute("select create_snapshots(10000)")
     # Wait logical replication to sync
     logical_replication_sync(vanilla_pg, endpoint)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, timeline)
     time.sleep(10)
 
     # Check layer file sizes

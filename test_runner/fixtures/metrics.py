@@ -4,6 +4,8 @@ from typing import Dict, List, Optional, Tuple
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
 
+from fixtures.log_helper import log
+
 
 class Metrics:
     metrics: Dict[str, List[Sample]]
@@ -31,6 +33,60 @@ class Metrics:
         return res[0]
 
 
+class MetricsGetter:
+    """
+    Mixin for types that implement a `get_metrics` function and would like associated
+    helpers for querying the metrics
+    """
+
+    def get_metrics(self) -> Metrics:
+        raise NotImplementedError()
+
+    def get_metric_value(
+        self, name: str, filter: Optional[Dict[str, str]] = None
+    ) -> Optional[float]:
+        metrics = self.get_metrics()
+        results = metrics.query_all(name, filter=filter)
+        if not results:
+            log.info(f'could not find metric "{name}"')
+            return None
+        assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
+        return results[0].value
+
+    def get_metrics_values(
+        self, names: list[str], filter: Optional[Dict[str, str]] = None, absence_ok=False
+    ) -> Dict[str, float]:
+        """
+        When fetching multiple named metrics, it is more efficient to use this
+        than to call `get_metric_value` repeatedly.
+
+        Throws RuntimeError if no metrics matching `names` are found, or if
+        not all of `names` are found: this method is intended for loading sets
+        of metrics whose existence is coupled.
+
+        If it's expected that there may be no results for some of the metrics,
+        specify `absence_ok=True`. The returned dict will then not contain values
+        for these metrics.
+        """
+        metrics = self.get_metrics()
+        samples = []
+        for name in names:
+            samples.extend(metrics.query_all(name, filter=filter))
+
+        result = {}
+        for sample in samples:
+            if sample.name in result:
+                raise RuntimeError(f"Multiple values found for {sample.name}")
+            result[sample.name] = sample.value
+
+        if not absence_ok:
+            if len(result) != len(names):
+                log.info(f"Metrics found: {metrics.metrics}")
+                raise RuntimeError(f"could not find all metrics {' '.join(names)}")
+
+        return result
+
+
 def parse_metrics(text: str, name: str = "") -> Metrics:
     metrics = Metrics(name)
     gen = text_string_to_metric_families(text)
@@ -47,7 +103,8 @@ def histogram(prefix_without_trailing_underscore: str) -> List[str]:
 
 
 PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
-    "pageserver_remote_timeline_client_calls_unfinished",
+    "pageserver_remote_timeline_client_calls_started_total",
+    "pageserver_remote_timeline_client_calls_finished_total",
     "pageserver_remote_physical_size",
     "pageserver_remote_timeline_client_bytes_started_total",
     "pageserver_remote_timeline_client_bytes_finished_total",
@@ -76,7 +133,6 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *histogram("pageserver_getpage_get_reconstruct_data_seconds"),
     *histogram("pageserver_wait_lsn_seconds"),
     *histogram("pageserver_remote_operation_seconds"),
-    *histogram("pageserver_remote_timeline_client_calls_started"),
     *histogram("pageserver_io_operations_seconds"),
     "pageserver_tenant_states_count",
 )
@@ -91,8 +147,6 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_smgr_query_seconds_sum",
     "pageserver_storage_operations_seconds_count_total",
     "pageserver_storage_operations_seconds_sum_total",
-    "pageserver_created_persistent_files_total",
-    "pageserver_written_persistent_bytes_total",
     "pageserver_evictions_total",
     "pageserver_evictions_with_low_residence_duration_total",
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,

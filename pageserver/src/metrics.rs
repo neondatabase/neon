@@ -4,8 +4,8 @@ use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
-    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPairVec,
-    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPair,
+    IntCounterPairVec, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
@@ -642,26 +642,6 @@ pub(crate) static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|
     .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
 });
 
-// Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
-// or in testing they estimate how much we would upload if we did.
-static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_created_persistent_files_total",
-        "Number of files created that are meant to be uploaded to cloud storage",
-        &["tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
-static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_written_persistent_bytes_total",
-        "Total bytes written that are meant to be uploaded to cloud storage",
-        &["tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_eviction_iteration_duration_seconds_global",
@@ -1266,13 +1246,12 @@ pub(crate) static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
 
 // remote storage metrics
 
-/// NB: increment _after_ recording the current value into [`REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST`].
-static REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_remote_timeline_client_calls_unfinished",
-        "Number of ongoing calls to remote timeline client. \
-         Used to populate pageserver_remote_timeline_client_calls_started. \
-         This metric is not useful for sampling from Prometheus, but useful in tests.",
+static REMOTE_TIMELINE_CLIENT_CALLS: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_remote_timeline_client_calls_started",
+        "Number of started calls to remote timeline client.",
+        "pageserver_remote_timeline_client_calls_finished",
+        "Number of finshed calls to remote timeline client.",
         &[
             "tenant_id",
             "shard_id",
@@ -1281,23 +1260,7 @@ static REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::
             "op_kind"
         ],
     )
-    .expect("failed to define a metric")
-});
-
-static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_remote_timeline_client_calls_started",
-        "When calling a remote timeline client method, we record the current value \
-         of the calls_unfinished gauge in this histogram. Plot the histogram \
-         over time in a heatmap to visualize how many operations were ongoing \
-         at a given instant. It gives you a better idea of the queue depth \
-         than plotting the gauge directly, since operations may complete faster \
-         than the sampling interval.",
-        &["file_kind", "op_kind"],
-        // The calls_unfinished gauge is an integer gauge, hence we have integer buckets.
-        vec![0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 40.0, 60.0, 80.0, 100.0, 500.0],
-    )
-    .expect("failed to define a metric")
+    .unwrap()
 });
 
 static REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER: Lazy<IntCounterVec> =
@@ -1819,8 +1782,6 @@ pub(crate) struct TimelineMetrics {
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
-    pub num_persistent_files_created: IntCounter,
-    pub persistent_bytes_written: IntCounter,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
 }
@@ -1902,12 +1863,6 @@ impl TimelineMetrics {
         };
         let directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>> =
             Lazy::new(Box::new(directory_entries_count_gauge_closure));
-        let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
-        let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -1929,8 +1884,6 @@ impl TimelineMetrics {
             resident_physical_size_gauge,
             current_logical_size_gauge,
             directory_entries_count_gauge,
-            num_persistent_files_created,
-            persistent_bytes_written,
             evictions,
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
@@ -1940,8 +1893,6 @@ impl TimelineMetrics {
 
     pub(crate) fn record_new_file_metrics(&self, sz: u64) {
         self.resident_physical_size_add(sz);
-        self.num_persistent_files_created.inc_by(1);
-        self.persistent_bytes_written.inc_by(sz);
     }
 
     pub(crate) fn resident_physical_size_sub(&self, sz: u64) {
@@ -1964,20 +1915,16 @@ impl Drop for TimelineMetrics {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
-        let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
-            let _ =
-                RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+            let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
-        let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         if let Some(metric) = Lazy::get(&DIRECTORY_ENTRIES_COUNT) {
-            let _ = metric.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+            let _ = metric.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
-        let _ =
-            NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
-        let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
-        let _ = EVICTIONS.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
@@ -2078,7 +2025,7 @@ pub(crate) struct RemoteTimelineClientMetrics {
     shard_id: String,
     timeline_id: String,
     remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
-    calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
+    calls: Mutex<HashMap<(&'static str, &'static str), IntCounterPair>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
 }
@@ -2089,7 +2036,7 @@ impl RemoteTimelineClientMetrics {
             tenant_id: tenant_shard_id.tenant_id.to_string(),
             shard_id: format!("{}", tenant_shard_id.shard_slug()),
             timeline_id: timeline_id.to_string(),
-            calls_unfinished_gauge: Mutex::new(HashMap::default()),
+            calls: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
             bytes_finished_counter: Mutex::new(HashMap::default()),
             remote_physical_size_gauge: Mutex::new(None),
@@ -2129,15 +2076,15 @@ impl RemoteTimelineClientMetrics {
             .unwrap()
     }
 
-    fn calls_unfinished_gauge(
+    fn calls_counter_pair(
         &self,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
-    ) -> IntGauge {
-        let mut guard = self.calls_unfinished_gauge.lock().unwrap();
+    ) -> IntCounterPair {
+        let mut guard = self.calls.lock().unwrap();
         let key = (file_kind.as_str(), op_kind.as_str());
         let metric = guard.entry(key).or_insert_with(move || {
-            REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE
+            REMOTE_TIMELINE_CLIENT_CALLS
                 .get_metric_with_label_values(&[
                     &self.tenant_id,
                     &self.shard_id,
@@ -2148,17 +2095,6 @@ impl RemoteTimelineClientMetrics {
                 .unwrap()
         });
         metric.clone()
-    }
-
-    fn calls_started_hist(
-        &self,
-        file_kind: &RemoteOpFileKind,
-        op_kind: &RemoteOpKind,
-    ) -> Histogram {
-        let key = (file_kind.as_str(), op_kind.as_str());
-        REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST
-            .get_metric_with_label_values(&[key.0, key.1])
-            .unwrap()
     }
 
     fn bytes_started_counter(
@@ -2231,7 +2167,7 @@ impl RemoteTimelineClientMetrics {
 #[must_use]
 pub(crate) struct RemoteTimelineClientCallMetricGuard {
     /// Decremented on drop.
-    calls_unfinished_metric: Option<IntGauge>,
+    calls_counter_pair: Option<IntCounterPair>,
     /// If Some(), this references the bytes_finished metric, and we increment it by the given `u64` on drop.
     bytes_finished: Option<(IntCounter, u64)>,
 }
@@ -2241,10 +2177,10 @@ impl RemoteTimelineClientCallMetricGuard {
     /// The caller vouches to do the metric updates manually.
     pub fn will_decrement_manually(mut self) {
         let RemoteTimelineClientCallMetricGuard {
-            calls_unfinished_metric,
+            calls_counter_pair,
             bytes_finished,
         } = &mut self;
-        calls_unfinished_metric.take();
+        calls_counter_pair.take();
         bytes_finished.take();
     }
 }
@@ -2252,10 +2188,10 @@ impl RemoteTimelineClientCallMetricGuard {
 impl Drop for RemoteTimelineClientCallMetricGuard {
     fn drop(&mut self) {
         let RemoteTimelineClientCallMetricGuard {
-            calls_unfinished_metric,
+            calls_counter_pair,
             bytes_finished,
         } = self;
-        if let Some(guard) = calls_unfinished_metric.take() {
+        if let Some(guard) = calls_counter_pair.take() {
             guard.dec();
         }
         if let Some((bytes_finished_metric, value)) = bytes_finished {
@@ -2288,10 +2224,8 @@ impl RemoteTimelineClientMetrics {
         op_kind: &RemoteOpKind,
         size: RemoteTimelineClientMetricsCallTrackSize,
     ) -> RemoteTimelineClientCallMetricGuard {
-        let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
-        self.calls_started_hist(file_kind, op_kind)
-            .observe(calls_unfinished_metric.get() as f64);
-        calls_unfinished_metric.inc(); // NB: inc after the histogram, see comment on underlying metric
+        let calls_counter_pair = self.calls_counter_pair(file_kind, op_kind);
+        calls_counter_pair.inc();
 
         let bytes_finished = match size {
             RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {
@@ -2305,7 +2239,7 @@ impl RemoteTimelineClientMetrics {
             }
         };
         RemoteTimelineClientCallMetricGuard {
-            calls_unfinished_metric: Some(calls_unfinished_metric),
+            calls_counter_pair: Some(calls_counter_pair),
             bytes_finished,
         }
     }
@@ -2319,12 +2253,8 @@ impl RemoteTimelineClientMetrics {
         op_kind: &RemoteOpKind,
         size: RemoteTimelineClientMetricsCallTrackSize,
     ) {
-        let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
-        debug_assert!(
-            calls_unfinished_metric.get() > 0,
-            "begin and end should cancel out"
-        );
-        calls_unfinished_metric.dec();
+        let calls_counter_pair = self.calls_counter_pair(file_kind, op_kind);
+        calls_counter_pair.dec();
         match size {
             RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {}
             RemoteTimelineClientMetricsCallTrackSize::Bytes(size) => {
@@ -2341,18 +2271,15 @@ impl Drop for RemoteTimelineClientMetrics {
             shard_id,
             timeline_id,
             remote_physical_size_gauge,
-            calls_unfinished_gauge,
+            calls,
             bytes_started_counter,
             bytes_finished_counter,
         } = self;
-        for ((a, b), _) in calls_unfinished_gauge.get_mut().unwrap().drain() {
-            let _ = REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE.remove_label_values(&[
-                tenant_id,
-                shard_id,
-                timeline_id,
-                a,
-                b,
-            ]);
+        for ((a, b), _) in calls.get_mut().unwrap().drain() {
+            let mut res = [Ok(()), Ok(())];
+            REMOTE_TIMELINE_CLIENT_CALLS
+                .remove_label_values(&mut res, &[tenant_id, shard_id, timeline_id, a, b]);
+            // don't care about results
         }
         for ((a, b), _) in bytes_started_counter.get_mut().unwrap().drain() {
             let _ = REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER.remove_label_values(&[
@@ -2546,6 +2473,64 @@ pub(crate) mod tenant_throttling {
     }
 }
 
+pub(crate) mod disk_usage_based_eviction {
+    use super::*;
+
+    pub(crate) struct Metrics {
+        pub(crate) tenant_collection_time: Histogram,
+        pub(crate) tenant_layer_count: Histogram,
+        pub(crate) layers_collected: IntCounter,
+        pub(crate) layers_selected: IntCounter,
+        pub(crate) layers_evicted: IntCounter,
+    }
+
+    impl Default for Metrics {
+        fn default() -> Self {
+            let tenant_collection_time = register_histogram!(
+                "pageserver_disk_usage_based_eviction_tenant_collection_seconds",
+                "Time spent collecting layers from a tenant -- not normalized by collected layer amount",
+                vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
+            )
+            .unwrap();
+
+            let tenant_layer_count = register_histogram!(
+                "pageserver_disk_usage_based_eviction_tenant_collected_layers",
+                "Amount of layers gathered from a tenant",
+                vec![5.0, 50.0, 500.0, 5000.0, 50000.0]
+            )
+            .unwrap();
+
+            let layers_collected = register_int_counter!(
+                "pageserver_disk_usage_based_eviction_collected_layers_total",
+                "Amount of layers collected"
+            )
+            .unwrap();
+
+            let layers_selected = register_int_counter!(
+                "pageserver_disk_usage_based_eviction_select_layers_total",
+                "Amount of layers selected"
+            )
+            .unwrap();
+
+            let layers_evicted = register_int_counter!(
+                "pageserver_disk_usage_based_eviction_evicted_layers_total",
+                "Amount of layers successfully evicted"
+            )
+            .unwrap();
+
+            Self {
+                tenant_collection_time,
+                tenant_layer_count,
+                layers_collected,
+                layers_selected,
+                layers_evicted,
+            }
+        }
+    }
+
+    pub(crate) static METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
+}
+
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //
@@ -2580,6 +2565,7 @@ pub fn preinitialize_metrics() {
     Lazy::force(&TENANT_MANAGER);
 
     Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
+    Lazy::force(&disk_usage_based_eviction::METRICS);
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]

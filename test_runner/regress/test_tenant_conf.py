@@ -270,7 +270,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         "period": "20s",
         "threshold": "23h",
     }
-    assert final_effective_config["max_lsn_wal_lag"] == 10 * 1024 * 1024
+    assert final_effective_config["max_lsn_wal_lag"] == 1024 * 1024 * 1024
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -299,8 +299,7 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 
     # tenant is created with defaults, as in without config file
     (tenant_id, timeline_id) = env.neon_cli.create_tenant()
-    config_path = env.pageserver.tenant_dir(tenant_id) / "config"
-    assert config_path.exists(), "config file is always initially created"
+    config_path = env.pageserver.tenant_dir(tenant_id) / "config-v1"
 
     http_client = env.pageserver.http_client()
 

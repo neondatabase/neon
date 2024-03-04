@@ -166,6 +166,10 @@ struct Args {
     /// useful for debugging.
     #[arg(long)]
     current_thread_runtime: bool,
+    /// Keep horizon for walsenders, i.e. don't remove WAL segments that are
+    /// still needed for existing replication connection.
+    #[arg(long)]
+    walsenders_keep_horizon: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -295,6 +299,7 @@ async fn main() -> anyhow::Result<()> {
         pg_tenant_only_auth,
         http_auth,
         current_thread_runtime: args.current_thread_runtime,
+        walsenders_keep_horizon: args.walsenders_keep_horizon,
     };
 
     // initialize sentry if SENTRY_DSN is provided

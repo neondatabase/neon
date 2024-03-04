@@ -1,9 +1,16 @@
-use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
+use pageserver_api::controller_api::{NodeAvailability, NodeSchedulingPolicy};
+use serde::Serialize;
 use utils::id::NodeId;
 
 use crate::persistence::NodePersistence;
 
-#[derive(Clone)]
+/// Represents the in-memory description of a Node.
+///
+/// Scheduling statistics are maintened separately in [`crate::scheduler`].
+///
+/// The persistent subset of the Node is defined in [`crate::persistence::NodePersistence`]: the
+/// implementation of serialization on this type is only for debug dumps.
+#[derive(Clone, Serialize)]
 pub(crate) struct Node {
     pub(crate) id: NodeId,
 

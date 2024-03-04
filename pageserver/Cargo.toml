@@ -73,6 +73,7 @@ url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
 pageserver_api.workspace = true
+pageserver_compaction.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true
 pq_proto.workspace = true

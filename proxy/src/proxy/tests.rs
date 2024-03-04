@@ -16,7 +16,8 @@ use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBacken
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
-use crate::{auth, http, sasl, scram};
+use crate::{http, sasl, scram};
+use anyhow::{bail, Context};
 use async_trait::async_trait;
 use rstest::rstest;
 use tokio_postgres::config::SslMode;
@@ -132,9 +133,8 @@ struct Scram(scram::ServerSecret);
 
 impl Scram {
     fn new(password: &str) -> anyhow::Result<Self> {
-        let salt = rand::random::<[u8; 16]>();
-        let secret = scram::ServerSecret::build(password, &salt, 256)
-            .context("failed to generate scram secret")?;
+        let secret =
+            scram::ServerSecret::build(password).context("failed to generate scram secret")?;
         Ok(Scram(secret))
     }
 

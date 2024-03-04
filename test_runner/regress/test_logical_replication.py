@@ -1,4 +1,5 @@
 import time
+from functools import partial
 from random import choice
 from string import ascii_lowercase
 
@@ -10,7 +11,7 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.types import Lsn
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
 
 
 def random_string(n: int):
@@ -155,6 +156,51 @@ COMMIT;
     endpoint.start()
     # it must be gone (but walproposer slot still exists, hence 1)
     assert endpoint.safe_psql("select count(*) from pg_replication_slots")[0][0] == 1
+
+
+# Test that neon.logical_replication_max_snap_files works
+def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
+    def slot_removed(ep):
+        assert (
+            endpoint.safe_psql(
+                "select count(*) from pg_replication_slots where slot_name = 'stale_slot'"
+            )[0][0]
+            == 0
+        )
+
+    env = neon_simple_env
+
+    env.neon_cli.create_branch("test_logical_replication", "empty")
+    # set low neon.logical_replication_max_snap_files
+    endpoint = env.endpoints.create_start(
+        "test_logical_replication",
+        config_lines=["log_statement=all", "neon.logical_replication_max_snap_files=1"],
+    )
+
+    pg_conn = endpoint.connect()
+    cur = pg_conn.cursor()
+
+    # create obsolete slot
+    cur.execute("select pg_create_logical_replication_slot('stale_slot', 'pgoutput');")
+    assert (
+        endpoint.safe_psql(
+            "select count(*) from pg_replication_slots where slot_name = 'stale_slot'"
+        )[0][0]
+        == 1
+    )
+
+    # now insert some data and create and start live subscriber to create more .snap files
+    # (in most cases this is not needed as stale_slot snap will have higher LSN than restart_lsn anyway)
+    cur.execute("create table t(pk integer primary key, payload integer)")
+    cur.execute("create publication pub1 for table t")
+
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create table t(pk integer primary key, payload integer)")
+    connstr = endpoint.connstr().replace("'", "''")
+    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
+
+    wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
 
 
 # Test compute start at LSN page of which starts with contrecord

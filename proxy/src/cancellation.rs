@@ -168,12 +168,11 @@ impl CancelClosure {
             cancel_token,
         }
     }
-
     /// Cancels the query running on user's compute node.
-    async fn try_cancel_query(self) -> Result<(), CancelError> {
+    pub async fn try_cancel_query(self) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
         self.cancel_token.cancel_query_raw(socket, NoTls).await?;
-
+        info!("query was cancelled");
         Ok(())
     }
 }

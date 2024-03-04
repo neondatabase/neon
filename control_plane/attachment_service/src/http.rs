@@ -1,18 +1,19 @@
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use crate::PlacementPolicy;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
-    TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
-    TimelineCreateRequest,
+    TenantConfigRequest, TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
+    TenantTimeTravelRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use utils::auth::SwappableJwtAuth;
-use utils::http::endpoint::{auth_middleware, request_span};
-use utils::http::request::parse_request_param;
+use utils::auth::{Scope, SwappableJwtAuth};
+use utils::http::endpoint::{auth_middleware, check_permission_with, request_span};
+use utils::http::request::{must_get_query_param, parse_request_param};
 use utils::id::{TenantId, TimelineId};
 
 use utils::{
@@ -25,12 +26,12 @@ use utils::{
     id::NodeId,
 };
 
-use pageserver_api::control_api::{ReAttachRequest, ValidateRequest};
-
-use control_plane::attachment_service::{
-    AttachHookRequest, InspectRequest, NodeConfigureRequest, NodeRegisterRequest,
-    TenantShardMigrateRequest,
+use pageserver_api::controller_api::{
+    NodeConfigureRequest, NodeRegisterRequest, TenantShardMigrateRequest,
 };
+use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
+
+use control_plane::attachment_service::{AttachHookRequest, InspectRequest};
 
 /// State available to HTTP request handlers
 #[derive(Clone)]
@@ -64,21 +65,18 @@ fn get_state(request: &Request<Body>) -> &HttpState {
 
 /// Pageserver calls into this on startup, to learn which tenants it should attach
 async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::GenerationsApi)?;
+
     let reattach_req = json_request::<ReAttachRequest>(&mut req).await?;
     let state = get_state(&req);
-    json_response(
-        StatusCode::OK,
-        state
-            .service
-            .re_attach(reattach_req)
-            .await
-            .map_err(ApiError::InternalServerError)?,
-    )
+    json_response(StatusCode::OK, state.service.re_attach(reattach_req).await?)
 }
 
 /// Pageserver calls into this before doing deletions, to confirm that it still
 /// holds the latest generation for the tenants with deletions enqueued
 async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::GenerationsApi)?;
+
     let validate_req = json_request::<ValidateRequest>(&mut req).await?;
     let state = get_state(&req);
     json_response(StatusCode::OK, state.service.validate(validate_req))
@@ -88,6 +86,8 @@ async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiEr
 /// (in the real control plane this is unnecessary, because the same program is managing
 ///  generation numbers and doing attachments).
 async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let attach_req = json_request::<AttachHookRequest>(&mut req).await?;
     let state = get_state(&req);
 
@@ -102,6 +102,8 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
 }
 
 async fn handle_inspect(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let inspect_req = json_request::<InspectRequest>(&mut req).await?;
 
     let state = get_state(&req);
@@ -113,8 +115,18 @@ async fn handle_tenant_create(
     service: Arc<Service>,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::PageServerApi)?;
+
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
-    json_response(StatusCode::OK, service.tenant_create(create_req).await?)
+
+    // TODO: enable specifying this.  Using Single as a default helps legacy tests to work (they
+    // have no expectation of HA).
+    let placement_policy = PlacementPolicy::Single;
+
+    json_response(
+        StatusCode::CREATED,
+        service.tenant_create(create_req, placement_policy).await?,
+    )
 }
 
 // For tenant and timeline deletions, which both implement an "initially return 202, then 404 once
@@ -168,6 +180,8 @@ async fn handle_tenant_location_config(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
     let config_req = json_request::<TenantLocationConfigRequest>(&mut req).await?;
     json_response(
         StatusCode::OK,
@@ -177,11 +191,76 @@ async fn handle_tenant_location_config(
     )
 }
 
+async fn handle_tenant_config_set(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let config_req = json_request::<TenantConfigRequest>(&mut req).await?;
+
+    json_response(StatusCode::OK, service.tenant_config_set(config_req).await?)
+}
+
+async fn handle_tenant_config_get(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    json_response(StatusCode::OK, service.tenant_config_get(tenant_id)?)
+}
+
+async fn handle_tenant_time_travel_remote_storage(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let time_travel_req = json_request::<TenantTimeTravelRequest>(&mut req).await?;
+
+    let timestamp_raw = must_get_query_param(&req, "travel_to")?;
+    let _timestamp = humantime::parse_rfc3339(&timestamp_raw).map_err(|_e| {
+        ApiError::BadRequest(anyhow::anyhow!(
+            "Invalid time for travel_to: {timestamp_raw:?}"
+        ))
+    })?;
+
+    let done_if_after_raw = must_get_query_param(&req, "done_if_after")?;
+    let _done_if_after = humantime::parse_rfc3339(&done_if_after_raw).map_err(|_e| {
+        ApiError::BadRequest(anyhow::anyhow!(
+            "Invalid time for done_if_after: {done_if_after_raw:?}"
+        ))
+    })?;
+
+    service
+        .tenant_time_travel_remote_storage(
+            &time_travel_req,
+            tenant_id,
+            timestamp_raw,
+            done_if_after_raw,
+        )
+        .await?;
+    json_response(StatusCode::OK, ())
+}
+
+async fn handle_tenant_secondary_download(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    service.tenant_secondary_download(tenant_id).await?;
+    json_response(StatusCode::OK, ())
+}
+
 async fn handle_tenant_delete(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
 
     deletion_wrapper(service, move |service| async move {
         service.tenant_delete(tenant_id).await
@@ -194,9 +273,11 @@ async fn handle_tenant_timeline_create(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
     let create_req = json_request::<TimelineCreateRequest>(&mut req).await?;
     json_response(
-        StatusCode::OK,
+        StatusCode::CREATED,
         service
             .tenant_timeline_create(tenant_id, create_req)
             .await?,
@@ -208,6 +289,8 @@ async fn handle_tenant_timeline_delete(
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
     deletion_wrapper(service, move |service| async move {
@@ -221,6 +304,7 @@ async fn handle_tenant_timeline_passthrough(
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
 
     let Some(path) = req.uri().path_and_query() else {
         // This should never happen, our request router only calls us if there is a path
@@ -264,11 +348,15 @@ async fn handle_tenant_locate(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     json_response(StatusCode::OK, service.tenant_locate(tenant_id)?)
 }
 
 async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let register_req = json_request::<NodeRegisterRequest>(&mut req).await?;
     let state = get_state(&req);
     state.service.node_register(register_req).await?;
@@ -276,17 +364,23 @@ async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, 
 }
 
 async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let state = get_state(&req);
     json_response(StatusCode::OK, state.service.node_list().await?)
 }
 
 async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
 }
 
 async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     let config_req = json_request::<NodeConfigureRequest>(&mut req).await?;
     if node_id != config_req.node_id {
@@ -296,13 +390,18 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
     }
     let state = get_state(&req);
 
-    json_response(StatusCode::OK, state.service.node_configure(config_req)?)
+    json_response(
+        StatusCode::OK,
+        state.service.node_configure(config_req).await?,
+    )
 }
 
 async fn handle_tenant_shard_split(
     service: Arc<Service>,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let split_req = json_request::<TenantShardSplitRequest>(&mut req).await?;
 
@@ -316,6 +415,8 @@ async fn handle_tenant_shard_migrate(
     service: Arc<Service>,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
     let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     let migrate_req = json_request::<TenantShardMigrateRequest>(&mut req).await?;
     json_response(
@@ -328,9 +429,33 @@ async fn handle_tenant_shard_migrate(
 
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
     let state = get_state(&req);
 
     json_response(StatusCode::OK, state.service.tenant_drop(tenant_id).await?)
+}
+
+async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    state.service.tenants_dump()
+}
+
+async fn handle_scheduler_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    state.service.scheduler_dump()
+}
+
+async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+
+    json_response(StatusCode::OK, state.service.consistency_check().await?)
 }
 
 /// Status endpoint is just used for checking that our HTTP listener is up
@@ -384,6 +509,12 @@ where
     .await
 }
 
+fn check_permissions(request: &Request<Body>, required_scope: Scope) -> Result<(), ApiError> {
+    check_permission_with(request, |claims| {
+        crate::auth::check_permission(claims, required_scope)
+    })
+}
+
 pub fn make_router(
     service: Arc<Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
@@ -421,6 +552,13 @@ pub fn make_router(
         .post("/debug/v1/node/:node_id/drop", |r| {
             request_span(r, handle_node_drop)
         })
+        .get("/debug/v1/tenant", |r| request_span(r, handle_tenants_dump))
+        .get("/debug/v1/scheduler", |r| {
+            request_span(r, handle_scheduler_dump)
+        })
+        .post("/debug/v1/consistency_check", |r| {
+            request_span(r, handle_consistency_check)
+        })
         .get("/control/v1/tenant/:tenant_id/locate", |r| {
             tenant_service_handler(r, handle_tenant_locate)
         })
@@ -448,8 +586,20 @@ pub fn make_router(
         .delete("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(r, handle_tenant_delete)
         })
+        .put("/v1/tenant/config", |r| {
+            tenant_service_handler(r, handle_tenant_config_set)
+        })
+        .get("/v1/tenant/:tenant_id/config", |r| {
+            tenant_service_handler(r, handle_tenant_config_get)
+        })
         .put("/v1/tenant/:tenant_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
+        })
+        .put("/v1/tenant/:tenant_id/time_travel_remote_storage", |r| {
+            tenant_service_handler(r, handle_tenant_time_travel_remote_storage)
+        })
+        .post("/v1/tenant/:tenant_id/secondary/download", |r| {
+            tenant_service_handler(r, handle_tenant_secondary_download)
         })
         // Timeline operations
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {

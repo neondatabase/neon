@@ -1,7 +1,6 @@
 // For details about authentication see docs/authentication.md
 
 use arc_swap::ArcSwap;
-use serde;
 use std::{borrow::Cow, fmt::Display, fs, sync::Arc};
 
 use anyhow::Result;
@@ -32,6 +31,8 @@ pub enum Scope {
     // The scope used by pageservers in upcalls to storage controller and cloud control plane
     #[serde(rename = "generations_api")]
     GenerationsApi,
+    // Allows access to control plane managment API and some storage controller endpoints.
+    Admin,
 }
 
 /// JWT payload. See docs/authentication.md for the format
@@ -204,12 +205,11 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         //   "scope": "tenant",
         //   "tenant_id": "3d1f7595b468230304e0b73cecbcb081",
         //   "iss": "neon.controlplane",
-        //   "exp": 1709200879,
         //   "iat": 1678442479
         // }
         // ```
         //
-        let encoded_eddsa = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzY29wZSI6InRlbmFudCIsInRlbmFudF9pZCI6IjNkMWY3NTk1YjQ2ODIzMDMwNGUwYjczY2VjYmNiMDgxIiwiaXNzIjoibmVvbi5jb250cm9scGxhbmUiLCJleHAiOjE3MDkyMDA4NzksImlhdCI6MTY3ODQ0MjQ3OX0.U3eA8j-uU-JnhzeO3EDHRuXLwkAUFCPxtGHEgw6p7Ccc3YRbFs2tmCdbD9PZEXP-XsxSeBQi1FY0YPcT3NXADw";
+        let encoded_eddsa = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzY29wZSI6InRlbmFudCIsInRlbmFudF9pZCI6IjNkMWY3NTk1YjQ2ODIzMDMwNGUwYjczY2VjYmNiMDgxIiwiaXNzIjoibmVvbi5jb250cm9scGxhbmUiLCJpYXQiOjE2Nzg0NDI0Nzl9.rNheBnluMJNgXzSTTJoTNIGy4P_qe0JUHl_nVEGuDCTgHOThPVr552EnmKccrCKquPeW3c2YUk0Y9Oh4KyASAw";
 
         // Check it can be validated with the public key
         let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap()]);

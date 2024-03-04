@@ -5,7 +5,7 @@
 use super::ephemeral_file::EphemeralFile;
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
-use crate::page_cache::{self, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
+use crate::page_cache::{self, FileId, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::Deref;
@@ -78,7 +78,7 @@ impl<'a> Deref for BlockLease<'a> {
 ///
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
-    FileBlockReader(&'a FileBlockReader),
+    FileBlockReader(&'a FileBlockReader<'a>),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
@@ -160,17 +160,15 @@ impl<'a> BlockCursor<'a> {
 ///
 /// The file is assumed to be immutable. This doesn't provide any functions
 /// for modifying the file, nor for invalidating the cache if it is modified.
-pub struct FileBlockReader {
-    pub file: VirtualFile,
+pub struct FileBlockReader<'a> {
+    pub file: &'a VirtualFile,
 
     /// Unique ID of this file, used as key in the page cache.
     file_id: page_cache::FileId,
 }
 
-impl FileBlockReader {
-    pub fn new(file: VirtualFile) -> Self {
-        let file_id = page_cache::next_file_id();
-
+impl<'a> FileBlockReader<'a> {
+    pub fn new(file: &'a VirtualFile, file_id: FileId) -> Self {
         FileBlockReader { file_id, file }
     }
 
@@ -190,11 +188,11 @@ impl FileBlockReader {
     /// Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
-    pub async fn read_blk(
+    pub async fn read_blk<'b>(
         &self,
         blknum: u32,
         ctx: &RequestContext,
-    ) -> Result<BlockLease, std::io::Error> {
+    ) -> Result<BlockLease<'b>, std::io::Error> {
         let cache = page_cache::get();
         match cache
             .read_immutable_buf(self.file_id, blknum, ctx)
@@ -215,7 +213,7 @@ impl FileBlockReader {
     }
 }
 
-impl BlockReader for FileBlockReader {
+impl BlockReader for FileBlockReader<'_> {
     fn block_cursor(&self) -> BlockCursor<'_> {
         BlockCursor::new(BlockReaderRef::FileBlockReader(self))
     }

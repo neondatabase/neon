@@ -130,7 +130,6 @@ FAILPOINTS = [
     "timeline-delete-before-index-deleted-at",
     "timeline-delete-before-rm",
     "timeline-delete-before-index-delete",
-    "timeline-delete-after-rm-dir",
 ]
 
 FAILPOINTS_BEFORE_BACKGROUND = [
@@ -506,10 +505,10 @@ def test_tenant_delete_concurrent(
         return ps_http.tenant_delete(tenant_id)
 
     def hit_remove_failpoint():
-        assert env.pageserver.log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")
+        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")
 
     def hit_run_failpoint():
-        assert env.pageserver.log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}")
+        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}")
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         background_200_req = executor.submit(delete_tenant)
@@ -613,12 +612,12 @@ def test_tenant_delete_races_timeline_creation(
     Thread(target=timeline_create).start()
 
     def hit_initdb_upload_failpoint():
-        assert env.pageserver.log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
+        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
 
     wait_until(100, 0.1, hit_initdb_upload_failpoint)
 
     def creation_connection_timed_out():
-        assert env.pageserver.log_contains(
+        env.pageserver.assert_log_contains(
             "POST.*/timeline.* request was dropped before completing"
         )
 
@@ -637,7 +636,7 @@ def test_tenant_delete_races_timeline_creation(
     Thread(target=tenant_delete).start()
 
     def deletion_arrived():
-        assert env.pageserver.log_contains(
+        env.pageserver.assert_log_contains(
             f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
         )
 
@@ -664,7 +663,7 @@ def test_tenant_delete_races_timeline_creation(
     )
 
     # Ensure that creation cancelled and deletion didn't end up in broken state or encountered the leftover temp file
-    assert env.pageserver.log_contains(CANCELLED_ERROR)
+    env.pageserver.assert_log_contains(CANCELLED_ERROR)
     assert not env.pageserver.log_contains(
         ".*ERROR.*delete_tenant.*Timelines directory is not empty after all timelines deletion"
     )

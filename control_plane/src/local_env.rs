@@ -412,14 +412,17 @@ impl LocalEnv {
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
-        let private_key_path = if self.private_key_path.is_absolute() {
+        let private_key_path = self.get_private_key_path();
+        let key_data = fs::read(private_key_path)?;
+        encode_from_key_file(claims, &key_data)
+    }
+
+    pub fn get_private_key_path(&self) -> PathBuf {
+        if self.private_key_path.is_absolute() {
             self.private_key_path.to_path_buf()
         } else {
             self.base_data_dir.join(&self.private_key_path)
-        };
-
-        let key_data = fs::read(private_key_path)?;
-        encode_from_key_file(claims, &key_data)
+        }
     }
 
     //

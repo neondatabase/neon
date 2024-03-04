@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::auth::IpPattern;
@@ -98,6 +98,16 @@ pub struct MetricsAuxInfo {
     pub endpoint_id: EndpointId,
     pub project_id: ProjectId,
     pub branch_id: BranchId,
+    pub cold_start_info: Option<ColdStartInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ColdStartInfo {
+    Unknown = 0,
+    Warm = 1,
+    PoolHit = 2,
+    PoolMiss = 3,
 }
 
 #[cfg(test)]
@@ -110,6 +120,7 @@ mod tests {
             "endpoint_id": "endpoint",
             "project_id": "project",
             "branch_id": "branch",
+            "cold_start_info": "unknown",
         })
     }
 

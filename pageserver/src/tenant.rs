@@ -29,7 +29,6 @@ use remote_storage::TimeoutOrCancel;
 use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
-use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -110,7 +109,6 @@ pub use pageserver_api::models::TenantState;
 use tokio::sync::Semaphore;
 
 static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
-use toml_edit;
 use utils::{
     crashsafe,
     generation::Generation,
@@ -146,6 +144,7 @@ macro_rules! pausable_failpoint {
 
 pub mod blob_io;
 pub mod block_io;
+pub mod vectored_blob_io;
 
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
@@ -171,9 +170,6 @@ pub(crate) mod throttle;
 
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
-
-// re-export for use in remote_timeline_client.rs
-pub use crate::tenant::metadata::save_metadata;
 
 // re-export for use in walreceiver
 pub use crate::tenant::timeline::WalReceiverInfo;
@@ -230,7 +226,11 @@ pub(crate) struct TenantPreload {
 /// When we spawn a tenant, there is a special mode for tenant creation that
 /// avoids trying to read anything from remote storage.
 pub(crate) enum SpawnMode {
-    Normal,
+    /// Activate as soon as possible
+    Eager,
+    /// Lazy activation in the background, with the option to skip the queue if the need comes up
+    Lazy,
+    /// Tenant has been created during the lifetime of this process
     Create,
 }
 
@@ -703,41 +703,37 @@ impl Tenant {
                     .and_then(|x| x.initial_tenant_load_remote.take());
 
                 enum AttachType<'a> {
-                    // During pageserver startup, we are attaching this tenant lazily in the background
-                    Warmup(tokio::sync::SemaphorePermit<'a>),
-                    // During pageserver startup, we are attaching this tenant as soon as we can,
-                    // because a client tried to access it.
+                    /// We are attaching this tenant lazily in the background.
+                    Warmup {
+                        _permit: tokio::sync::SemaphorePermit<'a>,
+                        during_startup: bool
+                    },
+                    /// We are attaching this tenant as soon as we can, because for example an
+                    /// endpoint tried to access it.
                     OnDemand,
-                    // During normal operations after startup, we are attaching a tenant.
+                    /// During normal operations after startup, we are attaching a tenant, and
+                    /// eager attach was requested.
                     Normal,
                 }
 
-                // Before doing any I/O, wait for either or:
-                // - A client to attempt to access to this tenant (on-demand loading)
-                // - A permit to become available in the warmup semaphore (background warmup)
-                //
-                // Some-ness of init_order is how we know if we're attaching during startup or later
-                // in process lifetime.
-                let attach_type = if init_order.is_some() {
+                let attach_type = if matches!(mode, SpawnMode::Lazy) {
+                    // Before doing any I/O, wait for at least one of:
+                    // - A client attempting to access to this tenant (on-demand loading)
+                    // - A permit becoming available in the warmup semaphore (background warmup)
+
                     tokio::select!(
-                        _ = tenant_clone.activate_now_sem.acquire() => {
+                        permit = tenant_clone.activate_now_sem.acquire() => {
+                            let _ = permit.expect("activate_now_sem is never closed");
                             tracing::info!("Activating tenant (on-demand)");
                             AttachType::OnDemand
                         },
-                        permit_result = conf.concurrent_tenant_warmup.inner().acquire() => {
-                            match permit_result {
-                                Ok(p) => {
-                                    tracing::info!("Activating tenant (warmup)");
-                                    AttachType::Warmup(p)
-                                }
-                                Err(_) => {
-                                    // This is unexpected: the warmup semaphore should stay alive
-                                    // for the lifetime of init_order.  Log a warning and proceed.
-                                    tracing::warn!("warmup_limit semaphore unexpectedly closed");
-                                    AttachType::Normal
-                                }
+                        permit = conf.concurrent_tenant_warmup.inner().acquire() => {
+                            let _permit = permit.expect("concurrent_tenant_warmup semaphore is never closed");
+                            tracing::info!("Activating tenant (warmup)");
+                            AttachType::Warmup {
+                                _permit,
+                                during_startup: init_order.is_some()
                             }
-
                         }
                         _ = tenant_clone.cancel.cancelled() => {
                             // This is safe, but should be pretty rare: it is interesting if a tenant
@@ -752,6 +748,8 @@ impl Tenant {
                         },
                     )
                 } else {
+                    // SpawnMode::{Create,Eager} always cause jumping ahead of the
+                    // concurrent_tenant_warmup queue
                     AttachType::Normal
                 };
 
@@ -759,7 +757,7 @@ impl Tenant {
                     (SpawnMode::Create, _) => {
                         None
                     },
-                    (SpawnMode::Normal, Some(remote_storage)) => {
+                    (SpawnMode::Eager | SpawnMode::Lazy, Some(remote_storage)) => {
                         let _preload_timer = TENANT.preload.start_timer();
                         let res = tenant_clone
                             .preload(remote_storage, task_mgr::shutdown_token())
@@ -772,7 +770,7 @@ impl Tenant {
                             }
                         }
                     }
-                    (SpawnMode::Normal, None) => {
+                    (_, None) => {
                         let _preload_timer = TENANT.preload.start_timer();
                         None
                     }
@@ -831,7 +829,7 @@ impl Tenant {
                 let attached = {
                     let _attach_timer = match mode {
                         SpawnMode::Create => None,
-                        SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
+                        SpawnMode::Eager | SpawnMode::Lazy => Some(TENANT.attach.start_timer()),
                     };
                     tenant_clone.attach(preload, mode, &ctx).await
                 };
@@ -853,7 +851,7 @@ impl Tenant {
                 // It also prevents the warmup proccess competing with the concurrency limit on
                 // logical size calculations: if logical size calculation semaphore is saturated,
                 // then warmup will wait for that before proceeding to the next tenant.
-                if let AttachType::Warmup(_permit) = attach_type {
+                if matches!(attach_type, AttachType::Warmup { during_startup: true, .. }) {
                     let mut futs: FuturesUnordered<_> = tenant_clone.timelines.lock().unwrap().values().cloned().map(|t| t.await_initial_logical_size()).collect();
                     tracing::info!("Waiting for initial logical sizes while warming up...");
                     while futs.next().await.is_some() {}
@@ -926,7 +924,7 @@ impl Tenant {
                 deleting: false,
                 timelines: HashMap::new(),
             },
-            (None, SpawnMode::Normal) => {
+            (None, _) => {
                 anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
             }
         };
@@ -1150,17 +1148,6 @@ impl Tenant {
         } else {
             None
         };
-
-        // timeline loading after attach expects to find metadata file for each metadata
-        save_metadata(
-            self.conf,
-            &self.tenant_shard_id,
-            &timeline_id,
-            &remote_metadata,
-        )
-        .await
-        .context("save_metadata")
-        .map_err(LoadLocalTimelineError::Load)?;
 
         self.timeline_init_and_sync(
             timeline_id,
@@ -2396,7 +2383,7 @@ impl Tenant {
             self.tenant_shard_id,
             self.generation,
             self.shard_identity,
-            self.walredo_mgr.as_ref().map(Arc::clone),
+            self.walredo_mgr.clone(),
             resources,
             pg_version,
             state,
@@ -2588,19 +2575,24 @@ impl Tenant {
         legacy_config_path: &Utf8Path,
         location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
-        // Forward compat: write out an old-style configuration that old versions can read, in case we roll back
-        Self::persist_tenant_config_legacy(
-            tenant_shard_id,
-            legacy_config_path,
-            &location_conf.tenant_conf,
-        )
-        .await?;
-
         if let LocationMode::Attached(attach_conf) = &location_conf.mode {
-            // Once we use LocationMode, generations are mandatory.  If we aren't using generations,
-            // then drop out after writing legacy-style config.
+            // The modern-style LocationConf config file requires a generation to be set. In case someone
+            // is running a pageserver without the infrastructure to set generations, write out the legacy-style
+            // config file that only contains TenantConf.
+            //
+            // This will eventually be removed in https://github.com/neondatabase/neon/issues/5388
+
             if attach_conf.generation.is_none() {
-                tracing::debug!("Running without generations, not writing new-style LocationConf");
+                tracing::info!(
+                    "Running without generations, writing legacy-style tenant config file"
+                );
+                Self::persist_tenant_config_legacy(
+                    tenant_shard_id,
+                    legacy_config_path,
+                    &location_conf.tenant_conf,
+                )
+                .await?;
+
                 return Ok(());
             }
         }
@@ -2623,17 +2615,10 @@ impl Tenant {
 
         let tenant_shard_id = *tenant_shard_id;
         let config_path = config_path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            Handle::current().block_on(async move {
-                let conf_content = conf_content.into_bytes();
-                VirtualFile::crashsafe_overwrite(&config_path, &temp_path, conf_content)
-                    .await
-                    .with_context(|| {
-                        format!("write tenant {tenant_shard_id} config to {config_path}")
-                    })
-            })
-        })
-        .await??;
+        let conf_content = conf_content.into_bytes();
+        VirtualFile::crashsafe_overwrite(config_path.clone(), temp_path, conf_content)
+            .await
+            .with_context(|| format!("write tenant {tenant_shard_id} config to {config_path}"))?;
 
         Ok(())
     }
@@ -2660,17 +2645,12 @@ impl Tenant {
 
         let tenant_shard_id = *tenant_shard_id;
         let target_config_path = target_config_path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            Handle::current().block_on(async move {
-                let conf_content = conf_content.into_bytes();
-                VirtualFile::crashsafe_overwrite(&target_config_path, &temp_path, conf_content)
-                    .await
-                    .with_context(|| {
-                        format!("write tenant {tenant_shard_id} config to {target_config_path}")
-                    })
-            })
-        })
-        .await??;
+        let conf_content = conf_content.into_bytes();
+        VirtualFile::crashsafe_overwrite(target_config_path.clone(), temp_path, conf_content)
+            .await
+            .with_context(|| {
+                format!("write tenant {tenant_shard_id} config to {target_config_path}")
+            })?;
         Ok(())
     }
 
@@ -3293,10 +3273,7 @@ impl Tenant {
 
         timeline_struct.init_empty_layer_map(start_lsn);
 
-        if let Err(e) = self
-            .create_timeline_files(&uninit_mark.timeline_path, &new_timeline_id, new_metadata)
-            .await
-        {
+        if let Err(e) = self.create_timeline_files(&uninit_mark.timeline_path).await {
             error!("Failed to create initial files for timeline {tenant_shard_id}/{new_timeline_id}, cleaning up: {e:?}");
             cleanup_timeline_directory(uninit_mark);
             return Err(e);
@@ -3313,26 +3290,13 @@ impl Tenant {
         ))
     }
 
-    async fn create_timeline_files(
-        &self,
-        timeline_path: &Utf8Path,
-        new_timeline_id: &TimelineId,
-        new_metadata: &TimelineMetadata,
-    ) -> anyhow::Result<()> {
+    async fn create_timeline_files(&self, timeline_path: &Utf8Path) -> anyhow::Result<()> {
         crashsafe::create_dir(timeline_path).context("Failed to create timeline directory")?;
 
         fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
             anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
         });
 
-        save_metadata(
-            self.conf,
-            &self.tenant_shard_id,
-            new_timeline_id,
-            new_metadata,
-        )
-        .await
-        .context("Failed to create timeline metadata")?;
         Ok(())
     }
 
@@ -3499,9 +3463,8 @@ impl Tenant {
             // Run each timeline's flush in a task holding the timeline's gate: this
             // means that if this function's future is cancelled, the Timeline shutdown
             // will still wait for any I/O in here to complete.
-            let gate = match timeline.gate.enter() {
-                Ok(g) => g,
-                Err(_) => continue,
+            let Ok(gate) = timeline.gate.enter() else {
+                continue;
             };
             let jh = tokio::task::spawn(async move { flush_timeline(gate, timeline).await });
             results.push(jh);
@@ -3629,25 +3592,18 @@ pub async fn dump_layerfile_from_path(
 #[cfg(test)]
 pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
-    use camino::Utf8PathBuf;
     use once_cell::sync::OnceCell;
     use pageserver_api::models::ShardParameters;
     use pageserver_api::shard::ShardIndex;
-    use std::fs;
-    use std::sync::Arc;
     use utils::logging;
-    use utils::lsn::Lsn;
 
     use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::walredo::apply_neon;
-    use crate::{
-        config::PageServerConf, repository::Key, tenant::Tenant, walrecord::NeonWalRecord,
-    };
+    use crate::{repository::Key, walrecord::NeonWalRecord};
 
     use super::*;
-    use crate::tenant::config::{TenantConf, TenantConfOpt};
     use hex_literal::hex;
-    use utils::id::{TenantId, TimelineId};
+    use utils::id::TenantId;
 
     pub const TIMELINE_ID: TimelineId =
         TimelineId::from_array(hex!("11223344556677881122334455667788"));
@@ -3671,6 +3627,7 @@ pub(crate) mod harness {
                 compaction_target_size: Some(tenant_conf.compaction_target_size),
                 compaction_period: Some(tenant_conf.compaction_period),
                 compaction_threshold: Some(tenant_conf.compaction_threshold),
+                compaction_algorithm: Some(tenant_conf.compaction_algorithm),
                 gc_horizon: Some(tenant_conf.gc_horizon),
                 gc_period: Some(tenant_conf.gc_period),
                 image_creation_threshold: Some(tenant_conf.image_creation_threshold),
@@ -3684,7 +3641,6 @@ pub(crate) mod harness {
                 evictions_low_residence_duration_metric_threshold: Some(
                     tenant_conf.evictions_low_residence_duration_metric_threshold,
                 ),
-                gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
                 timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
@@ -3807,7 +3763,7 @@ pub(crate) mod harness {
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())
                 .await?;
-            tenant.attach(Some(preload), SpawnMode::Normal, ctx).await?;
+            tenant.attach(Some(preload), SpawnMode::Eager, ctx).await?;
 
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
@@ -3876,9 +3832,8 @@ mod tests {
     use crate::DEFAULT_PG_VERSION;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use once_cell::sync::Lazy;
+    use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
-    use tokio_util::sync::CancellationToken;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -4514,6 +4469,61 @@ mod tests {
         Ok(())
     }
 
+    async fn bulk_insert_compact_gc(
+        timeline: Arc<Timeline>,
+        ctx: &RequestContext,
+        mut lsn: Lsn,
+        repeat: usize,
+        key_count: usize,
+    ) -> anyhow::Result<()> {
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let mut blknum = 0;
+
+        // Enforce that key range is monotonously increasing
+        let mut keyspace = KeySpaceAccum::new();
+
+        for _ in 0..repeat {
+            for _ in 0..key_count {
+                test_key.field6 = blknum;
+                let writer = timeline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        ctx,
+                    )
+                    .await?;
+                writer.finish_write(lsn);
+                drop(writer);
+
+                keyspace.add_key(test_key);
+
+                lsn = Lsn(lsn.0 + 0x10);
+                blknum += 1;
+            }
+
+            let cutoff = timeline.get_last_record_lsn();
+
+            timeline
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    ctx,
+                )
+                .await?;
+            timeline.freeze_and_flush().await?;
+            timeline
+                .compact(&CancellationToken::new(), EnumSet::empty(), ctx)
+                .await?;
+            timeline.gc().await?;
+        }
+
+        Ok(())
+    }
+
     //
     // Insert 1000 key-value pairs with increasing keys, flush, compact, GC.
     // Repeat 50 times.
@@ -4526,49 +4536,98 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let mut lsn = Lsn(0x10);
+        let lsn = Lsn(0x10);
+        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
 
-        let mut keyspace = KeySpaceAccum::new();
+        Ok(())
+    }
 
-        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
-        let mut blknum = 0;
-        for _ in 0..50 {
-            for _ in 0..10000 {
-                test_key.field6 = blknum;
-                let writer = tline.writer().await;
-                writer
-                    .put(
-                        test_key,
-                        lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
-                        &ctx,
-                    )
-                    .await?;
-                writer.finish_write(lsn);
-                drop(writer);
+    // Test the vectored get real implementation against a simple sequential implementation.
+    //
+    // The test generates a keyspace by repeatedly flushing the in-memory layer and compacting.
+    // Projected to 2D the key space looks like below. Lsn grows upwards on the Y axis and keys
+    // grow to the right on the X axis.
+    //                       [Delta]
+    //                 [Delta]
+    //           [Delta]
+    //    [Delta]
+    // ------------ Image ---------------
+    //
+    // After layer generation we pick the ranges to query as follows:
+    // 1. The beginning of each delta layer
+    // 2. At the seam between two adjacent delta layers
+    //
+    // There's one major downside to this test: delta layers only contains images,
+    // so the search can stop at the first delta layer and doesn't traverse any deeper.
+    #[tokio::test]
+    async fn test_get_vectored() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_get_vectored")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
-                keyspace.add_key(test_key);
+        let lsn = Lsn(0x10);
+        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
 
-                lsn = Lsn(lsn.0 + 0x10);
-                blknum += 1;
+        let guard = tline.layers.read().await;
+        guard.layer_map().dump(true, &ctx).await?;
+
+        let mut reads = Vec::new();
+        let mut prev = None;
+        guard.layer_map().iter_historic_layers().for_each(|desc| {
+            if !desc.is_delta() {
+                prev = Some(desc.clone());
+                return;
             }
 
-            let cutoff = tline.get_last_record_lsn();
+            let start = desc.key_range.start;
+            let end = desc
+                .key_range
+                .start
+                .add(Timeline::MAX_GET_VECTORED_KEYS.try_into().unwrap());
+            reads.push(KeySpace {
+                ranges: vec![start..end],
+            });
 
+            if let Some(prev) = &prev {
+                if !prev.is_delta() {
+                    return;
+                }
+
+                let first_range = Key {
+                    field6: prev.key_range.end.field6 - 4,
+                    ..prev.key_range.end
+                }..prev.key_range.end;
+
+                let second_range = desc.key_range.start..Key {
+                    field6: desc.key_range.start.field6 + 4,
+                    ..desc.key_range.start
+                };
+
+                reads.push(KeySpace {
+                    ranges: vec![first_range, second_range],
+                });
+            };
+
+            prev = Some(desc.clone());
+        });
+
+        drop(guard);
+
+        // Pick a big LSN such that we query over all the changes.
+        // Technically, u64::MAX - 1 is the largest LSN supported by the read path,
+        // but there seems to be a bug on the non-vectored search path which surfaces
+        // in that case.
+        let reads_lsn = Lsn(u64::MAX - 1000);
+
+        for read in reads {
+            info!("Doing vectored read on {:?}", read);
+
+            let vectored_res = tline.get_vectored_impl(read.clone(), reads_lsn, &ctx).await;
             tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
-            tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
-                .await?;
-            tline.gc().await?;
+                .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
+                .await;
         }
 
         Ok(())

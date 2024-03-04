@@ -1040,7 +1040,7 @@ mod tests {
             Some("test/prefix/"),
             Some("/test/prefix/"),
         ];
-        let expected_outputs = vec![
+        let expected_outputs = [
             vec!["", "some/path", "some/path"],
             vec!["/", "/some/path", "/some/path"],
             vec![

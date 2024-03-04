@@ -1,0 +1,72 @@
+name: 'Pin build-tools image'
+
+on:
+  workflow_dispatch:
+    inputs:
+      from-tag:
+        description: 'Source tag'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      from-tag:
+        description: 'Source tag'
+        required: true
+        type: string
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: pin-build-tools-image-${{ inputs.from-tag }}
+
+permissions: {}
+
+jobs:
+  tag-image:
+    runs-on: ubuntu-latest
+
+    env:
+      FROM_TAG: ${{ inputs.from-tag }}
+      TO_TAG: pinned
+
+    steps:
+      - name: Check if we really need to pin the image
+        id: check-manifests
+        run: |
+          docker manifest inspect neondatabase/build-tools:${FROM_TAG} > ${FROM_TAG}.json
+          docker manifest inspect neondatabase/build-tools:${TO_TAG}   > ${TO_TAG}.json
+
+          if diff ${FROM_TAG}.json ${TO_TAG}.json; then
+            skip=true
+          else
+            skip=false
+          fi
+
+          echo "skip=${skip}" | tee -a $GITHUB_OUTPUT
+
+      - uses: docker/login-action@v3
+        if: steps.check-manifests.outputs.skip == 'false'
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Tag build-tools with `${{ env.TO_TAG }}` in Docker Hub
+        if: steps.check-manifests.outputs.skip == 'false'
+        run: |
+          docker buildx imagetools create -t neondatabase/build-tools:${TO_TAG} \
+                                             neondatabase/build-tools:${FROM_TAG}
+
+      - uses: docker/login-action@v3
+        if: steps.check-manifests.outputs.skip == 'false'
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - name: Tag build-tools with `${{ env.TO_TAG }}` in ECR
+        if: steps.check-manifests.outputs.skip == 'false'
+        run: |
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG} \
+                                             neondatabase/build-tools:${FROM_TAG}

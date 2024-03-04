@@ -37,7 +37,6 @@ impl Value {
 mod test {
     use super::*;
 
-    use bytes::Bytes;
     use utils::bin_ser::BeSer;
 
     macro_rules! roundtrip {

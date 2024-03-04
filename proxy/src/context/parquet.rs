@@ -92,6 +92,8 @@ struct RequestData {
     /// Success is counted if we form a HTTP response with sql rows inside
     /// Or if we make it to proxy_pass
     success: bool,
+    /// Indicates if the cplane started the new compute node for this request.
+    cold_start_info: Option<String>,
     /// Tracks time from session start (HTTP request/libpq TCP handshake)
     /// Through to success/failure
     duration_us: u64,
@@ -119,6 +121,10 @@ impl From<RequestMonitoring> for RequestData {
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
+            cold_start_info: value
+                .cold_start_info
+                .as_ref()
+                .map(|x| serde_json::to_string(x).unwrap_or_default()),
             duration_us: SystemTime::from(value.first_packet)
                 .elapsed()
                 .unwrap_or_default()
@@ -452,6 +458,7 @@ mod tests {
             region: "us-east-1",
             error: None,
             success: rng.gen(),
+            cold_start_info: Some("no".into()),
             duration_us: rng.gen_range(0..30_000_000),
         }
     }
@@ -521,16 +528,16 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313727, 3, 6000),
-                (1313720, 3, 6000),
-                (1313780, 3, 6000),
-                (1313737, 3, 6000),
-                (1313867, 3, 6000),
-                (1313709, 3, 6000),
-                (1313501, 3, 6000),
-                (1313737, 3, 6000),
-                (438118, 1, 2000)
-            ],
+                (1314406, 3, 6000),
+                (1314399, 3, 6000),
+                (1314459, 3, 6000),
+                (1314416, 3, 6000),
+                (1314546, 3, 6000),
+                (1314388, 3, 6000),
+                (1314180, 3, 6000),
+                (1314416, 3, 6000),
+                (438359, 1, 2000)
+            ]
         );
 
         tmpdir.close().unwrap();
@@ -559,12 +566,12 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1219459, 5, 10000),
-                (1225609, 5, 10000),
-                (1227403, 5, 10000),
-                (1226765, 5, 10000),
-                (1218043, 5, 10000)
-            ],
+                (1220668, 5, 10000),
+                (1226818, 5, 10000),
+                (1228612, 5, 10000),
+                (1227974, 5, 10000),
+                (1219252, 5, 10000)
+            ]
         );
 
         tmpdir.close().unwrap();
@@ -595,12 +602,12 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1205106, 5, 10000),
-                (1204837, 5, 10000),
-                (1205130, 5, 10000),
-                (1205118, 5, 10000),
-                (1205373, 5, 10000)
-            ],
+                (1206315, 5, 10000),
+                (1206046, 5, 10000),
+                (1206339, 5, 10000),
+                (1206327, 5, 10000),
+                (1206582, 5, 10000)
+            ]
         );
 
         tmpdir.close().unwrap();
@@ -624,16 +631,16 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313727, 3, 6000),
-                (1313720, 3, 6000),
-                (1313780, 3, 6000),
-                (1313737, 3, 6000),
-                (1313867, 3, 6000),
-                (1313709, 3, 6000),
-                (1313501, 3, 6000),
-                (1313737, 3, 6000),
-                (438118, 1, 2000)
-            ],
+                (1314406, 3, 6000),
+                (1314399, 3, 6000),
+                (1314459, 3, 6000),
+                (1314416, 3, 6000),
+                (1314546, 3, 6000),
+                (1314388, 3, 6000),
+                (1314180, 3, 6000),
+                (1314416, 3, 6000),
+                (438359, 1, 2000)
+            ]
         );
 
         tmpdir.close().unwrap();
@@ -669,7 +676,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(658383, 2, 3001), (658097, 2, 3000), (657893, 2, 2999)],
+            [(658837, 2, 3001), (658551, 2, 3000), (658347, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

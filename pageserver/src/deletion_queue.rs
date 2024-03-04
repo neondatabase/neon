@@ -20,10 +20,9 @@ use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
-use tokio;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use tracing::{self, debug, error};
+use tracing::{debug, error};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::generation::Generation;
 use utils::id::TimelineId;
@@ -234,7 +233,7 @@ impl DeletionHeader {
         let header_bytes = serde_json::to_vec(self).context("serialize deletion header")?;
         let header_path = conf.deletion_header_path();
         let temp_path = path_with_suffix_extension(&header_path, TEMP_SUFFIX);
-        VirtualFile::crashsafe_overwrite(&header_path, &temp_path, header_bytes)
+        VirtualFile::crashsafe_overwrite(header_path, temp_path, header_bytes)
             .await
             .maybe_fatal_err("save deletion header")?;
 
@@ -325,7 +324,8 @@ impl DeletionList {
         let temp_path = path_with_suffix_extension(&path, TEMP_SUFFIX);
 
         let bytes = serde_json::to_vec(self).expect("Failed to serialize deletion list");
-        VirtualFile::crashsafe_overwrite(&path, &temp_path, bytes)
+
+        VirtualFile::crashsafe_overwrite(path, temp_path, bytes)
             .await
             .maybe_fatal_err("save deletion list")
             .map_err(Into::into)
@@ -725,7 +725,7 @@ mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
     use pageserver_api::shard::ShardIndex;
-    use std::{io::ErrorKind, time::Duration};
+    use std::io::ErrorKind;
     use tracing::info;
 
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
@@ -734,10 +734,7 @@ mod test {
     use crate::{
         control_plane_client::RetryForeverError,
         repository::Key,
-        tenant::{
-            harness::TenantHarness, remote_timeline_client::remote_timeline_path,
-            storage_layer::DeltaFileName,
-        },
+        tenant::{harness::TenantHarness, storage_layer::DeltaFileName},
     };
 
     use super::*;
@@ -1160,13 +1157,8 @@ mod test {
 pub(crate) mod mock {
     use tracing::info;
 
-    use crate::tenant::remote_timeline_client::remote_layer_path;
-
     use super::*;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub struct ConsumerState {
         rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,

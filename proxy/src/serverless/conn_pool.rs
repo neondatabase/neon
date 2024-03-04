@@ -667,7 +667,6 @@ impl<C: ClientInnerExt> Drop for Client<C> {
 
 #[cfg(test)]
 mod tests {
-    use env_logger;
     use std::{mem, sync::atomic::AtomicBool};
 
     use super::*;

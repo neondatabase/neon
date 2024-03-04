@@ -369,7 +369,12 @@ def start_in_background(
         return spawned_process
 
 
-def wait_until(number_of_iterations: int, interval: float, func: Fn):
+WaitUntilRet = TypeVar("WaitUntilRet")
+
+
+def wait_until(
+    number_of_iterations: int, interval: float, func: Callable[[], WaitUntilRet]
+) -> WaitUntilRet:
     """
     Wait until 'func' returns successfully, without exception. Returns the
     last return value from the function.
@@ -385,6 +390,18 @@ def wait_until(number_of_iterations: int, interval: float, func: Fn):
             continue
         return res
     raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def assert_eq(a, b) -> None:
+    assert a == b
+
+
+def assert_gt(a, b) -> None:
+    assert a > b
+
+
+def assert_ge(a, b) -> None:
+    assert a >= b
 
 
 def run_pg_bench_small(pg_bin: "PgBin", connstr: str):

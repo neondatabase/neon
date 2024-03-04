@@ -13,8 +13,6 @@ use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIErr
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use num_cpus;
-use serde_json;
 use tokio::task;
 use tracing::{error, info, warn};
 use tracing_utils::http::OtelName;

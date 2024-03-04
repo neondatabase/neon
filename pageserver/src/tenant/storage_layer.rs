@@ -8,15 +8,21 @@ pub(crate) mod layer;
 mod layer_desc;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
+use crate::repository::Value;
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use once_cell::sync::Lazy;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::models::{
     LayerAccessKind, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use std::cmp::{Ordering, Reverse};
+use std::collections::hash_map::Entry;
+use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,6 +39,11 @@ pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 
 pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
+
+use super::layer_map::InMemoryLayerHandle;
+use super::timeline::layer_manager::LayerManager;
+use super::timeline::GetVectoredError;
+use super::PageReconstructError;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -61,10 +72,285 @@ where
 /// the same ValueReconstructState struct in the next 'get_value_reconstruct_data'
 /// call, to collect more records.
 ///
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ValueReconstructState {
     pub records: Vec<(Lsn, NeonWalRecord)>,
     pub img: Option<(Lsn, Bytes)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ValueReconstructSituation {
+    Complete,
+    #[default]
+    Continue,
+}
+
+/// Reconstruct data accumulated for a single key during a vectored get
+#[derive(Debug, Default, Clone)]
+pub(crate) struct VectoredValueReconstructState {
+    pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
+    pub(crate) img: Option<(Lsn, Bytes)>,
+
+    situation: ValueReconstructSituation,
+}
+
+impl VectoredValueReconstructState {
+    fn get_cached_lsn(&self) -> Option<Lsn> {
+        self.img.as_ref().map(|img| img.0)
+    }
+}
+
+impl From<VectoredValueReconstructState> for ValueReconstructState {
+    fn from(mut state: VectoredValueReconstructState) -> Self {
+        // walredo expects the records to be descending in terms of Lsn
+        state.records.sort_by_key(|(lsn, _)| Reverse(*lsn));
+
+        ValueReconstructState {
+            records: state.records,
+            img: state.img,
+        }
+    }
+}
+
+/// Bag of data accumulated during a vectored get
+pub(crate) struct ValuesReconstructState {
+    pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
+
+    keys_done: KeySpaceRandomAccum,
+}
+
+impl ValuesReconstructState {
+    pub(crate) fn new() -> Self {
+        Self {
+            keys: HashMap::new(),
+            keys_done: KeySpaceRandomAccum::new(),
+        }
+    }
+
+    /// Associate a key with the error which it encountered and mark it as done
+    pub(crate) fn on_key_error(&mut self, key: Key, err: PageReconstructError) {
+        let previous = self.keys.insert(key, Err(err));
+        if let Some(Ok(state)) = previous {
+            if state.situation == ValueReconstructSituation::Continue {
+                self.keys_done.add_key(key);
+            }
+        }
+    }
+
+    /// Update the state collected for a given key.
+    /// Returns true if this was the last value needed for the key and false otherwise.
+    ///
+    /// If the key is done after the update, mark it as such.
+    pub(crate) fn update_key(
+        &mut self,
+        key: &Key,
+        lsn: Lsn,
+        value: Value,
+    ) -> ValueReconstructSituation {
+        let state = self
+            .keys
+            .entry(*key)
+            .or_insert(Ok(VectoredValueReconstructState::default()));
+
+        if let Ok(state) = state {
+            let key_done = match state.situation {
+                ValueReconstructSituation::Complete => unreachable!(),
+                ValueReconstructSituation::Continue => match value {
+                    Value::Image(img) => {
+                        state.img = Some((lsn, img));
+                        true
+                    }
+                    Value::WalRecord(rec) => {
+                        let reached_cache =
+                            state.get_cached_lsn().map(|clsn| clsn + 1) == Some(lsn);
+                        let will_init = rec.will_init();
+                        state.records.push((lsn, rec));
+                        will_init || reached_cache
+                    }
+                },
+            };
+
+            if key_done && state.situation == ValueReconstructSituation::Continue {
+                state.situation = ValueReconstructSituation::Complete;
+                self.keys_done.add_key(*key);
+            }
+
+            state.situation
+        } else {
+            ValueReconstructSituation::Complete
+        }
+    }
+
+    /// Returns the Lsn at which this key is cached if one exists.
+    /// The read path should go no further than this Lsn for the given key.
+    pub(crate) fn get_cached_lsn(&self, key: &Key) -> Option<Lsn> {
+        self.keys
+            .get(key)
+            .and_then(|k| k.as_ref().ok())
+            .and_then(|state| state.get_cached_lsn())
+    }
+
+    /// Returns the key space describing the keys that have
+    /// been marked as completed since the last call to this function.
+    pub(crate) fn consume_done_keys(&mut self) -> KeySpace {
+        self.keys_done.consume_keyspace()
+    }
+}
+
+impl Default for ValuesReconstructState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Description of layer to be read - the layer map can turn
+/// this description into the actual layer.
+#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+pub(crate) enum ReadableLayerDesc {
+    Persistent {
+        desc: PersistentLayerDesc,
+        lsn_range: Range<Lsn>,
+    },
+    InMemory {
+        handle: InMemoryLayerHandle,
+        lsn_ceil: Lsn,
+    },
+}
+
+/// Wraper for 'ReadableLayerDesc' sorted by Lsn
+#[derive(Debug)]
+struct ReadableLayerDescOrdered(ReadableLayerDesc);
+
+/// Data structure which maintains a fringe of layers for the
+/// read path. The fringe is the set of layers which intersects
+/// the current keyspace that the search is descending on.
+/// Each layer tracks the keyspace that intersects it.
+///
+/// The fringe must appear sorted by Lsn. Hence, it uses
+/// a two layer indexing scheme.
+#[derive(Debug)]
+pub(crate) struct LayerFringe {
+    layers_by_lsn: BinaryHeap<ReadableLayerDescOrdered>,
+    layers: HashMap<ReadableLayerDesc, KeySpace>,
+}
+
+impl LayerFringe {
+    pub(crate) fn new() -> Self {
+        LayerFringe {
+            layers_by_lsn: BinaryHeap::new(),
+            layers: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayerDesc, KeySpace)> {
+        let handle = match self.layers_by_lsn.pop() {
+            Some(h) => h,
+            None => return None,
+        };
+
+        let removed = self.layers.remove_entry(&handle.0);
+        match removed {
+            Some((layer, keyspace)) => Some((layer, keyspace)),
+            None => unreachable!("fringe internals are always consistent"),
+        }
+    }
+
+    pub(crate) fn update(&mut self, layer: ReadableLayerDesc, keyspace: KeySpace) {
+        let entry = self.layers.entry(layer.clone());
+        match entry {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().merge(&keyspace);
+            }
+            Entry::Vacant(entry) => {
+                self.layers_by_lsn
+                    .push(ReadableLayerDescOrdered(entry.key().clone()));
+                entry.insert(keyspace);
+            }
+        }
+    }
+}
+
+impl Default for LayerFringe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Ord for ReadableLayerDescOrdered {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let ord = self.0.get_lsn_ceil().cmp(&other.0.get_lsn_ceil());
+        if ord == std::cmp::Ordering::Equal {
+            self.0
+                .get_lsn_floor()
+                .cmp(&other.0.get_lsn_floor())
+                .reverse()
+        } else {
+            ord
+        }
+    }
+}
+
+impl PartialOrd for ReadableLayerDescOrdered {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for ReadableLayerDescOrdered {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get_lsn_floor() == other.0.get_lsn_floor()
+            && self.0.get_lsn_ceil() == other.0.get_lsn_ceil()
+    }
+}
+
+impl Eq for ReadableLayerDescOrdered {}
+
+impl ReadableLayerDesc {
+    pub(crate) fn get_lsn_floor(&self) -> Lsn {
+        match self {
+            ReadableLayerDesc::Persistent { lsn_range, .. } => lsn_range.start,
+            ReadableLayerDesc::InMemory { handle, .. } => handle.get_lsn_floor(),
+        }
+    }
+
+    pub(crate) fn get_lsn_ceil(&self) -> Lsn {
+        match self {
+            ReadableLayerDesc::Persistent { lsn_range, .. } => lsn_range.end,
+            ReadableLayerDesc::InMemory { lsn_ceil, .. } => *lsn_ceil,
+        }
+    }
+
+    pub(crate) async fn get_values_reconstruct_data(
+        &self,
+        layer_manager: &LayerManager,
+        keyspace: KeySpace,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        match self {
+            ReadableLayerDesc::Persistent { desc, lsn_range } => {
+                let layer = layer_manager.get_from_desc(desc);
+                layer
+                    .get_values_reconstruct_data(
+                        keyspace,
+                        lsn_range.clone(),
+                        reconstruct_state,
+                        ctx,
+                    )
+                    .await
+            }
+            ReadableLayerDesc::InMemory { handle, lsn_ceil } => {
+                let layer = layer_manager
+                    .layer_map()
+                    .get_in_memory_layer(handle)
+                    .unwrap();
+
+                layer
+                    .get_values_reconstruct_data(keyspace, *lsn_ceil, reconstruct_state, ctx)
+                    .await
+            }
+        }
+    }
 }
 
 /// Return value from [`Layer::get_value_reconstruct_data`]

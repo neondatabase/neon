@@ -6,10 +6,12 @@ use std::time::Duration;
 use self::split_state::SplitState;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
-use control_plane::attachment_service::{NodeAvailability, NodeSchedulingPolicy};
 use diesel::pg::PgConnection;
-use diesel::prelude::*;
-use diesel::Connection;
+use diesel::{
+    Connection, ExpressionMethods, Insertable, QueryDsl, QueryResult, Queryable, RunQueryDsl,
+    Selectable, SelectableHelper,
+};
+use pageserver_api::controller_api::NodeSchedulingPolicy;
 use pageserver_api::models::TenantConfig;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
 use serde::{Deserialize, Serialize};
@@ -130,30 +132,41 @@ impl Persistence {
     }
 
     /// At startup, populate the list of nodes which our shards may be placed on
-    pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<Node>> {
-        let nodes: Vec<Node> = self
+    pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
+        let nodes: Vec<NodePersistence> = self
             .with_conn(move |conn| -> DatabaseResult<_> {
-                Ok(crate::schema::nodes::table
-                    .load::<NodePersistence>(conn)?
-                    .into_iter()
-                    .map(|n| Node {
-                        id: NodeId(n.node_id as u64),
-                        // At startup we consider a node offline until proven otherwise.
-                        availability: NodeAvailability::Offline,
-                        scheduling: NodeSchedulingPolicy::from_str(&n.scheduling_policy)
-                            .expect("Bad scheduling policy in DB"),
-                        listen_http_addr: n.listen_http_addr,
-                        listen_http_port: n.listen_http_port as u16,
-                        listen_pg_addr: n.listen_pg_addr,
-                        listen_pg_port: n.listen_pg_port as u16,
-                    })
-                    .collect::<Vec<Node>>())
+                Ok(crate::schema::nodes::table.load::<NodePersistence>(conn)?)
             })
             .await?;
 
         tracing::info!("list_nodes: loaded {} nodes", nodes.len());
 
         Ok(nodes)
+    }
+
+    pub(crate) async fn update_node(
+        &self,
+        input_node_id: NodeId,
+        input_scheduling: NodeSchedulingPolicy,
+    ) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        let updated = self
+            .with_conn(move |conn| {
+                let updated = diesel::update(nodes)
+                    .filter(node_id.eq(input_node_id.0 as i64))
+                    .set((scheduling_policy.eq(String::from(input_scheduling)),))
+                    .execute(conn)?;
+                Ok(updated)
+            })
+            .await?;
+
+        if updated != 1 {
+            Err(DatabaseError::Logical(format!(
+                "Node {node_id:?} not found for update",
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// At startup, load the high level state for shards, such as their config + policy.  This will
@@ -320,7 +333,15 @@ impl Persistence {
                 shard_number: ShardNumber(tsp.shard_number as u8),
                 shard_count: ShardCount::new(tsp.shard_count as u8),
             };
-            result.insert(tenant_shard_id, Generation::new(tsp.generation as u32));
+
+            let Some(g) = tsp.generation else {
+                // If the generation_pageserver column was non-NULL, then the generation column should also be non-NULL:
+                // we only set generation_pageserver when setting generation.
+                return Err(DatabaseError::Logical(
+                    "Generation should always be set after incrementing".to_string(),
+                ));
+            };
+            result.insert(tenant_shard_id, Generation::new(g as u32));
         }
 
         Ok(result)
@@ -353,7 +374,85 @@ impl Persistence {
             })
             .await?;
 
-        Ok(Generation::new(updated.generation as u32))
+        // Generation is always non-null in the rseult: if the generation column had been NULL, then we
+        // should have experienced an SQL Confilict error while executing a query that tries to increment it.
+        debug_assert!(updated.generation.is_some());
+        let Some(g) = updated.generation else {
+            return Err(DatabaseError::Logical(
+                "Generation should always be set after incrementing".to_string(),
+            )
+            .into());
+        };
+
+        Ok(Generation::new(g as u32))
+    }
+
+    /// For use when updating a persistent property of a tenant, such as its config or placement_policy.
+    ///
+    /// Do not use this for settting generation, unless in the special onboarding code path (/location_config)
+    /// API: use [`Self::increment_generation`] instead.  Setting the generation via this route is a one-time thing
+    /// that we only do the first time a tenant is set to an attached policy via /location_config.
+    pub(crate) async fn update_tenant_shard(
+        &self,
+        tenant_shard_id: TenantShardId,
+        input_placement_policy: PlacementPolicy,
+        input_config: TenantConfig,
+        input_generation: Option<Generation>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::tenant_shards::dsl::*;
+
+        self.with_conn(move |conn| {
+            let query = diesel::update(tenant_shards)
+                .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
+                .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
+                .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32));
+
+            if let Some(input_generation) = input_generation {
+                // Update includes generation column
+                query
+                    .set((
+                        generation.eq(Some(input_generation.into().unwrap() as i32)),
+                        placement_policy
+                            .eq(serde_json::to_string(&input_placement_policy).unwrap()),
+                        config.eq(serde_json::to_string(&input_config).unwrap()),
+                    ))
+                    .execute(conn)?;
+            } else {
+                // Update does not include generation column
+                query
+                    .set((
+                        placement_policy
+                            .eq(serde_json::to_string(&input_placement_policy).unwrap()),
+                        config.eq(serde_json::to_string(&input_config).unwrap()),
+                    ))
+                    .execute(conn)?;
+            }
+
+            Ok(())
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn update_tenant_config(
+        &self,
+        input_tenant_id: TenantId,
+        input_config: TenantConfig,
+    ) -> DatabaseResult<()> {
+        use crate::schema::tenant_shards::dsl::*;
+
+        self.with_conn(move |conn| {
+            diesel::update(tenant_shards)
+                .filter(tenant_id.eq(input_tenant_id.to_string()))
+                .set((config.eq(serde_json::to_string(&input_config).unwrap()),))
+                .execute(conn)?;
+
+            Ok(())
+        })
+        .await?;
+
+        Ok(())
     }
 
     pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
@@ -364,7 +463,7 @@ impl Persistence {
                 .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
                 .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
                 .set((
-                    generation_pageserver.eq(i64::MAX),
+                    generation_pageserver.eq(Option::<i64>::None),
                     placement_policy.eq(serde_json::to_string(&PlacementPolicy::Detached).unwrap()),
                 ))
                 .execute(conn)?;
@@ -477,7 +576,7 @@ impl Persistence {
 }
 
 /// Parts of [`crate::tenant_state::TenantState`] that are stored durably
-#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone)]
+#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
 #[diesel(table_name = crate::schema::tenant_shards)]
 pub(crate) struct TenantShardPersistence {
     #[serde(default)]
@@ -490,12 +589,15 @@ pub(crate) struct TenantShardPersistence {
     pub(crate) shard_stripe_size: i32,
 
     // Latest generation number: next time we attach, increment this
-    // and use the incremented number when attaching
-    pub(crate) generation: i32,
+    // and use the incremented number when attaching.
+    //
+    // Generation is only None when first onboarding a tenant, where it may
+    // be in PlacementPolicy::Secondary and therefore have no valid generation state.
+    pub(crate) generation: Option<i32>,
 
     // Currently attached pageserver
     #[serde(rename = "pageserver")]
-    pub(crate) generation_pageserver: i64,
+    pub(crate) generation_pageserver: Option<i64>,
 
     #[serde(default)]
     pub(crate) placement_policy: String,
@@ -506,7 +608,7 @@ pub(crate) struct TenantShardPersistence {
 }
 
 /// Parts of [`crate::node::Node`] that are stored durably
-#[derive(Serialize, Deserialize, Queryable, Selectable, Insertable)]
+#[derive(Serialize, Deserialize, Queryable, Selectable, Insertable, Eq, PartialEq)]
 #[diesel(table_name = crate::schema::nodes)]
 pub(crate) struct NodePersistence {
     pub(crate) node_id: i64,

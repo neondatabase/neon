@@ -5,10 +5,11 @@ use once_cell::sync::OnceCell;
 use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
+use tracing::{field::display, info_span, Span};
 use uuid::Uuid;
 
 use crate::{
-    console::messages::MetricsAuxInfo,
+    console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     metrics::{LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND},
     BranchId, DbName, EndpointId, ProjectId, RoleName,
@@ -29,6 +30,7 @@ pub struct RequestMonitoring {
     pub protocol: &'static str,
     first_packet: chrono::DateTime<Utc>,
     region: &'static str,
+    pub span: Span,
 
     // filled in as they are discovered
     project: Option<ProjectId>,
@@ -40,6 +42,7 @@ pub struct RequestMonitoring {
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
     success: bool,
+    cold_start_info: Option<ColdStartInfo>,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -63,12 +66,21 @@ impl RequestMonitoring {
         protocol: &'static str,
         region: &'static str,
     ) -> Self {
+        let span = info_span!(
+            "connect_request",
+            %protocol,
+            ?session_id,
+            %peer_addr,
+            ep = tracing::field::Empty,
+        );
+
         Self {
             peer_addr,
             session_id,
             protocol,
             first_packet: Utc::now(),
             region,
+            span,
 
             project: None,
             branch: None,
@@ -79,6 +91,7 @@ impl RequestMonitoring {
             error_kind: None,
             auth_method: None,
             success: false,
+            cold_start_info: None,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
@@ -99,9 +112,10 @@ impl RequestMonitoring {
     }
 
     pub fn set_project(&mut self, x: MetricsAuxInfo) {
+        self.set_endpoint_id(x.endpoint_id);
         self.branch = Some(x.branch_id);
-        self.endpoint_id = Some(x.endpoint_id);
         self.project = Some(x.project_id);
+        self.cold_start_info = x.cold_start_info;
     }
 
     pub fn set_project_id(&mut self, project_id: ProjectId) {
@@ -109,6 +123,7 @@ impl RequestMonitoring {
     }
 
     pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+        self.span.record("ep", display(&endpoint_id));
         crate::metrics::CONNECTING_ENDPOINTS
             .with_label_values(&[self.protocol])
             .measure(&endpoint_id);
@@ -147,15 +162,13 @@ impl RequestMonitoring {
         self.success = true;
     }
 
-    pub fn log(&mut self) {
-        if let Some(tx) = self.sender.take() {
-            let _: Result<(), _> = tx.send(self.clone());
-        }
-    }
+    pub fn log(self) {}
 }
 
 impl Drop for RequestMonitoring {
     fn drop(&mut self) {
-        self.log()
+        if let Some(tx) = self.sender.take() {
+            let _: Result<(), _> = tx.send(self.clone());
+        }
     }
 }

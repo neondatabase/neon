@@ -100,6 +100,7 @@ pub struct State {
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
     secondary_controller: SecondaryController,
+    latest_utilization: tokio::sync::Mutex<Option<(std::time::Instant, bytes::Bytes)>>,
 }
 
 impl State {
@@ -128,6 +129,7 @@ impl State {
             disk_usage_eviction_state,
             deletion_queue_client,
             secondary_controller,
+            latest_utilization: Default::default(),
         })
     }
 }
@@ -622,7 +624,7 @@ async fn timeline_preserve_initdb_handler(
     // location where timeline recreation cand find it.
 
     async {
-        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+        let tenant = mgr::get_tenant(tenant_shard_id, false)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -659,9 +661,14 @@ async fn timeline_detail_handler(
 
     // Logical size calculation needs downloading.
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let state = get_state(&request);
 
     let timeline_info = async {
-        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id, false)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -694,6 +701,7 @@ async fn get_lsn_by_timestamp_handler(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
     if !tenant_shard_id.is_zero() {
         // Requires SLRU contents, which are only stored on shard zero
@@ -710,7 +718,10 @@ async fn get_lsn_by_timestamp_handler(
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
@@ -741,6 +752,7 @@ async fn get_timestamp_of_lsn_handler(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
     if !tenant_shard_id.is_zero() {
         // Requires SLRU contents, which are only stored on shard zero
@@ -757,7 +769,9 @@ async fn get_timestamp_of_lsn_handler(
         .map_err(ApiError::BadRequest)?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
     let result = timeline.get_timestamp_for_lsn(lsn, &ctx).await?;
 
     match result {
@@ -802,13 +816,7 @@ async fn tenant_attach_handler(
 
     let tenant = state
         .tenant_manager
-        .upsert_location(
-            tenant_shard_id,
-            location_conf,
-            None,
-            SpawnMode::Normal,
-            &ctx,
-        )
+        .upsert_location(tenant_shard_id, location_conf, None, SpawnMode::Eager, &ctx)
         .await?;
 
     let Some(tenant) = tenant else {
@@ -1157,10 +1165,13 @@ async fn layer_map_info_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let reset: LayerAccessStatsReset =
         parse_query_param(&request, "reset")?.unwrap_or(LayerAccessStatsReset::NoReset);
+    let state = get_state(&request);
 
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
     let layer_map_info = timeline.layer_map_info(reset).await;
 
     json_response(StatusCode::OK, layer_map_info)
@@ -1174,8 +1185,11 @@ async fn layer_download_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
-    let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
     let downloaded = timeline
         .download_layer(layer_file_name)
         .await
@@ -1199,8 +1213,11 @@ async fn evict_timeline_layer_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
+    let state = get_state(&request);
 
-    let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
     let evicted = timeline
         .evict_layer(layer_file_name)
         .await
@@ -1395,6 +1412,7 @@ async fn put_tenant_location_config_handler(
 
     let request_data: TenantLocationConfigRequest = json_request(&mut request).await?;
     let flush = parse_query_param(&request, "flush_ms")?.map(Duration::from_millis);
+    let lazy = parse_query_param(&request, "lazy")?.unwrap_or(false);
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
@@ -1425,15 +1443,17 @@ async fn put_tenant_location_config_handler(
     let location_conf =
         LocationConf::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
+    // lazy==true queues up for activation or jumps the queue like normal when a compute connects,
+    // similar to at startup ordering.
+    let spawn_mode = if lazy {
+        tenant::SpawnMode::Lazy
+    } else {
+        tenant::SpawnMode::Eager
+    };
+
     let attached = state
         .tenant_manager
-        .upsert_location(
-            tenant_shard_id,
-            location_conf,
-            flush,
-            tenant::SpawnMode::Normal,
-            &ctx,
-        )
+        .upsert_location(tenant_shard_id, location_conf, flush, spawn_mode, &ctx)
         .await?
         .is_some();
 
@@ -1610,13 +1630,19 @@ async fn timeline_compact_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    let state = get_state(&request);
+
     let mut flags = EnumSet::empty();
     if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
+        flags |= CompactFlags::ForceImageLayerCreation;
+    }
+
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+        let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
         timeline
             .compact(&cancel, flags, &ctx)
             .await
@@ -1636,13 +1662,19 @@ async fn timeline_checkpoint_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
+    let state = get_state(&request);
+
     let mut flags = EnumSet::empty();
     if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
+        flags |= CompactFlags::ForceImageLayerCreation;
+    }
+
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+        let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
         timeline
             .freeze_and_flush()
             .await
@@ -1667,7 +1699,11 @@ async fn timeline_download_remote_layers_handler_post(
     let body: DownloadRemoteLayersTaskSpawnRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
     match timeline.spawn_download_all_remote_layers(body).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
@@ -1681,8 +1717,11 @@ async fn timeline_download_remote_layers_handler_get(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let state = get_state(&request);
 
-    let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
     let info = timeline
         .get_download_all_remote_layers_task_info()
         .context("task never started since last pageserver process start")
@@ -1731,6 +1770,7 @@ async fn getpage_at_lsn_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
     struct Key(crate::repository::Key);
 
@@ -1749,7 +1789,7 @@ async fn getpage_at_lsn_handler(
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+        let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
 
         let page = timeline.get(key.0, lsn, &ctx).await?;
 
@@ -1772,12 +1812,13 @@ async fn timeline_collect_keyspace(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
     let at_lsn: Option<Lsn> = parse_query_param(&request, "at_lsn")?;
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
+        let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
         let at_lsn = at_lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
         let keys = timeline
             .collect_keyspace(at_lsn, &ctx)
@@ -1793,10 +1834,14 @@ async fn timeline_collect_keyspace(
 }
 
 async fn active_timeline_of_active_tenant(
+    tenant_manager: &TenantManager,
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
 ) -> Result<Arc<Timeline>, ApiError> {
-    let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+    let tenant = tenant_manager.get_attached_tenant_shard(tenant_shard_id, false)?;
+
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
     tenant
         .get_timeline(timeline_id, true)
         .map_err(|e| ApiError::NotFound(e.into()))
@@ -1961,6 +2006,54 @@ async fn put_io_engine_handler(
     let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
     crate::virtual_file::io_engine::set(kind);
     json_response(StatusCode::OK, ())
+}
+
+/// Polled by control plane.
+///
+/// See [`crate::utilization`].
+async fn get_utilization(
+    r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    // this probably could be completely public, but lets make that change later.
+    check_permission(&r, None)?;
+
+    let state = get_state(&r);
+    let mut g = state.latest_utilization.lock().await;
+
+    let regenerate_every = Duration::from_secs(1);
+    let still_valid = g
+        .as_ref()
+        .is_some_and(|(captured_at, _)| captured_at.elapsed() < regenerate_every);
+
+    // avoid needless statvfs calls even though those should be non-blocking fast.
+    // regenerate at most 1Hz to allow polling at any rate.
+    if !still_valid {
+        let path = state.conf.tenants_path();
+        let doc = crate::utilization::regenerate(path.as_std_path())
+            .map_err(ApiError::InternalServerError)?;
+
+        let mut buf = Vec::new();
+        serde_json::to_writer(&mut buf, &doc)
+            .context("serialize")
+            .map_err(ApiError::InternalServerError)?;
+
+        let body = bytes::Bytes::from(buf);
+
+        *g = Some((std::time::Instant::now(), body));
+    }
+
+    // hyper 0.14 doesn't yet have Response::clone so this is a bit of extra legwork
+    let cached = g.as_ref().expect("just set").1.clone();
+
+    Response::builder()
+        .header(hyper::http::header::CONTENT_TYPE, "application/json")
+        // thought of using http date header, but that is second precision which does not give any
+        // debugging aid
+        .status(StatusCode::OK)
+        .body(hyper::Body::from(cached))
+        .context("build response")
+        .map_err(ApiError::InternalServerError)
 }
 
 /// Common functionality of all the HTTP API handlers.
@@ -2224,5 +2317,6 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .get("/v1/utilization", |r| api_handler(r, get_utilization))
         .any(handler_404))
 }
