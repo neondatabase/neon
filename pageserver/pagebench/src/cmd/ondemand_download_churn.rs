@@ -55,6 +55,7 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
 struct LiveStats {
     evictions: AtomicU64,
     downloads: AtomicU64,
+    timeline_restarts: AtomicU64,
 }
 
 impl LiveStats {
@@ -63,6 +64,9 @@ impl LiveStats {
     }
     fn download_done(&self) {
         self.downloads.fetch_add(1, Ordering::Relaxed);
+    }
+    fn timeline_restart_done(&self) {
+        self.timeline_restarts.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -104,10 +108,12 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 let LiveStats {
                     evictions,
                     downloads,
+                    timeline_restarts,
                 } = &*live_stats;
                 let evictions = evictions.swap(0, Ordering::Relaxed) as f64 / delta.as_secs_f64();
                 let downloads = downloads.swap(0, Ordering::Relaxed) as f64 / delta.as_secs_f64();
-                info!("evictions={evictions:.2}/s downloads={downloads:.2}/s");
+                let timeline_restarts = timeline_restarts.swap(0, Ordering::Relaxed);
+                info!("evictions={evictions:.2}/s downloads={downloads:.2}/s timeline_restarts={timeline_restarts}");
             }
         }
     });
@@ -176,6 +182,8 @@ async fn timeline_actor(
             layers,
             concurrency,
         };
+
+        live_stats.timeline_restart_done();
 
         loop {
             assert!(!timeline.joinset.is_empty());
