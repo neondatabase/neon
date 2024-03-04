@@ -438,6 +438,24 @@ async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiEr
     state.service.tenants_dump()
 }
 
+async fn handle_balance_all(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+    service.balance_all()?;
+    json_response(StatusCode::OK, ())
+}
+
+async fn handle_balance_attached(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+    service.balance_attached()?;
+    json_response(StatusCode::OK, ())
+}
+
 async fn handle_scheduler_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -571,6 +589,12 @@ pub fn make_router(
         })
         .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
             tenant_service_handler(r, handle_tenant_shard_split)
+        })
+        .post("/control/v1/balance/all", |r| {
+            tenant_service_handler(r, handle_balance_all)
+        })
+        .post("/control/v1/balance/attached", |r| {
+            tenant_service_handler(r, handle_balance_attached)
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into
