@@ -892,15 +892,22 @@ impl DeltaLayerInner {
                         let lsn = DeltaKey::extract_lsn_from_buf(raw_key);
                         let blob_ref = BlobRef(value);
 
-                        assert!(key >= range.start && lsn >= lsn_range.start);
+                        // Lsns are not monotonically increasing, so we don't assert on them.
+                        assert!(key >= range.start);
 
-                        let cached_lsn = reconstruct_state.get_cached_lsn(&key);
                         let flag = {
-                            if cached_lsn >= Some(lsn) {
+                            #[allow(clippy::if_same_then_else)]
+                            if lsn >= lsn_range.end || lsn < lsn_range.start {
+                                // If the Lsn is not in the queried range it must be ignored
+                                BlobFlag::Ignore
+                            } else if reconstruct_state.get_cached_lsn(&key) >= Some(lsn) {
+                                // If the Lsn is below the caching line it must be ignored
                                 BlobFlag::Ignore
                             } else if blob_ref.will_init() {
+                                // This blob will replace all previous blobs for this key
                                 BlobFlag::Replaces
                             } else {
+                                // Usual path: add blob to the read
                                 BlobFlag::None
                             }
                         };
