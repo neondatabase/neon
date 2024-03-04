@@ -159,6 +159,7 @@ impl PagestreamClient {
             | PagestreamBeMessage::Nblocks(_)
             | PagestreamBeMessage::DbSize(_)
             | PagestreamBeMessage::GetSlruSegment(_)
+            | PagestreamBeMessage::GetControlFileValues(_)
             | PagestreamBeMessage::GetVectoredPages(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",
@@ -190,6 +191,7 @@ impl PagestreamClient {
             | PagestreamBeMessage::Nblocks(_)
             | PagestreamBeMessage::DbSize(_)
             | PagestreamBeMessage::GetSlruSegment(_)
+            | PagestreamBeMessage::GetControlFileValues(_)
             | PagestreamBeMessage::GetPage(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",

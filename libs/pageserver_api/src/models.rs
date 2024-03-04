@@ -739,6 +739,7 @@ pub enum PagestreamFeMessage {
     DbSize(PagestreamDbSizeRequest),
     GetSlruSegment(PagestreamGetSlruSegmentRequest),
     GetVectoredPages(PagestreamGetVectoredPagesRequest),
+    GetControlFileValues(PagestreamGetControlFileValuesRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -751,6 +752,7 @@ pub enum PagestreamBeMessage {
     DbSize(PagestreamDbSizeResponse),
     GetSlruSegment(PagestreamGetSlruSegmentResponse),
     GetVectoredPages(PagestreamGetVectoredPagesResponse),
+    GetControlFileValues(PagestreamGetControlFileValuesResponse),
 }
 
 // Keep in sync with `pagestore_client.h`
@@ -763,6 +765,7 @@ enum PagestreamBeMessageTag {
     DbSize = 104,
     GetSlruSegment = 105,
     GetVectoredPages = 106,
+    GetControlFileValues = 107,
 }
 impl TryFrom<u8> for PagestreamBeMessageTag {
     type Error = u8;
@@ -826,6 +829,11 @@ pub struct PagestreamGetVectoredPagesRequest {
     pub count: u8,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct PagestreamGetControlFileValuesRequest {
+    pub lsn: Lsn,
+}
+
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
     pub exists: bool,
@@ -851,6 +859,9 @@ pub struct PagestreamGetVectoredPagesResponse {
     pub page_count: u8,
     pub pages: Bytes,
 }
+
+#[derive(Debug)]
+pub struct PagestreamGetControlFileValuesResponse {}
 
 #[derive(Debug)]
 pub struct PagestreamErrorResponse {
@@ -935,6 +946,10 @@ impl PagestreamFeMessage {
                 bytes.put_u32(req.blkno);
                 bytes.put_u8(req.count);
             }
+            Self::GetControlFileValues(req) => {
+                bytes.put_u8(6);
+                bytes.put_u64(req.lsn.0);
+            }
         }
 
         bytes.into()
@@ -1007,6 +1022,11 @@ impl PagestreamFeMessage {
                     count: body.read_u8()?,
                 },
             )),
+            6 => Ok(PagestreamFeMessage::GetControlFileValues(
+                PagestreamGetControlFileValuesRequest {
+                    lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                },
+            )),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
@@ -1053,6 +1073,10 @@ impl PagestreamBeMessage {
                 bytes.put_u8(Tag::GetVectoredPages as u8);
                 bytes.put_u8(resp.page_count);
                 bytes.put(&resp.pages[..]);
+            }
+
+            Self::GetControlFileValues(_resp) => {
+                bytes.put_u8(Tag::GetControlFileValues as u8);
             }
         }
 
@@ -1111,6 +1135,9 @@ impl PagestreamBeMessage {
                         pages: pages.into(),
                     })
                 }
+                Tag::GetControlFileValues => {
+                    Self::GetControlFileValues(PagestreamGetControlFileValuesResponse {})
+                }
             };
         let remaining = buf.into_inner();
         if !remaining.is_empty() {
@@ -1131,6 +1158,7 @@ impl PagestreamBeMessage {
             Self::DbSize(_) => "DbSize",
             Self::GetSlruSegment(_) => "GetSlruSegment",
             Self::GetVectoredPages(_) => "GetVectoredPages",
+            Self::GetControlFileValues(_) => "GetControlFileValues",
         }
     }
 }

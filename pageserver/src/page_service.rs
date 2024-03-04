@@ -17,6 +17,11 @@ use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
 use pageserver_api::key::Key;
+use pageserver_api::key::AUX_FILES_KEY;
+use pageserver_api::key::CONTROLFILE_KEY;
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::models::PagestreamGetControlFileValuesRequest;
+use pageserver_api::models::PagestreamGetControlFileValuesResponse;
 use pageserver_api::models::PagestreamGetVectoredPagesRequest;
 use pageserver_api::models::PagestreamGetVectoredPagesResponse;
 use pageserver_api::models::TenantState;
@@ -690,6 +695,15 @@ impl PageServerHandler {
                         span,
                     )
                 }
+                PagestreamFeMessage::GetControlFileValues(req) => {
+                    let span = tracing::info_span!("handle_get_control_values", req_lsn = %req.lsn);
+                    (
+                        self.handle_get_control_values(tenant_id, timeline_id, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
+                }
             };
 
             match response {
@@ -1183,6 +1197,24 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
+    }
+    #[instrument(skip_all, fields(shard_id))]
+    async fn handle_get_control_values(
+        &mut self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &PagestreamGetControlFileValuesRequest,
+        ctx: &RequestContext,
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
+        let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+        let keyspace = KeySpace {
+            ranges: vec![CONTROLFILE_KEY..AUX_FILES_KEY.next()],
+        };
+        let _ = timeline.get_vectored(keyspace, req.lsn, ctx).await;
+
+        Ok(PagestreamBeMessage::GetControlFileValues(
+            PagestreamGetControlFileValuesResponse {},
+        ))
     }
 
     #[instrument(skip_all, fields(shard_id))]
