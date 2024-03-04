@@ -176,7 +176,7 @@ build: |
       # actually build the thing...
       && make install
 
-  FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.0 AS postgres-exporter
+  FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
 
   FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
 
