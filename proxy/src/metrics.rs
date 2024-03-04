@@ -238,7 +238,7 @@ impl Drop for LatencyTimer {
     fn drop(&mut self) {
         let duration = self
             .stop
-            .unwrap_or_else(|| time::Instant::now())
+            .unwrap_or_else(time::Instant::now)
             .duration_since(self.start);
         // Excluding cplane communication from the accumulated time.
         let accumulated_client = *self
