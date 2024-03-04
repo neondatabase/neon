@@ -46,6 +46,8 @@ use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
+use futures::pin_mut;
+use futures::StreamExt;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
@@ -879,54 +881,51 @@ impl DeltaLayerInner {
             block_reader,
         );
 
+        let btree_request_context = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+            .build();
+
         for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
 
             let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
-            tree_reader
-                .visit(
-                    &start_key.0,
-                    VisitDirection::Forwards,
-                    |raw_key, value| {
-                        let key = Key::from_slice(&raw_key[..KEY_SIZE]);
-                        let lsn = DeltaKey::extract_lsn_from_buf(raw_key);
-                        let blob_ref = BlobRef(value);
+            let index_stream = tree_reader.get_stream_from(&start_key.0, &btree_request_context);
+            pin_mut!(index_stream);
 
-                        // Lsns are not monotonically increasing, so we don't assert on them.
-                        assert!(key >= range.start);
+            while let Some(index_entry) = index_stream.next().await {
+                let (raw_key, value) = index_entry.map_err(|err| anyhow!(err))?;
+                let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
+                let blob_ref = BlobRef(value);
 
-                        let flag = {
-                            #[allow(clippy::if_same_then_else)]
-                            if lsn >= lsn_range.end || lsn < lsn_range.start {
-                                // If the Lsn is not in the queried range it must be ignored
-                                BlobFlag::Ignore
-                            } else if reconstruct_state.get_cached_lsn(&key) >= Some(lsn) {
-                                // If the Lsn is below the caching line it must be ignored
-                                BlobFlag::Ignore
-                            } else if blob_ref.will_init() {
-                                // This blob will replace all previous blobs for this key
-                                BlobFlag::Replaces
-                            } else {
-                                // Usual path: add blob to the read
-                                BlobFlag::None
-                            }
-                        };
+                // Lsns are not monotonically increasing, so we don't assert on them.
+                assert!(key >= range.start);
 
-                        if key >= range.end || (key.next() == range.end && lsn >= lsn_range.end) {
-                            planner.handle_range_end(blob_ref.pos());
-                            range_end_handled = true;
-                            false
-                        } else {
-                            planner.handle(key, lsn, blob_ref.pos(), flag);
-                            true
-                        }
-                    },
-                    &RequestContextBuilder::extend(ctx)
-                        .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
-                        .build(),
-                )
-                .await
-                .map_err(|err| anyhow!(err))?;
+                let flag = {
+                    #[allow(clippy::if_same_then_else)]
+                    if lsn >= lsn_range.end || lsn < lsn_range.start {
+                        // If the Lsn is not in the queried range it must be ignored
+                        BlobFlag::Ignore
+                    } else if reconstruct_state.get_cached_lsn(&key) >= Some(lsn) {
+                        // If the Lsn is below the caching line it must be ignored
+                        BlobFlag::Ignore
+                    } else if blob_ref.will_init() {
+                        // This blob will replace all previous blobs for this key
+                        BlobFlag::Replaces
+                    } else {
+                        // Usual path: add blob to the read
+                        BlobFlag::None
+                    }
+                };
+
+                if key >= range.end || (key.next() == range.end && lsn >= lsn_range.end) {
+                    planner.handle_range_end(blob_ref.pos());
+                    range_end_handled = true;
+                    break;
+                } else {
+                    planner.handle(key, lsn, blob_ref.pos(), flag);
+                }
+            }
 
             if !range_end_handled {
                 let payload_end = self.index_start_blk as u64 * PAGE_SZ as u64;
