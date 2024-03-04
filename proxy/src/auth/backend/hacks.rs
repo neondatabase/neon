@@ -25,13 +25,16 @@ pub async fn authenticate_cleartext(
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     // pause the timer while we communicate with the client
-    let _paused = ctx.latency_timer.pause();
+    let paused = ctx.latency_timer.pause("client");
 
-    let auth_outcome = AuthFlow::new(client)
+    let auth_flow = AuthFlow::new(client)
         .begin(auth::CleartextPassword(secret))
-        .await?
-        .authenticate()
         .await?;
+    drop(paused);
+    // cleartext auth is only allowed to the ws/http protocol.
+    // If we're here, we already received the password in the first message.
+    // Scram protocol will be executed on the proxy side.
+    let auth_outcome = auth_flow.authenticate().await?;
 
     let keys = match auth_outcome {
         sasl::Outcome::Success(key) => key,
@@ -56,7 +59,7 @@ pub async fn password_hack_no_authentication(
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     // pause the timer while we communicate with the client
-    let _paused = ctx.latency_timer.pause();
+    let _paused = ctx.latency_timer.pause("client");
 
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)
