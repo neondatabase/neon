@@ -6,7 +6,7 @@ use utils::id::TenantTimelineId;
 
 use tokio::task::JoinSet;
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// Evict & on-demand download random layers.
 #[derive(clap::Parser)]
@@ -17,6 +17,8 @@ pub(crate) struct Args {
     pageserver_jwt: Option<String>,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
+    #[clap(long)]
+    tasks_per_target: NonZeroUsize,
     /// Probability for sending `latest=true` in the request (uniform distribution).
     #[clap(long)]
     limit_to_first_n_targets: Option<usize>,
@@ -60,7 +62,9 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
 
     let mut tasks = JoinSet::new();
     for tl in timelines {
-        tasks.spawn(timeline_task(Arc::clone(&mgmt_api_client), tl));
+        for _ in 0..args.tasks_per_target.get() {
+            tasks.spawn(timeline_task(Arc::clone(&mgmt_api_client), tl));
+        }
     }
 
     while let Some(res) = tasks.join_next().await {
@@ -96,6 +100,7 @@ async fn timeline_task(
                 .choose_mut(&mut rng)
                 .expect("no layers")
         };
+        #[derive(Clone, Copy)]
         enum Action {
             Evict,
             OnDemandDownload,
@@ -128,7 +133,10 @@ async fn timeline_task(
             layers = None;
         } else {
             info!("did it");
-            layer.set_remote(layer.is_remote());
+            layer.set_remote(match action {
+                Action::Evict => true,
+                Action::OnDemandDownload => false,
+            });
         }
     }
 }
