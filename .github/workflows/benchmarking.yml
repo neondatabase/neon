@@ -71,10 +71,12 @@ jobs:
     - name: Generate matrix for pgbench benchmark with big databases
       id: pgbench-compare-big-db-matrix
       run: |
+        # There's also `neonvm-captest-reuse` platform, but we don't want to use it
+        # because DevRel team used it for some demos, they might need it again
+
         matrix='{
           "platform": [
-            "neon-captest-reuse",
-            "neonvm-captest-reuse"
+            "neon-captest-reuse"
           ],
           "db_size": [ "1tb" ]
         }'
