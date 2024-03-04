@@ -1,12 +1,19 @@
 use pageserver_api::shard::TenantShardId;
 
 use rand::seq::SliceRandom;
-use tracing::info;
+use tracing::{debug, info};
 use utils::id::TenantTimelineId;
 
 use tokio::task::JoinSet;
 
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 /// Evict & on-demand download random layers.
 #[derive(clap::Parser)]
@@ -38,6 +45,21 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Default)]
+struct LiveStats {
+    evictions: AtomicU64,
+    downloads: AtomicU64,
+}
+
+impl LiveStats {
+    fn eviction_done(&self) {
+        self.evictions.fetch_add(1, Ordering::Relaxed);
+    }
+    fn download_done(&self) {
+        self.downloads.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 async fn main_impl(args: Args) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
@@ -61,9 +83,36 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     .await?;
 
     let mut tasks = JoinSet::new();
+
+    let live_stats = Arc::new(LiveStats::default());
+    tasks.spawn({
+        let live_stats = Arc::clone(&live_stats);
+        async move {
+            let mut last_at = Instant::now();
+            loop {
+                tokio::time::sleep_until((last_at + Duration::from_secs(1)).into()).await;
+                let now = Instant::now();
+                let delta: Duration = now - last_at;
+                last_at = now;
+
+                let LiveStats {
+                    evictions,
+                    downloads,
+                } = &*live_stats;
+                let evictions = evictions.swap(0, Ordering::Relaxed) as f64 / delta.as_secs_f64();
+                let downloads = downloads.swap(0, Ordering::Relaxed) as f64 / delta.as_secs_f64();
+                info!("evictions={evictions:.2}/s downloads={downloads:.2}/s");
+            }
+        }
+    });
+
     for tl in timelines {
         for _ in 0..args.tasks_per_target.get() {
-            tasks.spawn(timeline_task(Arc::clone(&mgmt_api_client), tl));
+            tasks.spawn(timeline_task(
+                Arc::clone(&mgmt_api_client),
+                tl,
+                Arc::clone(&live_stats),
+            ));
         }
     }
 
@@ -76,6 +125,7 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
 async fn timeline_task(
     mgmt_api_client: Arc<pageserver_client::mgmt_api::Client>,
     timeline: TenantTimelineId,
+    live_stats: Arc<LiveStats>,
 ) {
     // TODO: support sharding
     let tenant_shard_id = TenantShardId::unsharded(timeline.tenant_id);
@@ -111,28 +161,36 @@ async fn timeline_task(
             Action::Evict
         };
         let did_it = match action {
-            Action::Evict => mgmt_api_client
-                .layer_evict(
-                    tenant_shard_id,
-                    timeline.timeline_id,
-                    layer.layer_file_name(),
-                )
-                .await
-                .unwrap(),
-            Action::OnDemandDownload => mgmt_api_client
-                .layer_ondemand_download(
-                    tenant_shard_id,
-                    timeline.timeline_id,
-                    layer.layer_file_name(),
-                )
-                .await
-                .unwrap(),
+            Action::Evict => {
+                let did_it = mgmt_api_client
+                    .layer_evict(
+                        tenant_shard_id,
+                        timeline.timeline_id,
+                        layer.layer_file_name(),
+                    )
+                    .await
+                    .unwrap();
+                live_stats.eviction_done();
+                did_it
+            }
+            Action::OnDemandDownload => {
+                let did_it =mgmt_api_client
+                    .layer_ondemand_download(
+                        tenant_shard_id,
+                        timeline.timeline_id,
+                        layer.layer_file_name(),
+                    )
+                    .await
+                    .unwrap();
+                live_stats.download_done();
+                did_it
+            }
         };
         if !did_it {
-            info!("local copy of layer map appears out of sync, re-downloading");
+            debug!("local copy of layer map appears out of sync, re-downloading");
             layers = None;
         } else {
-            info!("did it");
+            debug!("did it");
             layer.set_remote(match action {
                 Action::Evict => true,
                 Action::OnDemandDownload => false,
