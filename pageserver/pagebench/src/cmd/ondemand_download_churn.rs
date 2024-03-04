@@ -186,6 +186,7 @@ async fn timeline_actor(
 
         live_stats.timeline_restart_done();
 
+        let mut i = 0;
         loop {
             assert!(!timeline.joinset.is_empty());
             if let Some(res) = timeline.joinset.try_join_next() {
@@ -202,9 +203,10 @@ async fn timeline_actor(
             );
 
             loop {
+                i += 1;
+                i = i % timeline.layers.len();
                 let layer_tx = {
-                    let mut rng = rand::thread_rng();
-                    timeline.layers.choose_mut(&mut rng).expect("no layers")
+                    &timeline.layers[i]
                 };
                 match layer_tx.try_send(permit.take().unwrap()) {
                     Ok(_) => break,
