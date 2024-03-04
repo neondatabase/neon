@@ -116,7 +116,7 @@ def test_sharding_service_smoke(
     # Marking a pageserver offline should migrate tenants away from it.
     env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
-    def node_evacuated(node_id: int):
+    def node_evacuated(node_id: int) -> None:
         counts = get_node_shard_counts(env, tenant_ids)
         assert counts[node_id] == 0
 
@@ -145,6 +145,8 @@ def test_sharding_service_smoke(
     # Delete all the tenants
     for tid in tenant_ids:
         tenant_delete_wait_completed(env.attachment_service.pageserver_api(), tid, 10)
+
+    env.attachment_service.consistency_check()
 
     # Set a scheduling policy on one node, create all the tenants, observe
     # that the scheduling policy is respected.
@@ -256,9 +258,8 @@ def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
     env.attachment_service.consistency_check()
 
 
-def test_sharding_service_onboarding(
-    neon_env_builder: NeonEnvBuilder,
-):
+@pytest.mark.parametrize("warm_up", [True, False])
+def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
     """
     We onboard tenants to the sharding service by treating it as a 'virtual pageserver'
     which provides the /location_config API.  This is similar to creating a tenant,
@@ -306,6 +307,23 @@ def test_sharding_service_onboarding(
         },
     )
 
+    if warm_up:
+        origin_ps.http_client().tenant_heatmap_upload(tenant_id)
+
+        # We expect to be called via live migration code, which may try to configure the tenant into secondary
+        # mode before attaching it.
+        virtual_ps_http.tenant_location_conf(
+            tenant_id,
+            {
+                "mode": "Secondary",
+                "secondary_conf": {"warm": True},
+                "tenant_conf": {},
+                "generation": None,
+            },
+        )
+
+        virtual_ps_http.tenant_secondary_download(tenant_id)
+
     # Call into attachment service to onboard the tenant
     generation += 1
     virtual_ps_http.tenant_location_conf(
@@ -351,7 +369,9 @@ def test_sharding_service_onboarding(
     assert len(dest_tenants) == 1
     assert TenantId(dest_tenants[0]["id"]) == tenant_id
 
-    # sharding service advances generation by 1 when it first attaches
+    # sharding service advances generation by 1 when it first attaches.  We started
+    # with a nonzero generation so this equality also proves that the generation
+    # was properly carried over during onboarding.
     assert dest_tenants[0]["generation"] == generation + 1
 
     # The onboarded tenant should survive a restart of sharding service
@@ -361,6 +381,31 @@ def test_sharding_service_onboarding(
     # The onboarded tenant should surviev a restart of pageserver
     dest_ps.stop()
     dest_ps.start()
+
+    # Having onboarded via /location_config, we should also be able to update the
+    # TenantConf part of LocationConf, without inadvertently resetting the generation
+    modified_tenant_conf = {"max_lsn_wal_lag": 1024 * 1024 * 1024 * 100}
+    dest_tenant_before_conf_change = dest_ps.http_client().tenant_status(tenant_id)
+
+    # The generation has moved on since we onboarded
+    assert generation != dest_tenant_before_conf_change["generation"]
+
+    virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "AttachedSingle",
+            "secondary_conf": None,
+            "tenant_conf": modified_tenant_conf,
+            # This is intentionally a stale generation
+            "generation": generation,
+        },
+    )
+    dest_tenant_after_conf_change = dest_ps.http_client().tenant_status(tenant_id)
+    assert (
+        dest_tenant_after_conf_change["generation"] == dest_tenant_before_conf_change["generation"]
+    )
+    dest_tenant_conf_after = dest_ps.http_client().tenant_config(tenant_id)
+    assert dest_tenant_conf_after.tenant_specific_overrides == modified_tenant_conf
 
     env.attachment_service.consistency_check()
 
@@ -405,7 +450,7 @@ def test_sharding_service_compute_hook(
 
     env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
-    def node_evacuated(node_id: int):
+    def node_evacuated(node_id: int) -> None:
         counts = get_node_shard_counts(env, [env.initial_tenant])
         assert counts[node_id] == 0
 
@@ -667,3 +712,41 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
         svc.request(
             "POST", f"{api}/upcall/v1/re-attach", headers=svc.headers(TokenScope.PAGE_SERVER_API)
         )
+
+
+def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
+    """
+    Validate the pageserver-compatible API endpoints for setting and getting tenant conf, without
+    supplying the whole LocationConf.
+    """
+
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+
+    http = env.attachment_service.pageserver_api()
+
+    default_value = "7days"
+    new_value = "1h"
+    http.set_tenant_config(tenant_id, {"pitr_interval": new_value})
+
+    # Ensure the change landed on the storage controller
+    readback_controller = http.tenant_config(tenant_id)
+    assert readback_controller.effective_config["pitr_interval"] == new_value
+    assert readback_controller.tenant_specific_overrides["pitr_interval"] == new_value
+
+    # Ensure the change made it down to the pageserver
+    readback_ps = env.pageservers[0].http_client().tenant_config(tenant_id)
+    assert readback_ps.effective_config["pitr_interval"] == new_value
+    assert readback_ps.tenant_specific_overrides["pitr_interval"] == new_value
+
+    # Omitting a value clears it.  This looks different in storage controller
+    # vs. pageserver API calls, because pageserver has defaults.
+    http.set_tenant_config(tenant_id, {})
+    readback_controller = http.tenant_config(tenant_id)
+    assert readback_controller.effective_config["pitr_interval"] is None
+    assert readback_controller.tenant_specific_overrides["pitr_interval"] is None
+    readback_ps = env.pageservers[0].http_client().tenant_config(tenant_id)
+    assert readback_ps.effective_config["pitr_interval"] == default_value
+    assert "pitr_interval" not in readback_ps.tenant_specific_overrides
+
+    env.attachment_service.consistency_check()

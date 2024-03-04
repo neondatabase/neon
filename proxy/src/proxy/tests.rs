@@ -16,7 +16,7 @@ use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBacken
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
-use crate::{auth, http, sasl, scram};
+use crate::{http, sasl, scram};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use rstest::rstest;

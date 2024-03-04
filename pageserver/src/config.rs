@@ -20,7 +20,6 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use toml_edit;
 use toml_edit::{Document, Item};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -212,9 +211,9 @@ pub struct PageServerConf {
 
     pub log_format: LogFormat,
 
-    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup,
-    /// does not limit tenants loaded in response to client I/O.  A lower value implicitly deprioritizes
-    /// loading such tenants, vs. other work in the system.
+    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup or attach.
+    ///
+    /// A lower value implicitly deprioritizes loading such tenants, vs. other work in the system.
     pub concurrent_tenant_warmup: ConfigurableSemaphore,
 
     /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
@@ -1203,10 +1202,7 @@ impl ConfigurableSemaphore {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        num::{NonZeroU32, NonZeroUsize},
-    };
+    use std::{fs, num::NonZeroU32};
 
     use camino_tempfile::{tempdir, Utf8TempDir};
     use pageserver_api::models::EvictionPolicy;

@@ -73,7 +73,6 @@
 
 use std::{
     collections::{hash_map::Entry, HashMap},
-    convert::TryInto,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Weak,
@@ -262,7 +261,9 @@ pub struct PageCache {
     size_metrics: &'static PageCacheSizeMetrics,
 }
 
-struct PinnedSlotsPermit(tokio::sync::OwnedSemaphorePermit);
+struct PinnedSlotsPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
 
 ///
 /// PageReadGuard is a "lease" on a buffer, for reading. The page is kept locked
@@ -558,9 +559,9 @@ impl PageCache {
         )
         .await
         {
-            Ok(res) => Ok(PinnedSlotsPermit(
-                res.expect("this semaphore is never closed"),
-            )),
+            Ok(res) => Ok(PinnedSlotsPermit {
+                _permit: res.expect("this semaphore is never closed"),
+            }),
             Err(_timeout) => {
                 crate::metrics::page_cache_errors_inc(
                     crate::metrics::PageCacheErrorKind::AcquirePinnedSlotTimeout,

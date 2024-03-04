@@ -147,10 +147,10 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadLayer.*, will retry.*"
     )
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
