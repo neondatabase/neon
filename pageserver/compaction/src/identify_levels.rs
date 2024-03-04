@@ -170,13 +170,6 @@ where
     })
 }
 
-// helper struct used in depth()
-struct Event<K> {
-    key: K,
-    layer_idx: usize,
-    start: bool,
-}
-
 impl<L> Level<L> {
     /// Count the number of deltas stacked on each other.
     pub fn depth<K>(&self) -> u64
@@ -184,6 +177,11 @@ impl<L> Level<L> {
         K: CompactionKey,
         L: CompactionLayer<K>,
     {
+        struct Event<K> {
+            key: K,
+            layer_idx: usize,
+            start: bool,
+        }
         let mut events: Vec<Event<K>> = Vec::new();
         for (idx, l) in self.layers.iter().enumerate() {
             events.push(Event {
@@ -202,7 +200,7 @@ impl<L> Level<L> {
         // Sweep the key space left to right. Stop at each distinct key, and
         // count the number of deltas on top of the highest image at that key.
         //
-        // This is a little enefficient, as we walk through the active_set on
+        // This is a little inefficient, as we walk through the active_set on
         // every key. We could increment/decrement a counter on each step
         // instead, but that'd require a bit more complex bookkeeping.
         let mut active_set: BTreeSet<(Lsn, bool, usize)> = BTreeSet::new();
@@ -236,6 +234,7 @@ impl<L> Level<L> {
                 }
             }
         }
+        debug_assert_eq!(active_set, BTreeSet::new());
         max_depth
     }
 }
