@@ -79,46 +79,33 @@ pub(crate) async fn download_layer_file<'a>(
                         Ok(chunk) => chunk,
                         Err(e) => return Err(e),
                     };
-                    // pad previous iteration's `buf` with head of this chunk
-                    {
-                        let have = chunk.len();
-                        let need = *BUFFER_SIZE - buf.len();
-                        let n = std::cmp::min(need, have);
-                        let head = chunk.split_to(n);
-                        buf.extend_from_slice(&head);
-                        if buf.len() >= *BUFFER_SIZE {
-                            assert_eq!(buf.len(), *BUFFER_SIZE);
-                            {
-                                // flush buf
-                                let res;
-                                let buf_pre_write = buf.len();
-                                (buf, res) = destination_file.write_all(buf).await;
-                                let nwritten = res?;
-                                assert_eq!(nwritten, buf_pre_write);
-                                buf.clear();
-                                bytes_amount += u64::try_from(nwritten).unwrap();
-                            }
-                            // fallthrough
-                        } else {
-                            assert_eq!(chunk.len(), 0, "if the chunk wasn't sufficient to fill `buf`, it should be empty now");
-                            continue; // next chunk
+
+                    if buf.len() + chunk.len() > *BUFFER_SIZE {
+                        {
+                            // flush buf
+                            let res;
+                            let buf_pre_write = buf.len();
+                            (buf, res) = destination_file.write_all(buf).await;
+                            let nwritten = res?;
+                            assert_eq!(nwritten, buf_pre_write);
+                            buf.clear();
+                            bytes_amount += u64::try_from(nwritten).unwrap();
                         }
                     }
 
                     // avoid memcpy for the middle of the chunk
-                    while chunk.len() >= *BUFFER_SIZE {
-                        let mut head = chunk.split_to(*BUFFER_SIZE);
-                        {
-                            // flush head
-                            let res;
-                            let buf_pre_write = head.len();
-                            (head, res) = destination_file.write_all(head).await;
-                            let nwritten = res?;
-                            assert_eq!(nwritten, buf_pre_write);
-                            bytes_amount += u64::try_from(nwritten).unwrap();
-                        }
-                        drop(head);
+                    if chunk.len() >= *BUFFER_SIZE {
+                        // do a big write
+                        let res;
+                        let buf_pre_write = chunk.len();
+                        (chunk, res) = destination_file.write_all(chunk).await;
+                        let nwritten = res?;
+                        assert_eq!(nwritten, buf_pre_write);
+                        bytes_amount += u64::try_from(nwritten).unwrap();
+                        drop(chunk);
+                        continue;
                     }
+
                     // in-memory copy the < BUFFER_SIZED tail of the chunk
                     assert!(chunk.len() < *BUFFER_SIZE);
                     let mut chunk = &chunk[..];
