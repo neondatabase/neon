@@ -708,18 +708,6 @@ where
     }
 }
 
-// Sliding window through keyspace and values
-//
-// This is used to decide what layer to write next, from the beginning of the window.
-//
-// Candidates:
-//
-// 1. Create an image layer, snapping to previous images
-// 2. Create a delta layer, snapping to previous images
-// 3. Create an image layer, snapping to
-//
-//
-
 // Take previous partitioning, based on the image layers below.
 //
 // Candidate is at the front:
@@ -738,6 +726,10 @@ struct WindowElement<K> {
     last_key: K,  // inclusive
     accum_size: u64,
 }
+
+// Sliding window through keyspace and values
+//
+// This is used to decide what layer to write next, from the beginning of the window.
 struct Window<K> {
     elems: VecDeque<WindowElement<K>>,
 
