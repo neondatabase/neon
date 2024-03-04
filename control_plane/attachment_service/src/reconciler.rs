@@ -91,6 +91,8 @@ impl TargetState {
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ReconcileError {
     #[error(transparent)]
+    Remote(#[from] mgmt_api::Error),
+    #[error(transparent)]
     Notify(#[from] NotifyError),
     #[error("Cancelled")]
     Cancel,
@@ -104,7 +106,7 @@ impl Reconciler {
         node_id: NodeId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ReconcileError> {
         let node = self
             .pageservers
             .get(&node_id)
@@ -114,12 +116,32 @@ impl Reconciler {
             .locations
             .insert(node.id, ObservedStateLocation { conf: None });
 
+        // TODO: amend locations that use long-polling: they will hit this timeout.
+        let timeout = Duration::from_secs(25);
+
         tracing::info!("location_config({}) calling: {:?}", node_id, config);
-        let client =
-            mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
-        client
-            .location_config(self.tenant_shard_id, config.clone(), flush_ms)
-            .await?;
+        let tenant_shard_id = self.tenant_shard_id;
+        let config_ref = &config;
+        match node
+            .with_client_retries(
+                |client| async move {
+                    let config = config_ref.clone();
+                    client
+                        .location_config(tenant_shard_id, config.clone(), flush_ms)
+                        .await
+                },
+                &self.service_config.jwt_token,
+                1,
+                3,
+                timeout,
+                &self.cancel,
+            )
+            .await
+        {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => return Err(e.into()),
+            None => return Err(ReconcileError::Cancel),
+        };
         tracing::info!("location_config({}) complete: {:?}", node_id, config);
 
         self.observed
@@ -210,19 +232,32 @@ impl Reconciler {
             .collect())
     }
 
-    async fn secondary_download(&self, tenant_shard_id: TenantShardId, node_id: &NodeId) {
+    async fn secondary_download(
+        &self,
+        tenant_shard_id: TenantShardId,
+        node_id: &NodeId,
+    ) -> Result<(), ReconcileError> {
         let node = self
             .pageservers
             .get(node_id)
             .expect("Pageserver may not be removed while referenced");
 
-        let client =
-            mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
-
-        match client.tenant_secondary_download(tenant_shard_id).await {
-            Ok(()) => {}
-            Err(_) => {
-                tracing::info!("  (skipping, destination wasn't in secondary mode)")
+        match node
+            .with_client_retries(
+                |client| async move { client.tenant_secondary_download(tenant_shard_id).await },
+                &self.service_config.jwt_token,
+                1,
+                1,
+                Duration::from_secs(60),
+                &self.cancel,
+            )
+            .await
+        {
+            None => Err(ReconcileError::Cancel),
+            Some(Ok(_)) => Ok(()),
+            Some(Err(e)) => {
+                tracing::info!("  (skipping destination download: {})", e);
+                Ok(())
             }
         }
     }
@@ -279,7 +314,7 @@ impl Reconciler {
         &mut self,
         origin_ps_id: NodeId,
         dest_ps_id: NodeId,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ReconcileError> {
         // `maybe_live_migrate` is responsibble for sanity of inputs
         assert!(origin_ps_id != dest_ps_id);
 
@@ -329,7 +364,7 @@ impl Reconciler {
                         dest_ps_id,
                     );
                     self.secondary_download(self.tenant_shard_id, &dest_ps_id)
-                        .await;
+                        .await?;
                 }
             }
         }
@@ -364,7 +399,7 @@ impl Reconciler {
         // the origin without notifying compute, we will render the tenant unavailable.
         while let Err(e) = self.compute_notify().await {
             match e {
-                NotifyError::Fatal(_) => return Err(anyhow::anyhow!(e)),
+                NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
                 _ => {
                     tracing::warn!(
                         "Live migration blocked by compute notification error, retrying: {e}"

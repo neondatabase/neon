@@ -39,7 +39,6 @@ use pageserver_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use utils::{
-    backoff,
     completion::Barrier,
     generation::Generation,
     http::error::ApiError,
@@ -355,39 +354,18 @@ impl Service {
         for node in nodes.values() {
             node_list_futs.push({
                 async move {
-                    let http_client = reqwest::ClientBuilder::new()
-                        .timeout(Duration::from_secs(5))
-                        .build()
-                        .expect("Failed to construct HTTP client");
-                    let client = mgmt_api::Client::from_client(
-                        http_client,
-                        node.base_url(),
-                        self.config.jwt_token.as_deref(),
-                    );
-
-                    fn is_fatal(e: &mgmt_api::Error) -> bool {
-                        use mgmt_api::Error::*;
-                        match e {
-                            ReceiveBody(_) | ReceiveErrorBody(_) => false,
-                            ApiError(StatusCode::SERVICE_UNAVAILABLE, _)
-                            | ApiError(StatusCode::GATEWAY_TIMEOUT, _)
-                            | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
-                            ApiError(_, _) => true,
-                        }
-                    }
-
                     tracing::info!("Scanning shards on node {}...", node.id);
-                    let description = format!("List locations on {}", node.id);
-                    let response = backoff::retry(
-                        || client.list_location_config(),
-                        is_fatal,
-                        1,
-                        5,
-                        &description,
-                        &self.cancel,
-                    )
-                    .await;
-
+                    let timeout = Duration::from_secs(5);
+                    let response = node
+                        .with_client_retries(
+                            |client| async move { client.list_location_config().await },
+                            &self.config.jwt_token,
+                            1,
+                            5,
+                            timeout,
+                            &self.cancel,
+                        )
+                        .await;
                     (node.id, response)
                 }
             });
