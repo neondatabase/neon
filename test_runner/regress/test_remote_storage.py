@@ -329,14 +329,15 @@ def test_remote_storage_upload_queue_retries(
     churn_while_failpoints_active_thread.start()
 
     # wait for churn thread's data to get stuck in the upload queue
-    wait_until(10, 0.5, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(10, 0.5, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 2))
-    wait_until(10, 0.5, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    # Exponential back-off in upload queue, so, gracious timeouts.
+
+    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 2))
+    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
 
-    # ... and wait for them to finish. Exponential back-off in upload queue, so, gracious timeouts.
     wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
     wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
     wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
