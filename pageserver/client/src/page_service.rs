@@ -5,7 +5,7 @@ use pageserver_api::{
     models::{
         PagestreamBeMessage, PagestreamFeMessage, PagestreamGetPageRequest,
         PagestreamGetPageResponse, PagestreamGetVectoredPagesRequest,
-        PagestreamGetVectoredPagesResponse,
+        PagestreamGetVectoredPagesResponse, PagestreamGetControlFileValuesRequest, PagestreamGetControlFileValuesResponse,
     },
     reltag::RelTag,
 };
@@ -192,6 +192,38 @@ impl PagestreamClient {
             | PagestreamBeMessage::DbSize(_)
             | PagestreamBeMessage::GetSlruSegment(_)
             | PagestreamBeMessage::GetControlFileValues(_)
+            | PagestreamBeMessage::GetPage(_) => {
+                anyhow::bail!(
+                    "unexpected be message kind in response to getpage request: {}",
+                    msg.kind()
+                )
+            }
+        }
+    }
+
+    pub async fn get_control_file(
+        &mut self,
+        req: PagestreamGetControlFileValuesRequest,
+    ) -> anyhow::Result<PagestreamGetControlFileValuesResponse> {
+        let req = PagestreamFeMessage::GetControlFileValues(req);
+        let req: bytes::Bytes = req.serialize();
+        // let mut req = tokio_util::io::ReaderStream::new(&req);
+        let mut req = tokio_stream::once(Ok(req));
+
+        self.copy_both.send_all(&mut req).await?;
+
+        let next: Option<Result<bytes::Bytes, _>> = self.copy_both.next().await;
+        let next: bytes::Bytes = next.unwrap()?;
+
+        let msg = PagestreamBeMessage::deserialize(next)?;
+        match msg {
+            PagestreamBeMessage::GetControlFileValues(p) => Ok(p),
+            PagestreamBeMessage::Error(e) => anyhow::bail!("Error: {:?}", e),
+            PagestreamBeMessage::Exists(_)
+            | PagestreamBeMessage::Nblocks(_)
+            | PagestreamBeMessage::DbSize(_)
+            | PagestreamBeMessage::GetSlruSegment(_)
+            | PagestreamBeMessage::GetVectoredPages(_)
             | PagestreamBeMessage::GetPage(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",

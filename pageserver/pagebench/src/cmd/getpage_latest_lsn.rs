@@ -2,7 +2,7 @@ use anyhow::Context;
 use camino::Utf8PathBuf;
 use pageserver_api::key::{is_rel_block_key, key_to_rel_block, Key};
 use pageserver_api::keyspace::KeySpaceAccum;
-use pageserver_api::models::PagestreamGetPageRequest;
+use pageserver_api::models::{PagestreamGetPageRequest, PagestreamGetControlFileValuesRequest};
 
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantTimelineId;
@@ -57,6 +57,8 @@ pub(crate) struct Args {
     /// [`pageserver_api::models::virtual_file::IoEngineKind`].
     #[clap(long)]
     set_io_engine: Option<pageserver_api::models::virtual_file::IoEngineKind>,
+    #[clap(long)]
+    lsn: Option<u64>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -300,21 +302,14 @@ async fn main_impl(
 
                 let start = Instant::now();
                 let req = {
-                    let mut rng = rand::thread_rng();
-                    let r = &ranges[weights.sample(&mut rng)];
-                    let key: i128 = rng.gen_range(r.start..r.end);
-                    let key = Key::from_i128(key);
-                    assert!(is_rel_block_key(&key));
-                    let (rel_tag, block_no) =
-                        key_to_rel_block(key).expect("we filter non-rel-block keys out above");
-                    PagestreamGetPageRequest {
-                        latest: rng.gen_bool(args.req_latest_probability),
-                        lsn: r.timeline_lsn,
-                        rel: rel_tag,
-                        blkno: block_no,
+                    PagestreamGetControlFileValuesRequest {
+                        lsn: Lsn(args.lsn.unwrap()),
                     }
                 };
-                client.getpage(req).await.unwrap();
+
+
+                client.get_control_file(req).await.unwrap();
+
                 let end = Instant::now();
                 live_stats.request_done();
                 ticks_processed += 1;
