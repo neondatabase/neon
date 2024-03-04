@@ -14,6 +14,7 @@
 
 #include "utils/guc.h"
 
+#include "extension_server.h" 
 #include "neon_utils.h"
 
 static int	extension_server_port = 0;
