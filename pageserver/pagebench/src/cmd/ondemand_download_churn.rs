@@ -1,10 +1,14 @@
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{models::HistoricLayerInfo, shard::TenantShardId};
 
+use pageserver_client::mgmt_api;
 use rand::seq::SliceRandom;
 use tracing::{debug, info};
-use utils::id::TenantTimelineId;
+use utils::id::{TenantTimelineId, TimelineId};
 
-use tokio::task::JoinSet;
+use tokio::{
+    sync::{mpsc, OwnedSemaphorePermit},
+    task::JoinSet,
+};
 
 use std::{
     num::NonZeroUsize,
@@ -24,8 +28,10 @@ pub(crate) struct Args {
     pageserver_jwt: Option<String>,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
-    #[clap(long)]
+    #[clap(long, default_value = "1")]
     tasks_per_target: NonZeroUsize,
+    #[clap(long, default_value = "1")]
+    concurrency_per_target: NonZeroUsize,
     /// Probability for sending `latest=true` in the request (uniform distribution).
     #[clap(long)]
     limit_to_first_n_targets: Option<usize>,
@@ -108,7 +114,8 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
 
     for tl in timelines {
         for _ in 0..args.tasks_per_target.get() {
-            tasks.spawn(timeline_task(
+            tasks.spawn(timeline_actor(
+                args,
                 Arc::clone(&mgmt_api_client),
                 tl,
                 Arc::clone(&live_stats),
@@ -122,7 +129,8 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn timeline_task(
+async fn timeline_actor(
+    args: &'static Args,
     mgmt_api_client: Arc<pageserver_client::mgmt_api::Client>,
     timeline: TenantTimelineId,
     live_stats: Arc<LiveStats>,
@@ -130,56 +138,100 @@ async fn timeline_task(
     // TODO: support sharding
     let tenant_shard_id = TenantShardId::unsharded(timeline.tenant_id);
 
-    let mut layers = None;
+    struct Timeline {
+        joinset: JoinSet<()>,
+        layers: Vec<mpsc::Sender<OwnedSemaphorePermit>>,
+        concurrency: Arc<tokio::sync::Semaphore>,
+    }
     loop {
-        if layers.is_none() {
-            layers = Some(
-                mgmt_api_client
-                    .layer_map_info(tenant_shard_id, timeline.timeline_id)
-                    .await
-                    .unwrap(),
-            );
-        }
+        debug!("restarting timeline");
+        let layer_map_info = mgmt_api_client
+            .layer_map_info(tenant_shard_id, timeline.timeline_id)
+            .await
+            .unwrap();
+        let concurrency = Arc::new(tokio::sync::Semaphore::new(
+            args.concurrency_per_target.get(),
+        ));
 
-        let layer = {
-            let mut rng = rand::thread_rng();
-            layers
-                .as_mut()
-                .unwrap()
-                .historic_layers
-                .choose_mut(&mut rng)
-                .expect("no layers")
+        let mut joinset = JoinSet::new();
+        let layers = layer_map_info
+            .historic_layers
+            .into_iter()
+            .map(|historic_layer| {
+                let (tx, rx) = mpsc::channel(1);
+                joinset.spawn(layer_actor(
+                    tenant_shard_id,
+                    timeline.timeline_id,
+                    historic_layer,
+                    rx,
+                    Arc::clone(&mgmt_api_client),
+                    Arc::clone(&live_stats),
+                ));
+                tx
+            })
+            .collect::<Vec<_>>();
+
+        let mut timeline = Timeline {
+            joinset,
+            layers,
+            concurrency,
         };
-        #[derive(Clone, Copy)]
-        enum Action {
-            Evict,
-            OnDemandDownload,
+
+        loop {
+            assert!(!timeline.joinset.is_empty());
+            if let Some(res) = timeline.joinset.try_join_next() {
+                debug!(?res, "a layer actor exited, should not happen");
+                timeline.joinset.shutdown().await;
+                break;
+            }
+
+            let permit = Arc::clone(&timeline.concurrency)
+                .acquire_owned()
+                .await
+                .unwrap();
+
+            let layer_tx = {
+                let mut rng = rand::thread_rng();
+                timeline.layers.choose_mut(&mut rng).expect("no layers")
+            };
+            layer_tx.send(permit).await.unwrap(); // TODO: what to do if this blocks?
         }
+    }
+}
+
+async fn layer_actor(
+    tenant_shard_id: TenantShardId,
+    timeline_id: TimelineId,
+    mut layer: HistoricLayerInfo,
+    mut rx: mpsc::Receiver<tokio::sync::OwnedSemaphorePermit>,
+    mgmt_api_client: Arc<mgmt_api::Client>,
+    live_stats: Arc<LiveStats>,
+) {
+    #[derive(Clone, Copy)]
+    enum Action {
+        Evict,
+        OnDemandDownload,
+    }
+
+    while let Some(_permit) = rx.recv().await {
         let action = if layer.is_remote() {
             Action::OnDemandDownload
         } else {
             Action::Evict
         };
+
         let did_it = match action {
             Action::Evict => {
                 let did_it = mgmt_api_client
-                    .layer_evict(
-                        tenant_shard_id,
-                        timeline.timeline_id,
-                        layer.layer_file_name(),
-                    )
+                    .layer_evict(tenant_shard_id, timeline_id, layer.layer_file_name())
                     .await
                     .unwrap();
                 live_stats.eviction_done();
                 did_it
             }
             Action::OnDemandDownload => {
-                let did_it =mgmt_api_client
-                    .layer_ondemand_download(
-                        tenant_shard_id,
-                        timeline.timeline_id,
-                        layer.layer_file_name(),
-                    )
+                let did_it = mgmt_api_client
+                    .layer_ondemand_download(tenant_shard_id, timeline_id, layer.layer_file_name())
                     .await
                     .unwrap();
                 live_stats.download_done();
@@ -188,13 +240,12 @@ async fn timeline_task(
         };
         if !did_it {
             debug!("local copy of layer map appears out of sync, re-downloading");
-            layers = None;
-        } else {
-            debug!("did it");
-            layer.set_remote(match action {
-                Action::Evict => true,
-                Action::OnDemandDownload => false,
-            });
+            return;
         }
+        debug!("did it");
+        layer.set_remote(match action {
+            Action::Evict => true,
+            Action::OnDemandDownload => false,
+        });
     }
 }
