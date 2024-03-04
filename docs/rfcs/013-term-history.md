@@ -9,7 +9,7 @@ receival and this might lag behind `term`; safekeeper switches to epoch `n` when
 it has received all committed log records from all `< n` terms. This roughly
 corresponds to proposed in
 
-https://github.com/zenithdb/rfcs/pull/3/files
+https://github.com/neondatabase/rfcs/pull/3/files
 
 
 This makes our biggest our difference from Raft. In Raft, every log record is
