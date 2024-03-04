@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
+use hyper::StatusCode;
 use pageserver_api::controller_api::NodeRegisterRequest;
 use pageserver_api::models::{
     self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
@@ -262,6 +263,11 @@ impl PageServerNode {
                 match st {
                     Ok(()) => Ok(true),
                     Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
+                    Err(mgmt_api::Error::ApiError(status, _msg))
+                        if status == StatusCode::SERVICE_UNAVAILABLE =>
+                    {
+                        Ok(false)
+                    }
                     Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
                 }
             },
