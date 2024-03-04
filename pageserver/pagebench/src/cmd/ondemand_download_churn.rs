@@ -194,16 +194,29 @@ async fn timeline_actor(
                 break;
             }
 
-            let permit = Arc::clone(&timeline.concurrency)
-                .acquire_owned()
-                .await
-                .unwrap();
+            let mut permit = Some(
+                Arc::clone(&timeline.concurrency)
+                    .acquire_owned()
+                    .await
+                    .unwrap(),
+            );
 
-            let layer_tx = {
-                let mut rng = rand::thread_rng();
-                timeline.layers.choose_mut(&mut rng).expect("no layers")
-            };
-            layer_tx.send(permit).await.unwrap(); // TODO: what to do if this blocks?
+            loop {
+                let layer_tx = {
+                    let mut rng = rand::thread_rng();
+                    timeline.layers.choose_mut(&mut rng).expect("no layers")
+                };
+                match layer_tx.try_send(permit.take().unwrap()) {
+                    Ok(_) => break,
+                    Err(e) => match e {
+                        mpsc::error::TrySendError::Full(back) => {
+                            // TODO: retrying introduces bias away from slow downloaders
+                            permit.replace(back);
+                        }
+                        mpsc::error::TrySendError::Closed(_) => panic!(),
+                    },
+                }
+            }
         }
     }
 }
