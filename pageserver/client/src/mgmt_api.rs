@@ -7,7 +7,7 @@ use utils::{
 
 pub mod util;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Client {
     mgmt_api_endpoint: String,
     authorization_header: Option<String>,
@@ -24,6 +24,9 @@ pub enum Error {
 
     #[error("pageserver API: {1}")]
     ApiError(StatusCode, String),
+
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

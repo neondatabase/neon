@@ -257,6 +257,7 @@ pub(crate) mod test_utils {
     use crate::node::Node;
     use pageserver_api::controller_api::{NodeAvailability, NodeSchedulingPolicy};
     use std::collections::HashMap;
+    use tokio_util::sync::CancellationToken;
     use utils::id::NodeId;
     /// Test helper: synthesize the requested number of nodes, all in active state.
     ///
@@ -274,6 +275,7 @@ pub(crate) mod test_utils {
                         listen_http_port: 80 + i as u16,
                         listen_pg_addr: format!("pghost-{i}"),
                         listen_pg_port: 5432 + i as u16,
+                        cancel: CancellationToken::new(),
                     },
                 )
             })

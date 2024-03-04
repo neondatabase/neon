@@ -27,6 +27,11 @@ pub(crate) struct Node {
 
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: u16,
+
+    // This cancellation token means "stop any RPCs in flight to this node, and don't start
+    // any more". It is not related to process shutdown.
+    #[serde(skip)]
+    pub(crate) cancel: CancellationToken,
 }
 
 impl Node {
@@ -63,8 +68,9 @@ impl Node {
     /// Wrapper for issuing requests to pageserver management API: takes care of generic
     /// retry/backoff for retryable HTTP status codes.
     ///
-    /// TODO: hook this up to our knowledge of a pageserver's Active/Offline status so that
-    /// we pre-emptively fail requests that would go to an offline pageserver.
+    /// This will return None to indicate cancellation.  Cancellation may happen from
+    /// the cancellation token passed in, or from Self's cancellation token (i.e. node
+    /// going offline).
     pub(crate) async fn with_client_retries<T, O, F>(
         &self,
         mut op: O,
@@ -86,6 +92,7 @@ impl Node {
                 | ApiError(StatusCode::GATEWAY_TIMEOUT, _)
                 | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
                 ApiError(_, _) => true,
+                Cancelled => true,
             }
         }
 
@@ -99,7 +106,17 @@ impl Node {
                 let client =
                     mgmt_api::Client::from_client(http_client, self.base_url(), jwt.as_deref());
 
-                op(client)
+                let node_cancel_fut = self.cancel.cancelled();
+
+                let op_fut = op(client);
+
+                async {
+                    tokio::select! {
+                        r = op_fut=> {r},
+                        _ = node_cancel_fut => {
+                        Err(mgmt_api::Error::Cancelled)
+                    }}
+                }
             },
             is_fatal,
             warn_threshold,

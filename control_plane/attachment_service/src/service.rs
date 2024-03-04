@@ -252,6 +252,7 @@ impl Service {
             for (node_id, node) in new_nodes.iter_mut() {
                 if nodes_online.contains(node_id) {
                     node.availability = NodeAvailability::Active;
+                    node.cancel = CancellationToken::new();
                     scheduler.node_upsert(node);
                 }
             }
@@ -642,6 +643,7 @@ impl Service {
                 listen_http_port: n.listen_http_port as u16,
                 listen_pg_addr: n.listen_pg_addr,
                 listen_pg_port: n.listen_pg_port as u16,
+                cancel: CancellationToken::new(),
             })
             .collect::<Vec<_>>();
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.id, n)).collect();
@@ -679,6 +681,7 @@ impl Service {
                     listen_http_port: 123,
                     listen_pg_addr: "".to_string(),
                     listen_pg_port: 123,
+                    cancel: CancellationToken::new(),
                 };
 
                 scheduler.node_upsert(&node);
@@ -2752,6 +2755,7 @@ impl Service {
             scheduling: NodeSchedulingPolicy::Filling,
             // TODO: we shouldn't really call this Active until we've heartbeated it.
             availability: NodeAvailability::Active,
+            cancel: CancellationToken::new(),
         };
         // TODO: idempotency if the node already exists in the database
         self.persistence.insert_node(&new_node).await?;
@@ -2827,6 +2831,16 @@ impl Service {
 
         // Update the scheduler, in case the elegibility of the node for new shards has changed
         scheduler.node_upsert(node);
+        if offline_transition {
+            // Fire the node's cancellation token to cancel any in-flight API requests to it
+            node.cancel.cancel();
+        } else if active_transition {
+            // Give the node a new cancellation token, effectively resetting it to un-cancelled.  Any
+            // users of previously-cloned copies of the node will still see the old cancellation
+            // state.  For example, Reconcilers in flight will have to complete and be spawned
+            // again to realize that the node has become available.
+            node.cancel = CancellationToken::new();
+        }
 
         let new_nodes = Arc::new(new_nodes);
 
