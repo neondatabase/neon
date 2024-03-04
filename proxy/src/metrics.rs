@@ -266,7 +266,7 @@ impl Drop for LatencyTimer {
                 bool_to_str(self.cache_miss),
                 bool_to_str(self.pool_miss),
                 self.outcome,
-                "client_anc_cplane",
+                "client_and_cplane",
             ])
             .observe((duration.saturating_sub(accumulated_total)).as_secs_f64());
     }
