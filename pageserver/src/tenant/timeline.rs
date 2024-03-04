@@ -54,7 +54,6 @@ use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::TimelineMetadata,
-    par_fsync,
 };
 use crate::{
     context::{AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder},
@@ -76,7 +75,7 @@ use crate::{
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
-    virtual_file::MaybeFatalIo,
+    virtual_file::{MaybeFatalIo, VirtualFile},
 };
 
 use crate::config::PageServerConf;
@@ -3417,28 +3416,31 @@ impl Timeline {
             let frozen_layer = Arc::clone(frozen_layer);
             let ctx = ctx.attached_child();
             move || {
-                // Write it out
-                // Keep this inside `spawn_blocking` and `Handle::current`
-                // as long as the write path is still sync and the read impl
-                // is still not fully async. Otherwise executor threads would
-                // be blocked.
-                let _g = span.entered();
-                let new_delta =
-                    Handle::current().block_on(frozen_layer.write_to_disk(&self_clone, &ctx))?;
-
-                // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
-                // We just need to fsync the directory in which these inodes are linked,
-                // which we know to be the timeline directory.
-                //
-                // We use fatal_err() below because the after write_to_disk returns with success,
-                // the in-memory state of the filesystem already has the layer file in its final place,
-                // and subsequent pageserver code could think it's durable while it really isn't.
-                par_fsync::par_fsync(&[self_clone
-                    .conf
-                    .timeline_path(&self_clone.tenant_shard_id, &self_clone.timeline_id)])
-                .fatal_err("fsync of timeline dir");
-
-                anyhow::Ok(new_delta)
+                Handle::current().block_on(
+                    async move {
+                        let new_delta = frozen_layer.write_to_disk(&self_clone, &ctx).await?;
+                        // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
+                        // We just need to fsync the directory in which these inodes are linked,
+                        // which we know to be the timeline directory.
+                        //
+                        // We use fatal_err() below because the after write_to_disk returns with success,
+                        // the in-memory state of the filesystem already has the layer file in its final place,
+                        // and subsequent pageserver code could think it's durable while it really isn't.
+                        let timeline_dir =
+                            VirtualFile::open(&self_clone.conf.timeline_path(
+                                &self_clone.tenant_shard_id,
+                                &self_clone.timeline_id,
+                            ))
+                            .await
+                            .fatal_err("VirtualFile::open for timeline dir fsync");
+                        timeline_dir
+                            .sync_all()
+                            .await
+                            .fatal_err("VirtualFile::sync_all timeline dir");
+                        anyhow::Ok(new_delta)
+                    }
+                    .instrument(span),
+                )
             }
         })
         .await
@@ -3672,11 +3674,17 @@ impl Timeline {
             // We use fatal_err() below because the after writer.finish() returns with success,
             // the in-memory state of the filesystem already has the layer file in its final place,
             // and subsequent pageserver code could think it's durable while it really isn't.
-            par_fsync::par_fsync_async(&[self
-                .conf
-                .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
+            let timeline_dir = VirtualFile::open(
+                &self
+                    .conf
+                    .timeline_path(&self.tenant_shard_id, &self.timeline_id),
+            )
             .await
-            .fatal_err("fsync of timeline dir");
+            .fatal_err("VirtualFile::open for timeline dir fsync");
+            timeline_dir
+                .sync_all()
+                .await
+                .fatal_err("VirtualFile::sync_all timeline dir");
         }
 
         let mut guard = self.layers.write().await;
@@ -4265,12 +4273,17 @@ impl Timeline {
             // We use fatal_err() below because the after writer.finish() returns with success,
             // the in-memory state of the filesystem already has the layer file in its final place,
             // and subsequent pageserver code could think it's durable while it really isn't.
-            let timeline_dir = self
-                .conf
-                .timeline_path(&self.tenant_shard_id, &self.timeline_id);
-            par_fsync::par_fsync_async(&[timeline_dir])
+            let timeline_dir = VirtualFile::open(
+                &self
+                    .conf
+                    .timeline_path(&self.tenant_shard_id, &self.timeline_id),
+            )
+            .await
+            .fatal_err("VirtualFile::open for timeline dir fsync");
+            timeline_dir
+                .sync_all()
                 .await
-                .fatal_err("fsync of timeline dir");
+                .fatal_err("VirtualFile::sync_all timeline dir");
         }
 
         stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
