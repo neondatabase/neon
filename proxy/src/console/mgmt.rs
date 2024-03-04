@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::Context;
 use once_cell::sync::Lazy;
-use postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP, QueryError};
+use postgres_backend::{AuthType, PostgresBackend, PostgresBackendTCP, QueryError};
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::{convert::Infallible, future};
 use tokio::net::{TcpListener, TcpStream};

@@ -2648,7 +2648,7 @@ pub(crate) async fn immediate_gc(
 
     let tenant = guard
         .get(&tenant_shard_id)
-        .map(Arc::clone)
+        .cloned()
         .with_context(|| format!("tenant {tenant_shard_id}"))
         .map_err(|e| ApiError::NotFound(e.into()))?;
 
