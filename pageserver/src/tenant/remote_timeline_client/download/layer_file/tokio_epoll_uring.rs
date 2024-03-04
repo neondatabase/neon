@@ -72,7 +72,7 @@ pub(crate) async fn download_layer_file<'a>(
             let bytes_amount = async {
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored()
-                let mut buf = BytesMut::with_capacity(BUFFER_SIZE);
+                let mut buf = BytesMut::with_capacity(*BUFFER_SIZE);
                 let mut bytes_amount: u64 = 0;
                 while let Some(chunk) = download.download_stream.next().await {
                     let mut chunk = match chunk {
@@ -82,12 +82,12 @@ pub(crate) async fn download_layer_file<'a>(
                     // pad previous iteration's `buf` with head of this chunk
                     {
                         let have = chunk.len();
-                        let need = BUFFER_SIZE - buf.len();
+                        let need = *BUFFER_SIZE - buf.len();
                         let n = std::cmp::min(need, have);
                         let head = chunk.split_to(n);
                         buf.extend_from_slice(&head);
-                        if buf.len() >= BUFFER_SIZE {
-                            assert_eq!(buf.len(), BUFFER_SIZE);
+                        if buf.len() >= *BUFFER_SIZE {
+                            assert_eq!(buf.len(), *BUFFER_SIZE);
                             {
                                 // flush buf
                                 let res;
@@ -106,8 +106,8 @@ pub(crate) async fn download_layer_file<'a>(
                     }
 
                     // avoid memcpy for the middle of the chunk
-                    while chunk.len() >= BUFFER_SIZE {
-                        let mut head = chunk.split_to(BUFFER_SIZE);
+                    while chunk.len() >= *BUFFER_SIZE {
+                        let mut head = chunk.split_to(*BUFFER_SIZE);
                         {
                             // flush head
                             let res;
@@ -120,16 +120,16 @@ pub(crate) async fn download_layer_file<'a>(
                         drop(head);
                     }
                     // in-memory copy the < BUFFER_SIZED tail of the chunk
-                    assert!(chunk.len() < BUFFER_SIZE);
+                    assert!(chunk.len() < *BUFFER_SIZE);
                     let mut chunk = &chunk[..];
                     while !chunk.is_empty() {
-                        let need = BUFFER_SIZE - buf.len();
+                        let need = *BUFFER_SIZE - buf.len();
                         let have = chunk.len();
                         let n = std::cmp::min(need, have);
                         buf.extend_from_slice(&chunk[..n]);
                         chunk = &chunk[n..];
-                        if buf.len() >= BUFFER_SIZE {
-                            assert_eq!(buf.len(), BUFFER_SIZE);
+                        if buf.len() >= *BUFFER_SIZE {
+                            assert_eq!(buf.len(), *BUFFER_SIZE);
                             {
                                 // flush buf
                                 let res;

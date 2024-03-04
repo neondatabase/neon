@@ -182,6 +182,7 @@ async fn timeline_actor(
             layers,
             concurrency,
         };
+        info!(len_layers=%timeline.layers.len(), "reubilt timeline");
 
         live_stats.timeline_restart_done();
 

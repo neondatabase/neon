@@ -293,7 +293,7 @@ pub(crate) async fn download_initdb_tar_zst(
                 Err(other) => Err(other)?,
             };
             let mut download = tokio_util::io::StreamReader::new(download.download_stream);
-            let mut writer = tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, file);
+            let mut writer = tokio::io::BufWriter::with_capacity(*super::BUFFER_SIZE, file);
 
             tokio::io::copy_buf(&mut download, &mut writer).await?;
 

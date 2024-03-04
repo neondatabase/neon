@@ -86,7 +86,10 @@ where
         .stdout(process_log_file)
         .stderr(same_file_for_stderr)
         .args(args);
-    let filled_cmd = fill_remote_storage_secrets_vars(fill_rust_env_vars(background_command));
+
+    let filled_cmd = fill_env_vars_prefixed_neon(fill_remote_storage_secrets_vars(
+        fill_rust_env_vars(background_command),
+    ));
     filled_cmd.envs(envs);
 
     let pid_file_to_check = match &initial_pid_file {
@@ -263,6 +266,15 @@ fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
     ] {
         if let Ok(value) = std::env::var(env_key) {
             cmd = cmd.env(env_key, value);
+        }
+    }
+    cmd
+}
+
+fn fill_env_vars_prefixed_neon(mut cmd: &mut Command) -> &mut Command {
+    for (var, val) in std::env::vars() {
+        if var.starts_with("NEON_") {
+            cmd = cmd.env(var, val);
         }
     }
     cmd
