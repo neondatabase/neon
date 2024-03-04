@@ -1,7 +1,7 @@
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.pg_version import PgVersion, skip_on_postgres
+from fixtures.pg_version import PgVersion
 from fixtures.utils import wait_until
 
 
@@ -96,6 +96,6 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
         assert cur.fetchall()[0][0] != "<insufficient privilege>"
         cur.execute("RESET ROLE")
         cur.execute("DROP ROLE not_a_superuser")
-        query = f"DROP SUBSCRIPTION sub CASCADE"
+        query = "DROP SUBSCRIPTION sub CASCADE"
         log.info(f"Dropping subscription: {query}")
         cur.execute(query)
