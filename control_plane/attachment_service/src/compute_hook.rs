@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
@@ -22,10 +23,13 @@ struct ShardedComputeHookTenant {
     stripe_size: ShardStripeSize,
     shard_count: ShardCount,
     shards: Vec<(ShardNumber, NodeId)>,
+
+    // Must hold this lock to send a notification.
+    send_lock: Arc<tokio::sync::Mutex<ComputeHookNotifyRequest>>,
 }
 
 enum ComputeHookTenant {
-    Unsharded(NodeId),
+    Unsharded((NodeId, Arc<tokio::sync::Mutex<ComputeHookNotifyRequest>>)),
     Sharded(ShardedComputeHookTenant),
 }
 
@@ -37,9 +41,17 @@ impl ComputeHookTenant {
                 shards: vec![(tenant_shard_id.shard_number, node_id)],
                 stripe_size,
                 shard_count: tenant_shard_id.shard_count,
+                send_lock: Arc::default(),
             })
         } else {
-            Self::Unsharded(node_id)
+            Self::Unsharded((node_id, Arc::default()))
+        }
+    }
+
+    fn get_lock(&self) -> &Arc<tokio::sync::Mutex<ComputeHookNotifyRequest>> {
+        match self {
+            Self::Unsharded((_node_id, lock)) => lock,
+            Self::Sharded(sharded_tenant) => &sharded_tenant.send_lock,
         }
     }
 
@@ -52,7 +64,9 @@ impl ComputeHookTenant {
         node_id: NodeId,
     ) {
         match self {
-            Self::Unsharded(existing_node_id) if tenant_shard_id.shard_count.count() == 1 => {
+            Self::Unsharded((existing_node_id, _lock))
+                if tenant_shard_id.shard_count.count() == 1 =>
+            {
                 *existing_node_id = node_id
             }
             Self::Sharded(sharded_tenant)
@@ -80,18 +94,28 @@ impl ComputeHookTenant {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 struct ComputeHookNotifyRequestShard {
     node_id: NodeId,
     shard_number: ShardNumber,
 }
 
 /// Request body that we send to the control plane to notify it of where a tenant is attached
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 struct ComputeHookNotifyRequest {
     tenant_id: TenantId,
     stripe_size: Option<ShardStripeSize>,
     shards: Vec<ComputeHookNotifyRequestShard>,
+}
+
+impl Default for ComputeHookNotifyRequest {
+    fn default() -> Self {
+        Self {
+            tenant_id: TenantId::from_array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            stripe_size: None,
+            shards: Vec::new(),
+        }
+    }
 }
 
 /// Error type for attempts to call into the control plane compute notification hook
@@ -120,10 +144,39 @@ pub(crate) enum NotifyError {
     Fatal(StatusCode),
 }
 
+enum MaybeSendResult {
+    // Please send this request while holding the lock, and if you succeed then write
+    // the request into the lock.
+    Transmit(
+        (
+            ComputeHookNotifyRequest,
+            tokio::sync::OwnedMutexGuard<ComputeHookNotifyRequest>,
+        ),
+    ),
+    // Something requires sending, but you must wait for a current sender then call again
+    AwaitLock(Arc<tokio::sync::Mutex<ComputeHookNotifyRequest>>),
+    // Nothing requires sending
+    Noop,
+}
+
 impl ComputeHookTenant {
-    fn maybe_reconfigure(&self, tenant_id: TenantId) -> Option<ComputeHookNotifyRequest> {
-        match self {
-            Self::Unsharded(node_id) => Some(ComputeHookNotifyRequest {
+    fn maybe_send(
+        &self,
+        tenant_id: TenantId,
+        lock: Option<tokio::sync::OwnedMutexGuard<ComputeHookNotifyRequest>>,
+    ) -> MaybeSendResult {
+        let locked = match lock {
+            Some(already_locked) => already_locked,
+            None => {
+                let Ok(locked) = self.get_lock().clone().try_lock_owned() else {
+                    return MaybeSendResult::AwaitLock(self.get_lock().clone());
+                };
+                locked
+            }
+        };
+
+        let request = match self {
+            Self::Unsharded((node_id, _lock)) => Some(ComputeHookNotifyRequest {
                 tenant_id,
                 shards: vec![ComputeHookNotifyRequestShard {
                     shard_number: ShardNumber(0),
@@ -151,12 +204,25 @@ impl ComputeHookTenant {
                 // Sharded tenant doesn't yet have information for all its shards
 
                 tracing::info!(
-                    "ComputeHookTenant::maybe_reconfigure: not enough shards ({}/{})",
+                    "ComputeHookTenant::maybe_send: not enough shards ({}/{})",
                     sharded_tenant.shards.len(),
                     sharded_tenant.shard_count.count()
                 );
                 None
             }
+        };
+
+        match request {
+            None => {
+                // Not yet ready to emit a notification
+                tracing::info!("Tenant isn't yet ready to emit a notification");
+                MaybeSendResult::Noop
+            }
+            Some(request) if request == *locked => {
+                // No change from the last value successfully sent
+                MaybeSendResult::Noop
+            }
+            Some(request) => MaybeSendResult::Transmit((request, locked)),
         }
     }
 }
@@ -166,8 +232,11 @@ impl ComputeHookTenant {
 /// the compute connection string.
 pub(super) struct ComputeHook {
     config: Config,
-    state: tokio::sync::Mutex<HashMap<TenantId, ComputeHookTenant>>,
+    state: std::sync::Mutex<HashMap<TenantId, ComputeHookTenant>>,
     authorization_header: Option<String>,
+
+    // This lock is only used in testing enviroments, to serialize calls into neon_lock
+    neon_local_lock: tokio::sync::Mutex<()>,
 }
 
 impl ComputeHook {
@@ -181,14 +250,19 @@ impl ComputeHook {
             state: Default::default(),
             config,
             authorization_header,
+            neon_local_lock: Default::default(),
         }
     }
 
     /// For test environments: use neon_local's LocalEnv to update compute
     async fn do_notify_local(
         &self,
-        reconfigure_request: ComputeHookNotifyRequest,
+        reconfigure_request: &ComputeHookNotifyRequest,
     ) -> anyhow::Result<()> {
+        // neon_local updates are not safe to call concurrently, use a lock to serialize
+        // all calls to this function
+        let _locked = self.neon_local_lock.lock().await;
+
         let env = match LocalEnv::load_config() {
             Ok(e) => e,
             Err(e) => {
@@ -205,7 +279,7 @@ impl ComputeHook {
         } = reconfigure_request;
 
         let compute_pageservers = shards
-            .into_iter()
+            .iter()
             .map(|shard| {
                 let ps_conf = env
                     .get_pageserver_conf(shard.node_id)
@@ -217,10 +291,10 @@ impl ComputeHook {
             .collect::<Vec<_>>();
 
         for (endpoint_name, endpoint) in &cplane.endpoints {
-            if endpoint.tenant_id == tenant_id && endpoint.status() == EndpointStatus::Running {
+            if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring endpoint {}", endpoint_name,);
                 endpoint
-                    .reconfigure(compute_pageservers.clone(), stripe_size)
+                    .reconfigure(compute_pageservers.clone(), *stripe_size)
                     .await?;
             }
         }
@@ -298,12 +372,12 @@ impl ComputeHook {
     async fn do_notify(
         &self,
         url: &String,
-        reconfigure_request: ComputeHookNotifyRequest,
+        reconfigure_request: &ComputeHookNotifyRequest,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let client = reqwest::Client::new();
         backoff::retry(
-            || self.do_notify_iteration(&client, url, &reconfigure_request, cancel),
+            || self.do_notify_iteration(&client, url, reconfigure_request, cancel),
             |e| {
                 matches!(
                     e,
@@ -343,42 +417,65 @@ impl ComputeHook {
         stripe_size: ShardStripeSize,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let mut locked = self.state.lock().await;
+        let maybe_send_result = {
+            let mut locked = self.state.lock().unwrap();
 
-        use std::collections::hash_map::Entry;
-        let tenant = match locked.entry(tenant_shard_id.tenant_id) {
-            Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
-                tenant_shard_id,
-                stripe_size,
-                node_id,
-            )),
-            Entry::Occupied(e) => {
-                let tenant = e.into_mut();
-                tenant.update(tenant_shard_id, stripe_size, node_id);
-                tenant
+            use std::collections::hash_map::Entry;
+            let tenant = match locked.entry(tenant_shard_id.tenant_id) {
+                Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
+                    tenant_shard_id,
+                    stripe_size,
+                    node_id,
+                )),
+                Entry::Occupied(e) => {
+                    let tenant = e.into_mut();
+                    tenant.update(tenant_shard_id, stripe_size, node_id);
+                    tenant
+                }
+            };
+            tenant.maybe_send(tenant_shard_id.tenant_id, None)
+        };
+
+        // Process result: we may get an update to send, or we may have to wait for a lock
+        // before trying again.
+        let (request, mut guard) = match maybe_send_result {
+            MaybeSendResult::Noop => {
+                return Ok(());
             }
+            MaybeSendResult::AwaitLock(lock) => {
+                let send_locked = lock.lock_owned().await;
+
+                let locked = self.state.lock().unwrap();
+                let Some(tenant) = locked.get(&tenant_shard_id.tenant_id) else {
+                    return Ok(());
+                };
+                match tenant.maybe_send(tenant_shard_id.tenant_id, Some(send_locked)) {
+                    MaybeSendResult::AwaitLock(_) => {
+                        unreachable!("We supplied lock guard")
+                    }
+                    MaybeSendResult::Noop => {
+                        return Ok(());
+                    }
+                    MaybeSendResult::Transmit((request, lock)) => (request, lock),
+                }
+            }
+            MaybeSendResult::Transmit((request, lock)) => (request, lock),
         };
 
-        let reconfigure_request = tenant.maybe_reconfigure(tenant_shard_id.tenant_id);
-        let Some(reconfigure_request) = reconfigure_request else {
-            // The tenant doesn't yet have pageservers for all its shards: we won't notify anything
-            // until it does.
-            tracing::info!("Tenant isn't yet ready to emit a notification");
-            return Ok(());
-        };
-
-        if let Some(notify_url) = &self.config.compute_hook_url {
-            self.do_notify(notify_url, reconfigure_request, cancel)
-                .await
+        let result = if let Some(notify_url) = &self.config.compute_hook_url {
+            self.do_notify(notify_url, &request, cancel).await
         } else {
-            self.do_notify_local(reconfigure_request)
-                .await
-                .map_err(|e| {
-                    // This path is for testing only, so munge the error into our prod-style error type.
-                    tracing::error!("Local notification hook failed: {e}");
-                    NotifyError::Fatal(StatusCode::INTERNAL_SERVER_ERROR)
-                })
+            self.do_notify_local(&request).await.map_err(|e| {
+                // This path is for testing only, so munge the error into our prod-style error type.
+                tracing::error!("Local notification hook failed: {e}");
+                NotifyError::Fatal(StatusCode::INTERNAL_SERVER_ERROR)
+            })
+        };
+
+        if result.is_ok() {
+            *guard = request;
         }
+        result
     }
 }
 
@@ -402,21 +499,22 @@ pub(crate) mod tests {
             NodeId(1),
         );
 
-        // An unsharded tenant is always ready to emit a notification
-        assert!(tenant_state.maybe_reconfigure(tenant_id).is_some());
-        assert_eq!(
-            tenant_state
-                .maybe_reconfigure(tenant_id)
-                .unwrap()
-                .shards
-                .len(),
-            1
-        );
-        assert!(tenant_state
-            .maybe_reconfigure(tenant_id)
-            .unwrap()
-            .stripe_size
-            .is_none());
+        // An unsharded tenant is always ready to emit a notification, but won't
+        // send the same one twice
+        let send_result = tenant_state.maybe_send(tenant_id, None);
+        let MaybeSendResult::Transmit((request, mut guard)) = send_result else {
+            anyhow::bail!("Wrong send result");
+        };
+        assert_eq!(request.shards.len(), 1);
+        assert!(request.stripe_size.is_none());
+
+        // Simulate successful send
+        *guard = request;
+        drop(guard);
+
+        // Try asking again: this should be a no-op
+        let send_result = tenant_state.maybe_send(tenant_id, None);
+        assert!(matches!(send_result, MaybeSendResult::Noop));
 
         // Writing the first shard of a multi-sharded situation (i.e. in a split)
         // resets the tenant state and puts it in an non-notifying state (need to
@@ -430,7 +528,10 @@ pub(crate) mod tests {
             ShardStripeSize(32768),
             NodeId(1),
         );
-        assert!(tenant_state.maybe_reconfigure(tenant_id).is_none());
+        assert!(matches!(
+            tenant_state.maybe_send(tenant_id, None),
+            MaybeSendResult::Noop
+        ));
 
         // Writing the second shard makes it ready to notify
         tenant_state.update(
@@ -443,22 +544,16 @@ pub(crate) mod tests {
             NodeId(1),
         );
 
-        assert!(tenant_state.maybe_reconfigure(tenant_id).is_some());
-        assert_eq!(
-            tenant_state
-                .maybe_reconfigure(tenant_id)
-                .unwrap()
-                .shards
-                .len(),
-            2
-        );
-        assert_eq!(
-            tenant_state
-                .maybe_reconfigure(tenant_id)
-                .unwrap()
-                .stripe_size,
-            Some(ShardStripeSize(32768))
-        );
+        let send_result = tenant_state.maybe_send(tenant_id, None);
+        let MaybeSendResult::Transmit((request, mut guard)) = send_result else {
+            anyhow::bail!("Wrong send result");
+        };
+        assert_eq!(request.shards.len(), 2);
+        assert_eq!(request.stripe_size, Some(ShardStripeSize(32768)));
+
+        // Simulate successful send
+        *guard = request;
+        drop(guard);
 
         Ok(())
     }
