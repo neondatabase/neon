@@ -1667,8 +1667,6 @@ mod tests {
     use super::*;
     use crate::tenant::harness::*;
     use crate::tenant::remote_timeline_client::{remote_initdb_archive_path, INITDB_PATH};
-    use crate::tenant::Timeline;
-    use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
 
     use crate::DEFAULT_PG_VERSION;

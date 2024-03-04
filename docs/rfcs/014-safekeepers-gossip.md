@@ -1,6 +1,6 @@
 # Safekeeper gossip
 
-Extracted from this [PR](https://github.com/zenithdb/rfcs/pull/13)
+Extracted from this [PR](https://github.com/neondatabase/rfcs/pull/13)
 
 ## Motivation
 

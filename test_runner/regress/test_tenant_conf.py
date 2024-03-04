@@ -270,7 +270,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         "period": "20s",
         "threshold": "23h",
     }
-    assert final_effective_config["max_lsn_wal_lag"] == 10 * 1024 * 1024
+    assert final_effective_config["max_lsn_wal_lag"] == 1024 * 1024 * 1024
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()

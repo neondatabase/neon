@@ -1,7 +1,5 @@
 use super::*;
 use std::collections::HashMap;
-use std::time::SystemTime;
-use utils::lsn::Lsn;
 
 #[test]
 fn startup_collected_timeline_metrics_before_advancing() {
