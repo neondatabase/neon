@@ -67,7 +67,7 @@ pub(crate) async fn download_layer_file<'a>(
             let download = storage.download(&remote_path, cancel).await?;
 
             let mut destination_file =
-                tokio::io::BufWriter::with_capacity(*BUFFER_SIZE, destination_file);
+                tokio::io::BufWriter::with_capacity(BUFFER_SIZE, destination_file);
 
             let mut reader = tokio_util::io::StreamReader::new(download.download_stream);
 

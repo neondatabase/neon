@@ -72,7 +72,7 @@ pub(crate) async fn download_layer_file<'a>(
             let bytes_amount = async {
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored()
-                let mut buf = BytesMut::with_capacity(*BUFFER_SIZE);
+                let mut buf = BytesMut::with_capacity(BUFFER_SIZE);
                 let mut bytes_amount: u64 = 0;
                 while let Some(chunk) = download.download_stream.next().await {
                     let mut chunk = match chunk {
@@ -80,7 +80,7 @@ pub(crate) async fn download_layer_file<'a>(
                         Err(e) => return Err(e),
                     };
 
-                    if buf.len() + chunk.len() > *BUFFER_SIZE {
+                    if buf.len() + chunk.len() > BUFFER_SIZE {
                         {
                             // flush buf
                             let res;
@@ -94,7 +94,7 @@ pub(crate) async fn download_layer_file<'a>(
                     }
 
                     // avoid memcpy for the middle of the chunk
-                    if chunk.len() >= *BUFFER_SIZE {
+                    if chunk.len() >= BUFFER_SIZE {
                         // do a big write
                         let res;
                         let buf_pre_write = chunk.len();
@@ -107,16 +107,16 @@ pub(crate) async fn download_layer_file<'a>(
                     }
 
                     // in-memory copy the < BUFFER_SIZED tail of the chunk
-                    assert!(chunk.len() < *BUFFER_SIZE);
+                    assert!(chunk.len() < BUFFER_SIZE);
                     let mut chunk = &chunk[..];
                     while !chunk.is_empty() {
-                        let need = *BUFFER_SIZE - buf.len();
+                        let need = BUFFER_SIZE - buf.len();
                         let have = chunk.len();
                         let n = std::cmp::min(need, have);
                         buf.extend_from_slice(&chunk[..n]);
                         chunk = &chunk[n..];
-                        if buf.len() >= *BUFFER_SIZE {
-                            assert_eq!(buf.len(), *BUFFER_SIZE);
+                        if buf.len() >= BUFFER_SIZE {
+                            assert_eq!(buf.len(), BUFFER_SIZE);
                             {
                                 // flush buf
                                 let res;

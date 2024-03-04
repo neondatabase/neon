@@ -259,19 +259,7 @@ pub(crate) const INITDB_PATH: &str = "initdb.tar.zst";
 pub(crate) const INITDB_PRESERVED_PATH: &str = "initdb-preserved.tar.zst";
 
 /// Default buffer size when interfacing with [`tokio::fs::File`].
-use once_cell::sync::Lazy;
-use std::env;
-
-pub(crate) static BUFFER_SIZE: Lazy<usize> =
-    Lazy::new(
-        || match env::var("NEON_PAGESERVER_REMOTE_TIMELINE_CLIENT_BUFFER_SIZE") {
-            Ok(v) => v.parse().unwrap(),
-            Err(e) => match e {
-                env::VarError::NotPresent => 32 * 1024,
-                env::VarError::NotUnicode(_) => panic!(),
-            },
-        },
-    );
+pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),

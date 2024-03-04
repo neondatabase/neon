@@ -112,7 +112,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     let fs_size = usize::try_from(fs_size)
         .with_context(|| format!("convert {source_path:?} size {fs_size} usize"))?;
 
-    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, *super::BUFFER_SIZE);
+    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
     storage
         .upload(reader, fs_size, &storage_path, None, cancel)
@@ -134,7 +134,7 @@ pub(crate) async fn upload_initdb_dir(
     // We might have read somewhat into the file already in the prior retry attempt
     initdb_tar_zst.seek(SeekFrom::Start(0)).await?;
 
-    let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, *super::BUFFER_SIZE);
+    let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, super::BUFFER_SIZE);
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
     storage
