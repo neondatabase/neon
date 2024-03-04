@@ -17,8 +17,7 @@ pub trait CompactionJobExecutor {
     // compaction doesn't distinguish whether they are stored locally or
     // remotely.
     //
-    // The keyspace is defined by CompactionKey trait.
-    //
+    // The keyspace is defined by the CompactionKey trait.
     type Key: CompactionKey;
 
     type Layer: CompactionLayer<Self::Key> + Clone;
@@ -83,7 +82,7 @@ pub trait CompactionJobExecutor {
     /// Delete a layer. The compaction implementation will call this only after
     /// all the create_image() or create_delta() calls that deletion of this
     /// layer depends on have finished. But if the implementor has extra lazy
-    /// background tasks, like uploading the index json file to remote storage,
+    /// background tasks, like uploading the index json file to remote storage.
     /// it is the implementation's responsibility to track those.
     fn delete_layer(
         &mut self,
