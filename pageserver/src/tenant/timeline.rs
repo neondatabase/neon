@@ -50,7 +50,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::sync::gate::{Gate, GateGuard};
 
-use crate::pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind};
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -75,6 +74,10 @@ use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{
+    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
+    virtual_file::MaybeFatalIo,
+};
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
@@ -3426,10 +3429,14 @@ impl Timeline {
                 // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
                 // We just need to fsync the directory in which these inodes are linked,
                 // which we know to be the timeline directory.
+                //
+                // We use fatal_err() below because the after write_to_disk returns with success,
+                // the in-memory state of the filesystem already has the layer file in its final place,
+                // and subsequent pageserver code could think it's durable while it really isn't.
                 par_fsync::par_fsync(&[self_clone
                     .conf
                     .timeline_path(&self_clone.tenant_shard_id, &self_clone.timeline_id)])
-                .context("fsync of timeline dir")?;
+                .fatal_err("fsync of timeline dir");
 
                 anyhow::Ok(new_delta)
             }
@@ -3662,11 +3669,14 @@ impl Timeline {
         // We just need to fsync the directory in which these inodes are linked,
         // which we know to be the timeline directory.
         if !image_layers.is_empty() {
+            // We use fatal_err() below because the after writer.finish() returns with success,
+            // the in-memory state of the filesystem already has the layer file in its final place,
+            // and subsequent pageserver code could think it's durable while it really isn't.
             par_fsync::par_fsync_async(&[self
                 .conf
                 .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
             .await
-            .context("fsync of timeline dir")?;
+            .fatal_err("fsync of timeline dir");
         }
 
         let mut guard = self.layers.write().await;
@@ -4251,12 +4261,16 @@ impl Timeline {
             // The writer.finish() above already did the fsync of the inodes.
             // We just need to fsync the directory in which these inodes are linked,
             // which we know to be the timeline directory.
+            //
+            // We use fatal_err() below because the after writer.finish() returns with success,
+            // the in-memory state of the filesystem already has the layer file in its final place,
+            // and subsequent pageserver code could think it's durable while it really isn't.
             let timeline_dir = self
                 .conf
                 .timeline_path(&self.tenant_shard_id, &self.timeline_id);
             par_fsync::par_fsync_async(&[timeline_dir])
                 .await
-                .context("fsync of timeline dir")?;
+                .fatal_err("fsync of timeline dir");
         }
 
         stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
