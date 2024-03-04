@@ -1,3 +1,4 @@
+import json
 import random
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -10,7 +11,7 @@ from fixtures.pageserver.utils import (
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
 )
-from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
@@ -436,6 +437,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     )
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
     assert env.attachment_service is not None
+    assert isinstance(env.pageserver_remote_storage, S3Storage)  # Satisfy linter
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
@@ -491,18 +493,35 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
 
     # Do evictions on attached pageserver, check secondary follows along
     # ==================================================================
-    log.info("Evicting a layer...")
-    layer_to_evict = list_layers(ps_attached, tenant_id, timeline_id)[0]
-    ps_attached.http_client().evict_layer(tenant_id, timeline_id, layer_name=layer_to_evict.name)
+    try:
+        log.info("Evicting a layer...")
+        layer_to_evict = list_layers(ps_attached, tenant_id, timeline_id)[0]
+        some_other_layer = list_layers(ps_attached, tenant_id, timeline_id)[1]
+        log.info(f"Victim layer: {layer_to_evict.name}")
+        ps_attached.http_client().evict_layer(
+            tenant_id, timeline_id, layer_name=layer_to_evict.name
+        )
 
-    log.info("Synchronizing after eviction...")
-    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
-    ps_secondary.http_client().tenant_secondary_download(tenant_id)
+        log.info("Synchronizing after eviction...")
+        ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+        heatmap_after_eviction = env.pageserver_remote_storage.heatmap_content(tenant_id)
+        heatmap_layers = set(
+            layer["name"] for layer in heatmap_after_eviction["timelines"][0]["layers"]
+        )
+        assert layer_to_evict.name not in heatmap_layers
+        assert some_other_layer.name in heatmap_layers
 
-    assert layer_to_evict not in list_layers(ps_attached, tenant_id, timeline_id)
-    assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
-        ps_secondary, tenant_id, timeline_id
-    )
+        ps_secondary.http_client().tenant_secondary_download(tenant_id)
+
+        assert layer_to_evict not in list_layers(ps_attached, tenant_id, timeline_id)
+        assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
+            ps_secondary, tenant_id, timeline_id
+        )
+    except:
+        # On assertion failures, log some details to help with debugging
+        heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
+        log.warn(f"heatmap contents: {json.dumps(heatmap,indent=2)}")
+        raise
 
     # Scrub the remote storage
     # ========================

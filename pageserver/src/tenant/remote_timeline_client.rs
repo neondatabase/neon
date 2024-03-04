@@ -1791,14 +1791,12 @@ mod tests {
         context::RequestContext,
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::Layer,
-            Generation, Tenant, Timeline,
+            Tenant, Timeline,
         },
         DEFAULT_PG_VERSION,
     };
 
     use std::collections::HashSet;
-    use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
         format!("contents for {name}").into()
