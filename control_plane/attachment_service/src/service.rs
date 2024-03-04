@@ -2642,6 +2642,18 @@ impl Service {
                 .map(|t| t.to_persistent())
                 .collect::<Vec<_>>();
 
+            // This method can only validate the state of an idle system: if a reconcile is in
+            // progress, fail out early to avoid giving false errors on state that won't match
+            // between database and memory under a ReconcileResult is processed.
+            for t in locked.tenants.values() {
+                if t.reconciler.is_some() {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Shard {} reconciliation in progress",
+                        t.tenant_shard_id
+                    )));
+                }
+            }
+
             (expect_nodes, expect_shards)
         };
 
