@@ -2103,6 +2103,10 @@ where
     R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
     H: FnOnce(Request<Body>, CancellationToken) -> R + Send + Sync + 'static,
 {
+    fail::fail_point!("api-503", |_| Err(ApiError::ResourceUnavailable(
+        "failpoint".into()
+    )));
+
     // Spawn a new task to handle the request, to protect the handler from unexpected
     // async cancellations. Most pageserver functions are not async cancellation safe.
     // We arm a drop-guard, so that if Hyper drops the Future, we signal the task
