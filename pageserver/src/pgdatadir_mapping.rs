@@ -11,8 +11,9 @@ use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
+use crate::tenant::timeline::GetVectoredError;
 use crate::walrecord::NeonWalRecord;
-use anyhow::{ensure, Context};
+use anyhow::{anyhow, ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use pageserver_api::key::{
@@ -26,7 +27,7 @@ use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, BTreeMap, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
@@ -196,6 +197,41 @@ impl Timeline {
 
         let key = rel_block_to_key(tag, blknum);
         version.get(self, key, ctx).await
+    }
+
+    pub(crate) async fn get_rel_pages_at_lsn(
+        &self,
+        tag: RelTag,
+        blknum: BlockNumber,
+        count: u8,
+        version: Version<'_>,
+        latest: bool,
+        ctx: &RequestContext,
+    ) -> Result<(u8, Bytes), GetVectoredError> {
+        if tag.relnode == 0 {
+            return Err(GetVectoredError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
+        }
+
+        let nblocks = self
+            .get_rel_size(tag, version, latest, ctx)
+            .await
+            .map_err(|e| GetVectoredError::Other(anyhow!(e)))?;
+        if blknum + (count - 1) as u32 >= nblocks {
+            debug!(
+                "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
+                tag,
+                blknum,
+                version.get_lsn(),
+                nblocks
+            );
+            return Ok((1, ZERO_PAGE.clone()));
+        }
+
+        let start_key = rel_block_to_key(tag, blknum);
+        let end_key = start_key.add(count as u32);
+        version.get_vectored(self, start_key..end_key, ctx).await
     }
 
     // Get size of a database in blocks
@@ -1604,6 +1640,55 @@ impl<'a> DatadirModification<'a> {
         self.tline.get(key, lsn, ctx).await
     }
 
+    async fn get_vectored(
+        &self,
+        key_range: Range<Key>,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        // Have we already updated the same key? Read the latest pending updated
+        // version in that case.
+        //
+        // Note: we don't check pending_deletions. It is an error to request a
+        // value that has been removed, deletion only avoids leaking storage.
+        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
+        let mut keys_in_modification = KeySpaceAccum::new();
+
+        let key = key_range.start;
+        while key != key_range.end {
+            if let Some(values) = self.pending_updates.get(&key) {
+                if let Some((_, value)) = values.last() {
+                    keys_in_modification.add_key(key);
+
+                    match value {
+                        Value::Image(img) => {
+                            results.insert(key, Ok(img.clone()));
+                        }
+                        _ => {
+                            results.insert(
+                                key,
+                                Err(PageReconstructError::from(anyhow::anyhow!(
+                                    "unexpected pending WAL record"
+                                ))),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+
+        let mut keyspace = KeySpace {
+            ranges: vec![key_range],
+        };
+        keyspace.remove_overlapping_with(&keys_in_modification.to_keyspace());
+
+        let pages = self.tline.get_vectored(keyspace, lsn, ctx).await?;
+        results.extend(pages.into_iter());
+
+        Ok(results)
+    }
+
     fn put(&mut self, key: Key, val: Value) {
         let values = self.pending_updates.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
@@ -1645,6 +1730,43 @@ impl<'a> Version<'a> {
             Version::Lsn(lsn) => timeline.get(key, *lsn, ctx).await,
             Version::Modified(modification) => modification.get(key, ctx).await,
         }
+    }
+
+    async fn get_vectored(
+        &self,
+        timeline: &Timeline,
+        key_range: Range<Key>,
+        ctx: &RequestContext,
+    ) -> Result<(u8, Bytes), GetVectoredError> {
+        let pages = match self {
+            Version::Lsn(lsn) => {
+                timeline
+                    .get_vectored(
+                        KeySpace {
+                            ranges: vec![key_range],
+                        },
+                        *lsn,
+                        ctx,
+                    )
+                    .await
+            }
+            Version::Modified(modification) => modification.get_vectored(key_range, ctx).await,
+        }?;
+
+        let mut buf = BytesMut::new();
+        let page_count: u8 = pages.len().try_into().expect("too many pages returned");
+        for page in pages {
+            match page {
+                (_key, Ok(bytes)) => {
+                    buf.extend_from_slice(&bytes[..]);
+                }
+                (_key, Err(err)) => {
+                    return Err(GetVectoredError::Other(anyhow!(err)));
+                }
+            }
+        }
+
+        Ok((page_count, buf.freeze()))
     }
 
     fn get_lsn(&self) -> Lsn {

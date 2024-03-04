@@ -17,6 +17,8 @@ use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
 use pageserver_api::key::Key;
+use pageserver_api::models::PagestreamGetVectoredPagesRequest;
+use pageserver_api::models::PagestreamGetVectoredPagesResponse;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -70,6 +72,7 @@ use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::ShardSelector;
+use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
@@ -333,6 +336,10 @@ enum PageStreamError {
     #[error("Read error")]
     Read(#[source] PageReconstructError),
 
+    /// Something went wrong reading a page: this likely indicates a pageserver bug
+    #[error("Vectored read error")]
+    VectoredRead(#[source] GetVectoredError),
+
     /// Ran out of time waiting for an LSN
     #[error("LSN timeout: {0}")]
     LsnTimeout(WaitLsnError),
@@ -352,6 +359,15 @@ impl From<PageReconstructError> for PageStreamError {
         match value {
             PageReconstructError::Cancelled => Self::Shutdown,
             e => Self::Read(e),
+        }
+    }
+}
+
+impl From<GetVectoredError> for PageStreamError {
+    fn from(value: GetVectoredError) -> Self {
+        match value {
+            GetVectoredError::Cancelled => Self::Shutdown,
+            e => Self::VectoredRead(e),
         }
     }
 }
@@ -660,6 +676,15 @@ impl PageServerHandler {
                     let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.lsn);
                     (
                         self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
+                }
+                PagestreamFeMessage::GetVectoredPages(req) => {
+                    let span = tracing::info_span!("handle_get_vectored_pages_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn, req_count = %req.count);
+                    (
+                        self.handle_get_pages_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
                             .await,
                         span,
@@ -1158,6 +1183,80 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
+    }
+
+    #[instrument(skip_all, fields(shard_id))]
+    async fn handle_get_pages_at_lsn_request(
+        &mut self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &PagestreamGetVectoredPagesRequest,
+        ctx: &RequestContext,
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
+        // This is cheeky and relies on not using sharding :)
+        // A real solution has to split the requested key sequence between shards.
+        let get_page_request = PagestreamGetPageRequest {
+            latest: req.latest,
+            lsn: req.lsn,
+            rel: req.rel,
+            blkno: req.blkno,
+        };
+
+        let timeline = match self.get_cached_timeline_for_page(&get_page_request) {
+            Ok(tl) => tl,
+            Err(key) => {
+                match self
+                    .load_timeline_for_page(tenant_id, timeline_id, key)
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
+                        // We already know this tenant exists in general, because we resolved it at
+                        // start of connection.  Getting a NotFound here indicates that the shard containing
+                        // the requested page is not present on this node: the client's knowledge of shard->pageserver
+                        // mapping is out of date.
+                        //
+                        // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
+                        // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
+                        // and talk to a different pageserver.
+                        return Err(PageStreamError::Reconnect(
+                            "getpage@lsn request routed to wrong shard".into(),
+                        ));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        };
+
+        // load_timeline_for_page sets shard_id, but get_cached_timeline_for_page doesn't
+        set_tracing_field_shard_id(timeline);
+
+        let _timer = timeline
+            .query_metrics
+            .start_timer(metrics::SmgrQueryType::GetPageAtLsn);
+
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
+
+        let (page_count, pages_buf) = timeline
+            .get_rel_pages_at_lsn(
+                req.rel,
+                req.blkno,
+                req.count,
+                Version::Lsn(lsn),
+                req.latest,
+                ctx,
+            )
+            .await?;
+
+        Ok(PagestreamBeMessage::GetVectoredPages(
+            PagestreamGetVectoredPagesResponse {
+                page_count,
+                pages: pages_buf,
+            },
+        ))
     }
 
     #[instrument(skip_all, fields(shard_id))]
