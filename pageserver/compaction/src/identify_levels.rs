@@ -1,5 +1,5 @@
-//! An LSM tree consists of multiple levels, each exponential larger than the
-//! previous level. And each level consists of be multiple "tiers". With tiered
+//! An LSM tree consists of multiple levels, each exponentially larger than the
+//! previous level. And each level consists of multiple "tiers". With tiered
 //! compaction, a level is compacted when it has accumulated more than N tiers,
 //! forming one tier on the next level.
 //!
