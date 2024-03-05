@@ -17,6 +17,7 @@ use futures::stream::StreamExt;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::{
+    key::AUX_FILES_KEY,
     keyspace::KeySpaceAccum,
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
@@ -891,8 +892,7 @@ impl Timeline {
                     assert_eq!(seq_key, vec_key);
                     match (seq_res, vec_res) {
                         (Ok(seq_blob), Ok(vec_blob)) => {
-                            assert_eq!(seq_blob, vec_blob,
-                                       "Image mismatch for key {seq_key} - keyspace={keyspace:?} lsn={lsn}");
+                            Self::validate_key_equivalence(seq_key, &keyspace, lsn, seq_blob, vec_blob);
                         },
                         (Err(err), Ok(_)) => {
                             panic!(
@@ -908,6 +908,43 @@ impl Timeline {
                     }
                 })
             }
+        }
+    }
+
+    fn validate_key_equivalence(
+        key: &Key,
+        keyspace: &KeySpace,
+        lsn: Lsn,
+        seq: &Bytes,
+        vec: &Bytes,
+    ) {
+        use utils::bin_ser::BeSer;
+
+        if *key == AUX_FILES_KEY {
+            // The value reconstruct of AUX_FILES_KEY from records is not deterministic
+            // since it uses a hash map under the hood. Hence, deserialise both results
+            // before comparing.
+            let seq_aux_dir_res = AuxFilesDirectory::des(seq);
+            let vec_aux_dir_res = AuxFilesDirectory::des(vec);
+            match (&seq_aux_dir_res, &vec_aux_dir_res) {
+                (Ok(seq_aux_dir), Ok(vec_aux_dir)) => {
+                    assert_eq!(
+                        seq_aux_dir, vec_aux_dir,
+                        "Mismatch for key {} - keyspace={:?} lsn={}: {:?} != {:?}",
+                        key, keyspace, lsn, seq_aux_dir, vec_aux_dir
+                    );
+                }
+                (Err(_), Err(_)) => {}
+                _ => {
+                    panic!("Mismatch for {key}: {seq_aux_dir_res:?} != {vec_aux_dir_res:?}");
+                }
+            }
+        } else {
+            // All other keys should reconstruct deterministically, so we simply compare the blobs.
+            assert_eq!(
+                seq, vec,
+                "Image mismatch for key {key} - keyspace={keyspace:?} lsn={lsn}"
+            );
         }
     }
 
