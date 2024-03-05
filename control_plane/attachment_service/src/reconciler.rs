@@ -26,7 +26,7 @@ pub(super) struct Reconciler {
     /// of a tenant's state from when we spawned a reconcile task.
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
-    pub(crate) generation: Generation,
+    pub(crate) generation: Option<Generation>,
     pub(crate) intent: TargetState,
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
@@ -312,7 +312,7 @@ impl Reconciler {
             &self.shard,
             &self.config,
             LocationConfigMode::AttachedStale,
-            Some(self.generation),
+            self.generation,
             None,
         );
         self.location_config(origin_ps_id, stale_conf, Some(Duration::from_secs(10)))
@@ -335,16 +335,17 @@ impl Reconciler {
         }
 
         // Increment generation before attaching to new pageserver
-        self.generation = self
-            .persistence
-            .increment_generation(self.tenant_shard_id, dest_ps_id)
-            .await?;
+        self.generation = Some(
+            self.persistence
+                .increment_generation(self.tenant_shard_id, dest_ps_id)
+                .await?,
+        );
 
         let dest_conf = build_location_config(
             &self.shard,
             &self.config,
             LocationConfigMode::AttachedMulti,
-            Some(self.generation),
+            self.generation,
             None,
         );
 
@@ -401,7 +402,7 @@ impl Reconciler {
             &self.shard,
             &self.config,
             LocationConfigMode::AttachedSingle,
-            Some(self.generation),
+            self.generation,
             None,
         );
         self.location_config(dest_ps_id, dest_final_conf.clone(), None)
@@ -433,22 +434,62 @@ impl Reconciler {
 
         // If the attached pageserver is not attached, do so now.
         if let Some(node_id) = self.intent.attached {
-            let mut wanted_conf =
-                attached_location_conf(self.generation, &self.shard, &self.config);
+            // If we are in an attached policy, then generation must have been set (null generations
+            // are only present when a tenant is initially loaded with a secondary policy)
+            debug_assert!(self.generation.is_some());
+            let Some(generation) = self.generation else {
+                return Err(ReconcileError::Other(anyhow::anyhow!(
+                    "Attempted to attach with NULL generation"
+                )));
+            };
+
+            let mut wanted_conf = attached_location_conf(generation, &self.shard, &self.config);
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
                     tracing::info!(%node_id, "Observed configuration already correct.")
                 }
-                _ => {
+                observed => {
                     // In all cases other than a matching observed configuration, we will
                     // reconcile this location.  This includes locations with different configurations, as well
                     // as locations with unknown (None) observed state.
-                    self.generation = self
-                        .persistence
-                        .increment_generation(self.tenant_shard_id, node_id)
-                        .await?;
-                    wanted_conf.generation = self.generation.into();
+
+                    // The general case is to increment the generation.  However, there are cases
+                    // where this is not necessary:
+                    // - if we are only updating the TenantConf part of the location
+                    // - if we are only changing the attachment mode (e.g. going to attachedmulti or attachedstale)
+                    //   and the location was already in the correct generation
+                    let increment_generation = match observed {
+                        None => true,
+                        Some(ObservedStateLocation { conf: None }) => true,
+                        Some(ObservedStateLocation {
+                            conf: Some(observed),
+                        }) => {
+                            let generations_match = observed.generation == wanted_conf.generation;
+
+                            use LocationConfigMode::*;
+                            let mode_transition_requires_gen_inc =
+                                match (observed.mode, wanted_conf.mode) {
+                                    // Usually the short-lived attachment modes (multi and stale) are only used
+                                    // in the case of [`Self::live_migrate`], but it is simple to handle them correctly
+                                    // here too.  Locations are allowed to go Single->Stale and Multi->Single within the same generation.
+                                    (AttachedSingle, AttachedStale) => false,
+                                    (AttachedMulti, AttachedSingle) => false,
+                                    (lhs, rhs) => lhs != rhs,
+                                };
+
+                            !generations_match || mode_transition_requires_gen_inc
+                        }
+                    };
+
+                    if increment_generation {
+                        let generation = self
+                            .persistence
+                            .increment_generation(self.tenant_shard_id, node_id)
+                            .await?;
+                        self.generation = Some(generation);
+                        wanted_conf.generation = generation.into();
+                    }
                     tracing::info!(%node_id, "Observed configuration requires update.");
                     self.location_config(node_id, wanted_conf, None).await?;
                     self.compute_notify().await?;

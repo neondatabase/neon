@@ -606,7 +606,7 @@ impl Endpoint {
         let conn_str = self.connstr("cloud_admin", "postgres");
         println!("Starting postgres node at '{}'", conn_str);
         if create_test_user {
-            let conn_str = self.connstr("user", "neondb");
+            let conn_str = self.connstr("test", "neondb");
             println!("Also at '{}'", conn_str);
         }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
