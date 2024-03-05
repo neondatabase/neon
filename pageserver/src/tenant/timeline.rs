@@ -56,7 +56,7 @@ use crate::tenant::{
     metadata::TimelineMetadata,
 };
 use crate::{
-    context::{AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder},
+    context::{DownloadBehavior, RequestContext},
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
@@ -1107,118 +1107,6 @@ impl Timeline {
             CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
         }
-    }
-
-    /// TODO: cancellation
-    async fn compact_legacy(
-        self: &Arc<Self>,
-        _cancel: &CancellationToken,
-        flags: EnumSet<CompactFlags>,
-        ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
-        // High level strategy for compaction / image creation:
-        //
-        // 1. First, calculate the desired "partitioning" of the
-        // currently in-use key space. The goal is to partition the
-        // key space into roughly fixed-size chunks, but also take into
-        // account any existing image layers, and try to align the
-        // chunk boundaries with the existing image layers to avoid
-        // too much churn. Also try to align chunk boundaries with
-        // relation boundaries.  In principle, we don't know about
-        // relation boundaries here, we just deal with key-value
-        // pairs, and the code in pgdatadir_mapping.rs knows how to
-        // map relations into key-value pairs. But in practice we know
-        // that 'field6' is the block number, and the fields 1-5
-        // identify a relation. This is just an optimization,
-        // though.
-        //
-        // 2. Once we know the partitioning, for each partition,
-        // decide if it's time to create a new image layer. The
-        // criteria is: there has been too much "churn" since the last
-        // image layer? The "churn" is fuzzy concept, it's a
-        // combination of too many delta files, or too much WAL in
-        // total in the delta file. Or perhaps: if creating an image
-        // file would allow to delete some older files.
-        //
-        // 3. After that, we compact all level0 delta files if there
-        // are too many of them.  While compacting, we also garbage
-        // collect any page versions that are no longer needed because
-        // of the new image layers we created in step 2.
-        //
-        // TODO: This high level strategy hasn't been implemented yet.
-        // Below are functions compact_level0() and create_image_layers()
-        // but they are a bit ad hoc and don't quite work like it's explained
-        // above. Rewrite it.
-
-        // Is the timeline being deleted?
-        if self.is_stopping() {
-            trace!("Dropping out of compaction on timeline shutdown");
-            return Err(CompactionError::ShuttingDown);
-        }
-
-        let target_file_size = self.get_checkpoint_distance();
-
-        // Define partitioning schema if needed
-
-        // FIXME: the match should only cover repartitioning, not the next steps
-        match self
-            .repartition(
-                self.get_last_record_lsn(),
-                self.get_compaction_target_size(),
-                flags,
-                ctx,
-            )
-            .await
-        {
-            Ok((partitioning, lsn)) => {
-                // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
-                let image_ctx = RequestContextBuilder::extend(ctx)
-                    .access_stats_behavior(AccessStatsBehavior::Skip)
-                    .build();
-
-                // 2. Compact
-                let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size, ctx).await?;
-                timer.stop_and_record();
-
-                // 3. Create new image layers for partitions that have been modified
-                // "enough".
-                let layers = self
-                    .create_image_layers(
-                        &partitioning,
-                        lsn,
-                        flags.contains(CompactFlags::ForceImageLayerCreation),
-                        &image_ctx,
-                    )
-                    .await
-                    .map_err(anyhow::Error::from)?;
-                if let Some(remote_client) = &self.remote_client {
-                    for layer in layers {
-                        remote_client.schedule_layer_file_upload(layer)?;
-                    }
-                }
-
-                if let Some(remote_client) = &self.remote_client {
-                    // should any new image layer been created, not uploading index_part will
-                    // result in a mismatch between remote_physical_size and layermap calculated
-                    // size, which will fail some tests, but should not be an issue otherwise.
-                    remote_client.schedule_index_upload_for_file_changes()?;
-                }
-            }
-            Err(err) => {
-                // no partitioning? This is normal, if the timeline was just created
-                // as an empty timeline. Also in unit tests, when we use the timeline
-                // as a simple key-value store, ignoring the datadir layout. Log the
-                // error but continue.
-                //
-                // Suppress error when it's due to cancellation
-                if !self.cancel.is_cancelled() {
-                    error!("could not compact, repartitioning keyspace failed: {err:?}");
-                }
-            }
-        };
-
-        Ok(())
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
