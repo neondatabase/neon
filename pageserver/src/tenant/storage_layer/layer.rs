@@ -710,7 +710,9 @@ impl LayerInner {
                 .map(|mut guard| guard.get_and_upgrade().ok_or(guard));
 
             match locked {
-                Ok(Ok((strong, upgraded))) if upgraded => {
+                // this path could had been a RwLock::read
+                Ok(Ok((strong, upgraded))) if !upgraded => return Ok(strong),
+                Ok(Ok((strong, _))) => {
                     // when upgraded back, the Arc<DownloadedLayer> is still available, but
                     // previously a `evict_and_wait` was received.
                     self.wanted_evicted.store(false, Ordering::Relaxed);
@@ -722,7 +724,6 @@ impl LayerInner {
 
                     return Ok(strong);
                 }
-                Ok(Ok((strong, _))) => return Ok(strong),
                 Ok(Err(mut guard)) => {
                     // path to here: the evict_blocking is stuck on spawn_blocking queue.
                     //
