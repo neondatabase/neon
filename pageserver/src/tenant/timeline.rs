@@ -2622,7 +2622,6 @@ impl Timeline {
                         if prev <= cont_lsn {
                             // Didn't make any progress in last iteration. Error out to avoid
                             // getting stuck in the loop.
-                            // We fail here
                             return Err(layer_traversal_error(format!(
                                 "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
                                 key,

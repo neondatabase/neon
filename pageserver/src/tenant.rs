@@ -4999,7 +4999,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_at_max_lsn() -> anyhow::Result<()> {
-        //assert!(false);
         let harness = TenantHarness::create("test_get_vectored")?;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
