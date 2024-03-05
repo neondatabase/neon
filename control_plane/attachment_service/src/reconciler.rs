@@ -454,6 +454,51 @@ impl Reconciler {
         Ok(())
     }
 
+    async fn maybe_refresh_observed(&mut self) -> Result<(), ReconcileError> {
+        // If the attached node has uncertain state, read it from the pageserver before proceeding: this
+        // is important to avoid spurious generation increments.
+        //
+        // We don't need to do this for secondary/detach locations because it's harmless to just PUT their
+        // location conf, whereas for attached locations it can interrupt clients if we spuriously destroy/recreate
+        // the `Timeline` object in the pageserver.
+
+        let Some(attached_node) = self.intent.attached.as_ref() else {
+            // Nothing to do
+            return Ok(());
+        };
+
+        if matches!(
+            self.observed.locations.get(&attached_node.get_id()),
+            Some(ObservedStateLocation { conf: None })
+        ) {
+            let tenant_shard_id = self.tenant_shard_id;
+            let observed_conf = match attached_node
+                .with_client_retries(
+                    |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.service_config.jwt_token,
+                    1,
+                    1,
+                    Duration::from_secs(5),
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Ok(observed)) => observed,
+                Some(Err(e)) => return Err(e.into()),
+                None => return Err(ReconcileError::Cancel),
+            };
+            tracing::info!("Scanned location configuration on {attached_node}: {observed_conf:?}");
+            self.observed.locations.insert(
+                attached_node.get_id(),
+                ObservedStateLocation {
+                    conf: observed_conf,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
     /// Reconciling a tenant makes API calls to pageservers until the observed state
     /// matches the intended state.
     ///
@@ -461,8 +506,8 @@ impl Reconciler {
     /// general case reconciliation where we walk through the intent by pageserver
     /// and call out to the pageserver to apply the desired state.
     pub(crate) async fn reconcile(&mut self) -> Result<(), ReconcileError> {
-        // TODO: if any of self.observed is None, call to remote pageservers
-        // to learn correct state.
+        // Prepare: if we have uncertain `observed` state for our would-be attachement location, then refresh it
+        self.maybe_refresh_observed().await?;
 
         // Special case: live migration
         self.maybe_live_migrate().await?;
