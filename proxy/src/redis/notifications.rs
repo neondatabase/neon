@@ -10,6 +10,7 @@ use crate::{
     cache::project_info::ProjectInfoCache,
     cancellation::{CancelMap, CancellationHandler, NotificationsCancellationHandler},
     intern::{ProjectIdInt, RoleNameInt},
+    metrics::REDIS_BROKEN_MESSAGES,
 };
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
@@ -115,6 +116,9 @@ impl<
         let msg: Notification = match serde_json::from_str(&payload) {
             Ok(msg) => msg,
             Err(e) => {
+                REDIS_BROKEN_MESSAGES
+                    .with_label_values(&[msg.get_channel_name()])
+                    .inc();
                 tracing::error!("broken message: {e}");
                 return Ok(());
             }

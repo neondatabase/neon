@@ -303,3 +303,12 @@ pub static ENDPOINT_ERRORS_BY_KIND: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub static REDIS_BROKEN_MESSAGES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_redis_errors_total",
+        "Number of errors by a given classification",
+        &["channel"],
+    )
+    .unwrap()
+});
