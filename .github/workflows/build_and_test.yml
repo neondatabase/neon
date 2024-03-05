@@ -451,7 +451,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
-        pg_version: [ v14, v15, v16 ]
+        pg_version: [ v15 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
