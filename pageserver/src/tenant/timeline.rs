@@ -930,8 +930,8 @@ impl Timeline {
                 (Ok(seq_aux_dir), Ok(vec_aux_dir)) => {
                     assert_eq!(
                         seq_aux_dir, vec_aux_dir,
-                        "Mismatch for key {} - keyspace={:?} lsn={}: {:?} != {:?}",
-                        key, keyspace, lsn, seq_aux_dir, vec_aux_dir
+                        "Mismatch for key {} - keyspace={:?} lsn={}",
+                        key, keyspace, lsn
                     );
                 }
                 (Err(_), Err(_)) => {}
