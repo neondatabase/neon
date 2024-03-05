@@ -922,8 +922,6 @@ impl Timeline {
         seq: &Bytes,
         vec: &Bytes,
     ) {
-        use utils::bin_ser::BeSer;
-
         if *key == AUX_FILES_KEY {
             // The value reconstruct of AUX_FILES_KEY from records is not deterministic
             // since it uses a hash map under the hood. Hence, deserialise both results
