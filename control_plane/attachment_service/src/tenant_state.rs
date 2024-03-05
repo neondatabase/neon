@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{metrics, persistence::TenantShardPersistence};
-use pageserver_api::controller_api::NodeAvailability;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
@@ -625,9 +624,7 @@ impl TenantState {
             let node = pageservers
                 .get(node_id)
                 .expect("Nodes may not be removed while referenced");
-            if observed_loc.conf.is_none()
-                && !matches!(node.availability, NodeAvailability::Offline)
-            {
+            if observed_loc.conf.is_none() && node.is_available() {
                 dirty_observed = true;
                 break;
             }
@@ -819,7 +816,10 @@ impl TenantState {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use pageserver_api::{
+        controller_api::NodeAvailability,
+        shard::{ShardCount, ShardNumber},
+    };
     use utils::id::TenantId;
 
     use crate::scheduler::test_utils::make_test_nodes;
@@ -878,7 +878,10 @@ pub(crate) mod tests {
         assert_eq!(tenant_state.intent.secondary.len(), 2);
 
         // Update the scheduler state to indicate the node is offline
-        nodes.get_mut(&attached_node_id).unwrap().availability = NodeAvailability::Offline;
+        nodes
+            .get_mut(&attached_node_id)
+            .unwrap()
+            .set_availability(NodeAvailability::Offline);
         scheduler.node_upsert(nodes.get(&attached_node_id).unwrap());
 
         // Scheduling the node should promote the still-available secondary node to attached

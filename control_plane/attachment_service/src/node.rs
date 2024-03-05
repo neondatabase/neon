@@ -1,7 +1,12 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 use hyper::StatusCode;
-use pageserver_api::controller_api::{NodeAvailability, NodeSchedulingPolicy};
+use pageserver_api::{
+    controller_api::{
+        NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, TenantLocateResponseShard,
+    },
+    shard::TenantShardId,
+};
 use pageserver_client::mgmt_api;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -17,26 +22,89 @@ use crate::persistence::NodePersistence;
 /// implementation of serialization on this type is only for debug dumps.
 #[derive(Clone, Serialize)]
 pub(crate) struct Node {
-    pub(crate) id: NodeId,
+    id: NodeId,
 
-    pub(crate) availability: NodeAvailability,
-    pub(crate) scheduling: NodeSchedulingPolicy,
+    availability: NodeAvailability,
+    scheduling: NodeSchedulingPolicy,
 
-    pub(crate) listen_http_addr: String,
-    pub(crate) listen_http_port: u16,
+    listen_http_addr: String,
+    listen_http_port: u16,
 
-    pub(crate) listen_pg_addr: String,
-    pub(crate) listen_pg_port: u16,
+    listen_pg_addr: String,
+    listen_pg_port: u16,
 
     // This cancellation token means "stop any RPCs in flight to this node, and don't start
     // any more". It is not related to process shutdown.
     #[serde(skip)]
-    pub(crate) cancel: CancellationToken,
+    cancel: CancellationToken,
 }
 
 impl Node {
     pub(crate) fn base_url(&self) -> String {
         format!("http://{}:{}", self.listen_http_addr, self.listen_http_port)
+    }
+
+    pub(crate) fn get_id(&self) -> NodeId {
+        self.id
+    }
+
+    pub(crate) fn set_scheduling(&mut self, scheduling: NodeSchedulingPolicy) {
+        self.scheduling = scheduling
+    }
+
+    /// Does this registration request match `self`?  This is used when deciding whether a registration
+    /// request should be allowed to update an existing record with the same node ID.
+    pub(crate) fn registration_match(&self, register_req: &NodeRegisterRequest) -> bool {
+        self.id == register_req.node_id
+            && self.listen_http_addr == register_req.listen_http_addr
+            && self.listen_http_port == register_req.listen_http_port
+            && self.listen_pg_addr == register_req.listen_pg_addr
+            && self.listen_pg_port == register_req.listen_pg_port
+    }
+
+    /// For a shard located on this node, populate a response object
+    /// with this node's address information.
+    pub(crate) fn shard_location(&self, shard_id: TenantShardId) -> TenantLocateResponseShard {
+        TenantLocateResponseShard {
+            shard_id,
+            node_id: self.id,
+            listen_http_addr: self.listen_http_addr.clone(),
+            listen_http_port: self.listen_http_port,
+            listen_pg_addr: self.listen_pg_addr.clone(),
+            listen_pg_port: self.listen_pg_port,
+        }
+    }
+
+    pub(crate) fn set_availability(&mut self, availability: NodeAvailability) {
+        use NodeAvailability::*;
+        match (self.availability, availability) {
+            (Offline, Active) => {
+                // Give the node a new cancellation token, effectively resetting it to un-cancelled.  Any
+                // users of previously-cloned copies of the node will still see the old cancellation
+                // state.  For example, Reconcilers in flight will have to complete and be spawned
+                // again to realize that the node has become available.
+                self.cancel = CancellationToken::new()
+            }
+            (Active, Offline) => {
+                // Fire the node's cancellation token to cancel any in-flight API requests to it
+                self.cancel.cancel()
+            }
+            _ => {}
+        }
+        self.availability = availability;
+    }
+
+    pub(crate) fn get_availability(&self) -> &NodeAvailability {
+        &self.availability
+    }
+
+    /// Whether we may send API requests to this node.
+    pub(crate) fn is_available(&self) -> bool {
+        // When we clone a node, [`Self::availability`] is a snapshot, but [`Self::cancel`] holds
+        // a reference to the original Node's cancellation status.  Checking both of these results
+        // in a "pessimistic" check where we will consider a Node instance unavailable if it was unavailable
+        // when we cloned it, or if the original Node instance's cancellation token was fired.
+        matches!(self.availability, NodeAvailability::Active) && !self.cancel.is_cancelled()
     }
 
     /// Is this node elegible to have work scheduled onto it?
@@ -54,6 +122,26 @@ impl Node {
         }
     }
 
+    pub(crate) fn new(
+        id: NodeId,
+        listen_http_addr: String,
+        listen_http_port: u16,
+        listen_pg_addr: String,
+        listen_pg_port: u16,
+    ) -> Self {
+        Self {
+            id,
+            listen_http_addr,
+            listen_http_port,
+            listen_pg_addr,
+            listen_pg_port,
+            scheduling: NodeSchedulingPolicy::Filling,
+            // TODO: we shouldn't really call this Active until we've heartbeated it.
+            availability: NodeAvailability::Active,
+            cancel: CancellationToken::new(),
+        }
+    }
+
     pub(crate) fn to_persistent(&self) -> NodePersistence {
         NodePersistence {
             node_id: self.id.0 as i64,
@@ -62,6 +150,21 @@ impl Node {
             listen_http_port: self.listen_http_port as i32,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port as i32,
+        }
+    }
+
+    pub(crate) fn from_persistent(np: NodePersistence) -> Self {
+        Self {
+            id: NodeId(np.node_id as u64),
+            // At startup we consider a node offline until proven otherwise.
+            availability: NodeAvailability::Offline,
+            scheduling: NodeSchedulingPolicy::from_str(&np.scheduling_policy)
+                .expect("Bad scheduling policy in DB"),
+            listen_http_addr: np.listen_http_addr,
+            listen_http_port: np.listen_http_port as u16,
+            listen_pg_addr: np.listen_pg_addr,
+            listen_pg_port: np.listen_pg_port as u16,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -128,5 +231,11 @@ impl Node {
             cancel,
         )
         .await
+    }
+}
+
+impl std::fmt::Display for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.id, self.listen_http_addr)
     }
 }

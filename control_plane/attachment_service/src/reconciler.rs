@@ -1,6 +1,5 @@
 use crate::persistence::Persistence;
 use crate::service;
-use pageserver_api::controller_api::NodeAvailability;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
@@ -114,7 +113,7 @@ impl Reconciler {
 
         self.observed
             .locations
-            .insert(node.id, ObservedStateLocation { conf: None });
+            .insert(node.get_id(), ObservedStateLocation { conf: None });
 
         // TODO: amend locations that use long-polling: they will hit this timeout.
         let timeout = Duration::from_secs(25);
@@ -146,7 +145,7 @@ impl Reconciler {
 
         self.observed
             .locations
-            .insert(node.id, ObservedStateLocation { conf: Some(config) });
+            .insert(node.get_id(), ObservedStateLocation { conf: Some(config) });
 
         Ok(())
     }
@@ -192,7 +191,7 @@ impl Reconciler {
                         .expect("Nodes may not be removed while referenced");
                     // We will only attempt live migration if the origin is not offline: this
                     // avoids trying to do it while reconciling after responding to an HA failover.
-                    if !matches!(node.availability, NodeAvailability::Offline) {
+                    if node.is_available() {
                         origin = Some(*node_id);
                         break;
                     }
