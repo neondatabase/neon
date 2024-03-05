@@ -642,7 +642,6 @@ struct CompactLevel0Phase1Result {
     deltas_to_compact: Vec<Layer>,
 }
 
-
 #[derive(Default)]
 struct CompactLevel0Phase1StatsBuilder {
     version: Option<u64>,
@@ -731,7 +730,6 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 }
 
 impl Timeline {
-
     /// Entry point for new tiered compaction algorithm.
     ///
     /// All the real work is in the implementation in the pageserver_compaction
