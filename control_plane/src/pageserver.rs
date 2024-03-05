@@ -605,7 +605,7 @@ impl PageServerNode {
                 eprintln!("connection error: {}", e);
             }
         });
-        tokio::pin!(client);
+        let mut client = std::pin::pin!(client);
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;

@@ -68,7 +68,7 @@ async fn handle_socket(
     // is not Unpin, and all pgbackend/framed/tokio dependencies require stream
     // to be Unpin. Which is reasonable, as indeed something like TimeoutReader
     // shouldn't be moved.
-    tokio::pin!(socket);
+    let socket = std::pin::pin!(socket);
 
     let traffic_metrics = TrafficMetrics::new();
     if let Some(current_az) = conf.availability_zone.as_deref() {
