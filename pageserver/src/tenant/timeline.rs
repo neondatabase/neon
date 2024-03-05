@@ -4201,48 +4201,6 @@ impl Timeline {
         })
     }
 
-    ///
-    /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
-    /// as Level 1 files.
-    ///
-    async fn compact_level0(
-        self: &Arc<Self>,
-        target_file_size: u64,
-        ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
-        let CompactLevel0Phase1Result {
-            new_layers,
-            deltas_to_compact,
-        } = {
-            let phase1_span = info_span!("compact_level0_phase1");
-            let ctx = ctx.attached_child();
-            let mut stats = CompactLevel0Phase1StatsBuilder {
-                version: Some(2),
-                tenant_id: Some(self.tenant_shard_id),
-                timeline_id: Some(self.timeline_id),
-                ..Default::default()
-            };
-
-            let begin = tokio::time::Instant::now();
-            let phase1_layers_locked = Arc::clone(&self.layers).read_owned().await;
-            let now = tokio::time::Instant::now();
-            stats.read_lock_acquisition_micros =
-                DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-            self.compact_level0_phase1(phase1_layers_locked, stats, target_file_size, &ctx)
-                .instrument(phase1_span)
-                .await?
-        };
-
-        if new_layers.is_empty() && deltas_to_compact.is_empty() {
-            // nothing to do
-            return Ok(());
-        }
-
-        self.finish_compact_batch(&new_layers, &Vec::new(), &deltas_to_compact)
-            .await?;
-        Ok(())
-    }
-
     async fn finish_compact_batch(
         self: &Arc<Self>,
         new_deltas: &[ResidentLayer],
