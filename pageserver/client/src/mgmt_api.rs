@@ -281,6 +281,21 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    pub async fn get_location_config(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<Option<LocationConfig>> {
+        let path = format!(
+            "{}/v1/location_config/{tenant_shard_id}",
+            self.mgmt_api_endpoint
+        );
+        self.request(Method::GET, &path, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_create(
         &self,
         tenant_shard_id: TenantShardId,

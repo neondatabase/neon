@@ -1358,6 +1358,16 @@ impl TenantManager {
         }
     }
 
+    pub(crate) fn get(&self, tenant_shard_id: TenantShardId) -> Option<TenantSlot> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => None,
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => {
+                map.get(&tenant_shard_id).cloned()
+            }
+        }
+    }
+
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
