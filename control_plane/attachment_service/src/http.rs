@@ -1,9 +1,10 @@
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use crate::PlacementPolicy;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
-    TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
+    TenantConfigRequest, TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
@@ -117,9 +118,14 @@ async fn handle_tenant_create(
     check_permissions(&req, Scope::PageServerApi)?;
 
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
+
+    // TODO: enable specifying this.  Using Single as a default helps legacy tests to work (they
+    // have no expectation of HA).
+    let placement_policy = PlacementPolicy::Single;
+
     json_response(
         StatusCode::CREATED,
-        service.tenant_create(create_req).await?,
+        service.tenant_create(create_req, placement_policy).await?,
     )
 }
 
@@ -185,6 +191,27 @@ async fn handle_tenant_location_config(
     )
 }
 
+async fn handle_tenant_config_set(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let config_req = json_request::<TenantConfigRequest>(&mut req).await?;
+
+    json_response(StatusCode::OK, service.tenant_config_set(config_req).await?)
+}
+
+async fn handle_tenant_config_get(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    json_response(StatusCode::OK, service.tenant_config_get(tenant_id)?)
+}
+
 async fn handle_tenant_time_travel_remote_storage(
     service: Arc<Service>,
     mut req: Request<Body>,
@@ -216,7 +243,15 @@ async fn handle_tenant_time_travel_remote_storage(
             done_if_after_raw,
         )
         .await?;
+    json_response(StatusCode::OK, ())
+}
 
+async fn handle_tenant_secondary_download(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    service.tenant_secondary_download(tenant_id).await?;
     json_response(StatusCode::OK, ())
 }
 
@@ -551,11 +586,20 @@ pub fn make_router(
         .delete("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(r, handle_tenant_delete)
         })
+        .put("/v1/tenant/config", |r| {
+            tenant_service_handler(r, handle_tenant_config_set)
+        })
+        .get("/v1/tenant/:tenant_id/config", |r| {
+            tenant_service_handler(r, handle_tenant_config_get)
+        })
         .put("/v1/tenant/:tenant_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
         })
         .put("/v1/tenant/:tenant_id/time_travel_remote_storage", |r| {
             tenant_service_handler(r, handle_tenant_time_travel_remote_storage)
+        })
+        .post("/v1/tenant/:tenant_id/secondary/download", |r| {
+            tenant_service_handler(r, handle_tenant_secondary_download)
         })
         // Timeline operations
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {

@@ -64,7 +64,7 @@ pub(super) fn init(engine_kind: IoEngineKind) {
     set(engine_kind);
 }
 
-/// Longer-term, this API should only be used by [`VirtualFile`].
+/// Longer-term, this API should only be used by [`super::VirtualFile`].
 pub(crate) fn get() -> IoEngine {
     let cur = IoEngine::try_from(IO_ENGINE.load(Ordering::Relaxed)).unwrap();
     if cfg!(test) {
@@ -206,7 +206,6 @@ impl IoEngine {
             }
         }
     }
-
     pub(super) async fn write_at<B: IoBuf + Send>(
         &self,
         file_guard: FileGuard,

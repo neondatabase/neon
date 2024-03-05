@@ -97,7 +97,7 @@ jobs:
           **Please merge this Pull Request using 'Create a merge commit' button**
         EOF
 
-        gh pr create --title "Proxy release ${RELEASE_DATE}}" \
+        gh pr create --title "Proxy release ${RELEASE_DATE}" \
                      --body-file "body.md" \
                      --head "${RELEASE_BRANCH}" \
                      --base "release-proxy"

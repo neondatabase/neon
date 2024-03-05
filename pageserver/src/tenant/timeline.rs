@@ -3449,6 +3449,7 @@ impl Timeline {
                 .context("spawn_blocking")
                 .and_then(|x| x)
             }
+            #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => work.await,
         }
     }
