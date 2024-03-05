@@ -398,7 +398,7 @@ walprop_pg_get_shmem_state(WalProposer *wp)
 	return walprop_shared;
 }
 
-void
+static void
 replication_feedback_set(PageserverFeedback *rf)
 {
 	SpinLockAcquire(&walprop_shared->mutex);
