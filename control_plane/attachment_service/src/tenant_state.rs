@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use crate::{metrics, persistence::TenantShardPersistence};
 use pageserver_api::{
@@ -563,7 +567,9 @@ impl TenantState {
         }
     }
 
-    fn dirty(&self) -> bool {
+    fn dirty(&self, nodes: &Arc<HashMap<NodeId, Node>>) -> bool {
+        let mut dirty_nodes = HashSet::new();
+
         if let Some(node_id) = self.intent.attached {
             // Maybe panic: it is a severe bug if we try to attach while generation is null.
             let generation = self
@@ -574,7 +580,7 @@ impl TenantState {
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
-                    return true;
+                    dirty_nodes.insert(node_id);
                 }
             }
         }
@@ -584,7 +590,7 @@ impl TenantState {
             match self.observed.locations.get(node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
-                    return true;
+                    dirty_nodes.insert(*node_id);
                 }
             }
         }
@@ -592,17 +598,18 @@ impl TenantState {
         for node_id in self.observed.locations.keys() {
             if self.intent.attached != Some(*node_id) && !self.intent.secondary.contains(node_id) {
                 // We have observed state that isn't part of our intent: need to clean it up.
-                return true;
+                dirty_nodes.insert(*node_id);
             }
         }
 
-        // Even if there is no pageserver work to be done, if we have a pending notification to computes,
-        // wake up a reconciler to send it.
-        if self.pending_compute_notification {
-            return true;
-        }
+        dirty_nodes.retain(|node_id| {
+            nodes
+                .get(node_id)
+                .map(|n| n.is_available())
+                .unwrap_or(false)
+        });
 
-        false
+        !dirty_nodes.is_empty()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -630,7 +637,14 @@ impl TenantState {
             }
         }
 
-        if !self.dirty() && !dirty_observed {
+        let active_nodes_dirty = self.dirty(pageservers);
+
+        // Even if there is no pageserver work to be done, if we have a pending notification to computes,
+        // wake up a reconciler to send it.
+        let do_reconcile =
+            active_nodes_dirty || dirty_observed || self.pending_compute_notification;
+
+        if !do_reconcile {
             tracing::info!("Not dirty, no reconciliation needed.");
             return None;
         }
