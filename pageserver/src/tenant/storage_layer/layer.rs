@@ -744,66 +744,66 @@ impl LayerInner {
             );
         }
 
+        let timeline = self
+            .timeline
+            .upgrade()
+            .ok_or_else(|| DownloadError::TimelineShutdown)?;
+
+        // count cancellations, which currently remain largely unexpected
+        let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
+
+        // check if we really need to be downloaded; could have been already downloaded by a
+        // cancelled previous attempt.
+        let needs_download = self
+            .needs_download()
+            .await
+            .map_err(DownloadError::PreStatFailed);
+
+        let needs_download = match needs_download {
+            Ok(reason) => reason,
+            Err(e) => {
+                scopeguard::ScopeGuard::into_inner(init_cancelled);
+                return Err(e);
+            }
+        };
+
+        let Some(reason) = needs_download else {
+            scopeguard::ScopeGuard::into_inner(init_cancelled);
+
+            // the file is present locally, probably by a previous but cancelled call to
+            // get_or_maybe_download. alternatively we might be running without remote storage.
+            LAYER_IMPL_METRICS.inc_init_needed_no_download();
+
+            let res = self.initialize_after_layer_is_on_disk(permit);
+            return Ok(res);
+        };
+
+        if let NeedsDownload::NotFile(ft) = reason {
+            scopeguard::ScopeGuard::into_inner(init_cancelled);
+            return Err(DownloadError::NotFile(ft));
+        }
+
+        if timeline.remote_client.as_ref().is_none() {
+            scopeguard::ScopeGuard::into_inner(init_cancelled);
+            return Err(DownloadError::NoRemoteStorage);
+        }
+
+        if let Some(ctx) = ctx {
+            let res = self.check_expected_download(ctx);
+            if let Err(e) = res {
+                scopeguard::ScopeGuard::into_inner(init_cancelled);
+                return Err(e);
+            }
+        }
+
+        if !allow_download {
+            // this does look weird, but for LayerInner the "downloading" means also changing
+            // internal once related state ...
+            scopeguard::ScopeGuard::into_inner(init_cancelled);
+            return Err(DownloadError::DownloadRequired);
+        }
+
         async move {
-            let timeline = self
-                .timeline
-                .upgrade()
-                .ok_or_else(|| DownloadError::TimelineShutdown)?;
-
-            // count cancellations, which currently remain largely unexpected
-            let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-
-            // check if we really need to be downloaded; could have been already downloaded by a
-            // cancelled previous attempt.
-            let needs_download = self
-                .needs_download()
-                .await
-                .map_err(DownloadError::PreStatFailed);
-
-            let needs_download = match needs_download {
-                Ok(reason) => reason,
-                Err(e) => {
-                    scopeguard::ScopeGuard::into_inner(init_cancelled);
-                    return Err(e);
-                }
-            };
-
-            let Some(reason) = needs_download else {
-                scopeguard::ScopeGuard::into_inner(init_cancelled);
-
-                // the file is present locally, probably by a previous but cancelled call to
-                // get_or_maybe_download. alternatively we might be running without remote storage.
-                LAYER_IMPL_METRICS.inc_init_needed_no_download();
-
-                let res = self.initialize_after_layer_is_on_disk(permit);
-                return Ok(res);
-            };
-
-            if let NeedsDownload::NotFile(ft) = reason {
-                scopeguard::ScopeGuard::into_inner(init_cancelled);
-                return Err(DownloadError::NotFile(ft));
-            }
-
-            if timeline.remote_client.as_ref().is_none() {
-                scopeguard::ScopeGuard::into_inner(init_cancelled);
-                return Err(DownloadError::NoRemoteStorage);
-            }
-
-            if let Some(ctx) = ctx {
-                let res = self.check_expected_download(ctx);
-                if let Err(e) = res {
-                    scopeguard::ScopeGuard::into_inner(init_cancelled);
-                    return Err(e);
-                }
-            }
-
-            if !allow_download {
-                // this does look weird, but for LayerInner the "downloading" means also changing
-                // internal once related state ...
-                scopeguard::ScopeGuard::into_inner(init_cancelled);
-                return Err(DownloadError::DownloadRequired);
-            }
-
             tracing::info!(%reason, "downloading on-demand");
 
             let res = self.download_init_and_wait(timeline, permit).await?;
