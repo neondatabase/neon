@@ -170,7 +170,7 @@ impl VectoredReadPlanner {
     /// incorrect data to the user.
     ///
     /// The `flag` argument has two interesting values:
-    /// * [`BlobFlag::Replaces`]: The blob for this key should replace all existing blobs.
+    /// * [`BlobFlag::ReplaceAll`]: The blob for this key should replace all existing blobs.
     /// This is used for WAL records that `will_init`.
     /// * [`BlobFlag::Ignore`]: This blob should not be included in the read. This happens
     /// if the blob is cached.
