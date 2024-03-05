@@ -782,26 +782,7 @@ impl LayerInner {
                 // get_or_maybe_download. alternatively we might be running without remote storage.
                 LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
-                let res = Arc::new(DownloadedLayer {
-                    owner: Arc::downgrade(self),
-                    kind: tokio::sync::OnceCell::default(),
-                    version: next_version,
-                });
-
-                self.access_stats.record_residence_event(
-                    LayerResidenceStatus::Resident,
-                    LayerResidenceEventReason::ResidenceChange,
-                );
-
-                let waiters = self.inner.initializer_count();
-                if waiters > 0 {
-                    tracing::info!(waiters, "completing the on-demand download for other tasks");
-                }
-
-                let value = ResidentOrWantedEvicted::Resident(res.clone());
-
-                self.inner.set(value, permit);
-
+                let res = self.initialize_after_layer_is_on_disk(next_version, permit, false);
                 return Ok(res);
             };
 
@@ -843,37 +824,7 @@ impl LayerInner {
 
             let permit = permit?;
 
-            let since_last_eviction = self
-                .last_evicted_at
-                .lock()
-                .unwrap()
-                .take()
-                .map(|ts| ts.elapsed());
-
-            if let Some(since_last_eviction) = since_last_eviction {
-                LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
-            }
-
-            let res = Arc::new(DownloadedLayer {
-                owner: Arc::downgrade(self),
-                kind: tokio::sync::OnceCell::default(),
-                version: next_version,
-            });
-
-            self.access_stats.record_residence_event(
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::ResidenceChange,
-            );
-
-            let waiters = self.inner.initializer_count();
-            if waiters > 0 {
-                tracing::info!(waiters, "completing the on-demand download for other tasks");
-            }
-
-            let value = ResidentOrWantedEvicted::Resident(res.clone());
-
-            self.inner.set(value, permit);
-
+            let res = self.initialize_after_layer_is_on_disk(next_version, permit, true);
             Ok(res)
         }
         .instrument(tracing::info_span!("get_or_maybe_download", layer=%self))
@@ -1025,6 +976,59 @@ impl LayerInner {
             }
             Err(_gone) => Err(DownloadError::DownloadCancelled),
         }
+    }
+
+    /// Initializes the `Self::inner` to a "resident" state.
+    ///
+    /// Callers are assumed to ensure that the file is actually on disk with `Self::needs_download`
+    /// before calling this method.
+    ///
+    /// If this method is ever made async, it needs to be cancellation safe so that no state
+    /// changes are made before we can write to the OnceCell in non-cancellable fashion.
+    fn initialize_after_layer_is_on_disk(
+        self: &Arc<LayerInner>,
+        next_version: usize,
+        permit: heavier_once_cell::InitPermit,
+        downloaded: bool,
+    ) -> Arc<DownloadedLayer> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
+        if downloaded {
+            let since_last_eviction = self
+                .last_evicted_at
+                .lock()
+                .unwrap()
+                .take()
+                .map(|ts| ts.elapsed());
+            if let Some(since_last_eviction) = since_last_eviction {
+                // FIXME: this will not always be recorded correctly until #6028 (the no
+                // download needed branch above)
+                LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+            }
+        }
+
+        let res = Arc::new(DownloadedLayer {
+            owner: Arc::downgrade(self),
+            kind: tokio::sync::OnceCell::default(),
+            version: next_version,
+        });
+
+        // FIXME: this might now be double-accounted for !downloaded
+        self.access_stats.record_residence_event(
+            LayerResidenceStatus::Resident,
+            LayerResidenceEventReason::ResidenceChange,
+        );
+
+        let waiters = self.inner.initializer_count();
+        if waiters > 0 {
+            tracing::info!(waiters, "completing the on-demand download for other tasks");
+        }
+
+        let value = ResidentOrWantedEvicted::Resident(res.clone());
+
+        self.inner.set(value, permit);
+
+        res
     }
 
     async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
