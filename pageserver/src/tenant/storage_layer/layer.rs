@@ -705,8 +705,10 @@ impl LayerInner {
         let mut init_permit = None;
 
         loop {
-            let download = move |permit| {
-                async move {
+            if let Some(permit) = init_permit.take() {
+                // use the already held initialization permit because it is impossible to hit the
+                // below paths anymore essentially limiting the max loop iterations to 2.
+                let (value, permit) = async move {
                     // disable any scheduled but not yet running eviction deletions for this
                     let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
@@ -828,13 +830,8 @@ impl LayerInner {
                     Ok((ResidentOrWantedEvicted::Resident(res), permit))
                 }
                 .instrument(tracing::info_span!("get_or_maybe_download", layer=%self))
-            };
-
-            if let Some(init_permit) = init_permit.take() {
-                // use the already held initialization permit because it is impossible to hit the
-                // below paths anymore essentially limiting the max loop iterations to 2.
-                let (value, init_permit) = download(init_permit).await?;
-                let mut guard = self.inner.set(value, init_permit);
+                .await?;
+                let mut guard = self.inner.set(value, permit);
                 let (strong, _upgraded) = guard
                     .get_and_upgrade()
                     .expect("init creates strong reference, we held the init permit");
