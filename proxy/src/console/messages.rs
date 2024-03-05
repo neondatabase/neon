@@ -101,9 +101,10 @@ pub struct MetricsAuxInfo {
     pub cold_start_info: Option<ColdStartInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ColdStartInfo {
+    #[default]
     Unknown = 0,
     Warm = 1,
     PoolHit = 2,
