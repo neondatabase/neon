@@ -472,6 +472,8 @@ impl SpawnBlockingPoolHelper {
             rx.recv().await.unwrap();
         }
 
+        tracing::trace!("consumed all threads");
+
         SpawnBlockingPoolHelper {
             awaited_by_spawn_blocking_tasks: completion,
             blocking_tasks,
@@ -490,6 +492,8 @@ impl SpawnBlockingPoolHelper {
         while let Some(res) = blocking_tasks.join_next().await {
             res.expect("none of the tasks should had panicked");
         }
+
+        tracing::trace!("released all threads");
     }
 
     /// In the tests it is used as an easy way of making sure something scheduled on the target

@@ -1098,6 +1098,8 @@ impl LayerInner {
         if can_evict && evict {
             let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, %version);
 
+            span.in_scope(|| tracing::debug!("eviction started"));
+
             // downgrade for queueing, in case there's a tear down already ongoing we should not
             // hold it alive.
             let this = Arc::downgrade(&self);
@@ -1111,11 +1113,12 @@ impl LayerInner {
 
                 // if LayerInner is already dropped here, do nothing because the delete on drop
                 // has already ran while we were in queue
-                let Some(this) = this.upgrade() else {
-                    LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
-                    return;
-                };
-                match this.evict_blocking(version) {
+                let res = this
+                    .upgrade()
+                    .ok_or(EvictionCancelled::LayerGone)
+                    .and_then(|this| this.evict_blocking(version));
+                tracing::debug!(?res, "eviction completed");
+                match res {
                     Ok(()) => LAYER_IMPL_METRICS.inc_completed_evictions(),
                     Err(reason) => LAYER_IMPL_METRICS.inc_eviction_cancelled(reason),
                 }
@@ -1736,7 +1739,7 @@ impl LayerImplMetrics {
     }
 }
 
-#[derive(enum_map::Enum)]
+#[derive(Debug, enum_map::Enum)]
 enum EvictionCancelled {
     LayerGone,
     TimelineGone,
