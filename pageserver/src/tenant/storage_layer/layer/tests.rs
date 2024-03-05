@@ -432,6 +432,13 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     assert!(matches!(e, DownloadError::DownloadRequired), "{e:?}");
 }
 
+#[test]
+fn layer_size() {
+    assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);
+    assert_eq!(std::mem::size_of::<PersistentLayerDesc>(), 104);
+    assert_eq!(std::mem::size_of::<LayerInner>(), 2348);
+}
+
 struct SpawnBlockingPoolHelper {
     awaited_by_spawn_blocking_tasks: Completion,
     blocking_tasks: JoinSet<()>,
