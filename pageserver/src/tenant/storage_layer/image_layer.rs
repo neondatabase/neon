@@ -490,8 +490,8 @@ impl ImageLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
 
-        let btree_request_context = RequestContextBuilder::extend(ctx)
-            .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::ImageLayerBtreeNode)
             .build();
 
         for range in keyspace.ranges.iter() {
@@ -500,7 +500,7 @@ impl ImageLayerInner {
             let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
             range.start.write_to_byte_slice(&mut search_key);
 
-            let index_stream = tree_reader.get_stream_from(&search_key, &btree_request_context);
+            let index_stream = tree_reader.get_stream_from(&search_key, &ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {

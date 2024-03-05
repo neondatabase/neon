@@ -894,7 +894,7 @@ impl DeltaLayerInner {
     where
         Reader: BlockReader,
     {
-        let btree_request_context = RequestContextBuilder::extend(ctx)
+        let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
             .build();
 
@@ -902,7 +902,7 @@ impl DeltaLayerInner {
             let mut range_end_handled = false;
 
             let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
-            let index_stream = index_reader.get_stream_from(&start_key.0, &btree_request_context);
+            let index_stream = index_reader.get_stream_from(&start_key.0, &ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
@@ -911,7 +911,7 @@ impl DeltaLayerInner {
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
 
-                // Lsns are not monotonically increasing, so we don't assert on them.
+                // Lsns are not monotonically increasing across keys, so we don't assert on them.
                 assert!(key >= range.start);
 
                 let outside_lsn_range = !lsn_range.contains(&lsn);
