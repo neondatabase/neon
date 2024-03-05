@@ -945,7 +945,6 @@ impl Service {
                 id: tenant_shard_id,
                 gen: new_gen.into().unwrap(),
             });
-
             // Apply the new generation number to our in-memory state
             let shard_state = locked.tenants.get_mut(&tenant_shard_id);
             let Some(shard_state) = shard_state else {
@@ -981,6 +980,14 @@ impl Service {
                 if let Some(conf) = observed.conf.as_mut() {
                     conf.generation = new_gen.into();
                 }
+            } else {
+                // This node has no observed state for the shard: perhaps it was offline
+                // when the pageserver restarted.  Insert a None, so that the Reconciler
+                // will be prompted to learn the location's state before it makes changes.
+                shard_state
+                    .observed
+                    .locations
+                    .insert(reattach_req.node_id, ObservedStateLocation { conf: None });
             }
 
             // TODO: cancel/restart any running reconciliation for this tenant, it might be trying
