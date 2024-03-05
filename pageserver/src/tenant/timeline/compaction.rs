@@ -134,7 +134,6 @@ struct ResidentDeltaLayer(ResidentLayer);
 #[derive(Clone)]
 struct ResidentImageLayer(ResidentLayer);
 
-#[async_trait]
 impl CompactionJobExecutor for TimelineAdaptor {
     type Key = crate::repository::Key;
 
