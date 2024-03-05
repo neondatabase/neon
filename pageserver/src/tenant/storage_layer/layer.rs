@@ -857,8 +857,8 @@ impl LayerInner {
             .enter()
             .map_err(|_| DownloadError::DownloadCancelled)?;
 
-        tokio::task::spawn(async move {
-
+        tokio::task::spawn(
+            async move {
                 let _guard = guard;
 
                 let res = this.download_and_init(timeline, permit).await;
@@ -866,11 +866,13 @@ impl LayerInner {
                 if let Err(res) = tx.send(res) {
                     match res {
                         Ok(_res) => {
-                            // our caller has been cancelled. regardless, the layer is now
-                            // initialized for any next read request.
-                        },
+                            tracing::debug!("layer initialized, but caller has been cancelled");
+                            LAYER_IMPL_METRICS.inc_init_completed_without_requester();
+                        }
                         Err(e) => {
-                            tracing::error!("layer file download failed, and additionally failed to communicate this to caller: {e:?}");
+                            tracing::info!(
+                                "layer file download failed, and caller has been cancelled: {e:?}"
+                            );
                             LAYER_IMPL_METRICS.inc_download_failed_without_requester();
                         }
                     }
@@ -1679,6 +1681,12 @@ impl LayerImplMetrics {
         self.rare_counters[RareEvent::RemoveOnDropFailed].inc();
     }
 
+    /// Expected rare just as cancellations are rare, but we could have cancellations separate from
+    /// the single caller which can start the download, so use this counter to separte them.
+    fn inc_init_completed_without_requester(&self) {
+        self.rare_counters[RareEvent::InitCompletedWithoutRequester].inc();
+    }
+
     /// Expected rare because cancellations are unexpected, and failures are unexpected
     fn inc_download_failed_without_requester(&self) {
         self.rare_counters[RareEvent::DownloadFailedWithoutRequester].inc();
@@ -1763,6 +1771,7 @@ impl DeleteFailed {
 #[derive(enum_map::Enum)]
 enum RareEvent {
     RemoveOnDropFailed,
+    InitCompletedWithoutRequester,
     DownloadFailedWithoutRequester,
     UpgradedWantedEvicted,
     InitWithoutDownload,
@@ -1776,6 +1785,7 @@ impl RareEvent {
 
         match self {
             RemoveOnDropFailed => "remove_on_drop_failed",
+            InitCompletedWithoutRequester => "init_completed_without",
             DownloadFailedWithoutRequester => "download_failed_without",
             UpgradedWantedEvicted => "raced_wanted_evicted",
             InitWithoutDownload => "init_needed_no_download",
