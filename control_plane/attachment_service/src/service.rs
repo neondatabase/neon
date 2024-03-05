@@ -661,16 +661,13 @@ impl Service {
             }
             for node_id in node_ids {
                 tracing::info!("Creating node {} in scheduler for tests", node_id);
-                let node = Node {
-                    id: NodeId(node_id as u64),
-                    availability: NodeAvailability::Active,
-                    scheduling: NodeSchedulingPolicy::Active,
-                    listen_http_addr: "".to_string(),
-                    listen_http_port: 123,
-                    listen_pg_addr: "".to_string(),
-                    listen_pg_port: 123,
-                    cancel: CancellationToken::new(),
-                };
+                let node = Node::new(
+                    NodeId(node_id as u64),
+                    "".to_string(),
+                    123,
+                    "".to_string(),
+                    123,
+                );
 
                 scheduler.node_upsert(&node);
             }

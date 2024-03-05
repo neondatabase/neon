@@ -239,3 +239,9 @@ impl std::fmt::Display for Node {
         write!(f, "{} ({})", self.id, self.listen_http_addr)
     }
 }
+
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.id, self.listen_http_addr)
+    }
+}

@@ -660,6 +660,21 @@ impl TenantState {
             }
         }
 
+        // Build list of nodes from which the reconciler should detach
+        let mut detach = Vec::new();
+        for node_id in self.observed.locations.keys() {
+            if self.intent.get_attached() != &Some(*node_id)
+                && !self.intent.secondary.contains(node_id)
+            {
+                detach.push(
+                    pageservers
+                        .get(node_id)
+                        .expect("Intent references non-existent pageserver")
+                        .clone(),
+                )
+            }
+        }
+
         // Reconcile in flight for a stale sequence?  Our sequence's task will wait for it before
         // doing our sequence's work.
         let old_handle = self.reconciler.take();
@@ -674,14 +689,15 @@ impl TenantState {
         self.sequence = self.sequence.next();
 
         let reconciler_cancel = cancel.child_token();
+        let reconciler_intent = TargetState::from_intent(pageservers, &self.intent);
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
             generation: self.generation,
-            intent: TargetState::from_intent(&self.intent),
+            intent: reconciler_intent,
+            detach,
             config: self.config.clone(),
             observed: self.observed.clone(),
-            pageservers: pageservers.clone(),
             compute_hook: compute_hook.clone(),
             service_config: service_config.clone(),
             _gate_guard: gate_guard,
