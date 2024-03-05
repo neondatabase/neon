@@ -128,7 +128,7 @@ impl VectoredReadBuilder {
 pub enum BlobFlag {
     None,
     Ignore,
-    Replaces,
+    ReplaceAll,
 }
 
 /// Planner for vectored blob reads.
@@ -204,7 +204,7 @@ impl VectoredReadPlanner {
                 let blobs_for_key = self.blobs.entry(key).or_default();
                 blobs_for_key.push((lsn, start_offset, end_offset));
             }
-            BlobFlag::Replaces => {
+            BlobFlag::ReplaceAll => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
                 blobs_for_key.clear();
                 blobs_for_key.push((lsn, start_offset, end_offset));
@@ -411,10 +411,10 @@ mod tests {
         let blob_descriptions = vec![
             (first_key, lsn, 0, BlobFlag::None),    // First in read 1
             (first_key, lsn, 1024, BlobFlag::None), // Last in read 1
-            (second_key, lsn, 2 * 1024, BlobFlag::Replaces),
+            (second_key, lsn, 2 * 1024, BlobFlag::ReplaceAll),
             (second_key, lsn, 3 * 1024, BlobFlag::None),
-            (second_key, lsn, 4 * 1024, BlobFlag::Replaces), // First in read 2
-            (second_key, lsn, 5 * 1024, BlobFlag::None),     // Last in read 2
+            (second_key, lsn, 4 * 1024, BlobFlag::ReplaceAll), // First in read 2
+            (second_key, lsn, 5 * 1024, BlobFlag::None),       // Last in read 2
         ];
 
         let ranges = [&blob_descriptions[0..2], &blob_descriptions[4..]];

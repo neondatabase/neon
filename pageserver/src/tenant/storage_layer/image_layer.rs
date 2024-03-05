@@ -43,7 +43,6 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
-use futures::pin_mut;
 use hex;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
@@ -502,10 +501,10 @@ impl ImageLayerInner {
             range.start.write_to_byte_slice(&mut search_key);
 
             let index_stream = tree_reader.get_stream_from(&search_key, &btree_request_context);
-            pin_mut!(index_stream);
+            let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
-                let (raw_key, offset) = index_entry.map_err(|err| anyhow!(err))?;
+                let (raw_key, offset) = index_entry?;
 
                 let key = Key::from_slice(&raw_key[..KEY_SIZE]);
                 assert!(key >= range.start);

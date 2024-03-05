@@ -46,7 +46,6 @@ use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
-use futures::pin_mut;
 use futures::StreamExt;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
@@ -883,8 +882,7 @@ impl DeltaLayerInner {
         Ok(())
     }
 
-    // This is public only for testing purposes.
-    pub(crate) async fn plan_reads<Reader>(
+    async fn plan_reads<Reader>(
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         data_end_offset: u64,
@@ -905,10 +903,10 @@ impl DeltaLayerInner {
 
             let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
             let index_stream = index_reader.get_stream_from(&start_key.0, &btree_request_context);
-            pin_mut!(index_stream);
+            let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
-                let (raw_key, value) = index_entry.map_err(|err| anyhow!(err))?;
+                let (raw_key, value) = index_entry?;
                 let key = Key::from_slice(&raw_key[..KEY_SIZE]);
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
@@ -916,17 +914,14 @@ impl DeltaLayerInner {
                 // Lsns are not monotonically increasing, so we don't assert on them.
                 assert!(key >= range.start);
 
+                let outside_lsn_range = !lsn_range.contains(&lsn);
+                let below_cached_lsn = reconstruct_state.get_cached_lsn(&key) >= Some(lsn);
+
                 let flag = {
-                    #[allow(clippy::if_same_then_else)]
-                    if lsn >= lsn_range.end || lsn < lsn_range.start {
-                        // If the Lsn is not in the queried range it must be ignored
-                        BlobFlag::Ignore
-                    } else if reconstruct_state.get_cached_lsn(&key) >= Some(lsn) {
-                        // If the Lsn is below the caching line it must be ignored
+                    if outside_lsn_range || below_cached_lsn {
                         BlobFlag::Ignore
                     } else if blob_ref.will_init() {
-                        // This blob will replace all previous blobs for this key
-                        BlobFlag::Replaces
+                        BlobFlag::ReplaceAll
                     } else {
                         // Usual path: add blob to the read
                         BlobFlag::None
@@ -1220,52 +1215,6 @@ mod test {
         context::DownloadBehavior, task_mgr::TaskKind, tenant::disk_btree::tests::TestDisk,
     };
 
-    #[derive(Debug, PartialEq, Eq)]
-    struct BlobSpec {
-        key: Key,
-        lsn: Lsn,
-        at: u64,
-    }
-
-    fn validate(
-        keyspace: KeySpace,
-        lsn_range: Range<Lsn>,
-        vectored_reads: Vec<VectoredRead>,
-        index_entries: BTreeMap<Key, Vec<Lsn>>,
-    ) {
-        let mut planned_blobs = Vec::new();
-        for read in vectored_reads {
-            for (at, meta) in read.blobs_at.as_slice() {
-                planned_blobs.push(BlobSpec {
-                    key: meta.key,
-                    lsn: meta.lsn,
-                    at: *at,
-                });
-            }
-        }
-
-        let mut expected_blobs = Vec::new();
-        let mut disk_offset = 0;
-        for (key, lsns) in index_entries {
-            for lsn in lsns {
-                let key_included = keyspace.ranges.iter().any(|range| range.contains(&key));
-                let lsn_included = lsn_range.contains(&lsn);
-
-                if key_included && lsn_included {
-                    expected_blobs.push(BlobSpec {
-                        key,
-                        lsn,
-                        at: disk_offset,
-                    });
-                }
-
-                disk_offset += 1;
-            }
-        }
-
-        assert_eq!(planned_blobs, expected_blobs);
-    }
-
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
     /// verify that the traversal fed the right index key and value
@@ -1336,5 +1285,51 @@ mod test {
         .expect("Read planning should not fail");
 
         validate(keyspace, lsn_range, vectored_reads, entries);
+    }
+
+    fn validate(
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+        vectored_reads: Vec<VectoredRead>,
+        index_entries: BTreeMap<Key, Vec<Lsn>>,
+    ) {
+        #[derive(Debug, PartialEq, Eq)]
+        struct BlobSpec {
+            key: Key,
+            lsn: Lsn,
+            at: u64,
+        }
+
+        let mut planned_blobs = Vec::new();
+        for read in vectored_reads {
+            for (at, meta) in read.blobs_at.as_slice() {
+                planned_blobs.push(BlobSpec {
+                    key: meta.key,
+                    lsn: meta.lsn,
+                    at: *at,
+                });
+            }
+        }
+
+        let mut expected_blobs = Vec::new();
+        let mut disk_offset = 0;
+        for (key, lsns) in index_entries {
+            for lsn in lsns {
+                let key_included = keyspace.ranges.iter().any(|range| range.contains(&key));
+                let lsn_included = lsn_range.contains(&lsn);
+
+                if key_included && lsn_included {
+                    expected_blobs.push(BlobSpec {
+                        key,
+                        lsn,
+                        at: disk_offset,
+                    });
+                }
+
+                disk_offset += 1;
+            }
+        }
+
+        assert_eq!(planned_blobs, expected_blobs);
     }
 }
