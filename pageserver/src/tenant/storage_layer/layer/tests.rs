@@ -360,6 +360,78 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     );
 }
 
+/// The test ensures with a failpoint that a pending eviction is not cancelled by what is currently
+/// a `Layer::keep_resident` call.
+///
+/// This matters because cancelling the eviction would leave us in a state where the file is on
+/// disk but the layer internal state says it has not been initialized.
+#[tokio::test(start_paused = true)]
+async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
+    use failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload;
+
+    let handle = BACKGROUND_RUNTIME.handle();
+    let h =
+        TenantHarness::create("cancelled_get_or_maybe_download_does_not_cancel_eviction").unwrap();
+    let (tenant, ctx) = h.load().await;
+
+    let timeline = tenant
+        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .await
+        .unwrap();
+
+    let layer = {
+        let mut layers = {
+            let layers = timeline.layers.read().await;
+            layers.resident_layers().collect::<Vec<_>>().await
+        };
+
+        assert_eq!(layers.len(), 1);
+
+        layers.swap_remove(0)
+    };
+
+    let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
+
+    layer
+        .0
+        .enable_failpoint(AfterDeterminingLayerNeedsNoDownload);
+
+    tokio::time::timeout(ADVANCE, layer.evict_and_wait(FOREVER))
+        .await
+        .expect_err("should had advanced to waiting on channel");
+
+    let e = layer
+        .0
+        .get_or_maybe_download(false, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            e,
+            DownloadError::Failpoint(AfterDeterminingLayerNeedsNoDownload)
+        ),
+        "{e:?}"
+    );
+
+    assert!(
+        // cannot use tokio::fs version while spawn_blocking is clogged
+        layer.0.needs_download_blocking().unwrap().is_none(),
+        "file is still on disk"
+    );
+
+    helper.release().await;
+
+    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle).await;
+
+    // failpoint is still enabled, but it is not hit
+    let e = layer
+        .0
+        .get_or_maybe_download(false, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, DownloadError::DownloadRequired), "{e:?}");
+}
+
 struct SpawnBlockingPoolHelper {
     awaited_by_spawn_blocking_tasks: Completion,
     blocking_tasks: JoinSet<()>,

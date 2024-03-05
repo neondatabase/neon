@@ -779,6 +779,9 @@ impl LayerInner {
         let needs_download = needs_download?;
 
         let Some(reason) = needs_download else {
+            #[cfg(test)]
+            self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload)?;
+
             // the file is present locally, probably by a previous but cancelled call to
             // get_or_maybe_download. alternatively we might be running without remote storage.
             LAYER_IMPL_METRICS.inc_init_needed_no_download();
