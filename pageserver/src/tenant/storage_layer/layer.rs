@@ -861,57 +861,9 @@ impl LayerInner {
 
                 let _guard = guard;
 
-                let client = timeline
-                    .remote_client
-                    .as_ref()
-                    .expect("checked above with have_remote_client");
+                let res = this.download_and_init(timeline, permit).await;
 
-                let result = client.download_layer_file(
-                    &this.desc.filename(),
-                    &this.metadata(),
-                    &timeline.cancel
-                )
-                .await;
-
-                let result = match result {
-                    Ok(size) => {
-                        match this.needs_download().await {
-                            Ok(Some(reason)) => panic!("post-condition failed: needs_download returned {reason:?}"),
-                            Ok(None) => { /* good */ },
-                            Err(e) => panic!("post-condition failed needs_download errored: {e:?}"),
-                        }
-
-                        tracing::info!(size=%this.desc.file_size, "on-demand download successful");
-                        timeline.metrics.resident_physical_size_add(size);
-                        this.consecutive_failures.store(0, Ordering::Relaxed);
-
-                        let res = this.initialize_after_layer_is_on_disk(permit, true);
-                        Ok(res)
-                    }
-                    Err(e) => {
-                        let consecutive_failures =
-                            this.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-
-                        tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
-
-                        let backoff = utils::backoff::exponential_backoff_duration_seconds(
-                            consecutive_failures.min(u32::MAX as usize) as u32,
-                            1.5,
-                            60.0,
-                        );
-
-                        let backoff = std::time::Duration::from_secs_f64(backoff);
-
-                        tokio::select! {
-                            _ = tokio::time::sleep(backoff) => {},
-                            _ = timeline.cancel.cancelled() => {},
-                        };
-
-                        Err(e)
-                    }
-                };
-
-                if let Err(res) = tx.send(result) {
+                if let Err(res) = tx.send(res) {
                     match res {
                         Ok(_res) => {
                             // our caller has been cancelled. regardless, the layer is now
@@ -941,6 +893,66 @@ impl LayerInner {
                 }
             }
             Err(_gone) => Err(DownloadError::DownloadCancelled),
+        }
+    }
+
+    async fn download_and_init(
+        self: &Arc<LayerInner>,
+        timeline: Arc<Timeline>,
+        permit: heavier_once_cell::InitPermit,
+    ) -> anyhow::Result<Arc<DownloadedLayer>> {
+        let client = timeline
+            .remote_client
+            .as_ref()
+            .expect("checked before download_init_and_wait");
+
+        let result = client
+            .download_layer_file(&self.desc.filename(), &self.metadata(), &timeline.cancel)
+            .await;
+
+        match result {
+            Ok(size) => {
+                match self.needs_download().await {
+                    Ok(Some(reason)) => {
+                        // this is really a bug in needs_download or remote timeline client
+                        panic!("post-condition failed: needs_download returned {reason:?}");
+                    }
+                    Ok(None) => {
+                        // as expected
+                    }
+                    Err(e) => {
+                        panic!("post-condition failed: needs_download errored: {e:?}");
+                    }
+                }
+
+                tracing::info!(size=%self.desc.file_size, "on-demand download successful");
+                timeline.metrics.resident_physical_size_add(size);
+                self.consecutive_failures.store(0, Ordering::Relaxed);
+
+                let res = self.initialize_after_layer_is_on_disk(permit, true);
+                Ok(res)
+            }
+            Err(e) => {
+                let consecutive_failures =
+                    self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+
+                tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
+
+                let backoff = utils::backoff::exponential_backoff_duration_seconds(
+                    consecutive_failures.min(u32::MAX as usize) as u32,
+                    1.5,
+                    60.0,
+                );
+
+                let backoff = std::time::Duration::from_secs_f64(backoff);
+
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {},
+                    _ = timeline.cancel.cancelled() => {},
+                };
+
+                Err(e)
+            }
         }
     }
 
