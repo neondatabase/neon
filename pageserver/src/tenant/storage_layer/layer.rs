@@ -759,8 +759,6 @@ impl LayerInner {
             // count cancellations, which currently remain largely unexpected
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
 
-            let can_ever_evict = timeline.remote_client.as_ref().is_some();
-
             // check if we really need to be downloaded; could have been already downloaded by a
             // cancelled previous attempt.
             let needs_download = self
@@ -797,7 +795,7 @@ impl LayerInner {
             // we would like to do for prefetching which was not needed.
             self.wanted_evicted.store(false, Ordering::Release);
 
-            if !can_ever_evict {
+            if timeline.remote_client.as_ref().is_none() {
                 scopeguard::ScopeGuard::into_inner(init_cancelled);
                 return Err(DownloadError::NoRemoteStorage);
             }
