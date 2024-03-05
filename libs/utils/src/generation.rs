@@ -45,7 +45,7 @@ impl Generation {
         Self::Broken
     }
 
-    pub fn new(v: u32) -> Self {
+    pub const fn new(v: u32) -> Self {
         Self::Valid(v)
     }
 

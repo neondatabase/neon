@@ -2,7 +2,7 @@
 
 Created on 19.01.22
 
-Initially created [here](https://github.com/zenithdb/rfcs/pull/16) by @kelvich.
+Initially created [here](https://github.com/neondatabase/rfcs/pull/16) by @kelvich.
 
 That it is an alternative to (014-safekeeper-gossip)[]
 
@@ -292,4 +292,4 @@ But with an etcd we are in a bit different situation:
 1. We don't need persistency and strong consistency guarantees for the data we store in the etcd
 2. etcd uses Grpc as a protocol, and messages are pretty simple
 
-So it looks like implementing in-mem store with etcd interface is straightforward thing _if we will want that in future_. At the same time, we can avoid implementing it right now, and we will be able to run local zenith installation with etcd running somewhere in the background (as opposed to building and running console, which in turn requires Postgres).
+So it looks like implementing in-mem store with etcd interface is straightforward thing _if we will want that in future_. At the same time, we can avoid implementing it right now, and we will be able to run local neon installation with etcd running somewhere in the background (as opposed to building and running console, which in turn requires Postgres).

@@ -6,7 +6,6 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::Context;
 use bytes::Bytes;
-use futures::pin_mut;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -378,8 +377,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let flush_fut = self.flush();
-        pin_mut!(flush_fut);
+        let flush_fut = std::pin::pin!(self.flush());
         flush_fut.poll(cx)
     }
 
