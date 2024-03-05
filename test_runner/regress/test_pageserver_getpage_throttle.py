@@ -1,7 +1,6 @@
 import json
 import uuid
 
-import pytest
 from anyio import Path
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
@@ -10,7 +9,6 @@ from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 
 
-@pytest.mark.repeat(100)
 def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
 
