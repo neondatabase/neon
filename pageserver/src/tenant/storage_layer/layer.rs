@@ -743,7 +743,7 @@ impl LayerInner {
             );
         }
 
-        let (value, permit) = async move {
+        async move {
             // disable any scheduled but not yet running eviction deletions for this
             let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
@@ -798,7 +798,11 @@ impl LayerInner {
                     tracing::info!(waiters, "completing the on-demand download for other tasks");
                 }
 
-                return Ok((ResidentOrWantedEvicted::Resident(res), permit));
+                let value = ResidentOrWantedEvicted::Resident(res.clone());
+
+                self.inner.set(value, permit);
+
+                return Ok(res);
             };
 
             if let NeedsDownload::NotFile(ft) = reason {
@@ -866,15 +870,14 @@ impl LayerInner {
                 tracing::info!(waiters, "completing the on-demand download for other tasks");
             }
 
-            Ok((ResidentOrWantedEvicted::Resident(res), permit))
+            let value = ResidentOrWantedEvicted::Resident(res.clone());
+
+            self.inner.set(value, permit);
+
+            Ok(res)
         }
         .instrument(tracing::info_span!("get_or_maybe_download", layer=%self))
-        .await?;
-        let mut guard = self.inner.set(value, permit);
-        let (strong, _upgraded) = guard
-            .get_and_upgrade()
-            .expect("init creates strong reference, we held the init permit");
-        Ok(strong)
+        .await
     }
 
     /// Nag or fail per RequestContext policy
