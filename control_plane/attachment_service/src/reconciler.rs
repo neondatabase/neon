@@ -104,6 +104,7 @@ impl Reconciler {
         node_id: NodeId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
+        lazy: bool,
     ) -> anyhow::Result<()> {
         let node = self
             .pageservers
@@ -118,7 +119,7 @@ impl Reconciler {
         let client =
             mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
         client
-            .location_config(self.tenant_shard_id, config.clone(), flush_ms)
+            .location_config(self.tenant_shard_id, config.clone(), flush_ms, lazy)
             .await?;
         tracing::info!("location_config({}) complete: {:?}", node_id, config);
 
@@ -315,8 +316,13 @@ impl Reconciler {
             self.generation,
             None,
         );
-        self.location_config(origin_ps_id, stale_conf, Some(Duration::from_secs(10)))
-            .await?;
+        self.location_config(
+            origin_ps_id,
+            stale_conf,
+            Some(Duration::from_secs(10)),
+            false,
+        )
+        .await?;
 
         let baseline_lsns = Some(self.get_lsns(self.tenant_shard_id, &origin_ps_id).await?);
 
@@ -350,7 +356,8 @@ impl Reconciler {
         );
 
         tracing::info!("🔁 Attaching to pageserver {}", dest_ps_id);
-        self.location_config(dest_ps_id, dest_conf, None).await?;
+        self.location_config(dest_ps_id, dest_conf, None, false)
+            .await?;
 
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
@@ -382,7 +389,7 @@ impl Reconciler {
             None,
             Some(LocationConfigSecondary { warm: true }),
         );
-        self.location_config(origin_ps_id, origin_secondary_conf.clone(), None)
+        self.location_config(origin_ps_id, origin_secondary_conf.clone(), None, false)
             .await?;
         // TODO: we should also be setting the ObservedState on earlier API calls, in case we fail
         // partway through.  In fact, all location conf API calls should be in a wrapper that sets
@@ -405,7 +412,7 @@ impl Reconciler {
             self.generation,
             None,
         );
-        self.location_config(dest_ps_id, dest_final_conf.clone(), None)
+        self.location_config(dest_ps_id, dest_final_conf.clone(), None, false)
             .await?;
         self.observed.locations.insert(
             dest_ps_id,
@@ -491,7 +498,10 @@ impl Reconciler {
                         wanted_conf.generation = generation.into();
                     }
                     tracing::info!(%node_id, "Observed configuration requires update.");
-                    self.location_config(node_id, wanted_conf, None).await?;
+                    // Use lazy=true, because we may run many of Self concurrently, and do not want to
+                    // overload the pageserver with logical size calculations.
+                    self.location_config(node_id, wanted_conf, None, true)
+                        .await?;
                     self.compute_notify().await?;
                 }
             }
@@ -543,7 +553,7 @@ impl Reconciler {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
             }
-            self.location_config(node_id, conf, None).await?;
+            self.location_config(node_id, conf, None, false).await?;
         }
 
         Ok(())
