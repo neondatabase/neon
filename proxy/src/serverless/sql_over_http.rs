@@ -15,8 +15,10 @@ use hyper::StatusCode;
 use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Value;
+use tokio::time;
 use tokio_postgres::error::DbError;
 use tokio_postgres::error::ErrorPosition;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::GenericClient;
 use tokio_postgres::IsolationLevel;
 use tokio_postgres::NoTls;
@@ -202,7 +204,7 @@ pub async fn handle(
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     let handle = tokio::spawn(async move {
-        tokio::time::sleep(config.http_config.request_timeout).await;
+        time::sleep(config.http_config.request_timeout).await;
         cancel2.cancel();
     });
 
@@ -444,14 +446,32 @@ async fn handle_inner(
                     discard.discard();
                     return Err(e);
                 }
-                Either::Right((_cancelled, _)) => {
+                Either::Right((_cancelled, query)) => {
                     if let Err(err) = cancel_token.cancel_query(NoTls).await {
                         tracing::error!(?err, "could not cancel query");
                     }
-                    // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
-                    discard.discard();
+                    match time::timeout(time::Duration::from_millis(100), query).await {
+                        Ok(Ok((status, results))) => {
+                            discard.check_idle(status);
+                            results
+                        }
+                        Ok(Err(error)) => {
+                            let db_error = error
+                                .downcast_ref::<tokio_postgres::Error>()
+                                .and_then(|e| e.as_db_error());
 
-                    return Ok(Err(Cancelled()));
+                            // if errored for some other reason, it might not be safe to return
+                            if !db_error.is_some_and(|e| *e.code() == SqlState::QUERY_CANCELED) {
+                                discard.discard();
+                            }
+
+                            return Ok(Err(Cancelled()));
+                        }
+                        Err(_timeout) => {
+                            discard.discard();
+                            return Ok(Err(Cancelled()));
+                        }
+                    }
                 }
             }
         }

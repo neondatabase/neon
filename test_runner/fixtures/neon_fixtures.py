@@ -2923,6 +2923,8 @@ class NeonProxy(PgProtocol):
         password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
 
+        log.info(f"Executing http query: {query}")
+
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
         response = requests.post(
             f"https://{self.domain}:{self.external_http_port}/sql",
@@ -2944,6 +2946,8 @@ class NeonProxy(PgProtocol):
         user = kwargs["user"]
         password = kwargs["password"]
         expected_code = kwargs.get("expected_code")
+
+        log.info(f"Executing http2 query: {query}")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
         async with httpx.AsyncClient(
