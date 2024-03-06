@@ -1,8 +1,10 @@
 import random
+import re
 import statistics
 import threading
 import time
 import timeit
+import uuid
 from contextlib import closing
 from typing import List
 
@@ -132,10 +134,48 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
         # this sleeps 100ms between polls
         env.pageserver.stop()
 
-    env.pageserver.start()
+    _, first_start = wait_until(
+        5, 1, lambda: env.pageserver.assert_log_contains("INFO version: git:")
+    )
+
+    # start without gc so we can time compaction with less noise; use shorter
+    # period for compaction so it starts earlier
+    env.pageserver.start(
+        overrides=(
+            "--pageserver-config-override=tenant_config={ compaction_period = '1s', gc_period = '0s' }",
+        ),
+        # this does print more than we want, but the number should be comparable between runs
+        extra_env_vars={
+            "RUST_LOG": f"[compaction_loop{{tenant_id={env.initial_tenant}}}]=debug,info"
+        },
+    )
+
+    _, second_start = wait_until(
+        5, 1, lambda: env.pageserver.assert_log_contains("INFO version: git:", first_start)
+    )
     env.pageserver.quiesce_tenants()
 
+    http_client = env.pageserver.http_client()
+    marker = uuid.uuid4().hex
+    http_client.post_tracing_event("info", marker)
+
+    _, position = wait_until(
+        10, 1, lambda: env.pageserver.assert_log_contains(marker, second_start)
+    )
+
     wait_and_record_startup_metrics(env.pageserver, neon_compare.zenbenchmark, "restart_after")
+
+    msg, _ = wait_until(
+        30,
+        1,
+        lambda: env.pageserver.assert_log_contains(
+            f".*tenant_id={env.initial_tenant}.*: compaction iteration complete.*", position
+        ),
+    )
+    needle = re.search(" elapsed_ms=([0-9]+)", msg)
+    assert needle is not None, "failed to find the elapsed time"
+    duration = int(needle.group(1)) / 1000.0
+    neon_compare.zenbenchmark.record("compaction", duration, "s", MetricReport.LOWER_IS_BETTER)
 
 
 def wait_and_record_startup_metrics(
