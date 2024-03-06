@@ -374,11 +374,6 @@ impl TenantState {
     /// to get an intent state that complies with placement policy.  The overall goal is to do scheduling
     /// in a way that makes use of any configured locations that already exist in the outside world.
     pub(crate) fn intent_from_observed(&mut self, scheduler: &mut Scheduler) {
-        tracing::info!("Observed:");
-        for (node_id, loc) in &self.observed.locations {
-            tracing::info!("{node_id}: {:?}", loc.conf);
-        }
-
         // Choose an attached location by filtering observed locations, and then sorting to get the highest
         // generation
         let mut attached_locs = self
