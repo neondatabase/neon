@@ -2843,6 +2843,7 @@ class NeonProxy(PgProtocol):
         self.auth_backend = auth_backend
         self.metric_collection_endpoint = metric_collection_endpoint
         self.metric_collection_interval = metric_collection_interval
+        self.http_timeout_seconds = 15
         self._popen: Optional[subprocess.Popen[bytes]] = None
 
     def start(self) -> NeonProxy:
@@ -2881,6 +2882,7 @@ class NeonProxy(PgProtocol):
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--mgmt", f"{self.host}:{self.mgmt_port}"],
             *["--wss", f"{self.host}:{self.external_http_port}"],
+            *["--sql-over-http-timeout", f"{self.http_timeout_seconds}s"],
             *["-c", str(crt_path)],
             *["-k", str(key_path)],
             *self.auth_backend.extra_args(),

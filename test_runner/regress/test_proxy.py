@@ -564,3 +564,44 @@ async def test_sql_over_http2(static_proxy: NeonProxy):
         "select 42 as answer", [], user="http", password="http", expected_code=200
     )
     assert resp["rows"] == [{"answer": 42}]
+
+
+@pytest.mark.asyncio
+async def test_sql_over_http_timeout_cancel(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    static_proxy.safe_psql("create table temp ( id int primary key )")
+
+    await static_proxy.http2_query(
+        "WITH temp AS ( \
+            SELECT pg_sleep($1) as sleep, $2 as id \
+        ) INSERT INTO test_table (id) SELECT id FROM temp",
+        [static_proxy.http_timeout_seconds + 2, 1],
+        user="http",
+        password="http",
+        expected_code=400,
+    )
+
+    await asyncio.sleep(2)
+
+    # this should succeed because the write was not completed
+    await static_proxy.http2_query(
+        "WITH temp AS ( \
+            SELECT pg_sleep($1) as sleep, $2 as id \
+        ) INSERT INTO test_table (id) SELECT id FROM temp",
+        [1, 1],
+        user="http",
+        password="http",
+        expected_code=200,
+    )
+
+    # this should fail because the id already exists in the table
+    await static_proxy.http2_query(
+        "WITH temp AS ( \
+            SELECT pg_sleep($1) as sleep, $2 as id \
+        ) INSERT INTO test_table (id) SELECT id FROM temp",
+        [0, 1],
+        user="http",
+        password="http",
+        expected_code=400,
+    )
