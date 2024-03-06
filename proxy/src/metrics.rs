@@ -167,14 +167,13 @@ pub enum Waiting {
     Compute,
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Accumulated {
     cplane: time::Duration,
     client: time::Duration,
     compute: time::Duration,
 }
 
-#[derive(Clone)]
 pub struct LatencyTimer {
     // time since the stopwatch was started
     start: time::Instant,
