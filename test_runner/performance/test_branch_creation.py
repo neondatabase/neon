@@ -128,7 +128,11 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
 
     endpoint.stop_and_destroy()
 
-    env.pageserver.restart()
+    with neon_compare.record_duration("pageserver_shutdown"):
+        # this sleeps 100ms between polls
+        env.pageserver.stop()
+
+    env.pageserver.start()
     env.pageserver.quiesce_tenants()
 
     wait_and_record_startup_metrics(env.pageserver, neon_compare.zenbenchmark, "restart_after")
