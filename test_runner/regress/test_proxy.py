@@ -566,42 +566,25 @@ async def test_sql_over_http2(static_proxy: NeonProxy):
     assert resp["rows"] == [{"answer": 42}]
 
 
-@pytest.mark.asyncio
-async def test_sql_over_http_timeout_cancel(static_proxy: NeonProxy):
+def test_sql_over_http_timeout_cancel(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
-    static_proxy.safe_psql("create table temp ( id int primary key )")
+    static_proxy.safe_psql("create table test_table ( id int primary key )")
 
-    await static_proxy.http2_query(
-        "WITH temp AS ( \
-            SELECT pg_sleep($1) as sleep, $2 as id \
-        ) INSERT INTO test_table (id) SELECT id FROM temp",
-        [static_proxy.http_timeout_seconds + 2, 1],
-        user="http",
-        password="http",
-        expected_code=400,
-    )
+    # insert into a table, with a unique constraint, after sleeping for n seconds
+    query = "WITH temp AS ( \
+        SELECT pg_sleep($1) as sleep, $2::int as id \
+    ) INSERT INTO test_table (id) SELECT id FROM temp"
 
-    await asyncio.sleep(2)
+    # expect to fail with timeout
+    res = static_proxy.http_query(query, [static_proxy.http_timeout_seconds + 2, 1], user="http", password="http", expected_code=504)
+    assert "HTTP-Connection timed out, execution time exceeded" in res["message"], "HTTP query should time out"
 
-    # this should succeed because the write was not completed
-    await static_proxy.http2_query(
-        "WITH temp AS ( \
-            SELECT pg_sleep($1) as sleep, $2 as id \
-        ) INSERT INTO test_table (id) SELECT id FROM temp",
-        [1, 1],
-        user="http",
-        password="http",
-        expected_code=200,
-    )
+    time.sleep(2)
 
-    # this should fail because the id already exists in the table
-    await static_proxy.http2_query(
-        "WITH temp AS ( \
-            SELECT pg_sleep($1) as sleep, $2 as id \
-        ) INSERT INTO test_table (id) SELECT id FROM temp",
-        [0, 1],
-        user="http",
-        password="http",
-        expected_code=400,
-    )
+    res = static_proxy.http_query(query, [1, 1], user="http", password="http", expected_code=200)
+    assert res["command"] == "INSERT", "HTTP query should insert"
+    assert res["rowCount"] == 1, "HTTP query should insert"
+
+    res = static_proxy.http_query(query, [0, 1], user="http", password="http", expected_code=400)
+    assert "duplicate key value violates unique constraint" in res["message"], "HTTP query should conflict"
