@@ -501,7 +501,7 @@ struct LayerInner {
 
     /// Version is to make sure we will only evict a specific download of a file.
     ///
-    /// Incremented for each download, stored in `DownloadedLayer::version` or
+    /// Incremented for each initialization, stored in `DownloadedLayer::version` or
     /// `ResidentOrWantedEvicted::WantedEvicted`.
     version: AtomicUsize,
 
