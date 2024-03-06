@@ -396,9 +396,9 @@ impl ComputeNode {
     // Gets the basebackup in a retry loop
     #[instrument(skip_all, fields(%lsn))]
     pub fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
-        let mut retry_period_ms = 500;
+        let mut retry_period_ms = 500.0;
         let mut attempts = 0;
-        let max_attempts = 5;
+        let max_attempts = 10;
         loop {
             let result = self.try_get_basebackup(compute_state, lsn);
             match result {
@@ -410,8 +410,8 @@ impl ComputeNode {
                         "Failed to get basebackup: {} (attempt {}/{})",
                         e, attempts, max_attempts
                     );
-                    std::thread::sleep(std::time::Duration::from_millis(retry_period_ms));
-                    retry_period_ms *= 2;
+                    std::thread::sleep(std::time::Duration::from_millis(retry_period_ms as u64));
+                    retry_period_ms *= 1.5;
                 }
                 Err(_) => {
                     return result;
