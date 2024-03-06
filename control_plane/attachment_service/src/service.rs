@@ -2497,6 +2497,19 @@ impl Service {
             let compute_hook = locked.compute_hook.clone();
             let (nodes, tenants, scheduler) = locked.parts_mut();
 
+            let Some(node) = nodes.get(&migrate_req.node_id) else {
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "Node {} not found",
+                    migrate_req.node_id
+                )));
+            };
+
+            if node.availability != NodeAvailability::Active {
+                // Warn but proceed: the caller may intend to manually adjust the placement of
+                // a shard even if the node is down, e.g. if intervening during an incident.
+                tracing::warn!("Migrating to an unavailable node ({})", node.id);
+            }
+
             let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant shard not found").into(),
