@@ -299,13 +299,13 @@ pub async fn handle(
             // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
 
             let message = format!(
-                "HTTP-Connection timed out, execution time exceeded {} seconds",
-                config.http_config.request_timeout.as_secs()
+                "Query cancelled, runtime exceeded. SQL queries over HTTP must not exceed {} seconds of runtime. Please consider using our websocket based connections",
+                config.http_config.request_timeout.as_secs_f64()
             );
             error!(message);
             json_response(
-                StatusCode::GATEWAY_TIMEOUT,
-                json!({ "message": message, "code": StatusCode::GATEWAY_TIMEOUT.as_u16() }),
+                StatusCode::BAD_REQUEST,
+                json!({ "message": message, "code": SqlState::PROTOCOL_VIOLATION.code() }),
             )?
         }
     };

@@ -582,10 +582,10 @@ def test_sql_over_http_timeout_cancel(static_proxy: NeonProxy):
         [static_proxy.http_timeout_seconds + 1, 1],
         user="http",
         password="http",
-        expected_code=504,
+        expected_code=400,
     )
     assert (
-        "HTTP-Connection timed out, execution time exceeded" in res["message"]
+        "Query cancelled, runtime exceeded" in res["message"]
     ), "HTTP query should time out"
 
     time.sleep(2)
