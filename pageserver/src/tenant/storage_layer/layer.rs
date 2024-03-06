@@ -956,6 +956,8 @@ impl LayerInner {
                     Some(remote_storage::DownloadError::Cancelled) => {
                         Err(DownloadError::DownloadCancelled)
                     }
+                    // FIXME: this is not embedding the error because historically it would had
+                    // been output to compute, however that is no longer the case.
                     _ => Err(DownloadError::DownloadFailed),
                 }
             }
