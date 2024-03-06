@@ -165,8 +165,8 @@ fn main() -> anyhow::Result<()> {
                 analyze_trace(reader);
             }
         }
-        Command::Draw => todo!(),
-        Command::Replay => todo!(),
+        Command::Draw => unimplemented!(),
+        Command::Replay => unimplemented!(),
     }
 
     Ok(())
