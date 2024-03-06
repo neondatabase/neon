@@ -285,6 +285,11 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
         .expect_err("should had been a timeout since we are holding the layer resident");
     assert_eq!(1, LAYER_IMPL_METRICS.started_evictions.get());
 
+    let (completion, barrier) = utils::completion::channel();
+    layer
+        .0
+        .enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(barrier));
+
     // clog up BACKGROUND_RUNTIME spawn_blocking
     let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
 
@@ -333,6 +338,11 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     // happens?
     assert_eq!(2, LAYER_IMPL_METRICS.started_evictions.get());
 
+    drop(completion);
+
+    // run pending tasks to completion, namely, to spawn blocking the evictions
+    tokio::time::sleep(ADVANCE).await;
+
     helper.release().await;
 
     // the second_eviction gets to run here
@@ -367,8 +377,6 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 /// disk but the layer internal state says it has not been initialized.
 #[tokio::test(start_paused = true)]
 async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
-    use failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload;
-
     let handle = BACKGROUND_RUNTIME.handle();
     let h =
         TenantHarness::create("cancelled_get_or_maybe_download_does_not_cancel_eviction").unwrap();
@@ -394,7 +402,13 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
 
     layer
         .0
-        .enable_failpoint(AfterDeterminingLayerNeedsNoDownload);
+        .enable_failpoint(failpoints::Failpoint::AfterDeterminingLayerNeedsNoDownload);
+
+    let (completion, barrier) = utils::completion::channel();
+
+    layer
+        .0
+        .enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(barrier));
 
     tokio::time::timeout(ADVANCE, layer.evict_and_wait(FOREVER))
         .await
@@ -408,7 +422,9 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     assert!(
         matches!(
             e,
-            DownloadError::Failpoint(AfterDeterminingLayerNeedsNoDownload)
+            DownloadError::Failpoint(
+                failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload
+            )
         ),
         "{e:?}"
     );
@@ -418,6 +434,8 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         layer.0.needs_download_blocking().unwrap().is_none(),
         "file is still on disk"
     );
+
+    drop(completion);
 
     helper.release().await;
 

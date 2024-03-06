@@ -497,7 +497,7 @@ struct LayerInner {
     last_evicted_at: std::sync::Mutex<Option<std::time::Instant>>,
 
     #[cfg(test)]
-    failpoints: std::sync::Mutex<enumset::EnumSet<failpoints::FailpointKind>>,
+    failpoints: std::sync::Mutex<Vec<failpoints::Failpoint>>,
 }
 
 impl std::fmt::Display for LayerInner {
@@ -780,7 +780,8 @@ impl LayerInner {
 
         let Some(reason) = needs_download else {
             #[cfg(test)]
-            self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload)?;
+            self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload)
+                .await?;
 
             // the file is present locally, probably by a previous but cancelled call to
             // get_or_maybe_download. alternatively we might be running without remote storage.
