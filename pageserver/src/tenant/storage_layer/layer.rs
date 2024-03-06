@@ -976,7 +976,7 @@ impl LayerInner {
                 }
 
                 self.consecutive_failures.store(0, Ordering::Relaxed);
-                tracing::info!("on-demand download successful");
+                tracing::info!(size=%self.desc.file_size, "on-demand download successful");
 
                 Ok(permit)
             }
