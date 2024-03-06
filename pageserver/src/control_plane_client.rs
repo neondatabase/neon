@@ -2,11 +2,13 @@ use std::collections::HashMap;
 
 use futures::Future;
 use pageserver_api::{
+    controller_api::NodeRegisterRequest,
     shard::TenantShardId,
     upcall_api::{
         ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
     },
 };
+use postgres_connection::parse_host_port;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -32,6 +34,7 @@ pub enum RetryForeverError {
 pub trait ControlPlaneGenerationsApi {
     fn re_attach(
         &self,
+        conf: &PageServerConf,
     ) -> impl Future<Output = Result<HashMap<TenantShardId, Generation>, RetryForeverError>> + Send;
     fn validate(
         &self,
@@ -110,13 +113,31 @@ impl ControlPlaneClient {
 
 impl ControlPlaneGenerationsApi for ControlPlaneClient {
     /// Block until we get a successful response, or error out if we are shut down
-    async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
+    async fn re_attach(
+        &self,
+        conf: &PageServerConf,
+    ) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("re-attach")
             .expect("Failed to build re-attach path");
+
+        let (listen_pg_addr, listen_pg_port) =
+            parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
+        let (listen_http_addr, listen_http_port) =
+            parse_host_port(&conf.listen_http_addr).expect("Unable to parse listen_http_addr");
+
+        let register = NodeRegisterRequest {
+            node_id: conf.id,
+            listen_pg_addr: listen_pg_addr.to_string(),
+            listen_pg_port: listen_pg_port.unwrap_or(5432),
+            listen_http_addr: listen_http_addr.to_string(),
+            listen_http_port: listen_http_port.unwrap_or(80),
+        };
+
         let request = ReAttachRequest {
             node_id: self.node_id,
+            register: Some(register),
         };
 
         fail::fail_point!("control-plane-client-re-attach");
