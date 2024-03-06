@@ -864,8 +864,6 @@ impl Timeline {
         fn errors_match(lhs: &GetVectoredError, rhs: &GetVectoredError) -> bool {
             use GetVectoredError::*;
             match (lhs, rhs) {
-                (Cancelled, Cancelled) => true,
-                (_, Cancelled) => true,
                 (Oversized(l), Oversized(r)) => l == r,
                 (InvalidLsn(l), InvalidLsn(r)) => l == r,
                 (MissingKey(l), MissingKey(r)) => l == r,
@@ -876,6 +874,8 @@ impl Timeline {
         }
 
         match (&sequential_res, vectored_res) {
+            (Err(GetVectoredError::Cancelled), _) => {},
+            (_, Err(GetVectoredError::Cancelled)) => {},
             (Err(seq_err), Ok(_)) => {
                 panic!(concat!("Sequential get failed with {}, but vectored get did not",
                                " - keyspace={:?} lsn={}"),
