@@ -357,7 +357,7 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 
     assert_eq!(1, LAYER_IMPL_METRICS.completed_evictions.get());
 
-    // now we finally can observe the original spawn_blocking failing
+    // now we finally can observe the original eviction failing
     // it would had been possible to observe it earlier, but here it is guaranteed to have
     // happened.
     assert_eq!(
@@ -454,7 +454,8 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
 fn layer_size() {
     assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);
     assert_eq!(std::mem::size_of::<PersistentLayerDesc>(), 104);
-    assert_eq!(std::mem::size_of::<LayerInner>(), 2348);
+    assert_eq!(std::mem::size_of::<LayerInner>(), 2328);
+    // it also has the utf8 path
 }
 
 struct SpawnBlockingPoolHelper {
