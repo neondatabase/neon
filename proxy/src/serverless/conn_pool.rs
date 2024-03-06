@@ -602,13 +602,6 @@ impl<C: ClientInnerExt> Client<C> {
         let inner = inner.as_mut().expect("client inner should not be removed");
         (&mut inner.inner, Discard { pool, conn_info })
     }
-
-    pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        self.inner().1.check_idle(status)
-    }
-    pub fn discard(&mut self) {
-        self.inner().1.discard()
-    }
 }
 
 impl<C: ClientInnerExt> Discard<'_, C> {
@@ -728,7 +721,7 @@ mod tests {
         {
             let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
             assert_eq!(0, pool.get_global_connections_count());
-            client.discard();
+            client.inner().1.discard();
             // Discard should not add the connection from the pool.
             assert_eq!(0, pool.get_global_connections_count());
         }
