@@ -577,8 +577,16 @@ def test_sql_over_http_timeout_cancel(static_proxy: NeonProxy):
     ) INSERT INTO test_table (id) SELECT id FROM temp"
 
     # expect to fail with timeout
-    res = static_proxy.http_query(query, [static_proxy.http_timeout_seconds + 2, 1], user="http", password="http", expected_code=504)
-    assert "HTTP-Connection timed out, execution time exceeded" in res["message"], "HTTP query should time out"
+    res = static_proxy.http_query(
+        query,
+        [static_proxy.http_timeout_seconds + 1, 1],
+        user="http",
+        password="http",
+        expected_code=504,
+    )
+    assert (
+        "HTTP-Connection timed out, execution time exceeded" in res["message"]
+    ), "HTTP query should time out"
 
     time.sleep(2)
 
@@ -587,4 +595,6 @@ def test_sql_over_http_timeout_cancel(static_proxy: NeonProxy):
     assert res["rowCount"] == 1, "HTTP query should insert"
 
     res = static_proxy.http_query(query, [0, 1], user="http", password="http", expected_code=400)
-    assert "duplicate key value violates unique constraint" in res["message"], "HTTP query should conflict"
+    assert (
+        "duplicate key value violates unique constraint" in res["message"]
+    ), "HTTP query should conflict"
