@@ -2897,7 +2897,7 @@ impl Timeline {
         let guard = timeline.layers.read().await;
         let layers = guard.layer_map();
 
-        'outer: loop {
+        loop {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
             }
@@ -2923,12 +2923,7 @@ impl Timeline {
                 }
                 None => {
                     for range in unmapped_keyspace.ranges.iter() {
-                        let results = match layers.range_search(range.clone(), cont_lsn) {
-                            Some(res) => res,
-                            None => {
-                                break 'outer;
-                            }
-                        };
+                        let results = layers.range_search(range.clone(), cont_lsn);
 
                         results
                             .found
