@@ -1710,10 +1710,8 @@ class NeonCli(AbstractNeonCli):
         id: int,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
-        register: bool = True,
     ) -> "subprocess.CompletedProcess[str]":
-        register_str = "true" if register else "false"
-        start_args = ["pageserver", "start", f"--id={id}", *overrides, f"--register={register_str}"]
+        start_args = ["pageserver", "start", f"--id={id}", *overrides]
         storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -2231,7 +2229,6 @@ class NeonPageserver(PgProtocol):
         self,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
-        register: bool = True,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -2241,7 +2238,7 @@ class NeonPageserver(PgProtocol):
         assert self.running is False
 
         self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars, register=register
+            self.id, overrides=overrides, extra_env_vars=extra_env_vars
         )
         self.running = True
         return self
