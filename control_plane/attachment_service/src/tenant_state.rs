@@ -373,7 +373,12 @@ impl TenantState {
     /// [`ObservedState`], even if it violates my [`PlacementPolicy`].  Call [`Self::schedule`] next,
     /// to get an intent state that complies with placement policy.  The overall goal is to do scheduling
     /// in a way that makes use of any configured locations that already exist in the outside world.
-    pub(crate) fn intent_from_observed(&mut self) {
+    pub(crate) fn intent_from_observed(&mut self, scheduler: &mut Scheduler) {
+        tracing::info!("Observed:");
+        for (node_id, loc) in &self.observed.locations {
+            tracing::info!("{node_id}: {:?}", loc.conf);
+        }
+
         // Choose an attached location by filtering observed locations, and then sorting to get the highest
         // generation
         let mut attached_locs = self
@@ -398,7 +403,7 @@ impl TenantState {
 
         attached_locs.sort_by_key(|i| i.1);
         if let Some((node_id, _gen)) = attached_locs.into_iter().last() {
-            self.intent.attached = Some(*node_id);
+            self.intent.set_attached(scheduler, Some(*node_id));
         }
 
         // All remaining observed locations generate secondary intents.  This includes None
@@ -409,7 +414,7 @@ impl TenantState {
         // will take care of promoting one of these secondaries to be attached.
         self.observed.locations.keys().for_each(|node_id| {
             if Some(*node_id) != self.intent.attached {
-                self.intent.secondary.push(*node_id);
+                self.intent.push_secondary(scheduler, *node_id);
             }
         });
     }
@@ -928,6 +933,56 @@ pub(crate) mod tests {
 
         tenant_state.intent.clear(&mut scheduler);
 
+        Ok(())
+    }
+
+    #[test]
+    fn intent_from_observed() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(3);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+
+        tenant_state.observed.locations.insert(
+            NodeId(3),
+            ObservedStateLocation {
+                conf: Some(LocationConfig {
+                    mode: LocationConfigMode::AttachedMulti,
+                    generation: Some(2),
+                    secondary_conf: None,
+                    shard_number: tenant_state.shard.number.0,
+                    shard_count: tenant_state.shard.count.literal(),
+                    shard_stripe_size: tenant_state.shard.stripe_size.0,
+                    tenant_conf: TenantConfig::default(),
+                }),
+            },
+        );
+
+        tenant_state.observed.locations.insert(
+            NodeId(2),
+            ObservedStateLocation {
+                conf: Some(LocationConfig {
+                    mode: LocationConfigMode::AttachedStale,
+                    generation: Some(1),
+                    secondary_conf: None,
+                    shard_number: tenant_state.shard.number.0,
+                    shard_count: tenant_state.shard.count.literal(),
+                    shard_stripe_size: tenant_state.shard.stripe_size.0,
+                    tenant_conf: TenantConfig::default(),
+                }),
+            },
+        );
+
+        tenant_state.intent_from_observed(&mut scheduler);
+
+        // The highest generationed attached location gets used as attached
+        assert_eq!(tenant_state.intent.attached, Some(NodeId(3)));
+        // Other locations get used as secondary
+        assert_eq!(tenant_state.intent.secondary, vec![NodeId(2)]);
+
+        scheduler.consistency_check(nodes.values(), [&tenant_state].into_iter())?;
+
+        tenant_state.intent.clear(&mut scheduler);
         Ok(())
     }
 }

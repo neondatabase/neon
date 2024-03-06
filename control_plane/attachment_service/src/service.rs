@@ -200,7 +200,8 @@ impl Service {
     async fn startup_reconcile(self: &Arc<Service>) {
         // For all tenant shards, a vector of observed states on nodes (where None means
         // indeterminate, same as in [`ObservedStateLocation`])
-        let mut observed = HashMap::new();
+        let mut observed: HashMap<TenantShardId, Vec<(NodeId, Option<LocationConfig>)>> =
+            HashMap::new();
 
         let mut nodes_online = HashSet::new();
 
@@ -235,7 +236,8 @@ impl Service {
             nodes_online.insert(node_id);
 
             for (tenant_shard_id, conf_opt) in tenant_shards {
-                observed.insert(tenant_shard_id, (node_id, conf_opt));
+                let shard_observations = observed.entry(tenant_shard_id).or_default();
+                shard_observations.push((node_id, conf_opt));
             }
         }
 
@@ -257,21 +259,22 @@ impl Service {
             }
             *nodes = Arc::new(new_nodes);
 
-            for (tenant_shard_id, (node_id, observed_loc)) in observed {
-                let Some(tenant_state) = tenants.get_mut(&tenant_shard_id) else {
-                    cleanup.push((tenant_shard_id, node_id));
-                    continue;
-                };
-
-                tenant_state
-                    .observed
-                    .locations
-                    .insert(node_id, ObservedStateLocation { conf: observed_loc });
+            for (tenant_shard_id, shard_observations) in observed {
+                for (node_id, observed_loc) in shard_observations {
+                    let Some(tenant_state) = tenants.get_mut(&tenant_shard_id) else {
+                        cleanup.push((tenant_shard_id, node_id));
+                        continue;
+                    };
+                    tenant_state
+                        .observed
+                        .locations
+                        .insert(node_id, ObservedStateLocation { conf: observed_loc });
+                }
             }
 
             // Populate each tenant's intent state
             for (tenant_shard_id, tenant_state) in tenants.iter_mut() {
-                tenant_state.intent_from_observed();
+                tenant_state.intent_from_observed(scheduler);
                 if let Err(e) = tenant_state.schedule(scheduler) {
                     // Non-fatal error: we are unable to properly schedule the tenant, perhaps because
                     // not enough pageservers are available.  The tenant may well still be available
@@ -932,6 +935,12 @@ impl Service {
 
         // Ordering: we must persist generation number updates before making them visible in the in-memory state
         let incremented_generations = self.persistence.re_attach(reattach_req.node_id).await?;
+
+        tracing::info!(
+            node_id=%reattach_req.node_id,
+            "Incremented {} tenant shards' generations",
+            incremented_generations.len()
+        );
 
         // Apply the updated generation to our in-memory state
         let mut locked = self.inner.write().unwrap();
