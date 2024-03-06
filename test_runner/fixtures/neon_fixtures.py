@@ -2062,6 +2062,8 @@ class NeonAttachmentService(MetricsGetter):
             "node_id": int(node.id),
             "listen_http_addr": "localhost",
             "listen_http_port": node.service_port.http,
+            "listen_pg_addr": "localhost",
+            "listen_pg_port": node.service_port.pg,
         }
         log.info(f"node_register({body})")
         self.request(

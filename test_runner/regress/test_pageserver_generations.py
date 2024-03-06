@@ -205,6 +205,9 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
         sk.start()
     env.attachment_service.start()
 
+    # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
+    env.attachment_service.node_register(env.pageserver)
+
     env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
 
     env.neon_cli.create_tenant(
