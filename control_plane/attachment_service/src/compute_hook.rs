@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use hyper::{Method, StatusCode};
-use pageserver_api::shard::{ShardIndex, ShardNumber, TenantShardId};
+use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -19,8 +19,66 @@ const SLOWDOWN_DELAY: Duration = Duration::from_secs(5);
 
 pub(crate) const API_CONCURRENCY: usize = 32;
 
-pub(super) struct ComputeHookTenant {
-    shards: Vec<(ShardIndex, NodeId)>,
+struct ShardedComputeHookTenant {
+    stripe_size: ShardStripeSize,
+    shard_count: ShardCount,
+    shards: Vec<(ShardNumber, NodeId)>,
+}
+
+enum ComputeHookTenant {
+    Unsharded(NodeId),
+    Sharded(ShardedComputeHookTenant),
+}
+
+impl ComputeHookTenant {
+    /// Construct with at least one shard's information
+    fn new(tenant_shard_id: TenantShardId, stripe_size: ShardStripeSize, node_id: NodeId) -> Self {
+        if tenant_shard_id.shard_count.count() > 1 {
+            Self::Sharded(ShardedComputeHookTenant {
+                shards: vec![(tenant_shard_id.shard_number, node_id)],
+                stripe_size,
+                shard_count: tenant_shard_id.shard_count,
+            })
+        } else {
+            Self::Unsharded(node_id)
+        }
+    }
+
+    /// Set one shard's location.  If stripe size or shard count have changed, Self is reset
+    /// and drops existing content.
+    fn update(
+        &mut self,
+        tenant_shard_id: TenantShardId,
+        stripe_size: ShardStripeSize,
+        node_id: NodeId,
+    ) {
+        match self {
+            Self::Unsharded(existing_node_id) if tenant_shard_id.shard_count.count() == 1 => {
+                *existing_node_id = node_id
+            }
+            Self::Sharded(sharded_tenant)
+                if sharded_tenant.stripe_size == stripe_size
+                    && sharded_tenant.shard_count == tenant_shard_id.shard_count =>
+            {
+                if let Some(existing) = sharded_tenant
+                    .shards
+                    .iter()
+                    .position(|s| s.0 == tenant_shard_id.shard_number)
+                {
+                    sharded_tenant.shards.get_mut(existing).unwrap().1 = node_id;
+                } else {
+                    sharded_tenant
+                        .shards
+                        .push((tenant_shard_id.shard_number, node_id));
+                    sharded_tenant.shards.sort_by_key(|s| s.0)
+                }
+            }
+            _ => {
+                // Shard count changed: reset struct.
+                *self = Self::new(tenant_shard_id, stripe_size, node_id);
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -33,6 +91,7 @@ struct ComputeHookNotifyRequestShard {
 #[derive(Serialize, Deserialize, Debug)]
 struct ComputeHookNotifyRequest {
     tenant_id: TenantId,
+    stripe_size: Option<ShardStripeSize>,
     shards: Vec<ComputeHookNotifyRequestShard>,
 }
 
@@ -63,42 +122,43 @@ pub(crate) enum NotifyError {
 }
 
 impl ComputeHookTenant {
-    async fn maybe_reconfigure(&mut self, tenant_id: TenantId) -> Option<ComputeHookNotifyRequest> {
-        // Find the highest shard count and drop any shards that aren't
-        // for that shard count.
-        let shard_count = self.shards.iter().map(|(k, _v)| k.shard_count).max();
-        let Some(shard_count) = shard_count else {
-            // No shards, nothing to do.
-            tracing::info!("ComputeHookTenant::maybe_reconfigure: no shards");
-            return None;
-        };
-
-        self.shards.retain(|(k, _v)| k.shard_count == shard_count);
-        self.shards
-            .sort_by_key(|(shard, _node_id)| shard.shard_number);
-
-        if self.shards.len() == shard_count.count() as usize || shard_count.is_unsharded() {
-            // We have pageservers for all the shards: emit a configuration update
-            return Some(ComputeHookNotifyRequest {
+    fn maybe_reconfigure(&self, tenant_id: TenantId) -> Option<ComputeHookNotifyRequest> {
+        match self {
+            Self::Unsharded(node_id) => Some(ComputeHookNotifyRequest {
                 tenant_id,
-                shards: self
-                    .shards
-                    .iter()
-                    .map(|(shard, node_id)| ComputeHookNotifyRequestShard {
-                        shard_number: shard.shard_number,
-                        node_id: *node_id,
-                    })
-                    .collect(),
-            });
-        } else {
-            tracing::info!(
-                "ComputeHookTenant::maybe_reconfigure: not enough shards ({}/{})",
-                self.shards.len(),
-                shard_count.count()
-            );
-        }
+                shards: vec![ComputeHookNotifyRequestShard {
+                    shard_number: ShardNumber(0),
+                    node_id: *node_id,
+                }],
+                stripe_size: None,
+            }),
+            Self::Sharded(sharded_tenant)
+                if sharded_tenant.shards.len() == sharded_tenant.shard_count.count() as usize =>
+            {
+                Some(ComputeHookNotifyRequest {
+                    tenant_id,
+                    shards: sharded_tenant
+                        .shards
+                        .iter()
+                        .map(|(shard_number, node_id)| ComputeHookNotifyRequestShard {
+                            shard_number: *shard_number,
+                            node_id: *node_id,
+                        })
+                        .collect(),
+                    stripe_size: Some(sharded_tenant.stripe_size),
+                })
+            }
+            Self::Sharded(sharded_tenant) => {
+                // Sharded tenant doesn't yet have information for all its shards
 
-        None
+                tracing::info!(
+                    "ComputeHookTenant::maybe_reconfigure: not enough shards ({}/{})",
+                    sharded_tenant.shards.len(),
+                    sharded_tenant.shard_count.count()
+                );
+                None
+            }
+        }
     }
 }
 
@@ -139,7 +199,11 @@ impl ComputeHook {
         };
         let cplane =
             ComputeControlPlane::load(env.clone()).expect("Error loading compute control plane");
-        let ComputeHookNotifyRequest { tenant_id, shards } = reconfigure_request;
+        let ComputeHookNotifyRequest {
+            tenant_id,
+            shards,
+            stripe_size,
+        } = reconfigure_request;
 
         let compute_pageservers = shards
             .into_iter()
@@ -156,7 +220,9 @@ impl ComputeHook {
         for (endpoint_name, endpoint) in &cplane.endpoints {
             if endpoint.tenant_id == tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring endpoint {}", endpoint_name,);
-                endpoint.reconfigure(compute_pageservers.clone()).await?;
+                endpoint
+                    .reconfigure(compute_pageservers.clone(), stripe_size)
+                    .await?;
             }
         }
 
@@ -271,30 +337,26 @@ impl ComputeHook {
         &self,
         tenant_shard_id: TenantShardId,
         node_id: NodeId,
+        stripe_size: ShardStripeSize,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let mut locked = self.state.lock().await;
-        let entry = locked
-            .entry(tenant_shard_id.tenant_id)
-            .or_insert_with(|| ComputeHookTenant { shards: Vec::new() });
 
-        let shard_index = ShardIndex {
-            shard_count: tenant_shard_id.shard_count,
-            shard_number: tenant_shard_id.shard_number,
+        use std::collections::hash_map::Entry;
+        let tenant = match locked.entry(tenant_shard_id.tenant_id) {
+            Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
+                tenant_shard_id,
+                stripe_size,
+                node_id,
+            )),
+            Entry::Occupied(e) => {
+                let tenant = e.into_mut();
+                tenant.update(tenant_shard_id, stripe_size, node_id);
+                tenant
+            }
         };
 
-        let mut set = false;
-        for (existing_shard, existing_node) in &mut entry.shards {
-            if *existing_shard == shard_index {
-                *existing_node = node_id;
-                set = true;
-            }
-        }
-        if !set {
-            entry.shards.push((shard_index, node_id));
-        }
-
-        let reconfigure_request = entry.maybe_reconfigure(tenant_shard_id.tenant_id).await;
+        let reconfigure_request = tenant.maybe_reconfigure(tenant_shard_id.tenant_id);
         let Some(reconfigure_request) = reconfigure_request else {
             // The tenant doesn't yet have pageservers for all its shards: we won't notify anything
             // until it does.
@@ -314,5 +376,87 @@ impl ComputeHook {
                     NotifyError::Fatal(StatusCode::INTERNAL_SERVER_ERROR)
                 })
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use utils::id::TenantId;
+
+    use super::*;
+
+    #[test]
+    fn tenant_updates() -> anyhow::Result<()> {
+        let tenant_id = TenantId::generate();
+        let mut tenant_state = ComputeHookTenant::new(
+            TenantShardId {
+                tenant_id,
+                shard_count: ShardCount::new(0),
+                shard_number: ShardNumber(0),
+            },
+            ShardStripeSize(12345),
+            NodeId(1),
+        );
+
+        // An unsharded tenant is always ready to emit a notification
+        assert!(tenant_state.maybe_reconfigure(tenant_id).is_some());
+        assert_eq!(
+            tenant_state
+                .maybe_reconfigure(tenant_id)
+                .unwrap()
+                .shards
+                .len(),
+            1
+        );
+        assert!(tenant_state
+            .maybe_reconfigure(tenant_id)
+            .unwrap()
+            .stripe_size
+            .is_none());
+
+        // Writing the first shard of a multi-sharded situation (i.e. in a split)
+        // resets the tenant state and puts it in an non-notifying state (need to
+        // see all shards)
+        tenant_state.update(
+            TenantShardId {
+                tenant_id,
+                shard_count: ShardCount::new(2),
+                shard_number: ShardNumber(1),
+            },
+            ShardStripeSize(32768),
+            NodeId(1),
+        );
+        assert!(tenant_state.maybe_reconfigure(tenant_id).is_none());
+
+        // Writing the second shard makes it ready to notify
+        tenant_state.update(
+            TenantShardId {
+                tenant_id,
+                shard_count: ShardCount::new(2),
+                shard_number: ShardNumber(0),
+            },
+            ShardStripeSize(32768),
+            NodeId(1),
+        );
+
+        assert!(tenant_state.maybe_reconfigure(tenant_id).is_some());
+        assert_eq!(
+            tenant_state
+                .maybe_reconfigure(tenant_id)
+                .unwrap()
+                .shards
+                .len(),
+            2
+        );
+        assert_eq!(
+            tenant_state
+                .maybe_reconfigure(tenant_id)
+                .unwrap()
+                .stripe_size,
+            Some(ShardStripeSize(32768))
+        );
+
+        Ok(())
     }
 }

@@ -1451,11 +1451,12 @@ async fn put_tenant_location_config_handler(
         tenant::SpawnMode::Eager
     };
 
-    let attached = state
+    let tenant = state
         .tenant_manager
         .upsert_location(tenant_shard_id, location_conf, flush, spawn_mode, &ctx)
-        .await?
-        .is_some();
+        .await?;
+    let stripe_size = tenant.as_ref().map(|t| t.get_shard_stripe_size());
+    let attached = tenant.is_some();
 
     if let Some(_flush_ms) = flush {
         match state
@@ -1477,12 +1478,20 @@ async fn put_tenant_location_config_handler(
     // This API returns a vector of pageservers where the tenant is attached: this is
     // primarily for use in the sharding service.  For compatibilty, we also return this
     // when called directly on a pageserver, but the payload is always zero or one shards.
-    let mut response = TenantLocationConfigResponse { shards: Vec::new() };
+    let mut response = TenantLocationConfigResponse {
+        shards: Vec::new(),
+        stripe_size: None,
+    };
     if attached {
         response.shards.push(TenantShardLocation {
             shard_id: tenant_shard_id,
             node_id: state.conf.id,
-        })
+        });
+        if tenant_shard_id.shard_count.count() > 1 {
+            // Stripe size should be set if we are attached
+            debug_assert!(stripe_size.is_some());
+            response.stripe_size = stripe_size;
+        }
     }
 
     json_response(StatusCode::OK, response)

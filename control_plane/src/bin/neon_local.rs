@@ -1024,7 +1024,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                         })
                         .collect::<Vec<_>>()
                 };
-            endpoint.reconfigure(pageservers).await?;
+            endpoint.reconfigure(pageservers, None).await?;
         }
         "stop" => {
             let endpoint_id = sub_args

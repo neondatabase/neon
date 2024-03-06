@@ -565,7 +565,12 @@ impl Reconciler {
         if let Some(node_id) = self.intent.attached {
             let result = self
                 .compute_hook
-                .notify(self.tenant_shard_id, node_id, &self.cancel)
+                .notify(
+                    self.tenant_shard_id,
+                    node_id,
+                    self.shard.stripe_size,
+                    &self.cancel,
+                )
                 .await;
             if let Err(e) = &result {
                 // It is up to the caller whether they want to drop out on this error, but they don't have to:
