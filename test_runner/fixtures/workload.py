@@ -1,5 +1,5 @@
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -32,6 +32,7 @@ class Workload:
         tenant_id: TenantId,
         timeline_id: TimelineId,
         branch_name: Optional[str] = None,
+        endpoint_opts: Optional[dict[str, Any]] = None,
     ):
         self.env = env
         self.tenant_id = tenant_id
@@ -45,6 +46,7 @@ class Workload:
         self.churn_cursor = 0
 
         self._endpoint: Optional[Endpoint] = None
+        self._endpoint_opts = endpoint_opts or {}
 
     def reconfigure(self):
         """
@@ -66,6 +68,7 @@ class Workload:
                     tenant_id=self.tenant_id,
                     pageserver_id=pageserver_id,
                     endpoint_id=endpoint_id,
+                    **self._endpoint_opts,
                 )
                 self._endpoint.start(pageserver_id=pageserver_id)
             else:
