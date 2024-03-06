@@ -112,6 +112,7 @@ impl Reconciler {
         node: &Node,
         config: LocationConfig,
         flush_ms: Option<Duration>,
+        lazy: bool,
     ) -> Result<(), ReconcileError> {
         self.observed
             .locations
@@ -128,7 +129,7 @@ impl Reconciler {
                 |client| async move {
                     let config = config_ref.clone();
                     client
-                        .location_config(tenant_shard_id, config.clone(), flush_ms)
+                        .location_config(tenant_shard_id, config.clone(), flush_ms, lazy)
                         .await
                 },
                 &self.service_config.jwt_token,
@@ -356,7 +357,7 @@ impl Reconciler {
             self.generation,
             None,
         );
-        self.location_config(&origin_ps, stale_conf, Some(Duration::from_secs(10)))
+        self.location_config(&origin_ps, stale_conf, Some(Duration::from_secs(10)), false)
             .await?;
 
         let baseline_lsns = Some(self.get_lsns(self.tenant_shard_id, &origin_ps).await?);
@@ -388,7 +389,8 @@ impl Reconciler {
         );
 
         tracing::info!("🔁 Attaching to pageserver {dest_ps}");
-        self.location_config(&dest_ps, dest_conf, None).await?;
+        self.location_config(&dest_ps, dest_conf, None, false)
+            .await?;
 
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
@@ -420,7 +422,7 @@ impl Reconciler {
             None,
             Some(LocationConfigSecondary { warm: true }),
         );
-        self.location_config(&origin_ps, origin_secondary_conf.clone(), None)
+        self.location_config(&origin_ps, origin_secondary_conf.clone(), None, false)
             .await?;
         // TODO: we should also be setting the ObservedState on earlier API calls, in case we fail
         // partway through.  In fact, all location conf API calls should be in a wrapper that sets
@@ -440,7 +442,7 @@ impl Reconciler {
             self.generation,
             None,
         );
-        self.location_config(&dest_ps, dest_final_conf.clone(), None)
+        self.location_config(&dest_ps, dest_final_conf.clone(), None, false)
             .await?;
         self.observed.locations.insert(
             dest_ps.get_id(),
@@ -577,7 +579,9 @@ impl Reconciler {
                     // a separate type to Self.
                     let node = node.clone();
 
-                    self.location_config(&node, wanted_conf, None).await?;
+                    // Use lazy=true, because we may run many of Self concurrently, and do not want to
+                    // overload the pageserver with logical size calculations.
+                    self.location_config(&node, wanted_conf, None, true).await?;
                     self.compute_notify().await?;
                 }
             }
@@ -623,7 +627,7 @@ impl Reconciler {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
             }
-            self.location_config(&node, conf, None).await?;
+            self.location_config(&node, conf, None, false).await?;
         }
 
         Ok(())
@@ -635,7 +639,12 @@ impl Reconciler {
         if let Some(node) = &self.intent.attached {
             let result = self
                 .compute_hook
-                .notify(self.tenant_shard_id, node.get_id(), &self.cancel)
+                .notify(
+                    self.tenant_shard_id,
+                    node.get_id(),
+                    self.shard.stripe_size,
+                    &self.cancel,
+                )
                 .await;
             if let Err(e) = &result {
                 // It is up to the caller whether they want to drop out on this error, but they don't have to:

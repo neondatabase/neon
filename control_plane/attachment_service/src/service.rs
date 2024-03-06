@@ -285,7 +285,11 @@ impl Service {
                     // emit a compute notification for this. In the case where our observed state does not
                     // yet match our intent, we will eventually reconcile, and that will emit a compute notification.
                     if let Some(attached_at) = tenant_state.stably_attached() {
-                        compute_notifications.push((*tenant_shard_id, attached_at));
+                        compute_notifications.push((
+                            *tenant_shard_id,
+                            attached_at,
+                            tenant_state.shard.stripe_size,
+                        ));
                     }
                 }
             }
@@ -449,6 +453,7 @@ impl Service {
                         tenant_conf: models::TenantConfig::default(),
                     },
                     None,
+                    false,
                 )
                 .await
             {
@@ -473,7 +478,7 @@ impl Service {
     /// Returns a set of any shards for which notifications where not acked within the deadline.
     async fn compute_notify_many(
         &self,
-        notifications: Vec<(TenantShardId, NodeId)>,
+        notifications: Vec<(TenantShardId, NodeId, ShardStripeSize)>,
         deadline: Instant,
     ) -> HashSet<TenantShardId> {
         let compute_hook = self.inner.read().unwrap().compute_hook.clone();
@@ -484,11 +489,14 @@ impl Service {
         // Construct an async stream of futures to invoke the compute notify function: we do this
         // in order to subsequently use .buffered() on the stream to execute with bounded parallelism.
         let mut stream = futures::stream::iter(notifications.into_iter())
-            .map(|(tenant_shard_id, node_id)| {
+            .map(|(tenant_shard_id, node_id, stripe_size)| {
                 let compute_hook = compute_hook.clone();
                 let cancel = self.cancel.clone();
                 async move {
-                    if let Err(e) = compute_hook.notify(tenant_shard_id, node_id, &cancel).await {
+                    if let Err(e) = compute_hook
+                        .notify(tenant_shard_id, node_id, stripe_size, &cancel)
+                        .await
+                    {
                         tracing::error!(
                             %tenant_shard_id,
                             %node_id,
@@ -1377,7 +1385,10 @@ impl Service {
         // First check if this is a creation or an update
         let create_or_update = self.tenant_location_config_prepare(tenant_id, req);
 
-        let mut result = TenantLocationConfigResponse { shards: Vec::new() };
+        let mut result = TenantLocationConfigResponse {
+            shards: Vec::new(),
+            stripe_size: None,
+        };
         let waiters = match create_or_update {
             TenantCreateOrUpdate::Create((create_req, placement_policy)) => {
                 let (create_resp, waiters) =
@@ -1432,6 +1443,11 @@ impl Service {
                             tracing::warn!("Shard {tenant_shard_id} removed while updating");
                             continue;
                         };
+
+                        // Update stripe size
+                        if result.stripe_size.is_none() && shard.shard.count.count() > 1 {
+                            result.stripe_size = Some(shard.shard.stripe_size);
+                        }
 
                         shard.policy = placement_policy;
                         shard.config = tenant_config;
@@ -2420,7 +2436,7 @@ impl Service {
                     // as at this point in the split process we have succeeded and this part is infallible:
                     // we will never need to do any special recovery from this state.
 
-                    child_locations.push((child, pageserver));
+                    child_locations.push((child, pageserver, child_shard.stripe_size));
 
                     tenants.insert(child, child_state);
                     response.new_shards.push(child);
@@ -2430,8 +2446,11 @@ impl Service {
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
-        for (child_id, child_ps) in child_locations {
-            if let Err(e) = compute_hook.notify(child_id, child_ps, &self.cancel).await {
+        for (child_id, child_ps, stripe_size) in child_locations {
+            if let Err(e) = compute_hook
+                .notify(child_id, child_ps, stripe_size, &self.cancel)
+                .await
+            {
                 tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
                         child_id, child_ps);
                 failed_notifications.push(child_id);

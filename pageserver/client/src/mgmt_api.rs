@@ -254,21 +254,30 @@ impl Client {
         tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<std::time::Duration>,
+        lazy: bool,
     ) -> Result<()> {
         let req_body = TenantLocationConfigRequest {
             tenant_id: tenant_shard_id,
             config,
         };
-        let path = format!(
+
+        let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/location_config",
             self.mgmt_api_endpoint, tenant_shard_id
-        );
-        let path = if let Some(flush_ms) = flush_ms {
-            format!("{}?flush_ms={}", path, flush_ms.as_millis())
-        } else {
-            path
-        };
-        self.request(Method::PUT, &path, &req_body).await?;
+        ))
+        // Should always work: mgmt_api_endpoint is configuration, not user input.
+        .expect("Cannot build URL");
+
+        if lazy {
+            path.query_pairs_mut().append_pair("lazy", "true");
+        }
+
+        if let Some(flush_ms) = flush_ms {
+            path.query_pairs_mut()
+                .append_pair("flush_ms", &format!("{}", flush_ms.as_millis()));
+        }
+
+        self.request(Method::PUT, path, &req_body).await?;
         Ok(())
     }
 
