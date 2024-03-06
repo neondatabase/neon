@@ -72,7 +72,7 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
-            let pause = ctx.latency_timer.pause("cplane");
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
@@ -134,7 +134,7 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
-            let pause = ctx.latency_timer.pause("cplane");
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");

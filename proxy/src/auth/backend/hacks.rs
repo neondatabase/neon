@@ -25,7 +25,7 @@ pub async fn authenticate_cleartext(
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     // pause the timer while we communicate with the client
-    let paused = ctx.latency_timer.pause("client");
+    let paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
 
     let auth_flow = AuthFlow::new(client)
         .begin(auth::CleartextPassword(secret))
@@ -59,7 +59,7 @@ pub async fn password_hack_no_authentication(
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     // pause the timer while we communicate with the client
-    let _paused = ctx.latency_timer.pause("client");
+    let _paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
 
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)

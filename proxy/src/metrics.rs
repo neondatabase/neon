@@ -4,7 +4,6 @@ use ::metrics::{
     register_int_gauge_vec, Histogram, HistogramVec, HyperLogLogVec, IntCounterPairVec,
     IntCounterVec, IntGauge, IntGaugeVec,
 };
-use hashbrown::HashMap;
 use metrics::{register_int_counter_pair, IntCounterPair};
 
 use once_cell::sync::Lazy;
@@ -162,6 +161,19 @@ pub static NUM_CANCELLATION_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub enum Waiting {
+    Cplane,
+    Client,
+    Compute,
+}
+
+#[derive(Clone, Default)]
+struct Accumulated {
+    cplane: time::Duration,
+    client: time::Duration,
+    compute: time::Duration,
+}
+
 #[derive(Clone)]
 pub struct LatencyTimer {
     // time since the stopwatch was started
@@ -169,7 +181,7 @@ pub struct LatencyTimer {
     // time since the stopwatch was stopped
     stop: Option<time::Instant>,
     // accumulated time on the stopwatch
-    pub accumulated: HashMap<&'static str, std::time::Duration>,
+    accumulated: Accumulated,
     // label data
     protocol: &'static str,
     cache_miss: bool,
@@ -180,7 +192,7 @@ pub struct LatencyTimer {
 pub struct LatencyTimerPause<'a> {
     timer: &'a mut LatencyTimer,
     start: time::Instant,
-    label: &'static str,
+    waiting_for: Waiting,
 }
 
 impl LatencyTimer {
@@ -188,7 +200,7 @@ impl LatencyTimer {
         Self {
             start: time::Instant::now(),
             stop: None,
-            accumulated: HashMap::from([("client", std::time::Duration::ZERO)]),
+            accumulated: Accumulated::default(),
             protocol,
             cache_miss: false,
             // by default we don't do pooling
@@ -198,11 +210,11 @@ impl LatencyTimer {
         }
     }
 
-    pub fn pause(&mut self, label: &'static str) -> LatencyTimerPause<'_> {
+    pub fn pause(&mut self, waiting_for: Waiting) -> LatencyTimerPause<'_> {
         LatencyTimerPause {
             timer: self,
             start: Instant::now(),
-            label,
+            waiting_for,
         }
     }
 
@@ -225,12 +237,12 @@ impl LatencyTimer {
 
 impl Drop for LatencyTimerPause<'_> {
     fn drop(&mut self) {
-        // start the stopwatch again
-        self.timer
-            .accumulated
-            .entry(self.label)
-            .and_modify(|x| *x += self.start.elapsed())
-            .or_insert(self.start.elapsed());
+        let dur = self.start.elapsed();
+        match self.waiting_for {
+            Waiting::Cplane => self.timer.accumulated.cplane += dur,
+            Waiting::Client => self.timer.accumulated.client += dur,
+            Waiting::Compute => self.timer.accumulated.compute += dur,
+        }
     }
 }
 
@@ -241,10 +253,6 @@ impl Drop for LatencyTimer {
             .unwrap_or_else(time::Instant::now)
             .duration_since(self.start);
         // Excluding cplane communication from the accumulated time.
-        let accumulated_client = *self
-            .accumulated
-            .get("client")
-            .unwrap_or(&std::time::Duration::ZERO);
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
@@ -253,13 +261,9 @@ impl Drop for LatencyTimer {
                 self.outcome,
                 "client",
             ])
-            .observe((duration.saturating_sub(accumulated_client)).as_secs_f64());
+            .observe((duration.saturating_sub(self.accumulated.client)).as_secs_f64());
         // Exclude client and cplane communication from the accumulated time.
-        let accumulated_total = accumulated_client
-            + *self
-                .accumulated
-                .get("cplane")
-                .unwrap_or(&std::time::Duration::ZERO);
+        let accumulated_total = self.accumulated.client + self.accumulated.cplane;
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
