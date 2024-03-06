@@ -39,6 +39,14 @@ pub(crate) struct Node {
     cancel: CancellationToken,
 }
 
+/// When updating [`Node::availability`] we use this type to indicate to the caller
+/// whether/how they changed it.
+pub(crate) enum AvailabilityTransition {
+    ToActive,
+    ToOffline,
+    Unchanged,
+}
+
 impl Node {
     pub(crate) fn base_url(&self) -> String {
         format!("http://{}:{}", self.listen_http_addr, self.listen_http_port)
@@ -75,27 +83,29 @@ impl Node {
         }
     }
 
-    pub(crate) fn set_availability(&mut self, availability: NodeAvailability) {
+    pub(crate) fn set_availability(
+        &mut self,
+        availability: NodeAvailability,
+    ) -> AvailabilityTransition {
         use NodeAvailability::*;
-        match (self.availability, availability) {
+        let transition = match (self.availability, availability) {
             (Offline, Active) => {
                 // Give the node a new cancellation token, effectively resetting it to un-cancelled.  Any
                 // users of previously-cloned copies of the node will still see the old cancellation
                 // state.  For example, Reconcilers in flight will have to complete and be spawned
                 // again to realize that the node has become available.
-                self.cancel = CancellationToken::new()
+                self.cancel = CancellationToken::new();
+                AvailabilityTransition::ToActive
             }
             (Active, Offline) => {
                 // Fire the node's cancellation token to cancel any in-flight API requests to it
-                self.cancel.cancel()
+                self.cancel.cancel();
+                AvailabilityTransition::ToOffline
             }
-            _ => {}
-        }
+            _ => AvailabilityTransition::Unchanged,
+        };
         self.availability = availability;
-    }
-
-    pub(crate) fn get_availability(&self) -> &NodeAvailability {
-        &self.availability
+        transition
     }
 
     /// Whether we may send API requests to this node.

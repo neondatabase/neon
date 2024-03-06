@@ -49,7 +49,7 @@ use utils::{
 
 use crate::{
     compute_hook::{self, ComputeHook},
-    node::Node,
+    node::{AvailabilityTransition, Node},
     persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
     scheduler::Scheduler,
@@ -2825,26 +2825,11 @@ impl Service {
             ));
         };
 
-        let mut offline_transition = false;
-        let mut active_transition = false;
-
-        if let Some(availability) = &config_req.availability {
-            match (availability, node.get_availability()) {
-                (NodeAvailability::Offline, NodeAvailability::Active) => {
-                    tracing::info!("Node {} transition to offline", config_req.node_id);
-                    offline_transition = true;
-                }
-                (NodeAvailability::Active, NodeAvailability::Offline) => {
-                    tracing::info!("Node {} transition to active", config_req.node_id);
-                    active_transition = true;
-                }
-                _ => {
-                    tracing::info!("Node {} no change during config", config_req.node_id);
-                    // No change
-                }
-            };
-            node.set_availability(*availability);
-        }
+        let availability_transition = if let Some(availability) = &config_req.availability {
+            node.set_availability(*availability)
+        } else {
+            AvailabilityTransition::Unchanged
+        };
 
         if let Some(scheduling) = config_req.scheduling {
             node.set_scheduling(scheduling);
@@ -2858,74 +2843,80 @@ impl Service {
 
         let new_nodes = Arc::new(new_nodes);
 
-        if offline_transition {
-            let mut tenants_affected: usize = 0;
-            for (tenant_shard_id, tenant_state) in tenants {
-                if let Some(observed_loc) =
-                    tenant_state.observed.locations.get_mut(&config_req.node_id)
-                {
-                    // When a node goes offline, we set its observed configuration to None, indicating unknown: we will
-                    // not assume our knowledge of the node's configuration is accurate until it comes back online
-                    observed_loc.conf = None;
-                }
+        match availability_transition {
+            AvailabilityTransition::ToOffline => {
+                tracing::info!("Node {} transition to offline", config_req.node_id);
+                let mut tenants_affected: usize = 0;
+                for (tenant_shard_id, tenant_state) in tenants {
+                    if let Some(observed_loc) =
+                        tenant_state.observed.locations.get_mut(&config_req.node_id)
+                    {
+                        // When a node goes offline, we set its observed configuration to None, indicating unknown: we will
+                        // not assume our knowledge of the node's configuration is accurate until it comes back online
+                        observed_loc.conf = None;
+                    }
 
-                if tenant_state.intent.demote_attached(config_req.node_id) {
-                    tenant_state.sequence = tenant_state.sequence.next();
-                    match tenant_state.schedule(scheduler) {
-                        Err(e) => {
-                            // It is possible that some tenants will become unschedulable when too many pageservers
-                            // go offline: in this case there isn't much we can do other than make the issue observable.
-                            // TODO: give TenantState a scheduling error attribute to be queried later.
-                            tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", config_req.node_id);
-                        }
-                        Ok(()) => {
-                            if tenant_state
-                                .maybe_reconcile(
-                                    result_tx.clone(),
-                                    &new_nodes,
-                                    &compute_hook,
-                                    &self.config,
-                                    &self.persistence,
-                                    &self.gate,
-                                    &self.cancel,
-                                )
-                                .is_some()
-                            {
-                                tenants_affected += 1;
-                            };
+                    if tenant_state.intent.demote_attached(config_req.node_id) {
+                        tenant_state.sequence = tenant_state.sequence.next();
+                        match tenant_state.schedule(scheduler) {
+                            Err(e) => {
+                                // It is possible that some tenants will become unschedulable when too many pageservers
+                                // go offline: in this case there isn't much we can do other than make the issue observable.
+                                // TODO: give TenantState a scheduling error attribute to be queried later.
+                                tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", config_req.node_id);
+                            }
+                            Ok(()) => {
+                                if tenant_state
+                                    .maybe_reconcile(
+                                        result_tx.clone(),
+                                        &new_nodes,
+                                        &compute_hook,
+                                        &self.config,
+                                        &self.persistence,
+                                        &self.gate,
+                                        &self.cancel,
+                                    )
+                                    .is_some()
+                                {
+                                    tenants_affected += 1;
+                                };
+                            }
                         }
                     }
                 }
+                tracing::info!(
+                    "Launched {} reconciler tasks for tenants affected by node {} going offline",
+                    tenants_affected,
+                    config_req.node_id
+                )
             }
-            tracing::info!(
-                "Launched {} reconciler tasks for tenants affected by node {} going offline",
-                tenants_affected,
-                config_req.node_id
-            )
-        }
-
-        if active_transition {
-            // When a node comes back online, we must reconcile any tenant that has a None observed
-            // location on the node.
-            for tenant_state in locked.tenants.values_mut() {
-                if let Some(observed_loc) =
-                    tenant_state.observed.locations.get_mut(&config_req.node_id)
-                {
-                    if observed_loc.conf.is_none() {
-                        tenant_state.maybe_reconcile(
-                            result_tx.clone(),
-                            &new_nodes,
-                            &compute_hook,
-                            &self.config,
-                            &self.persistence,
-                            &self.gate,
-                            &self.cancel,
-                        );
+            AvailabilityTransition::ToActive => {
+                tracing::info!("Node {} transition to active", config_req.node_id);
+                // When a node comes back online, we must reconcile any tenant that has a None observed
+                // location on the node.
+                for tenant_state in locked.tenants.values_mut() {
+                    if let Some(observed_loc) =
+                        tenant_state.observed.locations.get_mut(&config_req.node_id)
+                    {
+                        if observed_loc.conf.is_none() {
+                            tenant_state.maybe_reconcile(
+                                result_tx.clone(),
+                                &new_nodes,
+                                &compute_hook,
+                                &self.config,
+                                &self.persistence,
+                                &self.gate,
+                                &self.cancel,
+                            );
+                        }
                     }
                 }
-            }
 
-            // TODO: in the background, we should balance work back onto this pageserver
+                // TODO: in the background, we should balance work back onto this pageserver
+            }
+            AvailabilityTransition::Unchanged => {
+                tracing::info!("Node {} no change during config", config_req.node_id);
+            }
         }
 
         locked.nodes = new_nodes;
