@@ -104,6 +104,7 @@ impl Reconciler {
         node_id: NodeId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
+        lazy: bool,
     ) -> anyhow::Result<()> {
         let node = self
             .pageservers
@@ -113,11 +114,6 @@ impl Reconciler {
         self.observed
             .locations
             .insert(node.id, ObservedStateLocation { conf: None });
-
-        // 'lazy' mode means that a tenant's activiation will be subject to a concurrency limit
-        // in the pageserver: this is the safer way to attach a tenant, as it avoids thundering
-        // herd I/O when attaching many tenants at the same time.
-        let lazy = true;
 
         tracing::info!("location_config({}) calling: {:?}", node_id, config);
         let client =
@@ -320,8 +316,13 @@ impl Reconciler {
             Some(self.generation),
             None,
         );
-        self.location_config(origin_ps_id, stale_conf, Some(Duration::from_secs(10)))
-            .await?;
+        self.location_config(
+            origin_ps_id,
+            stale_conf,
+            Some(Duration::from_secs(10)),
+            false,
+        )
+        .await?;
 
         let baseline_lsns = Some(self.get_lsns(self.tenant_shard_id, &origin_ps_id).await?);
 
@@ -354,7 +355,8 @@ impl Reconciler {
         );
 
         tracing::info!("🔁 Attaching to pageserver {}", dest_ps_id);
-        self.location_config(dest_ps_id, dest_conf, None).await?;
+        self.location_config(dest_ps_id, dest_conf, None, false)
+            .await?;
 
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
@@ -386,7 +388,7 @@ impl Reconciler {
             None,
             Some(LocationConfigSecondary { warm: true }),
         );
-        self.location_config(origin_ps_id, origin_secondary_conf.clone(), None)
+        self.location_config(origin_ps_id, origin_secondary_conf.clone(), None, false)
             .await?;
         // TODO: we should also be setting the ObservedState on earlier API calls, in case we fail
         // partway through.  In fact, all location conf API calls should be in a wrapper that sets
@@ -409,7 +411,7 @@ impl Reconciler {
             Some(self.generation),
             None,
         );
-        self.location_config(dest_ps_id, dest_final_conf.clone(), None)
+        self.location_config(dest_ps_id, dest_final_conf.clone(), None, false)
             .await?;
         self.observed.locations.insert(
             dest_ps_id,
@@ -455,7 +457,10 @@ impl Reconciler {
                         .await?;
                     wanted_conf.generation = self.generation.into();
                     tracing::info!(%node_id, "Observed configuration requires update.");
-                    self.location_config(node_id, wanted_conf, None).await?;
+                    // Use lazy=true, because we may run many of Self concurrently, and do not want to
+                    // overload the pageserver with logical size calculations.
+                    self.location_config(node_id, wanted_conf, None, true)
+                        .await?;
                     self.compute_notify().await?;
                 }
             }
@@ -507,7 +512,7 @@ impl Reconciler {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
             }
-            self.location_config(node_id, conf, None).await?;
+            self.location_config(node_id, conf, None, false).await?;
         }
 
         Ok(())
