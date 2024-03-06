@@ -130,7 +130,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
 
     endpoint.stop_and_destroy()
 
-    with neon_compare.record_duration("pageserver_shutdown"):
+    with neon_compare.record_duration("shutdown"):
         # this sleeps 100ms between polls
         env.pageserver.stop()
 
