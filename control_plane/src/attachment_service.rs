@@ -34,7 +34,7 @@ pub struct AttachmentService {
     client: reqwest::Client,
 }
 
-const COMMAND: &str = "attachment_service";
+const COMMAND: &str = "storage_controller";
 
 const ATTACHMENT_SERVICE_POSTGRES_VERSION: u32 = 16;
 
