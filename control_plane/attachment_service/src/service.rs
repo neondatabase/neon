@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::id_lock_map::IdLockMap;
 use anyhow::Context;
 use control_plane::attachment_service::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
@@ -146,6 +147,11 @@ pub struct Service {
     persistence: Arc<Persistence>,
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
+
+    // Locking on a tenant granularity (covers all shards in the tenant):
+    // - Take exclusively for rare operations that mutate the tenant's persistent state (e.g. create/delete/split)
+    // - Take in shared mode for operations that need the set of shards to stay the same to complete reliably (e.g. timeline CRUD)
+    tenant_locks: IdLockMap<TenantId>,
 
     // Process shutdown will fire this token
     cancel: CancellationToken,
@@ -731,6 +737,7 @@ impl Service {
             startup_complete: startup_complete.clone(),
             cancel: CancellationToken::new(),
             gate: Gate::default(),
+            tenant_locks: Default::default(),
         });
 
         let result_task_this = this.clone();
@@ -738,6 +745,23 @@ impl Service {
             // Block shutdown until we're done (we must respect self.cancel)
             if let Ok(_gate) = result_task_this.gate.enter() {
                 result_task_this.process_results(result_rx).await
+            }
+        });
+
+        tokio::task::spawn({
+            let this = this.clone();
+            async move {
+                if let Ok(_gate) = this.gate.enter() {
+                    loop {
+                        tokio::select! {
+                            _ = this.cancel.cancelled() => {
+                                break;
+                            },
+                            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                        };
+                        this.tenant_locks.housekeeping();
+                    }
+                }
             }
         });
 
@@ -1045,6 +1069,12 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<TenantCreateResponse, ApiError> {
+        // Exclude any concurrent attempts to create/access the same tenant ID
+        let _tenant_lock = self
+            .tenant_locks
+            .exclusive(create_req.new_tenant_id.tenant_id)
+            .await;
+
         let (response, waiters) = self.do_tenant_create(create_req).await?;
 
         self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await?;
@@ -1360,6 +1390,9 @@ impl Service {
         tenant_id: TenantId,
         req: TenantLocationConfigRequest,
     ) -> Result<TenantLocationConfigResponse, ApiError> {
+        // We require an exclusive lock, because we are updating both persistent and in-memory state
+        let _tenant_lock = self.tenant_locks.exclusive(tenant_id).await;
+
         if !req.tenant_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "This API is for importing single-sharded or unsharded tenants"
@@ -1473,6 +1506,9 @@ impl Service {
     }
 
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
+        // We require an exclusive lock, because we are updating persistent and in-memory state
+        let _tenant_lock = self.tenant_locks.exclusive(req.tenant_id).await;
+
         let tenant_id = req.tenant_id;
         let config = req.config;
 
@@ -1554,6 +1590,8 @@ impl Service {
         timestamp: Cow<'_, str>,
         done_if_after: Cow<'_, str>,
     ) -> Result<(), ApiError> {
+        let _tenant_lock = self.tenant_locks.exclusive(tenant_id).await;
+
         let node = {
             let locked = self.inner.read().unwrap();
             // Just a sanity check to prevent misuse: the API expects that the tenant is fully
@@ -1639,6 +1677,8 @@ impl Service {
         &self,
         tenant_id: TenantId,
     ) -> Result<(), ApiError> {
+        let _tenant_lock = self.tenant_locks.shared(tenant_id).await;
+
         // Acquire lock and yield the collection of shard-node tuples which we will send requests onward to
         let targets = {
             let locked = self.inner.read().unwrap();
@@ -1688,6 +1728,8 @@ impl Service {
     }
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
+        let _tenant_lock = self.tenant_locks.exclusive(tenant_id).await;
+
         self.ensure_attached_wait(tenant_id).await?;
 
         // TODO: refactor into helper
@@ -1783,6 +1825,8 @@ impl Service {
             tenant_id,
             create_req.new_timeline_id,
         );
+
+        let _tenant_lock = self.tenant_locks.shared(tenant_id).await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -1909,11 +1953,10 @@ impl Service {
         timeline_id: TimelineId,
     ) -> Result<StatusCode, ApiError> {
         tracing::info!("Deleting timeline {}/{}", tenant_id, timeline_id,);
+        let _tenant_lock = self.tenant_locks.shared(tenant_id).await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
-        // TODO: refuse to do this if shard splitting is in progress
-        // (https://github.com/neondatabase/neon/issues/6676)
         let mut targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
