@@ -124,12 +124,15 @@ pub async fn task_main(
             WithConnectionGuard<WithClientIp<AddrStream>>,
         >| {
             let (conn, _) = stream.get_ref();
+
+            // this is jank. should dissapear with hyper 1.0 migration.
             let gauge = conn
                 .gauge
                 .lock()
                 .expect("lock should not be poisoned")
                 .take()
                 .expect("gauge should be set on connection start");
+
             let client_addr = conn.inner.client_addr();
             let remote_addr = conn.inner.inner.remote_addr();
             let backend = backend.clone();
