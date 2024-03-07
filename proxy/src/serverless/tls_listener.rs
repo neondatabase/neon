@@ -13,8 +13,6 @@ use tokio::{
     time::timeout,
 };
 
-/// Default number of concurrent handshakes
-pub const DEFAULT_MAX_HANDSHAKES: usize = 64;
 /// Default timeout for the TLS handshake.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -98,7 +96,6 @@ pin_project! {
         listener: A,
         tls: T,
         waiting: JoinSet<Result<Result<T::Stream, T::Error>, tokio::time::error::Elapsed>>,
-        max_handshakes: usize,
         timeout: Duration,
     }
 }
@@ -107,7 +104,6 @@ pin_project! {
 #[derive(Clone)]
 pub struct Builder<T> {
     tls: T,
-    max_handshakes: usize,
     handshake_timeout: Duration,
 }
 
@@ -176,7 +172,7 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 
-        while this.waiting.len() < *this.max_handshakes {
+        loop {
             match this.listener.as_mut().poll_accept(cx) {
                 Poll::Pending => break,
                 Poll::Ready(Some(Ok(conn))) => {
@@ -220,18 +216,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncTls<C> for tokio_r
 }
 
 impl<T> Builder<T> {
-    /// Set the maximum number of concurrent handshakes.
-    ///
-    /// At most `max` handshakes will be concurrently processed. If that limit is
-    /// reached, the `TlsListener` will stop polling the underlying listener until a
-    /// handshake completes and the encrypted stream has been returned.
-    ///
-    /// Defaults to `DEFAULT_MAX_HANDSHAKES`.
-    pub fn max_handshakes(&mut self, max: usize) -> &mut Self {
-        self.max_handshakes = max;
-        self
-    }
-
     /// Set the timeout for handshakes.
     ///
     /// If a timeout takes longer than `timeout`, then the handshake will be
@@ -256,7 +240,6 @@ impl<T> Builder<T> {
             listener,
             tls: self.tls.clone(),
             waiting: JoinSet::new(),
-            max_handshakes: self.max_handshakes,
             timeout: self.handshake_timeout,
         }
     }
@@ -268,7 +251,6 @@ impl<T> Builder<T> {
 pub fn builder<T>(tls: T) -> Builder<T> {
     Builder {
         tls,
-        max_handshakes: DEFAULT_MAX_HANDSHAKES,
         handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
     }
 }
