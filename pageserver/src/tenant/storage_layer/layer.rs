@@ -889,6 +889,11 @@ impl LayerInner {
 
         let this: Arc<Self> = self.clone();
 
+        let guard = timeline
+            .gate
+            .enter()
+            .map_err(|_| DownloadError::DownloadCancelled)?;
+
         crate::task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             crate::task_mgr::TaskKind::RemoteDownloadTask,
@@ -897,6 +902,8 @@ impl LayerInner {
             &task_name,
             false,
             async move {
+
+                let _guard = guard;
 
                 let client = timeline
                     .remote_client
