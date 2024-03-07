@@ -134,8 +134,11 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
         # this sleeps 100ms between polls
         env.pageserver.stop()
 
+    startup_line = "INFO version: git(-env)?:"
+
+    # find the first line of the log file so we can find the next start later
     _, first_start = wait_until(
-        5, 1, lambda: env.pageserver.assert_log_contains("INFO version: git:")
+        5, 1, lambda: env.pageserver.assert_log_contains(startup_line)
     )
 
     # start without gc so we can time compaction with less noise; use shorter
@@ -151,7 +154,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     )
 
     _, second_start = wait_until(
-        5, 1, lambda: env.pageserver.assert_log_contains("INFO version: git:", first_start)
+        5, 1, lambda: env.pageserver.assert_log_contains(startup_line, first_start)
     )
     env.pageserver.quiesce_tenants()
 
