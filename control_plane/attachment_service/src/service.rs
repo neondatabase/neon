@@ -16,9 +16,9 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use hyper::StatusCode;
 use pageserver_api::{
     controller_api::{
-        NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy,
-        TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
-        TenantLocateResponseShard, TenantShardMigrateRequest, TenantShardMigrateResponse,
+        NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantCreateResponse,
+        TenantCreateResponseShard, TenantLocateResponse, TenantShardMigrateRequest,
+        TenantShardMigrateResponse,
     },
     models::TenantConfigRequest,
 };
@@ -39,7 +39,6 @@ use pageserver_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use utils::{
-    backoff,
     completion::Barrier,
     generation::Generation,
     http::error::ApiError,
@@ -50,7 +49,7 @@ use utils::{
 
 use crate::{
     compute_hook::{self, ComputeHook},
-    node::Node,
+    node::{AvailabilityTransition, Node},
     persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
     scheduler::Scheduler,
@@ -201,7 +200,8 @@ impl Service {
     async fn startup_reconcile(self: &Arc<Service>) {
         // For all tenant shards, a vector of observed states on nodes (where None means
         // indeterminate, same as in [`ObservedStateLocation`])
-        let mut observed = HashMap::new();
+        let mut observed: HashMap<TenantShardId, Vec<(NodeId, Option<LocationConfig>)>> =
+            HashMap::new();
 
         let mut nodes_online = HashSet::new();
 
@@ -236,7 +236,8 @@ impl Service {
             nodes_online.insert(node_id);
 
             for (tenant_shard_id, conf_opt) in tenant_shards {
-                observed.insert(tenant_shard_id, (node_id, conf_opt));
+                let shard_observations = observed.entry(tenant_shard_id).or_default();
+                shard_observations.push((node_id, conf_opt));
             }
         }
 
@@ -252,27 +253,28 @@ impl Service {
             let mut new_nodes = (**nodes).clone();
             for (node_id, node) in new_nodes.iter_mut() {
                 if nodes_online.contains(node_id) {
-                    node.availability = NodeAvailability::Active;
+                    node.set_availability(NodeAvailability::Active);
                     scheduler.node_upsert(node);
                 }
             }
             *nodes = Arc::new(new_nodes);
 
-            for (tenant_shard_id, (node_id, observed_loc)) in observed {
-                let Some(tenant_state) = tenants.get_mut(&tenant_shard_id) else {
-                    cleanup.push((tenant_shard_id, node_id));
-                    continue;
-                };
-
-                tenant_state
-                    .observed
-                    .locations
-                    .insert(node_id, ObservedStateLocation { conf: observed_loc });
+            for (tenant_shard_id, shard_observations) in observed {
+                for (node_id, observed_loc) in shard_observations {
+                    let Some(tenant_state) = tenants.get_mut(&tenant_shard_id) else {
+                        cleanup.push((tenant_shard_id, node_id));
+                        continue;
+                    };
+                    tenant_state
+                        .observed
+                        .locations
+                        .insert(node_id, ObservedStateLocation { conf: observed_loc });
+                }
             }
 
             // Populate each tenant's intent state
             for (tenant_shard_id, tenant_state) in tenants.iter_mut() {
-                tenant_state.intent_from_observed();
+                tenant_state.intent_from_observed(scheduler);
                 if let Err(e) = tenant_state.schedule(scheduler) {
                     // Non-fatal error: we are unable to properly schedule the tenant, perhaps because
                     // not enough pageservers are available.  The tenant may well still be available
@@ -359,40 +361,19 @@ impl Service {
         for node in nodes.values() {
             node_list_futs.push({
                 async move {
-                    let http_client = reqwest::ClientBuilder::new()
-                        .timeout(Duration::from_secs(5))
-                        .build()
-                        .expect("Failed to construct HTTP client");
-                    let client = mgmt_api::Client::from_client(
-                        http_client,
-                        node.base_url(),
-                        self.config.jwt_token.as_deref(),
-                    );
-
-                    fn is_fatal(e: &mgmt_api::Error) -> bool {
-                        use mgmt_api::Error::*;
-                        match e {
-                            ReceiveBody(_) | ReceiveErrorBody(_) => false,
-                            ApiError(StatusCode::SERVICE_UNAVAILABLE, _)
-                            | ApiError(StatusCode::GATEWAY_TIMEOUT, _)
-                            | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
-                            ApiError(_, _) => true,
-                        }
-                    }
-
-                    tracing::info!("Scanning shards on node {}...", node.id);
-                    let description = format!("List locations on {}", node.id);
-                    let response = backoff::retry(
-                        || client.list_location_config(),
-                        is_fatal,
-                        1,
-                        5,
-                        &description,
-                        &self.cancel,
-                    )
-                    .await;
-
-                    (node.id, response)
+                    tracing::info!("Scanning shards on node {node}...");
+                    let timeout = Duration::from_secs(5);
+                    let response = node
+                        .with_client_retries(
+                            |client| async move { client.list_location_config().await },
+                            &self.config.jwt_token,
+                            1,
+                            5,
+                            timeout,
+                            &self.cancel,
+                        )
+                        .await;
+                    (node.get_id(), response)
                 }
             });
         }
@@ -662,19 +643,9 @@ impl Service {
             .list_nodes()
             .await?
             .into_iter()
-            .map(|n| Node {
-                id: NodeId(n.node_id as u64),
-                // At startup we consider a node offline until proven otherwise.
-                availability: NodeAvailability::Offline,
-                scheduling: NodeSchedulingPolicy::from_str(&n.scheduling_policy)
-                    .expect("Bad scheduling policy in DB"),
-                listen_http_addr: n.listen_http_addr,
-                listen_http_port: n.listen_http_port as u16,
-                listen_pg_addr: n.listen_pg_addr,
-                listen_pg_port: n.listen_pg_port as u16,
-            })
+            .map(Node::from_persistent)
             .collect::<Vec<_>>();
-        let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.id, n)).collect();
+        let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
 
         tracing::info!("Loading shards from database...");
@@ -701,15 +672,13 @@ impl Service {
             }
             for node_id in node_ids {
                 tracing::info!("Creating node {} in scheduler for tests", node_id);
-                let node = Node {
-                    id: NodeId(node_id as u64),
-                    availability: NodeAvailability::Active,
-                    scheduling: NodeSchedulingPolicy::Active,
-                    listen_http_addr: "".to_string(),
-                    listen_http_port: 123,
-                    listen_pg_addr: "".to_string(),
-                    listen_pg_port: 123,
-                };
+                let node = Node::new(
+                    NodeId(node_id as u64),
+                    "".to_string(),
+                    123,
+                    "".to_string(),
+                    123,
+                );
 
                 scheduler.node_upsert(&node);
             }
@@ -975,6 +944,12 @@ impl Service {
         // Ordering: we must persist generation number updates before making them visible in the in-memory state
         let incremented_generations = self.persistence.re_attach(reattach_req.node_id).await?;
 
+        tracing::info!(
+            node_id=%reattach_req.node_id,
+            "Incremented {} tenant shards' generations",
+            incremented_generations.len()
+        );
+
         // Apply the updated generation to our in-memory state
         let mut locked = self.inner.write().unwrap();
 
@@ -987,7 +962,6 @@ impl Service {
                 id: tenant_shard_id,
                 gen: new_gen.into().unwrap(),
             });
-
             // Apply the new generation number to our in-memory state
             let shard_state = locked.tenants.get_mut(&tenant_shard_id);
             let Some(shard_state) = shard_state else {
@@ -1023,6 +997,14 @@ impl Service {
                 if let Some(conf) = observed.conf.as_mut() {
                     conf.generation = new_gen.into();
                 }
+            } else {
+                // This node has no observed state for the shard: perhaps it was offline
+                // when the pageserver restarted.  Insert a None, so that the Reconciler
+                // will be prompted to learn the location's state before it makes changes.
+                shard_state
+                    .observed
+                    .locations
+                    .insert(reattach_req.node_id, ObservedStateLocation { conf: None });
             }
 
             // TODO: cancel/restart any running reconciliation for this tenant, it might be trying
@@ -1685,7 +1667,7 @@ impl Service {
                         .map_err(|e| {
                             ApiError::InternalServerError(anyhow::anyhow!(
                                 "Error doing time travel recovery for shard {tenant_shard_id} on node {}: {e}",
-                                node.id
+                                node
                             ))
                         })?;
             }
@@ -1739,10 +1721,7 @@ impl Service {
             // Secondary downloads are always advisory: if something fails, we nevertheless report success, so that whoever
             // is calling us will proceed with whatever migration they're doing, albeit with a slightly less warm cache
             // than they had hoped for.
-            tracing::warn!(
-                "Ignoring tenant secondary download error from pageserver {}: {e}",
-                node.id,
-            );
+            tracing::warn!("Ignoring tenant secondary download error from pageserver {node}: {e}",);
         }
 
         Ok(())
@@ -1780,13 +1759,11 @@ impl Service {
             // surface immediately as an error to our caller.
             let status = client.tenant_delete(tenant_shard_id).await.map_err(|e| {
                 ApiError::InternalServerError(anyhow::anyhow!(
-                    "Error deleting shard {tenant_shard_id} on node {}: {e}",
-                    node.id
+                    "Error deleting shard {tenant_shard_id} on node {node}: {e}",
                 ))
             })?;
             tracing::info!(
-                "Shard {tenant_shard_id} on node {}, delete returned {}",
-                node.id,
+                "Shard {tenant_shard_id} on node {node}, delete returned {}",
                 status
             );
             if status == StatusCode::ACCEPTED {
@@ -1885,10 +1862,9 @@ impl Service {
             create_req: TimelineCreateRequest,
         ) -> Result<TimelineInfo, ApiError> {
             tracing::info!(
-                "Creating timeline on shard {}/{}, attached to node {}",
+                "Creating timeline on shard {}/{}, attached to node {node}",
                 tenant_shard_id,
                 create_req.new_timeline_id,
-                node.id
             );
             let client = mgmt_api::Client::new(node.base_url(), jwt.as_deref());
 
@@ -2012,10 +1988,7 @@ impl Service {
             jwt: Option<String>,
         ) -> Result<StatusCode, ApiError> {
             tracing::info!(
-                "Deleting timeline on shard {}/{}, attached to node {}",
-                tenant_shard_id,
-                timeline_id,
-                node.id
+                "Deleting timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
             );
 
             let client = mgmt_api::Client::new(node.base_url(), jwt.as_deref());
@@ -2024,8 +1997,7 @@ impl Service {
                 .await
                 .map_err(|e| {
                     ApiError::InternalServerError(anyhow::anyhow!(
-                    "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {}: {e}",
-                    node.id
+                    "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
                 ))
                 })
         }
@@ -2126,14 +2098,7 @@ impl Service {
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while referenced");
 
-            result.push(TenantLocateResponseShard {
-                shard_id: *tenant_shard_id,
-                node_id,
-                listen_http_addr: node.listen_http_addr.clone(),
-                listen_http_port: node.listen_http_port,
-                listen_pg_addr: node.listen_pg_addr.clone(),
-                listen_pg_port: node.listen_pg_port,
-            });
+            result.push(node.shard_location(*tenant_shard_id));
 
             match &shard_params {
                 None => {
@@ -2324,7 +2289,7 @@ impl Service {
                     // populate the correct generation as part of its transaction, to protect us
                     // against racing with changes in the state of the parent.
                     generation: None,
-                    generation_pageserver: Some(target.node.id.0 as i64),
+                    generation_pageserver: Some(target.node.get_id().0 as i64),
                     placement_policy: serde_json::to_string(&policy).unwrap(),
                     // TODO: get the config out of the map
                     config: serde_json::to_string(&TenantConfig::default()).unwrap(),
@@ -2526,10 +2491,10 @@ impl Service {
                 )));
             };
 
-            if node.availability != NodeAvailability::Active {
+            if !node.is_available() {
                 // Warn but proceed: the caller may intend to manually adjust the placement of
                 // a shard even if the node is down, e.g. if intervening during an incident.
-                tracing::warn!("Migrating to an unavailable node ({})", node.id);
+                tracing::warn!("Migrating to unavailable node {node}");
             }
 
             let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
@@ -2784,11 +2749,7 @@ impl Service {
             if let Some(node) = locked.nodes.get(&register_req.node_id) {
                 // Note that we do not do a total equality of the struct, because we don't require
                 // the availability/scheduling states to agree for a POST to be idempotent.
-                if node.listen_http_addr == register_req.listen_http_addr
-                    && node.listen_http_port == register_req.listen_http_port
-                    && node.listen_pg_addr == register_req.listen_pg_addr
-                    && node.listen_pg_port == register_req.listen_pg_port
-                {
+                if node.registration_match(&register_req) {
                     tracing::info!(
                         "Node {} re-registered with matching address",
                         register_req.node_id
@@ -2812,16 +2773,14 @@ impl Service {
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
-        let new_node = Node {
-            id: register_req.node_id,
-            listen_http_addr: register_req.listen_http_addr,
-            listen_http_port: register_req.listen_http_port,
-            listen_pg_addr: register_req.listen_pg_addr,
-            listen_pg_port: register_req.listen_pg_port,
-            scheduling: NodeSchedulingPolicy::Filling,
-            // TODO: we shouldn't really call this Active until we've heartbeated it.
-            availability: NodeAvailability::Active,
-        };
+        let new_node = Node::new(
+            register_req.node_id,
+            register_req.listen_http_addr,
+            register_req.listen_http_port,
+            register_req.listen_pg_addr,
+            register_req.listen_pg_port,
+        );
+
         // TODO: idempotency if the node already exists in the database
         self.persistence.insert_node(&new_node).await?;
 
@@ -2866,29 +2825,14 @@ impl Service {
             ));
         };
 
-        let mut offline_transition = false;
-        let mut active_transition = false;
-
-        if let Some(availability) = &config_req.availability {
-            match (availability, &node.availability) {
-                (NodeAvailability::Offline, NodeAvailability::Active) => {
-                    tracing::info!("Node {} transition to offline", config_req.node_id);
-                    offline_transition = true;
-                }
-                (NodeAvailability::Active, NodeAvailability::Offline) => {
-                    tracing::info!("Node {} transition to active", config_req.node_id);
-                    active_transition = true;
-                }
-                _ => {
-                    tracing::info!("Node {} no change during config", config_req.node_id);
-                    // No change
-                }
-            };
-            node.availability = *availability;
-        }
+        let availability_transition = if let Some(availability) = &config_req.availability {
+            node.set_availability(*availability)
+        } else {
+            AvailabilityTransition::Unchanged
+        };
 
         if let Some(scheduling) = config_req.scheduling {
-            node.scheduling = scheduling;
+            node.set_scheduling(scheduling);
 
             // TODO: once we have a background scheduling ticker for fill/drain, kick it
             // to wake up and start working.
@@ -2899,74 +2843,80 @@ impl Service {
 
         let new_nodes = Arc::new(new_nodes);
 
-        if offline_transition {
-            let mut tenants_affected: usize = 0;
-            for (tenant_shard_id, tenant_state) in tenants {
-                if let Some(observed_loc) =
-                    tenant_state.observed.locations.get_mut(&config_req.node_id)
-                {
-                    // When a node goes offline, we set its observed configuration to None, indicating unknown: we will
-                    // not assume our knowledge of the node's configuration is accurate until it comes back online
-                    observed_loc.conf = None;
-                }
+        match availability_transition {
+            AvailabilityTransition::ToOffline => {
+                tracing::info!("Node {} transition to offline", config_req.node_id);
+                let mut tenants_affected: usize = 0;
+                for (tenant_shard_id, tenant_state) in tenants {
+                    if let Some(observed_loc) =
+                        tenant_state.observed.locations.get_mut(&config_req.node_id)
+                    {
+                        // When a node goes offline, we set its observed configuration to None, indicating unknown: we will
+                        // not assume our knowledge of the node's configuration is accurate until it comes back online
+                        observed_loc.conf = None;
+                    }
 
-                if tenant_state.intent.demote_attached(config_req.node_id) {
-                    tenant_state.sequence = tenant_state.sequence.next();
-                    match tenant_state.schedule(scheduler) {
-                        Err(e) => {
-                            // It is possible that some tenants will become unschedulable when too many pageservers
-                            // go offline: in this case there isn't much we can do other than make the issue observable.
-                            // TODO: give TenantState a scheduling error attribute to be queried later.
-                            tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", config_req.node_id);
-                        }
-                        Ok(()) => {
-                            if tenant_state
-                                .maybe_reconcile(
-                                    result_tx.clone(),
-                                    &new_nodes,
-                                    &compute_hook,
-                                    &self.config,
-                                    &self.persistence,
-                                    &self.gate,
-                                    &self.cancel,
-                                )
-                                .is_some()
-                            {
-                                tenants_affected += 1;
-                            };
+                    if tenant_state.intent.demote_attached(config_req.node_id) {
+                        tenant_state.sequence = tenant_state.sequence.next();
+                        match tenant_state.schedule(scheduler) {
+                            Err(e) => {
+                                // It is possible that some tenants will become unschedulable when too many pageservers
+                                // go offline: in this case there isn't much we can do other than make the issue observable.
+                                // TODO: give TenantState a scheduling error attribute to be queried later.
+                                tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", config_req.node_id);
+                            }
+                            Ok(()) => {
+                                if tenant_state
+                                    .maybe_reconcile(
+                                        result_tx.clone(),
+                                        &new_nodes,
+                                        &compute_hook,
+                                        &self.config,
+                                        &self.persistence,
+                                        &self.gate,
+                                        &self.cancel,
+                                    )
+                                    .is_some()
+                                {
+                                    tenants_affected += 1;
+                                };
+                            }
                         }
                     }
                 }
+                tracing::info!(
+                    "Launched {} reconciler tasks for tenants affected by node {} going offline",
+                    tenants_affected,
+                    config_req.node_id
+                )
             }
-            tracing::info!(
-                "Launched {} reconciler tasks for tenants affected by node {} going offline",
-                tenants_affected,
-                config_req.node_id
-            )
-        }
-
-        if active_transition {
-            // When a node comes back online, we must reconcile any tenant that has a None observed
-            // location on the node.
-            for tenant_state in locked.tenants.values_mut() {
-                if let Some(observed_loc) =
-                    tenant_state.observed.locations.get_mut(&config_req.node_id)
-                {
-                    if observed_loc.conf.is_none() {
-                        tenant_state.maybe_reconcile(
-                            result_tx.clone(),
-                            &new_nodes,
-                            &compute_hook,
-                            &self.config,
-                            &self.persistence,
-                            &self.gate,
-                            &self.cancel,
-                        );
+            AvailabilityTransition::ToActive => {
+                tracing::info!("Node {} transition to active", config_req.node_id);
+                // When a node comes back online, we must reconcile any tenant that has a None observed
+                // location on the node.
+                for tenant_state in locked.tenants.values_mut() {
+                    if let Some(observed_loc) =
+                        tenant_state.observed.locations.get_mut(&config_req.node_id)
+                    {
+                        if observed_loc.conf.is_none() {
+                            tenant_state.maybe_reconcile(
+                                result_tx.clone(),
+                                &new_nodes,
+                                &compute_hook,
+                                &self.config,
+                                &self.persistence,
+                                &self.gate,
+                                &self.cancel,
+                            );
+                        }
                     }
                 }
-            }
 
-            // TODO: in the background, we should balance work back onto this pageserver
+                // TODO: in the background, we should balance work back onto this pageserver
+            }
+            AvailabilityTransition::Unchanged => {
+                tracing::info!("Node {} no change during config", config_req.node_id);
+            }
         }
 
         locked.nodes = new_nodes;

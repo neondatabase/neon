@@ -1,6 +1,5 @@
 use crate::persistence::Persistence;
 use crate::service;
-use pageserver_api::controller_api::NodeAvailability;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
@@ -28,14 +27,15 @@ pub(super) struct Reconciler {
     pub(crate) shard: ShardIdentity,
     pub(crate) generation: Option<Generation>,
     pub(crate) intent: TargetState,
+
+    /// Nodes not referenced by [`Self::intent`], from which we should try
+    /// to detach this tenant shard.
+    pub(crate) detach: Vec<Node>,
+
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
 
     pub(crate) service_config: service::Config,
-
-    /// A snapshot of the pageservers as they were when we were asked
-    /// to reconcile.
-    pub(crate) pageservers: Arc<HashMap<NodeId, Node>>,
 
     /// A hook to notify the running postgres instances when we change the location
     /// of a tenant.  Use this via [`Self::compute_notify`] to update our failure flag
@@ -67,29 +67,37 @@ pub(super) struct Reconciler {
 /// and the TargetState is just the instruction for a particular Reconciler run.
 #[derive(Debug)]
 pub(crate) struct TargetState {
-    pub(crate) attached: Option<NodeId>,
-    pub(crate) secondary: Vec<NodeId>,
+    pub(crate) attached: Option<Node>,
+    pub(crate) secondary: Vec<Node>,
 }
 
 impl TargetState {
-    pub(crate) fn from_intent(intent: &IntentState) -> Self {
+    pub(crate) fn from_intent(nodes: &HashMap<NodeId, Node>, intent: &IntentState) -> Self {
         Self {
-            attached: *intent.get_attached(),
-            secondary: intent.get_secondary().clone(),
+            attached: intent.get_attached().map(|n| {
+                nodes
+                    .get(&n)
+                    .expect("Intent attached referenced non-existent node")
+                    .clone()
+            }),
+            secondary: intent
+                .get_secondary()
+                .iter()
+                .map(|n| {
+                    nodes
+                        .get(n)
+                        .expect("Intent secondary referenced non-existent node")
+                        .clone()
+                })
+                .collect(),
         }
-    }
-
-    fn all_pageservers(&self) -> Vec<NodeId> {
-        let mut result = self.secondary.clone();
-        if let Some(node_id) = &self.attached {
-            result.push(*node_id);
-        }
-        result
     }
 }
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ReconcileError {
+    #[error(transparent)]
+    Remote(#[from] mgmt_api::Error),
     #[error(transparent)]
     Notify(#[from] NotifyError),
     #[error("Cancelled")]
@@ -101,45 +109,83 @@ pub(crate) enum ReconcileError {
 impl Reconciler {
     async fn location_config(
         &mut self,
-        node_id: NodeId,
+        node: &Node,
         config: LocationConfig,
         flush_ms: Option<Duration>,
         lazy: bool,
-    ) -> anyhow::Result<()> {
-        let node = self
-            .pageservers
-            .get(&node_id)
-            .expect("Pageserver may not be removed while referenced");
+    ) -> Result<(), ReconcileError> {
+        self.observed
+            .locations
+            .insert(node.get_id(), ObservedStateLocation { conf: None });
+
+        // TODO: amend locations that use long-polling: they will hit this timeout.
+        let timeout = Duration::from_secs(25);
+
+        tracing::info!("location_config({node}) calling: {:?}", config);
+        let tenant_shard_id = self.tenant_shard_id;
+        let config_ref = &config;
+        match node
+            .with_client_retries(
+                |client| async move {
+                    let config = config_ref.clone();
+                    client
+                        .location_config(tenant_shard_id, config.clone(), flush_ms, lazy)
+                        .await
+                },
+                &self.service_config.jwt_token,
+                1,
+                3,
+                timeout,
+                &self.cancel,
+            )
+            .await
+        {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => return Err(e.into()),
+            None => return Err(ReconcileError::Cancel),
+        };
+        tracing::info!("location_config({node}) complete: {:?}", config);
 
         self.observed
             .locations
-            .insert(node.id, ObservedStateLocation { conf: None });
-
-        tracing::info!("location_config({}) calling: {:?}", node_id, config);
-        let client =
-            mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
-        client
-            .location_config(self.tenant_shard_id, config.clone(), flush_ms, lazy)
-            .await?;
-        tracing::info!("location_config({}) complete: {:?}", node_id, config);
-
-        self.observed
-            .locations
-            .insert(node.id, ObservedStateLocation { conf: Some(config) });
+            .insert(node.get_id(), ObservedStateLocation { conf: Some(config) });
 
         Ok(())
     }
 
+    fn get_node(&self, node_id: &NodeId) -> Option<&Node> {
+        if let Some(node) = self.intent.attached.as_ref() {
+            if node.get_id() == *node_id {
+                return Some(node);
+            }
+        }
+
+        if let Some(node) = self
+            .intent
+            .secondary
+            .iter()
+            .find(|n| n.get_id() == *node_id)
+        {
+            return Some(node);
+        }
+
+        if let Some(node) = self.detach.iter().find(|n| n.get_id() == *node_id) {
+            return Some(node);
+        }
+
+        None
+    }
+
     async fn maybe_live_migrate(&mut self) -> Result<(), ReconcileError> {
-        let destination = if let Some(node_id) = self.intent.attached {
-            match self.observed.locations.get(&node_id) {
+        let destination = if let Some(node) = &self.intent.attached {
+            match self.observed.locations.get(&node.get_id()) {
                 Some(conf) => {
                     // We will do a live migration only if the intended destination is not
                     // currently in an attached state.
                     match &conf.conf {
                         Some(conf) if conf.mode == LocationConfigMode::Secondary => {
                             // Fall through to do a live migration
-                            node_id
+                            node
                         }
                         None | Some(_) => {
                             // Attached or uncertain: don't do a live migration, proceed
@@ -152,7 +198,7 @@ impl Reconciler {
                 None => {
                     // Our destination is not attached: maybe live migrate if some other
                     // node is currently attached.  Fall through.
-                    node_id
+                    node
                 }
             }
         } else {
@@ -165,15 +211,13 @@ impl Reconciler {
         for (node_id, state) in &self.observed.locations {
             if let Some(observed_conf) = &state.conf {
                 if observed_conf.mode == LocationConfigMode::AttachedSingle {
-                    let node = self
-                        .pageservers
-                        .get(node_id)
-                        .expect("Nodes may not be removed while referenced");
                     // We will only attempt live migration if the origin is not offline: this
                     // avoids trying to do it while reconciling after responding to an HA failover.
-                    if !matches!(node.availability, NodeAvailability::Offline) {
-                        origin = Some(*node_id);
-                        break;
+                    if let Some(node) = self.get_node(node_id) {
+                        if node.is_available() {
+                            origin = Some(node.clone());
+                            break;
+                        }
                     }
                 }
             }
@@ -186,7 +230,7 @@ impl Reconciler {
 
         // We have an origin and a destination: proceed to do the live migration
         tracing::info!("Live migrating {}->{}", origin, destination);
-        self.live_migrate(origin, destination).await?;
+        self.live_migrate(origin, destination.clone()).await?;
 
         Ok(())
     }
@@ -194,13 +238,8 @@ impl Reconciler {
     async fn get_lsns(
         &self,
         tenant_shard_id: TenantShardId,
-        node_id: &NodeId,
+        node: &Node,
     ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
-        let node = self
-            .pageservers
-            .get(node_id)
-            .expect("Pageserver may not be removed while referenced");
-
         let client =
             mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
 
@@ -211,19 +250,27 @@ impl Reconciler {
             .collect())
     }
 
-    async fn secondary_download(&self, tenant_shard_id: TenantShardId, node_id: &NodeId) {
-        let node = self
-            .pageservers
-            .get(node_id)
-            .expect("Pageserver may not be removed while referenced");
-
-        let client =
-            mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
-
-        match client.tenant_secondary_download(tenant_shard_id).await {
-            Ok(()) => {}
-            Err(_) => {
-                tracing::info!("  (skipping, destination wasn't in secondary mode)")
+    async fn secondary_download(
+        &self,
+        tenant_shard_id: TenantShardId,
+        node: &Node,
+    ) -> Result<(), ReconcileError> {
+        match node
+            .with_client_retries(
+                |client| async move { client.tenant_secondary_download(tenant_shard_id).await },
+                &self.service_config.jwt_token,
+                1,
+                1,
+                Duration::from_secs(60),
+                &self.cancel,
+            )
+            .await
+        {
+            None => Err(ReconcileError::Cancel),
+            Some(Ok(_)) => Ok(()),
+            Some(Err(e)) => {
+                tracing::info!("  (skipping destination download: {})", e);
+                Ok(())
             }
         }
     }
@@ -231,17 +278,14 @@ impl Reconciler {
     async fn await_lsn(
         &self,
         tenant_shard_id: TenantShardId,
-        pageserver_id: &NodeId,
+        node: &Node,
         baseline: HashMap<TimelineId, Lsn>,
     ) -> anyhow::Result<()> {
         loop {
-            let latest = match self.get_lsns(tenant_shard_id, pageserver_id).await {
+            let latest = match self.get_lsns(tenant_shard_id, node).await {
                 Ok(l) => l,
                 Err(e) => {
-                    println!(
-                        "🕑 Can't get LSNs on pageserver {} yet, waiting ({e})",
-                        pageserver_id
-                    );
+                    tracing::info!("🕑 Can't get LSNs on node {node} yet, waiting ({e})",);
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
                 }
@@ -251,7 +295,7 @@ impl Reconciler {
             for (timeline_id, baseline_lsn) in &baseline {
                 match latest.get(timeline_id) {
                     Some(latest_lsn) => {
-                        println!("🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
+                        tracing::info!("🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
                         if latest_lsn < baseline_lsn {
                             any_behind = true;
                         }
@@ -266,7 +310,7 @@ impl Reconciler {
             }
 
             if !any_behind {
-                println!("✅ LSN caught up.  Proceeding...");
+                tracing::info!("✅ LSN caught up.  Proceeding...");
                 break;
             } else {
                 std::thread::sleep(Duration::from_millis(500));
@@ -278,11 +322,11 @@ impl Reconciler {
 
     pub async fn live_migrate(
         &mut self,
-        origin_ps_id: NodeId,
-        dest_ps_id: NodeId,
-    ) -> anyhow::Result<()> {
+        origin_ps: Node,
+        dest_ps: Node,
+    ) -> Result<(), ReconcileError> {
         // `maybe_live_migrate` is responsibble for sanity of inputs
-        assert!(origin_ps_id != dest_ps_id);
+        assert!(origin_ps.get_id() != dest_ps.get_id());
 
         fn build_location_config(
             shard: &ShardIdentity,
@@ -302,10 +346,7 @@ impl Reconciler {
             }
         }
 
-        tracing::info!(
-            "🔁 Switching origin pageserver {} to stale mode",
-            origin_ps_id
-        );
+        tracing::info!("🔁 Switching origin node {origin_ps} to stale mode",);
 
         // FIXME: it is incorrect to use self.generation here, we should use the generation
         // from the ObservedState of the origin pageserver (it might be older than self.generation)
@@ -316,26 +357,18 @@ impl Reconciler {
             self.generation,
             None,
         );
-        self.location_config(
-            origin_ps_id,
-            stale_conf,
-            Some(Duration::from_secs(10)),
-            false,
-        )
-        .await?;
+        self.location_config(&origin_ps, stale_conf, Some(Duration::from_secs(10)), false)
+            .await?;
 
-        let baseline_lsns = Some(self.get_lsns(self.tenant_shard_id, &origin_ps_id).await?);
+        let baseline_lsns = Some(self.get_lsns(self.tenant_shard_id, &origin_ps).await?);
 
         // If we are migrating to a destination that has a secondary location, warm it up first
-        if let Some(destination_conf) = self.observed.locations.get(&dest_ps_id) {
+        if let Some(destination_conf) = self.observed.locations.get(&dest_ps.get_id()) {
             if let Some(destination_conf) = &destination_conf.conf {
                 if destination_conf.mode == LocationConfigMode::Secondary {
-                    tracing::info!(
-                        "🔁 Downloading latest layers to destination pageserver {}",
-                        dest_ps_id,
-                    );
-                    self.secondary_download(self.tenant_shard_id, &dest_ps_id)
-                        .await;
+                    tracing::info!("🔁 Downloading latest layers to destination node {dest_ps}",);
+                    self.secondary_download(self.tenant_shard_id, &dest_ps)
+                        .await?;
                 }
             }
         }
@@ -343,7 +376,7 @@ impl Reconciler {
         // Increment generation before attaching to new pageserver
         self.generation = Some(
             self.persistence
-                .increment_generation(self.tenant_shard_id, dest_ps_id)
+                .increment_generation(self.tenant_shard_id, dest_ps.get_id())
                 .await?,
         );
 
@@ -355,23 +388,23 @@ impl Reconciler {
             None,
         );
 
-        tracing::info!("🔁 Attaching to pageserver {}", dest_ps_id);
-        self.location_config(dest_ps_id, dest_conf, None, false)
+        tracing::info!("🔁 Attaching to pageserver {dest_ps}");
+        self.location_config(&dest_ps, dest_conf, None, false)
             .await?;
 
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
-            self.await_lsn(self.tenant_shard_id, &dest_ps_id, baseline)
+            self.await_lsn(self.tenant_shard_id, &dest_ps, baseline)
                 .await?;
         }
 
-        tracing::info!("🔁 Notifying compute to use pageserver {}", dest_ps_id);
+        tracing::info!("🔁 Notifying compute to use pageserver {dest_ps}");
 
         // During a live migration it is unhelpful to proceed if we couldn't notify compute: if we detach
         // the origin without notifying compute, we will render the tenant unavailable.
         while let Err(e) = self.compute_notify().await {
             match e {
-                NotifyError::Fatal(_) => return Err(anyhow::anyhow!(e)),
+                NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
                 _ => {
                     tracing::warn!(
                         "Live migration blocked by compute notification error, retrying: {e}"
@@ -389,22 +422,19 @@ impl Reconciler {
             None,
             Some(LocationConfigSecondary { warm: true }),
         );
-        self.location_config(origin_ps_id, origin_secondary_conf.clone(), None, false)
+        self.location_config(&origin_ps, origin_secondary_conf.clone(), None, false)
             .await?;
         // TODO: we should also be setting the ObservedState on earlier API calls, in case we fail
         // partway through.  In fact, all location conf API calls should be in a wrapper that sets
         // the observed state to None, then runs, then sets it to what we wrote.
         self.observed.locations.insert(
-            origin_ps_id,
+            origin_ps.get_id(),
             ObservedStateLocation {
                 conf: Some(origin_secondary_conf),
             },
         );
 
-        println!(
-            "🔁 Switching to AttachedSingle mode on pageserver {}",
-            dest_ps_id
-        );
+        tracing::info!("🔁 Switching to AttachedSingle mode on node {dest_ps}",);
         let dest_final_conf = build_location_config(
             &self.shard,
             &self.config,
@@ -412,16 +442,61 @@ impl Reconciler {
             self.generation,
             None,
         );
-        self.location_config(dest_ps_id, dest_final_conf.clone(), None, false)
+        self.location_config(&dest_ps, dest_final_conf.clone(), None, false)
             .await?;
         self.observed.locations.insert(
-            dest_ps_id,
+            dest_ps.get_id(),
             ObservedStateLocation {
                 conf: Some(dest_final_conf),
             },
         );
 
-        println!("✅ Migration complete");
+        tracing::info!("✅ Migration complete");
+
+        Ok(())
+    }
+
+    async fn maybe_refresh_observed(&mut self) -> Result<(), ReconcileError> {
+        // If the attached node has uncertain state, read it from the pageserver before proceeding: this
+        // is important to avoid spurious generation increments.
+        //
+        // We don't need to do this for secondary/detach locations because it's harmless to just PUT their
+        // location conf, whereas for attached locations it can interrupt clients if we spuriously destroy/recreate
+        // the `Timeline` object in the pageserver.
+
+        let Some(attached_node) = self.intent.attached.as_ref() else {
+            // Nothing to do
+            return Ok(());
+        };
+
+        if matches!(
+            self.observed.locations.get(&attached_node.get_id()),
+            Some(ObservedStateLocation { conf: None })
+        ) {
+            let tenant_shard_id = self.tenant_shard_id;
+            let observed_conf = match attached_node
+                .with_client_retries(
+                    |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.service_config.jwt_token,
+                    1,
+                    1,
+                    Duration::from_secs(5),
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Ok(observed)) => observed,
+                Some(Err(e)) => return Err(e.into()),
+                None => return Err(ReconcileError::Cancel),
+            };
+            tracing::info!("Scanned location configuration on {attached_node}: {observed_conf:?}");
+            self.observed.locations.insert(
+                attached_node.get_id(),
+                ObservedStateLocation {
+                    conf: observed_conf,
+                },
+            );
+        }
 
         Ok(())
     }
@@ -433,14 +508,14 @@ impl Reconciler {
     /// general case reconciliation where we walk through the intent by pageserver
     /// and call out to the pageserver to apply the desired state.
     pub(crate) async fn reconcile(&mut self) -> Result<(), ReconcileError> {
-        // TODO: if any of self.observed is None, call to remote pageservers
-        // to learn correct state.
+        // Prepare: if we have uncertain `observed` state for our would-be attachement location, then refresh it
+        self.maybe_refresh_observed().await?;
 
         // Special case: live migration
         self.maybe_live_migrate().await?;
 
         // If the attached pageserver is not attached, do so now.
-        if let Some(node_id) = self.intent.attached {
+        if let Some(node) = self.intent.attached.as_ref() {
             // If we are in an attached policy, then generation must have been set (null generations
             // are only present when a tenant is initially loaded with a secondary policy)
             debug_assert!(self.generation.is_some());
@@ -451,10 +526,10 @@ impl Reconciler {
             };
 
             let mut wanted_conf = attached_location_conf(generation, &self.shard, &self.config);
-            match self.observed.locations.get(&node_id) {
+            match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
-                    tracing::info!(%node_id, "Observed configuration already correct.")
+                    tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
                 }
                 observed => {
                     // In all cases other than a matching observed configuration, we will
@@ -492,16 +567,21 @@ impl Reconciler {
                     if increment_generation {
                         let generation = self
                             .persistence
-                            .increment_generation(self.tenant_shard_id, node_id)
+                            .increment_generation(self.tenant_shard_id, node.get_id())
                             .await?;
                         self.generation = Some(generation);
                         wanted_conf.generation = generation.into();
                     }
-                    tracing::info!(%node_id, "Observed configuration requires update.");
+                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+
+                    // Because `node` comes from a ref to &self, clone it before calling into a &mut self
+                    // function: this could be avoided by refactoring the state mutated by location_config into
+                    // a separate type to Self.
+                    let node = node.clone();
+
                     // Use lazy=true, because we may run many of Self concurrently, and do not want to
                     // overload the pageserver with logical size calculations.
-                    self.location_config(node_id, wanted_conf, None, true)
-                        .await?;
+                    self.location_config(&node, wanted_conf, None, true).await?;
                     self.compute_notify().await?;
                 }
             }
@@ -510,33 +590,27 @@ impl Reconciler {
         // Configure secondary locations: if these were previously attached this
         // implicitly downgrades them from attached to secondary.
         let mut changes = Vec::new();
-        for node_id in &self.intent.secondary {
+        for node in &self.intent.secondary {
             let wanted_conf = secondary_location_conf(&self.shard, &self.config);
-            match self.observed.locations.get(node_id) {
+            match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
-                    tracing::info!(%node_id, "Observed configuration already correct.")
+                    tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
                 }
                 _ => {
                     // In all cases other than a matching observed configuration, we will
                     // reconcile this location.
-                    tracing::info!(%node_id, "Observed configuration requires update.");
-                    changes.push((*node_id, wanted_conf))
+                    tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+                    changes.push((node.clone(), wanted_conf))
                 }
             }
         }
 
         // Detach any extraneous pageservers that are no longer referenced
         // by our intent.
-        let all_pageservers = self.intent.all_pageservers();
-        for node_id in self.observed.locations.keys() {
-            if all_pageservers.contains(node_id) {
-                // We are only detaching pageservers that aren't used at all.
-                continue;
-            }
-
+        for node in &self.detach {
             changes.push((
-                *node_id,
+                node.clone(),
                 LocationConfig {
                     mode: LocationConfigMode::Detached,
                     generation: None,
@@ -549,11 +623,11 @@ impl Reconciler {
             ));
         }
 
-        for (node_id, conf) in changes {
+        for (node, conf) in changes {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
             }
-            self.location_config(node_id, conf, None, false).await?;
+            self.location_config(&node, conf, None, false).await?;
         }
 
         Ok(())
@@ -562,12 +636,12 @@ impl Reconciler {
     pub(crate) async fn compute_notify(&mut self) -> Result<(), NotifyError> {
         // Whenever a particular Reconciler emits a notification, it is always notifying for the intended
         // destination.
-        if let Some(node_id) = self.intent.attached {
+        if let Some(node) = &self.intent.attached {
             let result = self
                 .compute_hook
                 .notify(
                     self.tenant_shard_id,
-                    node_id,
+                    node.get_id(),
                     self.shard.stripe_size,
                     &self.cancel,
                 )
@@ -576,7 +650,7 @@ impl Reconciler {
                 // It is up to the caller whether they want to drop out on this error, but they don't have to:
                 // in general we should avoid letting unavailability of the cloud control plane stop us from
                 // making progress.
-                tracing::warn!("Failed to notify compute of attached pageserver {node_id}: {e}");
+                tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
                 // Set this flag so that in our ReconcileResult we will set the flag on the shard that it
                 // needs to retry at some point.
                 self.compute_notify_failure = true;

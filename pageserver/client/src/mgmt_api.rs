@@ -7,7 +7,7 @@ use utils::{
 
 pub mod util;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Client {
     mgmt_api_endpoint: String,
     authorization_header: Option<String>,
@@ -24,6 +24,9 @@ pub enum Error {
 
     #[error("pageserver API: {1}")]
     ApiError(StatusCode, String),
+
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -280,6 +283,21 @@ impl Client {
 
     pub async fn list_location_config(&self) -> Result<LocationConfigListResponse> {
         let path = format!("{}/v1/location_config", self.mgmt_api_endpoint);
+        self.request(Method::GET, &path, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn get_location_config(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<Option<LocationConfig>> {
+        let path = format!(
+            "{}/v1/location_config/{tenant_shard_id}",
+            self.mgmt_api_endpoint
+        );
         self.request(Method::GET, &path, ())
             .await?
             .json()
