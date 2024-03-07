@@ -53,7 +53,7 @@ RUN set -e \
       --bin pagectl  \
       --bin safekeeper  \
       --bin storage_broker  \
-      --bin attachment_service  \
+      --bin storage_controller  \
       --bin proxy  \
       --bin neon_local \
       --locked --release \
