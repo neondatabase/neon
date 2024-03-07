@@ -810,7 +810,7 @@ DO $$
 DECLARE
     role_name TEXT;
 BEGIN
-    FOR r IN SELECT rolname FROM pg_roles WHERE rolreplication IS TRUE
+    FOR role_name IN SELECT rolname FROM pg_roles WHERE rolreplication IS TRUE
     LOOP
         RAISE NOTICE 'EXECUTING ALTER ROLE % NOREPLICATION', quote_ident(role_name);
         EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOREPLICATION';
