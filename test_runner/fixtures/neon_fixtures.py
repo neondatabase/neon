@@ -517,9 +517,9 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self):
+    def start(self, register_pageservers=False):
         assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start()
+        self.env.start(register_pageservers=register_pageservers)
 
     def init_start(
         self,
@@ -1110,7 +1110,7 @@ class NeonEnv:
         log.info(f"Config: {cfg}")
         self.neon_cli.init(cfg, force=config.config_init_force)
 
-    def start(self):
+    def start(self, register_pageservers=False):
         # Attachment service starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.attachment_service.start()
@@ -1121,6 +1121,11 @@ class NeonEnv:
         # Wait for attachment service readiness to prevent unnecessary post start-up
         # reconcile.
         wait_until(30, 1, attachment_service_ready)
+
+        if register_pageservers:
+            # Special case for forward compat tests, this can be removed later.
+            for pageserver in self.pageservers:
+                self.attachment_service.node_register(pageserver)
 
         # Start up broker, pageserver and all safekeepers
         futs = []
