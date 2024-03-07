@@ -4,7 +4,6 @@ import statistics
 import threading
 import time
 import timeit
-import uuid
 from contextlib import closing
 from typing import List
 
@@ -137,9 +136,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     startup_line = "INFO version: git(-env)?:"
 
     # find the first line of the log file so we can find the next start later
-    _, first_start = wait_until(
-        5, 1, lambda: env.pageserver.assert_log_contains(startup_line)
-    )
+    _, first_start = wait_until(5, 1, lambda: env.pageserver.assert_log_contains(startup_line))
 
     # start without gc so we can time compaction with less noise; use shorter
     # period for compaction so it starts earlier
@@ -158,14 +155,6 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     )
     env.pageserver.quiesce_tenants()
 
-    http_client = env.pageserver.http_client()
-    marker = uuid.uuid4().hex
-    http_client.post_tracing_event("info", marker)
-
-    _, position = wait_until(
-        10, 1, lambda: env.pageserver.assert_log_contains(marker, second_start)
-    )
-
     wait_and_record_startup_metrics(env.pageserver, neon_compare.zenbenchmark, "restart_after")
 
     # wait for compaction to complete, which most likely has already done so multiple times
@@ -173,7 +162,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
         30,
         1,
         lambda: env.pageserver.assert_log_contains(
-            f".*tenant_id={env.initial_tenant}.*: compaction iteration complete.*", position
+            f".*tenant_id={env.initial_tenant}.*: compaction iteration complete.*", second_start
         ),
     )
     needle = re.search(" elapsed_ms=([0-9]+)", msg)
