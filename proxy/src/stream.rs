@@ -1,5 +1,6 @@
 use crate::config::TlsServerEndPoint;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
+use crate::metrics::TLS_HANDSHAKE_FAILURES;
 use bytes::BytesMut;
 
 use pq_proto::framed::{ConnectionError, Framed};
@@ -224,7 +225,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
     /// If possible, upgrade raw stream into a secure TLS-based stream.
     pub async fn upgrade(self, cfg: Arc<ServerConfig>) -> Result<TlsStream<S>, StreamUpgradeError> {
         match self {
-            Stream::Raw { raw } => Ok(tokio_rustls::TlsAcceptor::from(cfg).accept(raw).await?),
+            Stream::Raw { raw } => Ok(tokio_rustls::TlsAcceptor::from(cfg)
+                .accept(raw)
+                .await
+                .inspect_err(|_| TLS_HANDSHAKE_FAILURES.inc())?),
             Stream::Tls { .. } => Err(StreamUpgradeError::AlreadyTls),
         }
     }
