@@ -52,7 +52,7 @@ fn generate_certs(
     Ok((
         pki_types::CertificateDer::from(ca.serialize_der()?),
         pki_types::CertificateDer::from(cert.serialize_der_with_signer(&ca)?),
-        pki_types::PrivateKeyDer::Pkcs1(cert.serialize_private_key_der().into()),
+        pki_types::PrivateKeyDer::Pkcs8(cert.serialize_private_key_der().into()),
     ))
 }
 
