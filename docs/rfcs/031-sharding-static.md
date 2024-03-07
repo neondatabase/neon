@@ -140,7 +140,7 @@ The properties we want from our Key->Shard mapping are:
   in data placement.
 
 To accomplish this, the blknum is used to select a stripe, and stripes are
-assigned to shards in a pseudorandom order via a hash.  The motivation for
+assigned to shards in a pseudorandom order via a hash. The motivation for
 pseudo-random distribution (rather than sequential mapping of stripe to shard)
 is to avoid I/O hotspots when sequentially reading multiple relations: we don't want
 all relations' stripes to touch pageservers in the same order.
@@ -153,12 +153,13 @@ To map a `Key` to a shard:
 - The total hash modulo the shard count gives the shard holding this key.
 
 Why don't we use the other fields in the Key?
+
 - We ignore `forknum` for key mapping, because it distinguishes different classes of data
-in the same relation, and we would like to keep the data in a relation together.
-- We would like to use spcNode and dbNode, but cannot.  Postgres database creation operations can refer to an existing database as a template, such that the created
-database's blocks differ only by spcNode and dbNode from the original.  To enable running
-this type of creation without cross-pageserver communication, we must ensure that these
-blocks map to the same shard -- we do this by excluding spcNode and dbNode from the hash.
+  in the same relation, and we would like to keep the data in a relation together.
+- We would like to use spcNode and dbNode, but cannot. Postgres database creation operations can refer to an existing database as a template, such that the created
+  database's blocks differ only by spcNode and dbNode from the original. To enable running
+  this type of creation without cross-pageserver communication, we must ensure that these
+  blocks map to the same shard -- we do this by excluding spcNode and dbNode from the hash.
 
 ### Data placement examples
 
@@ -198,7 +199,7 @@ to a particular shard:
 - Shard count
 - Shard index
 
-This structure's size is constant.  Note that if we had used a differnet key
+This structure's size is constant. Note that if we had used a differnet key
 mapping scheme such as consistent hashing with explicit hash ranges assigned
 to each shard, then the ShardIdentity's size would grow with the shard count: the simpler
 key mapping scheme used here enables a small fixed size ShardIdentity.
@@ -344,12 +345,12 @@ write bandwidth than average.
 be changed. This causes excessive sharding for most small tenants, and an upper
 bound on scale for very large tenants.
 
-To address `A`, a _splitting_ feature will later be added. One shard can split its
+To address this, a _splitting_ feature will later be added. One shard can split its
 data into a number of children by doing a special compaction operation to generate
-image layers broken up child-shard-wise, and then writing out an index*part.json for
+image layers broken up child-shard-wise, and then writing out an `index_part.json` for
 each child. This will then require external coordination (by the control plane) to
 safely attach these new child shards and then move them around to distribute work.
-The opposite \_merging* operation can also be imagined, but is unlikely to be implemented:
+The opposite _merging_ operation can also be imagined, but is unlikely to be implemented:
 once a Tenant has been sharded, the marginal efficiency benefit of merging is unlikely to justify
 the risk/complexity of implementing such a rarely-encountered scenario.
 
