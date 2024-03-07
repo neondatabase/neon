@@ -4615,10 +4615,7 @@ mod tests {
         drop(guard);
 
         // Pick a big LSN such that we query over all the changes.
-        // Technically, u64::MAX - 1 is the largest LSN supported by the read path,
-        // but there seems to be a bug on the non-vectored search path which surfaces
-        // in that case.
-        let reads_lsn = Lsn(u64::MAX - 1000);
+        let reads_lsn = Lsn(u64::MAX - 1);
 
         for read in reads {
             info!("Doing vectored read on {:?}", read);
@@ -4999,7 +4996,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_at_max_lsn() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_get_vectored")?;
+        let harness = TenantHarness::create("test_read_at_max_lsn")?;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
