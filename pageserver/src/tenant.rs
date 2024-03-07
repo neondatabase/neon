@@ -4690,7 +4690,7 @@ mod tests {
 
         current_lsn += 0x100;
 
-        let writer = current_timeline.writer().await;
+        let mut writer = current_timeline.writer().await;
         writer
             .put(
                 gap_at_key,
@@ -4729,7 +4729,7 @@ mod tests {
 
             current_lsn += 0x10;
 
-            let writer = child_timeline.writer().await;
+            let mut writer = child_timeline.writer().await;
             writer
                 .put(
                     current_key,
