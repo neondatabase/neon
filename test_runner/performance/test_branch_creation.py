@@ -145,7 +145,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     # period for compaction so it starts earlier
     env.pageserver.start(
         overrides=(
-            "--pageserver-config-override=tenant_config={ compaction_period = '1s', gc_period = '0s' }",
+            "--pageserver-config-override=tenant_config={ compaction_period = '3s', gc_period = '0s' }",
         ),
         # this does print more than we want, but the number should be comparable between runs
         extra_env_vars={
@@ -168,6 +168,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
 
     wait_and_record_startup_metrics(env.pageserver, neon_compare.zenbenchmark, "restart_after")
 
+    # wait for compaction to complete, which most likely has already done so multiple times
     msg, _ = wait_until(
         30,
         1,
