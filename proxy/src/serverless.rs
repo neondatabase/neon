@@ -6,6 +6,7 @@ mod backend;
 mod conn_pool;
 mod json;
 mod sql_over_http;
+pub mod tls_listener;
 mod websocket;
 
 pub use conn_pool::GlobalConnPoolOptions;

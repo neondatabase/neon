@@ -10,14 +10,14 @@ use std::{
 };
 
 use bytes::{Buf, BytesMut};
+use hyper::server::accept::Accept;
 use hyper::server::conn::{AddrIncoming, AddrStream};
 use metrics::IntCounterPairGuard;
 use pin_project_lite::pin_project;
-use tls_listener::AsyncAccept;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use uuid::Uuid;
 
-use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
+use crate::{metrics::NUM_CLIENT_CONNECTION_GAUGE, serverless::tls_listener::AsyncAccept};
 
 pub struct ProxyProtocolAccept {
     pub incoming: AddrIncoming,
