@@ -20,8 +20,8 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
 use crate::context::RequestMonitoring;
-use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
-use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
+use crate::metrics::TLS_HANDSHAKE_FAILURES;
+use crate::protocol2::{ProxyProtocolAccept, WithClientIp, WithConnectionGuard};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::{cancellation::CancellationHandler, config::ProxyConfig};
@@ -98,6 +98,7 @@ pub async fn task_main(
     let _ = addr_incoming.set_nodelay(true);
     let addr_incoming = ProxyProtocolAccept {
         incoming: addr_incoming,
+        protocol: "http",
     };
 
     let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
@@ -105,18 +106,31 @@ pub async fn task_main(
 
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
         if let Err(err) = conn {
-            error!("failed to accept TLS connection for websockets: {err:?}");
+            error!(
+                protocol = "http",
+                "failed to accept TLS connection: {err:?}"
+            );
+            TLS_HANDSHAKE_FAILURES.inc();
             ready(false)
         } else {
+            info!(protocol = "http", "accepted new TLS connection");
             ready(true)
         }
     });
 
     let make_svc = hyper::service::make_service_fn(
-        |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
-            let (io, _) = stream.get_ref();
-            let client_addr = io.client_addr();
-            let remote_addr = io.inner.remote_addr();
+        |stream: &tokio_rustls::server::TlsStream<
+            WithConnectionGuard<WithClientIp<AddrStream>>,
+        >| {
+            let (conn, _) = stream.get_ref();
+            let gauge = conn
+                .gauge
+                .lock()
+                .expect("lock should not be poisoned")
+                .take()
+                .expect("gauge should be set on connection start");
+            let client_addr = conn.inner.client_addr();
+            let remote_addr = conn.inner.inner.remote_addr();
             let backend = backend.clone();
             let ws_connections = ws_connections.clone();
             let endpoint_rate_limiter = endpoint_rate_limiter.clone();
@@ -127,8 +141,8 @@ pub async fn task_main(
                     None if config.require_client_ip => bail!("missing required client ip"),
                     None => remote_addr,
                 };
-                Ok(MetricService::new(hyper::service::service_fn(
-                    move |req: Request<Body>| {
+                Ok(MetricService::new(
+                    hyper::service::service_fn(move |req: Request<Body>| {
                         let backend = backend.clone();
                         let ws_connections = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
@@ -149,8 +163,9 @@ pub async fn task_main(
                                 .map_or_else(|e| e.into_response(), |r| r),
                             )
                         }
-                    },
-                )))
+                    }),
+                    gauge,
+                ))
             }
         },
     );
@@ -172,13 +187,8 @@ struct MetricService<S> {
 }
 
 impl<S> MetricService<S> {
-    fn new(inner: S) -> MetricService<S> {
-        MetricService {
-            inner,
-            _gauge: NUM_CLIENT_CONNECTION_GAUGE
-                .with_label_values(&["http"])
-                .guard(),
-        }
+    fn new(inner: S, _gauge: IntCounterPairGuard) -> MetricService<S> {
+        MetricService { inner, _gauge }
     }
 }
 
