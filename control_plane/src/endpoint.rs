@@ -656,7 +656,7 @@ impl Endpoint {
         // Wait for it to start
         let mut attempt = 0;
         const ATTEMPT_INTERVAL: Duration = Duration::from_millis(100);
-        const MAX_ATTEMPTS: u32 = 10 * 30; // Wait up to 30 s
+        const MAX_ATTEMPTS: u32 = 10 * 90; // Wait up to 1.5 min
         loop {
             attempt += 1;
             match self.get_status().await {
