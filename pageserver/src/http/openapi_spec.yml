@@ -1314,10 +1314,11 @@ components:
     TenantLocationConfigRequest:
       type: object
       required:
-        - tenant_id
+        - mode
       properties:
         tenant_id:
           type: string
+          description: Only used for the storage controller.
         mode:
           type: string
           enum: ["AttachedSingle", "AttachedMulti", "AttachedStale", "Secondary", "Detached"]
