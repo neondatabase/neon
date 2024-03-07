@@ -1544,12 +1544,11 @@ impl<'a> DatadirModification<'a> {
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            let prev_pending_updates = std::mem::take(&mut self.pending_updates);
-
             // The put_batch call below expects expects the inputs to be sorted by Lsn,
             // so we do that first.
-            let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = prev_pending_updates
-                .into_iter()
+            let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = self
+                .pending_updates
+                .drain()
                 .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (key, lsn, val)))
                 .kmerge_by(|lhs, rhs| lhs.1 .0 < rhs.1 .0)
                 .collect();
