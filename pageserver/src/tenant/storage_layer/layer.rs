@@ -913,7 +913,7 @@ impl LayerInner {
                 let result = client.download_layer_file(
                     &this.desc.filename(),
                     &this.metadata(),
-                    &crate::task_mgr::shutdown_token()
+                    &timeline.cancel
                 )
                 .await;
 
@@ -933,10 +933,11 @@ impl LayerInner {
                         );
 
                         let backoff = std::time::Duration::from_secs_f64(backoff);
+                        let cancel = crate::task_mgr::shutdown_token();
 
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {},
-                            _ = crate::task_mgr::shutdown_token().cancelled_owned() => {},
+                            _ = cancel.cancelled() => {},
                             _ = timeline.cancel.cancelled() => {},
                         };
 
