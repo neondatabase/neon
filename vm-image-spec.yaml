@@ -142,6 +142,32 @@ files:
         query: |
           select datname, state, count(*) as count from pg_stat_activity where state <> '' group by datname, state;
 
+      - metric_name: pg_stats_userdb
+        type: gauge
+        help: 'Stats for the oldest non-system db'
+        key_labels:
+          - datname
+        value_label: kind
+        values:
+          - db_size
+          - deadlocks
+          # Rows
+          - inserted
+          - updated
+          - deleted
+        query: |
+          select pg_database_size(datname) as db_size, deadlocks,
+                 tup_inserted as inserted, tup_updated as updated, tup_deleted as deleted,
+                 datname
+            from pg_stat_database
+           where datname IN (
+             select datname
+               from pg_database
+              where datname <> 'postgres' and not datistemplate
+              order by oid
+              limit 1
+           );
+
 build: |
   # Build cgroup-tools
   #
