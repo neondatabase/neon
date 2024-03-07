@@ -85,7 +85,7 @@ to remember:
   index may reference layers that were created by another shard.
 - Local tenant shard directories include the shard index. All layers downloaded by
   a tenant shard are stored in this shard-prefixed path, even if those layers were
-  initially created by another shard: tenant shards do read and write one anothers'
+  initially created by another shard: tenant shards do not read and write one anothers'
   paths.
 - The `Tenant` pageserver type represents one tenant _shard_, not the whole tenant.
   This is for historical reasons and will be cleaned up in future, but the existing
@@ -153,7 +153,8 @@ Once child shards are running and have caught up with WAL ingest, we no longer
 need the parent shard. Note that clients may still be using it -- when we
 shut it down, any page_service handlers will also shut down, causing clients
 to disconnect. When the client reconnects, it will re-lookup the tenant,
-and hit the child shard instead of the parent.
+and hit the child shard instead of the parent (shard lookup from page_service
+should bias toward higher ShardCount shards).
 
 Note that at this stage the page service client has not yet been notified of
 any split. In the trivial single split example:
@@ -242,7 +243,8 @@ modifications:
 - Parent shards' layers must not have been deleted: this property will come "for free" when
   we first roll out sharding, by simply not implementing deletion of parent layers after
   a split. When we do implement such deletion (see "Cleaning up parent-shard layers" in the
-  Optimizations section)
+  Optimizations section), it should apply a TTL to layers such that we have a
+  defined walltime window in which rollback will be possible.
 
 The storage controller will expose an API for rolling back a complete split, for use
 in the field if we encounter some critical bug with a post-split tenant.
@@ -262,11 +264,11 @@ of view. Recall that if _any_ pageserver fails to split, the overall split opera
 complete, and all shards must remain pinned to their current pageserver locations until the
 split is done.
 
-Because splitting is an expensive operation, it is generally preferable to "fail
-forward" rather than rolling back the split to wait for a retry. Therefore if the split
-operation encounters retryable API errors (e.g. 503, connection timeout) from a pageserver,
-it will retry a finite number of times rather than giving up right away. Only if it exceeds
-a set retry count will the storage controller opt to roll back the split in progress.
+The pageserver API calls during splitting will retry on transient errors, so that
+short availability gaps do not result in a failure of the overall operation. The
+split in progress will be automatically rolled back if the threshold for API
+retries is reached (e.g. if a pageserver stays offline for longer than a typical
+restart).
 
 #### On Storage Controller Restart
 
@@ -301,7 +303,7 @@ goes to Offline) while a split is in progress, the splitting operation will roll
 during the roll back it will skip any API calls to the offline pageserver. If the offline
 pageserver becomes available again, any stale locations will be cleaned up via the normal reconciliation process (the `/re-attach` API).
 
-### Splitting secondary locations
+### Handling secondary locations
 
 For correctness, it is not necessary to split secondary locations. We can simply detach
 the secondary locations for parent shards, and then attach new secondary locations
