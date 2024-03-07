@@ -4646,6 +4646,8 @@ mod tests {
     // The test generates timelines that look like the diagram below.
     // We leave a gap in one of the L1 layers at `gap_at_key` (`/` in the diagram).
     // The reconstruct data for that key lies in the ancestor timeline (`X` in the diagram).
+    //
+    // ```
     //-------------------------------+
     //                          ...  |
     //               [   L1   ]      |
@@ -4654,6 +4656,7 @@ mod tests {
     // ------------------------------+
     //     [ X L1   ]                | Parent Timeline
     // ------------------------------+
+    // ```
     #[tokio::test]
     async fn test_get_vectored_key_gap() -> anyhow::Result<()> {
         let tenant_conf = TenantConf {
