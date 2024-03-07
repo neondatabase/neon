@@ -764,6 +764,26 @@ impl ComputeNode {
         Ok((pg, logs_handle))
     }
 
+    /// Do post configuration of the already started Postgres. This function spawns a background thread to
+    /// configure the database after applying the compute spec. Currently, it upgrades the neon extension
+    /// version. In the future, it may upgrade all 3rd-party extensions.
+    #[instrument(skip_all)]
+    pub fn post_apply_config(&self) -> Result<()> {
+        let connstr = self.connstr.clone();
+        thread::spawn(move || {
+            let func = || {
+                let mut client = Client::connect(connstr.as_str(), NoTls)?;
+                handle_neon_extension_upgrade(&mut client)
+                    .context("handle_neon_extension_upgrade")?;
+                Ok::<_, anyhow::Error>(())
+            };
+            if let Err(err) = func() {
+                error!("error while post_apply_config: {err:#}");
+            }
+        });
+        Ok(())
+    }
+
     /// Do initial configuration of the already started Postgres.
     #[instrument(skip_all)]
     pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
@@ -998,18 +1018,21 @@ impl ComputeNode {
         let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
 
         let config_time = Utc::now();
-        if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
-            let pgdata_path = Path::new(&self.pgdata);
-            // temporarily reset max_cluster_size in config
-            // to avoid the possibility of hitting the limit, while we are applying config:
-            // creating new extensions, roles, etc...
-            config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
-            self.pg_reload_conf()?;
+        if pspec.spec.mode == ComputeMode::Primary {
+            if !pspec.spec.skip_pg_catalog_updates {
+                let pgdata_path = Path::new(&self.pgdata);
+                // temporarily reset max_cluster_size in config
+                // to avoid the possibility of hitting the limit, while we are applying config:
+                // creating new extensions, roles, etc...
+                config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
+                self.pg_reload_conf()?;
 
-            self.apply_config(&compute_state)?;
+                self.apply_config(&compute_state)?;
 
-            config::compute_ctl_temp_override_remove(pgdata_path)?;
-            self.pg_reload_conf()?;
+                config::compute_ctl_temp_override_remove(pgdata_path)?;
+                self.pg_reload_conf()?;
+            }
+            self.post_apply_config()?;
         }
 
         let startup_end_time = Utc::now();

@@ -1460,7 +1460,7 @@ RecvAppendResponses(Safekeeper *sk)
 }
 
 /* Parse a PageserverFeedback message, or the PageserverFeedback part of an AppendResponse */
-void
+static void
 ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, PageserverFeedback *rf)
 {
 	uint8		nkeys;
@@ -1590,9 +1590,9 @@ GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
 Safekeeper *
 GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 {
-	*donor_lsn = InvalidXLogRecPtr;
 	Safekeeper *donor = NULL;
 	int			i;
+	*donor_lsn = InvalidXLogRecPtr;
 
 	if (wp->n_votes < wp->quorum)
 	{

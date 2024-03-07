@@ -4216,7 +4216,6 @@ dependencies = [
  "thiserror",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
- "tls-listener",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
@@ -5793,20 +5792,6 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
-
-[[package]]
-name = "tls-listener"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81294c017957a1a69794f506723519255879e15a870507faf45dfed288b763dd"
-dependencies = [
- "futures-util",
- "hyper",
- "pin-project-lite",
- "thiserror",
- "tokio",
- "tokio-rustls",
-]
 
 [[package]]
 name = "tokio"

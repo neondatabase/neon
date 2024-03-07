@@ -24,6 +24,7 @@ use crate::{
 };
 use futures::TryFutureExt;
 use itertools::Itertools;
+use metrics::IntCounterPairGuard;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
@@ -78,9 +79,15 @@ pub async fn task_main(
     {
         let (socket, peer_addr) = accept_result?;
 
+        let conn_gauge = NUM_CLIENT_CONNECTION_GAUGE
+            .with_label_values(&["tcp"])
+            .guard();
+
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
+
+        tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
         connections.spawn(async move {
             let mut socket = WithClientIp::new(socket);
@@ -116,6 +123,7 @@ pub async fn task_main(
                 socket,
                 ClientMode::Tcp,
                 endpoint_rate_limiter,
+                conn_gauge,
             )
             .instrument(span.clone())
             .await;
@@ -229,13 +237,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    conn_gauge: IntCounterPairGuard,
 ) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
     info!("handling interactive connection from client");
 
     let proto = ctx.protocol;
-    let _client_gauge = NUM_CLIENT_CONNECTION_GAUGE
-        .with_label_values(&[proto])
-        .guard();
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[proto])
         .guard();
@@ -325,7 +331,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         aux: node.aux.clone(),
         compute: node,
         req: _request_gauge,
-        conn: _client_gauge,
+        conn: conn_gauge,
         cancel: session,
     }))
 }

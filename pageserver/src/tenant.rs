@@ -22,6 +22,7 @@ use pageserver_api::models;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
+use pageserver_api::shard::ShardStripeSize;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
@@ -2086,6 +2087,10 @@ impl Tenant {
         &self.tenant_shard_id
     }
 
+    pub(crate) fn get_shard_stripe_size(&self) -> ShardStripeSize {
+        self.shard_identity.stripe_size
+    }
+
     pub(crate) fn get_generation(&self) -> Generation {
         self.generation
     }
@@ -3674,7 +3679,10 @@ pub(crate) mod harness {
     }
 
     impl TenantHarness {
-        pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
+        pub fn create_custom(
+            test_name: &'static str,
+            tenant_conf: TenantConf,
+        ) -> anyhow::Result<Self> {
             setup_logging();
 
             let repo_dir = PageServerConf::test_repo_dir(test_name);
@@ -3685,14 +3693,6 @@ pub(crate) mod harness {
             // Make a static copy of the config. This can never be free'd, but that's
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
-
-            // Disable automatic GC and compaction to make the unit tests more deterministic.
-            // The tests perform them manually if needed.
-            let tenant_conf = TenantConf {
-                gc_period: Duration::ZERO,
-                compaction_period: Duration::ZERO,
-                ..TenantConf::default()
-            };
 
             let tenant_id = TenantId::generate();
             let tenant_shard_id = TenantShardId::unsharded(tenant_id);
@@ -3719,6 +3719,18 @@ pub(crate) mod harness {
                 remote_fs_dir,
                 deletion_queue,
             })
+        }
+
+        pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
+            // Disable automatic GC and compaction to make the unit tests more deterministic.
+            // The tests perform them manually if needed.
+            let tenant_conf = TenantConf {
+                gc_period: Duration::ZERO,
+                compaction_period: Duration::ZERO,
+                ..TenantConf::default()
+            };
+
+            Self::create_custom(test_name, tenant_conf)
         }
 
         pub fn span(&self) -> tracing::Span {
@@ -3828,6 +3840,7 @@ mod tests {
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
+    use crate::tenant::timeline::CompactFlags;
     use crate::DEFAULT_PG_VERSION;
     use bytes::BytesMut;
     use hex_literal::hex;
@@ -4627,6 +4640,145 @@ mod tests {
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
                 .await;
+        }
+
+        Ok(())
+    }
+
+    // Test that vectored get handles layer gaps correctly
+    // by advancing into the next ancestor timeline if required.
+    //
+    // The test generates timelines that look like the diagram below.
+    // We leave a gap in one of the L1 layers at `gap_at_key` (`/` in the diagram).
+    // The reconstruct data for that key lies in the ancestor timeline (`X` in the diagram).
+    //
+    // ```
+    //-------------------------------+
+    //                          ...  |
+    //               [   L1   ]      |
+    //     [ / L1   ]                | Child Timeline
+    // ...                           |
+    // ------------------------------+
+    //     [ X L1   ]                | Parent Timeline
+    // ------------------------------+
+    // ```
+    #[tokio::test]
+    async fn test_get_vectored_key_gap() -> anyhow::Result<()> {
+        let tenant_conf = TenantConf {
+            // Make compaction deterministic
+            gc_period: Duration::ZERO,
+            compaction_period: Duration::ZERO,
+            // Encourage creation of L1 layers
+            checkpoint_distance: 16 * 1024,
+            compaction_target_size: 8 * 1024,
+            ..TenantConf::default()
+        };
+
+        let harness = TenantHarness::create_custom("test_get_vectored_key_gap", tenant_conf)?;
+        let (tenant, ctx) = harness.load().await;
+
+        let mut current_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let gap_at_key = current_key.add(100);
+        let mut current_lsn = Lsn(0x10);
+
+        const KEY_COUNT: usize = 10_000;
+
+        let timeline_id = TimelineId::generate();
+        let current_timeline = tenant
+            .create_test_timeline(timeline_id, current_lsn, DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        current_lsn += 0x100;
+
+        let writer = current_timeline.writer().await;
+        writer
+            .put(
+                gap_at_key,
+                current_lsn,
+                &Value::Image(test_img(&format!("{} at {}", gap_at_key, current_lsn))),
+                &ctx,
+            )
+            .await?;
+        writer.finish_write(current_lsn);
+        drop(writer);
+
+        let mut latest_lsns = HashMap::new();
+        latest_lsns.insert(gap_at_key, current_lsn);
+
+        current_timeline.freeze_and_flush().await?;
+
+        let child_timeline_id = TimelineId::generate();
+
+        tenant
+            .branch_timeline_test(
+                &current_timeline,
+                child_timeline_id,
+                Some(current_lsn),
+                &ctx,
+            )
+            .await?;
+        let child_timeline = tenant
+            .get_timeline(child_timeline_id, true)
+            .expect("Should have the branched timeline");
+
+        for i in 0..KEY_COUNT {
+            if current_key == gap_at_key {
+                current_key = current_key.next();
+                continue;
+            }
+
+            current_lsn += 0x10;
+
+            let writer = child_timeline.writer().await;
+            writer
+                .put(
+                    current_key,
+                    current_lsn,
+                    &Value::Image(test_img(&format!("{} at {}", current_key, current_lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(current_lsn);
+            drop(writer);
+
+            latest_lsns.insert(current_key, current_lsn);
+            current_key = current_key.next();
+
+            // Flush every now and then to encourage layer file creation.
+            if i % 500 == 0 {
+                child_timeline.freeze_and_flush().await?;
+            }
+        }
+
+        child_timeline.freeze_and_flush().await?;
+        let mut flags = EnumSet::new();
+        flags.insert(CompactFlags::ForceRepartition);
+        child_timeline
+            .compact(&CancellationToken::new(), flags, &ctx)
+            .await?;
+
+        let key_near_end = {
+            let mut tmp = current_key;
+            tmp.field6 -= 10;
+            tmp
+        };
+
+        let key_near_gap = {
+            let mut tmp = gap_at_key;
+            tmp.field6 -= 10;
+            tmp
+        };
+
+        let read = KeySpace {
+            ranges: vec![key_near_gap..gap_at_key.next(), key_near_end..current_key],
+        };
+        let results = child_timeline
+            .get_vectored_impl(read.clone(), current_lsn, &ctx)
+            .await?;
+
+        for (key, img_res) in results {
+            let expected = test_img(&format!("{} at {}", key, latest_lsns[&key]));
+            assert_eq!(img_res?, expected);
         }
 
         Ok(())

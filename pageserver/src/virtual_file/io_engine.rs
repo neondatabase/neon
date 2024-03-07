@@ -248,6 +248,7 @@ impl IoEngine {
                 .await
                 .expect("failed to join blocking code most likely it panicked, panicking as well")
             }
+            #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => work.await,
         }
     }

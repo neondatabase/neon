@@ -1339,6 +1339,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TenantShardLocation"
+        stripe_size:
+          description: If multiple shards are present, this field contains the sharding stripe size, else it is null.
+          type: integer
+          nullable: true
     TenantShardLocation:
       type: object
       required:
