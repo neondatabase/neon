@@ -220,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
     // Check that we can bind to address before further initialization
     let http_address: SocketAddr = args.http.parse()?;
     info!("Starting http on {http_address}");
-    let http_listener = TcpListener::bind(http_address).await?.into_std()?;
+    let http_listener = TcpListener::bind(http_address).await?;
 
     let mgmt_address: SocketAddr = args.mgmt.parse()?;
     info!("Starting mgmt on {mgmt_address}");
