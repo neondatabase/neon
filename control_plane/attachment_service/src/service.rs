@@ -156,6 +156,10 @@ pub struct Service {
     // - Take in shared mode for operations that need the set of shards to stay the same to complete reliably (e.g. timeline CRUD)
     tenant_locks: IdLockMap<TenantId>,
 
+    // Locking for nodes: take exclusively for operations that modify the node's persistent state, or
+    // that transition it to/from Active.
+    node_locks: IdLockMap<NodeId>,
+
     // Process shutdown will fire this token
     cancel: CancellationToken,
 
@@ -846,6 +850,7 @@ impl Service {
             cancel: CancellationToken::new(),
             gate: Gate::default(),
             tenant_locks: Default::default(),
+            node_locks: Default::default(),
         });
 
         let result_task_this = this.clone();
@@ -3101,6 +3106,8 @@ impl Service {
         &self,
         register_req: NodeRegisterRequest,
     ) -> Result<(), ApiError> {
+        let _node_lock = self.node_locks.exclusive(register_req.node_id).await;
+
         // Pre-check for an already-existing node
         {
             let locked = self.inner.read().unwrap();
@@ -3162,6 +3169,8 @@ impl Service {
         &self,
         config_req: NodeConfigureRequest,
     ) -> Result<(), ApiError> {
+        let _node_lock = self.node_locks.exclusive(config_req.node_id).await;
+
         if let Some(scheduling) = config_req.scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
             // applying them in memory
