@@ -21,12 +21,13 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use tokio::time::timeout;
 use tokio_util::task::TaskTracker;
 
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
-use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
+use crate::metrics::{NUM_CLIENT_CONNECTION_GAUGE, TLS_HANDSHAKE_FAILURES};
 use crate::protocol2::WithClientIp;
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
@@ -100,7 +101,7 @@ pub async fn task_main(
     let server = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
 
     while let Some(res) = run_until_cancelled(ws_listener.accept(), &cancellation_token).await {
-        let (conn, mut peer_addr) = res.context("could not accept TCP stream")?;
+        let (conn, peer_addr) = res.context("could not accept TCP stream")?;
         if let Err(e) = conn.set_nodelay(true) {
             tracing::error!("could not set nodolay: {e}");
             continue;
@@ -128,19 +129,30 @@ pub async fn task_main(
                 let peer = match conn.wait_for_addr().await {
                     Ok(peer) => peer,
                     Err(e) => {
-                        tracing::error!("could not parse PROXY protocol header: {e}");
+                        tracing::error!(%peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
                         return;
                     }
                 };
 
-                if let Some(peer) = peer {
-                    peer_addr = peer;
-                }
+                let peer_addr = peer.unwrap_or(peer_addr).ip();
+                info!(%peer_addr, "accepted new TCP connection");
 
-                let conn = match tls.accept(conn).await {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        tracing::error!(protocol = "http", "TLS failure: {e}");
+                let accept = tls.accept(conn);
+                let conn = match timeout(config.handshake_timeout, accept).await {
+                    Ok(Ok(conn)) => {
+                        info!(%peer_addr, "accepted new TLS connection");
+                        conn
+                    }
+                    // The handshake failed, try getting another connection from the queue
+                    Ok(Err(e)) => {
+                        TLS_HANDSHAKE_FAILURES.inc();
+                        warn!(%peer_addr, "failed to accept TLS connection: {e:?}");
+                        return;
+                    }
+                    // The handshake timed out, try getting another connection from the queue
+                    Err(_) => {
+                        TLS_HANDSHAKE_FAILURES.inc();
+                        warn!(%peer_addr, "failed to accept TLS connection: timeout");
                         return;
                     }
                 };
@@ -173,7 +185,7 @@ pub async fn task_main(
                                     backend,
                                     ws_connections2,
                                     cancellation_handler,
-                                    peer_addr.ip(),
+                                    peer_addr,
                                     endpoint_rate_limiter,
                                     http_cancellation_token,
                                 )
@@ -198,10 +210,8 @@ pub async fn task_main(
                 };
 
                 match res {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::warn!("HTTP connection error {e}")
-                    }
+                    Ok(()) => tracing::info!(%peer_addr, "HTTP connection closed"),
+                    Err(e) => tracing::warn!(%peer_addr, "HTTP connection error {e}"),
                 }
             }
             .instrument(http_conn_span),
