@@ -880,12 +880,7 @@ impl LayerInner {
     ) -> Result<heavier_once_cell::InitPermit, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let task_name = format!("download layer {}", self);
-
         let (tx, rx) = tokio::sync::oneshot::channel();
-
-        // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
-        // block tenant::mgr::remove_tenant_from_memory.
 
         let this: Arc<Self> = self.clone();
 
@@ -894,14 +889,7 @@ impl LayerInner {
             .enter()
             .map_err(|_| DownloadError::DownloadCancelled)?;
 
-        crate::task_mgr::spawn(
-            &tokio::runtime::Handle::current(),
-            crate::task_mgr::TaskKind::RemoteDownloadTask,
-            Some(self.desc.tenant_shard_id),
-            Some(self.desc.timeline_id),
-            &task_name,
-            false,
-            async move {
+        tokio::task::spawn(async move {
 
                 let _guard = guard;
 
@@ -933,11 +921,9 @@ impl LayerInner {
                         );
 
                         let backoff = std::time::Duration::from_secs_f64(backoff);
-                        let cancel = crate::task_mgr::shutdown_token();
 
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {},
-                            _ = cancel.cancelled() => {},
                             _ = timeline.cancel.cancelled() => {},
                         };
 
@@ -967,11 +953,10 @@ impl LayerInner {
                         }
                     }
                 }
-
-                Ok(())
             }
             .in_current_span(),
         );
+
         match rx.await {
             Ok((Ok(()), permit)) => {
                 if let Some(reason) = self
