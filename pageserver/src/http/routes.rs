@@ -2103,9 +2103,15 @@ where
     R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
     H: FnOnce(Request<Body>, CancellationToken) -> R + Send + Sync + 'static,
 {
-    fail::fail_point!("api-503", |_| Err(ApiError::ResourceUnavailable(
-        "failpoint".into()
-    )));
+    if request.uri() != &"/v1/failpoints".parse::<Uri>().unwrap() {
+        fail::fail_point!("api-503", |_| Err(ApiError::ResourceUnavailable(
+            "failpoint".into()
+        )));
+
+        fail::fail_point!("api-500", |_| Err(ApiError::InternalServerError(
+            anyhow::anyhow!("failpoint")
+        )));
+    }
 
     // Spawn a new task to handle the request, to protect the handler from unexpected
     // async cancellations. Most pageserver functions are not async cancellation safe.
