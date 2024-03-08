@@ -2172,6 +2172,23 @@ class NeonAttachmentService(MetricsGetter):
         )
         log.info("Attachment service passed consistency check")
 
+    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
+        if isinstance(config_strings, tuple):
+            pairs = [config_strings]
+        else:
+            pairs = config_strings
+
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
+
+        res = self.request(
+            "PUT",
+            f"{self.env.attachment_service_api}/debug/v1/failpoints",
+            json=[{"name": name, "actions": actions} for name, actions in pairs],
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        log.info(f"Got failpoints request response code {res.status_code}")
+        res.raise_for_status()
+
     def balance_all(self):
         self.request(
             "POST",
