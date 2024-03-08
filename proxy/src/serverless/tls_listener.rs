@@ -29,7 +29,7 @@ pin_project! {
         #[pin]
         listener: A,
         tls: TlsAcceptor,
-        waiting: JoinSet<TimeoutResult<std::io::Result<TlsStream<A::Conn>>>>,
+        waiting: JoinSet<Option<TlsStream<A::Conn>>>,
         timeout: Duration,
         protocol: &'static str,
     }
@@ -67,8 +67,21 @@ where
             match this.listener.as_mut().poll_accept(cx) {
                 Poll::Pending => break,
                 Poll::Ready(Some(Ok(conn))) => {
-                    this.waiting
-                        .spawn(timeout(*this.timeout, this.tls.accept(conn)));
+                    let t = *this.timeout;
+                    let accept = this.tls.accept(conn);
+                    let protocol = *this.protocol;
+                    this.waiting.spawn(async move {
+                        match timeout(t, accept).await {
+                            Ok(Ok(conn)) => Some(conn),
+                            Ok(Err(e)) => {
+                                TLS_HANDSHAKE_FAILURES.inc();
+                                warn!(protocol, "failed to accept TLS connection: {e:?}");
+                                None
+                            }
+                            // The handshake timed out, try getting another connection from the queue
+                            Err(_) => None,
+                        }
+                    });
                 }
                 Poll::Ready(Some(Err(e))) => {
                     tracing::error!("error accepting TCP connection: {e}");
@@ -80,20 +93,12 @@ where
 
         loop {
             return match this.waiting.poll_join_next(cx) {
-                Poll::Ready(Some(Ok(Ok(Ok(conn))))) => {
+                Poll::Ready(Some(Ok(Some(conn)))) => {
                     info!(protocol = this.protocol, "accepted new TLS connection");
                     Poll::Ready(Some(Ok(conn)))
                 }
-                Poll::Ready(Some(Ok(Ok(Err(e))))) => {
-                    TLS_HANDSHAKE_FAILURES.inc();
-                    warn!(
-                        protocol = this.protocol,
-                        "failed to accept TLS connection: {e:?}"
-                    );
-                    continue;
-                }
-                // The handshake timed out, try getting another connection from the queue
-                Poll::Ready(Some(Ok(Err(_)))) => continue,
+                // The handshake failed to complete, try getting another connection from the queue
+                Poll::Ready(Some(Ok(None))) => continue,
                 // The handshake panicked or was cancelled. ignore and get another connection
                 Poll::Ready(Some(Err(e))) => {
                     tracing::warn!("handshake aborted: {e}");
