@@ -16,9 +16,9 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use hyper::StatusCode;
 use pageserver_api::{
     controller_api::{
-        NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantCreateResponse,
-        TenantCreateResponseShard, TenantLocateResponse, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
+        NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, PlacementPolicy,
+        TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
+        TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::TenantConfigRequest,
 };
@@ -57,7 +57,7 @@ use crate::{
         IntentState, ObservedState, ObservedStateLocation, ReconcileResult, ReconcileWaitError,
         ReconcilerWaiter, TenantState,
     },
-    PlacementPolicy, Sequence,
+    Sequence,
 };
 
 // For operations that should be quick, like attaching a new tenant
@@ -176,7 +176,7 @@ impl From<ReconcileWaitError> for ApiError {
 
 #[allow(clippy::large_enum_variant)]
 enum TenantCreateOrUpdate {
-    Create((TenantCreateRequest, PlacementPolicy)),
+    Create(TenantCreateRequest),
     Update(Vec<ShardUpdate>),
 }
 
@@ -792,7 +792,7 @@ impl Service {
                 shard_stripe_size: 0,
                 generation: Some(0),
                 generation_pageserver: None,
-                placement_policy: serde_json::to_string(&PlacementPolicy::default()).unwrap(),
+                placement_policy: serde_json::to_string(&PlacementPolicy::Single).unwrap(),
                 config: serde_json::to_string(&TenantConfig::default()).unwrap(),
                 splitting: SplitState::default(),
             };
@@ -1053,9 +1053,8 @@ impl Service {
     pub(crate) async fn tenant_create(
         &self,
         create_req: TenantCreateRequest,
-        placement_policy: PlacementPolicy,
     ) -> Result<TenantCreateResponse, ApiError> {
-        let (response, waiters) = self.do_tenant_create(create_req, placement_policy).await?;
+        let (response, waiters) = self.do_tenant_create(create_req).await?;
 
         self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await?;
         Ok(response)
@@ -1064,8 +1063,13 @@ impl Service {
     pub(crate) async fn do_tenant_create(
         &self,
         create_req: TenantCreateRequest,
-        placement_policy: PlacementPolicy,
     ) -> Result<(TenantCreateResponse, Vec<ReconcilerWaiter>), ApiError> {
+        // As a default, single is convenient for tests that don't choose a policy.
+        let placement_policy = create_req
+            .placement_policy
+            .clone()
+            .unwrap_or(PlacementPolicy::Single);
+
         // This service expects to handle sharding itself: it is an error to try and directly create
         // a particular shard here.
         let tenant_id = if !create_req.new_tenant_id.is_unsharded() {
@@ -1339,22 +1343,20 @@ impl Service {
 
             TenantCreateOrUpdate::Create(
                 // Synthesize a creation request
-                (
-                    TenantCreateRequest {
-                        new_tenant_id: TenantShardId::unsharded(tenant_id),
-                        generation,
-                        shard_parameters: ShardParameters {
-                            // Must preserve the incoming shard_count do distinguish unsharded (0)
-                            // from single-sharded (1): this distinction appears in the S3 keys of the tenant.
-                            count: req.tenant_id.shard_count,
-                            // We only import un-sharded or single-sharded tenants, so stripe
-                            // size can be made up arbitrarily here.
-                            stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
-                        },
-                        config: req.config.tenant_conf,
+                TenantCreateRequest {
+                    new_tenant_id: TenantShardId::unsharded(tenant_id),
+                    generation,
+                    shard_parameters: ShardParameters {
+                        // Must preserve the incoming shard_count do distinguish unsharded (0)
+                        // from single-sharded (1): this distinction appears in the S3 keys of the tenant.
+                        count: req.tenant_id.shard_count,
+                        // We only import un-sharded or single-sharded tenants, so stripe
+                        // size can be made up arbitrarily here.
+                        stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
                     },
-                    placement_policy,
-                ),
+                    placement_policy: Some(placement_policy),
+                    config: req.config.tenant_conf,
+                },
             )
         } else {
             TenantCreateOrUpdate::Update(updates)
@@ -1393,9 +1395,8 @@ impl Service {
             stripe_size: None,
         };
         let waiters = match create_or_update {
-            TenantCreateOrUpdate::Create((create_req, placement_policy)) => {
-                let (create_resp, waiters) =
-                    self.do_tenant_create(create_req, placement_policy).await?;
+            TenantCreateOrUpdate::Create(create_req) => {
+                let (create_resp, waiters) = self.do_tenant_create(create_req).await?;
                 result.shards = create_resp
                     .shards
                     .into_iter()

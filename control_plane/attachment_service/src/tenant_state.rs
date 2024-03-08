@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{metrics, persistence::TenantShardPersistence};
+use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
@@ -28,7 +29,7 @@ use crate::{
         attached_location_conf, secondary_location_conf, ReconcileError, Reconciler, TargetState,
     },
     scheduler::{ScheduleError, Scheduler},
-    service, PlacementPolicy, Sequence,
+    service, Sequence,
 };
 
 /// Serialization helper

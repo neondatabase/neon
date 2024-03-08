@@ -429,6 +429,8 @@ impl PageServerNode {
             generation,
             config,
             shard_parameters: ShardParameters::default(),
+            // Placement policy is not meaningful for creations not done via storage controller
+            placement_policy: None,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
