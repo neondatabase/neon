@@ -1441,6 +1441,31 @@ impl TenantManager {
         new_shard_count: ShardCount,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<TenantShardId>> {
+        let r = self
+            .do_shard_split(tenant_shard_id, new_shard_count, ctx)
+            .await;
+        if r.is_err() {
+            // Shard splitting might have left the original shard in a partially shut down state (it
+            // stops the shard's remote timeline client).  Reset it to ensure we leave things in
+            // a working state.
+            if self.get(tenant_shard_id).is_some() {
+                tracing::warn!("Resetting {tenant_shard_id} after shard split failure");
+                if let Err(e) = self.reset_tenant(tenant_shard_id, false, ctx).await {
+                    // Log this error because our return value will still be the original error, not this one.
+                    tracing::warn!("Failed to reset {tenant_shard_id}: {e}");
+                }
+            }
+        }
+
+        r
+    }
+
+    pub(crate) async fn do_shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        new_shard_count: ShardCount,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<TenantShardId>> {
         let tenant = get_tenant(tenant_shard_id, true)?;
 
         // Plan: identify what the new child shards will be
