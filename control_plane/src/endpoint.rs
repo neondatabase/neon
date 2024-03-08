@@ -774,7 +774,10 @@ impl Endpoint {
             spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
         }
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
         let response = client
             .post(format!(
                 "http://{}:{}/configure",
