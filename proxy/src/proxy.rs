@@ -380,6 +380,11 @@ impl NeonOptions {
         Self::parse_from_iter(StartupMessageParams::parse_options_raw(options))
     }
 
+    pub fn is_ephemeral(&self) -> bool {
+        // Currently, neon endpoint options are all reserved for ephemeral endpoints.
+        !self.0.is_empty()
+    }
+
     fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {
         let mut options = options
             .filter_map(neon_option)
