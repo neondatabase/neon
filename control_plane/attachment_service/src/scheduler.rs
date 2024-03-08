@@ -43,7 +43,7 @@ impl Scheduler {
         let mut scheduler_nodes = HashMap::new();
         for node in nodes {
             scheduler_nodes.insert(
-                node.id,
+                node.get_id(),
                 SchedulerNode {
                     shard_count: 0,
                     may_schedule: node.may_schedule(),
@@ -68,7 +68,7 @@ impl Scheduler {
         let mut expect_nodes: HashMap<NodeId, SchedulerNode> = HashMap::new();
         for node in nodes {
             expect_nodes.insert(
-                node.id,
+                node.get_id(),
                 SchedulerNode {
                     shard_count: 0,
                     may_schedule: node.may_schedule(),
@@ -156,7 +156,7 @@ impl Scheduler {
 
     pub(crate) fn node_upsert(&mut self, node: &Node) {
         use std::collections::hash_map::Entry::*;
-        match self.nodes.entry(node.id) {
+        match self.nodes.entry(node.get_id()) {
             Occupied(mut entry) => {
                 entry.get_mut().may_schedule = node.may_schedule();
             }
@@ -255,7 +255,6 @@ impl Scheduler {
 pub(crate) mod test_utils {
 
     use crate::node::Node;
-    use pageserver_api::controller_api::{NodeAvailability, NodeSchedulingPolicy};
     use std::collections::HashMap;
     use utils::id::NodeId;
     /// Test helper: synthesize the requested number of nodes, all in active state.
@@ -264,18 +263,17 @@ pub(crate) mod test_utils {
     pub(crate) fn make_test_nodes(n: u64) -> HashMap<NodeId, Node> {
         (1..n + 1)
             .map(|i| {
-                (
-                    NodeId(i),
-                    Node {
-                        id: NodeId(i),
-                        availability: NodeAvailability::Active,
-                        scheduling: NodeSchedulingPolicy::Active,
-                        listen_http_addr: format!("httphost-{i}"),
-                        listen_http_port: 80 + i as u16,
-                        listen_pg_addr: format!("pghost-{i}"),
-                        listen_pg_port: 5432 + i as u16,
-                    },
-                )
+                (NodeId(i), {
+                    let node = Node::new(
+                        NodeId(i),
+                        format!("httphost-{i}"),
+                        80 + i as u16,
+                        format!("pghost-{i}"),
+                        5432 + i as u16,
+                    );
+                    assert!(node.is_available());
+                    node
+                })
             })
             .collect()
     }

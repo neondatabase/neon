@@ -232,7 +232,7 @@ impl LocalEnv {
         // run from the same location as neon_local.  This means that for compatibility
         // tests that run old pageserver/safekeeper, they still run latest attachment service.
         let neon_local_bin_dir = env::current_exe().unwrap().parent().unwrap().to_owned();
-        neon_local_bin_dir.join("attachment_service")
+        neon_local_bin_dir.join("storage_controller")
     }
 
     pub fn safekeeper_bin(&self) -> PathBuf {
