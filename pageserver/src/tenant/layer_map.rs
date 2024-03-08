@@ -460,15 +460,22 @@ impl LayerMap {
         }
     }
 
-    pub fn range_search(&self, key_range: Range<Key>, end_lsn: Lsn) -> Option<RangeSearchResult> {
-        let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
+    pub fn range_search(&self, key_range: Range<Key>, end_lsn: Lsn) -> RangeSearchResult {
+        let version = match self.historic.get().unwrap().get_version(end_lsn.0 - 1) {
+            Some(version) => version,
+            None => {
+                let mut result = RangeSearchResult::new();
+                result.not_found.add_range(key_range);
+                return result;
+            }
+        };
 
         let raw_range = key_range.start.to_i128()..key_range.end.to_i128();
         let delta_changes = version.delta_coverage.range_overlaps(&raw_range);
         let image_changes = version.image_coverage.range_overlaps(&raw_range);
 
         let collector = RangeSearchCollector::new(key_range, end_lsn, delta_changes, image_changes);
-        Some(collector.collect())
+        collector.collect()
     }
 
     /// Start a batch of updates, applied on drop
@@ -995,8 +1002,13 @@ mod tests {
         let layer_map = LayerMap::default();
         let range = Key::from_i128(100)..Key::from_i128(200);
 
-        let res = layer_map.range_search(range, Lsn(100));
-        assert!(res.is_none());
+        let res = layer_map.range_search(range.clone(), Lsn(100));
+        assert_eq!(
+            res.not_found.to_keyspace(),
+            KeySpace {
+                ranges: vec![range]
+            }
+        );
     }
 
     #[test]
@@ -1033,7 +1045,7 @@ mod tests {
         for start in 0..60 {
             for end in (start + 1)..60 {
                 let range = Key::from_i128(start)..Key::from_i128(end);
-                let result = layer_map.range_search(range.clone(), Lsn(100)).unwrap();
+                let result = layer_map.range_search(range.clone(), Lsn(100));
                 let expected = brute_force_range_search(&layer_map, range, Lsn(100));
 
                 assert_range_search_result_eq(result, expected);

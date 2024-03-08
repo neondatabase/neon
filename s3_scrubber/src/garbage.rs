@@ -12,7 +12,7 @@ use aws_sdk_s3::{
     types::{Delete, ObjectIdentifier},
     Client,
 };
-use futures_util::{pin_mut, TryStreamExt};
+use futures_util::TryStreamExt;
 use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
@@ -199,12 +199,12 @@ async fn find_garbage_inner(
             }
         }
     });
-    let tenants_checked = tenants_checked.try_buffer_unordered(CONSOLE_CONCURRENCY);
+    let mut tenants_checked =
+        std::pin::pin!(tenants_checked.try_buffer_unordered(CONSOLE_CONCURRENCY));
 
     // Process the results of Tenant checks.  If a Tenant is garbage, it goes into
     // the `GarbageList`.  Else it goes into `active_tenants` for more detailed timeline
     // checks if they are enabled by the `depth` parameter.
-    pin_mut!(tenants_checked);
     let mut garbage = GarbageList::new(node_kind, bucket_config);
     let mut active_tenants: Vec<TenantShardId> = vec![];
     let mut counter = 0;
@@ -267,10 +267,10 @@ async fn find_garbage_inner(
                 .map(|r| (ttid, r))
         }
     });
-    let timelines_checked = timelines_checked.try_buffer_unordered(CONSOLE_CONCURRENCY);
+    let mut timelines_checked =
+        std::pin::pin!(timelines_checked.try_buffer_unordered(CONSOLE_CONCURRENCY));
 
     // Update the GarbageList with any timelines which appear not to exist.
-    pin_mut!(timelines_checked);
     while let Some(result) = timelines_checked.next().await {
         let (ttid, console_result) = result?;
         if garbage.maybe_append(GarbageEntity::Timeline(ttid), console_result) {
@@ -425,9 +425,9 @@ pub async fn purge_garbage(
             }
         }
     });
-    let get_objects_results = get_objects_results.try_buffer_unordered(S3_CONCURRENCY);
+    let mut get_objects_results =
+        std::pin::pin!(get_objects_results.try_buffer_unordered(S3_CONCURRENCY));
 
-    pin_mut!(get_objects_results);
     let mut objects_to_delete = Vec::new();
     while let Some(result) = get_objects_results.next().await {
         let mut object_list = result?;

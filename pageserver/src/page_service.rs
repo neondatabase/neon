@@ -910,7 +910,7 @@ impl PageServerHandler {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelExists);
+            .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -938,7 +938,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelSize);
+            .start_timer(metrics::SmgrQueryType::GetRelSize, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -966,7 +966,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetDbSize);
+            .start_timer(metrics::SmgrQueryType::GetDbSize, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -1144,7 +1144,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetPageAtLsn);
+            .start_timer(metrics::SmgrQueryType::GetPageAtLsn, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -1172,7 +1172,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetSlruSegment);
+            .start_timer(metrics::SmgrQueryType::GetSlruSegment, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =

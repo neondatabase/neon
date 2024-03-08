@@ -20,6 +20,7 @@ use crate::{http, sasl, scram};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use rstest::rstest;
+use rustls::pki_types;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
 use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
@@ -28,7 +29,11 @@ use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
 fn generate_certs(
     hostname: &str,
     common_name: &str,
-) -> anyhow::Result<(rustls::Certificate, rustls::Certificate, rustls::PrivateKey)> {
+) -> anyhow::Result<(
+    pki_types::CertificateDer<'static>,
+    pki_types::CertificateDer<'static>,
+    pki_types::PrivateKeyDer<'static>,
+)> {
     let ca = rcgen::Certificate::from_params({
         let mut params = rcgen::CertificateParams::default();
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -45,9 +50,9 @@ fn generate_certs(
     })?;
 
     Ok((
-        rustls::Certificate(ca.serialize_der()?),
-        rustls::Certificate(cert.serialize_der_with_signer(&ca)?),
-        rustls::PrivateKey(cert.serialize_private_key_der()),
+        pki_types::CertificateDer::from(ca.serialize_der()?),
+        pki_types::CertificateDer::from(cert.serialize_der_with_signer(&ca)?),
+        pki_types::PrivateKeyDer::Pkcs8(cert.serialize_private_key_der().into()),
     ))
 }
 
@@ -82,9 +87,8 @@ fn generate_tls_config<'a>(
 
     let tls_config = {
         let config = rustls::ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
-            .with_single_cert(vec![cert.clone()], key.clone())?
+            .with_single_cert(vec![cert.clone()], key.clone_key())?
             .into();
 
         let mut cert_resolver = CertResolver::new();
@@ -101,10 +105,9 @@ fn generate_tls_config<'a>(
 
     let client_config = {
         let config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
             .with_root_certificates({
                 let mut store = rustls::RootCertStore::empty();
-                store.add(&ca)?;
+                store.add(ca)?;
                 store
             })
             .with_no_client_auth();

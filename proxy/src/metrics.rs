@@ -4,7 +4,7 @@ use ::metrics::{
     register_int_gauge_vec, Histogram, HistogramVec, HyperLogLogVec, IntCounterPairVec,
     IntCounterVec, IntGauge, IntGaugeVec,
 };
-use metrics::{register_int_counter_pair, IntCounterPair};
+use metrics::{register_int_counter, register_int_counter_pair, IntCounter, IntCounterPair};
 
 use once_cell::sync::Lazy;
 use tokio::time;
@@ -300,6 +300,23 @@ pub static ENDPOINT_ERRORS_BY_KIND: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
         "proxy_endpoints_affected_by_errors",
         "Number of endpoints affected by errors of a given classification",
         &["type"],
+    )
+    .unwrap()
+});
+
+pub static REDIS_BROKEN_MESSAGES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_redis_errors_total",
+        "Number of errors by a given classification",
+        &["channel"],
+    )
+    .unwrap()
+});
+
+pub static TLS_HANDSHAKE_FAILURES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "proxy_tls_handshake_failures",
+        "Number of TLS handshake failures",
     )
     .unwrap()
 });

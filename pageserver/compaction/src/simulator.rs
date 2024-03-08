@@ -429,7 +429,6 @@ impl From<&Arc<MockImageLayer>> for MockLayer {
     }
 }
 
-#[async_trait]
 impl interface::CompactionJobExecutor for MockTimeline {
     type Key = Key;
     type Layer = MockLayer;

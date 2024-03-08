@@ -195,6 +195,7 @@ impl Layer {
         let downloaded = resident.expect("just initialized");
 
         // if the rename works, the path is as expected
+        // TODO: sync system call
         std::fs::rename(temp_path, owner.local_path())
             .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
@@ -975,7 +976,7 @@ impl LayerInner {
                 }
 
                 self.consecutive_failures.store(0, Ordering::Relaxed);
-                tracing::info!("on-demand download successful");
+                tracing::info!(size=%self.desc.file_size, "on-demand download successful");
 
                 Ok(permit)
             }

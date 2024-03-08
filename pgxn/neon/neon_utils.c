@@ -6,6 +6,7 @@
 
 #include "postgres.h"
 
+#include "neon_utils.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 
@@ -14,7 +15,7 @@
  *
  * Returns -1 if the character is not a hexadecimal digit.
  */
-int
+static int
 HexDecodeChar(char c)
 {
 	if (c >= '0' && c <= '9')

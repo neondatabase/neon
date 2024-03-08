@@ -259,6 +259,9 @@ impl super::Api for Api {
         }
 
         let node = self.do_wake_compute(ctx, user_info).await?;
+        ctx.set_project(node.aux.clone());
+        let cold_start_info = node.aux.cold_start_info.clone().unwrap_or_default();
+        info!(?cold_start_info, "woken up a compute node");
         let (_, cached) = self.caches.node_info.insert(key.clone(), node);
         info!(key = &*key, "created a cache entry for compute node info");
 

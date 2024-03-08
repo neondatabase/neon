@@ -35,6 +35,7 @@
 #include "utils/memutils.h"
 #include "utils/jsonb.h"
 
+#include "control_plane_connector.h"
 #include "neon_utils.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
@@ -113,15 +114,14 @@ ConstructDeltaMessage()
 	if (RootTable.db_table)
 	{
 		JsonbValue	dbs;
+		HASH_SEQ_STATUS status;
+		DbEntry    *entry;
 
 		dbs.type = jbvString;
 		dbs.val.string.val = "dbs";
 		dbs.val.string.len = strlen(dbs.val.string.val);
 		pushJsonbValue(&state, WJB_KEY, &dbs);
 		pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
-
-		HASH_SEQ_STATUS status;
-		DbEntry    *entry;
 
 		hash_seq_init(&status, RootTable.db_table);
 		while ((entry = hash_seq_search(&status)) != NULL)
@@ -168,8 +168,9 @@ ConstructDeltaMessage()
 #else
 				const char *logdetail;
 #endif
+				char	   *encrypted_password;
 				PushKeyValue(&state, "password", (char *) entry->password);
-				char	   *encrypted_password = get_role_password(entry->name, &logdetail);
+				encrypted_password = get_role_password(entry->name, &logdetail);
 
 				if (encrypted_password)
 				{
@@ -831,7 +832,7 @@ NeonProcessUtility(
 	}
 }
 
-extern void
+void
 InitControlPlaneConnector()
 {
 	PreviousProcessUtilityHook = ProcessUtility_hook;

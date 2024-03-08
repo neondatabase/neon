@@ -11,7 +11,7 @@ use utils::id::TimelineId;
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
 use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
-use futures_util::{pin_mut, StreamExt};
+use futures_util::StreamExt;
 use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::IndexPart;
@@ -285,8 +285,7 @@ pub(crate) async fn list_timeline_blobs(
     let mut index_parts: Vec<ObjectIdentifier> = Vec::new();
     let mut initdb_archive: bool = false;
 
-    let stream = stream_listing(s3_client, &timeline_dir_target);
-    pin_mut!(stream);
+    let mut stream = std::pin::pin!(stream_listing(s3_client, &timeline_dir_target));
     while let Some(obj) = stream.next().await {
         let obj = obj?;
         let key = obj.key();
