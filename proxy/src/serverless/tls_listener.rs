@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use hyper::server::accept::Accept;
+use hyper::server::{accept::Accept, conn::AddrStream};
 use pin_project_lite::pin_project;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -15,12 +15,13 @@ use tokio::{
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tracing::{info, warn};
 
-use crate::metrics::TLS_HANDSHAKE_FAILURES;
+use crate::{
+    metrics::TLS_HANDSHAKE_FAILURES,
+    protocol2::{WithClientIp, WithConnectionGuard},
+};
 
 /// Default timeout for the TLS handshake.
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-type TimeoutResult<T> = Result<T, tokio::time::error::Elapsed>;
 
 pin_project! {
     /// Wraps a `Stream` of connections (such as a TCP listener) so that each connection is itself
@@ -48,8 +49,9 @@ impl<A: Accept> TlsListener<A> {
     }
 }
 
-impl<A: Accept> Accept for TlsListener<A>
+impl<A> Accept for TlsListener<A>
 where
+    A: Accept<Conn = WithConnectionGuard<WithClientIp<AddrStream>>>,
     A::Error: std::error::Error,
     A::Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -68,14 +70,18 @@ where
                 Poll::Pending => break,
                 Poll::Ready(Some(Ok(conn))) => {
                     let t = *this.timeout;
-                    let accept = this.tls.accept(conn);
+                    let accept = this.tls.accept(conn).into_fallible();
                     let protocol = *this.protocol;
                     this.waiting.spawn(async move {
                         match timeout(t, accept).await {
                             Ok(Ok(conn)) => Some(conn),
-                            Ok(Err(e)) => {
+                            Ok(Err((e, conn))) => {
+                                let peer_addr = conn
+                                    .inner
+                                    .client_addr()
+                                    .unwrap_or_else(|| conn.inner.inner.remote_addr());
                                 TLS_HANDSHAKE_FAILURES.inc();
-                                warn!(protocol, "failed to accept TLS connection: {e:?}");
+                                warn!(%peer_addr, protocol, "failed to accept TLS connection: {e:?}");
                                 None
                             }
                             // The handshake timed out, try getting another connection from the queue
