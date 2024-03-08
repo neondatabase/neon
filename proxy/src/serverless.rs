@@ -21,10 +21,11 @@ use rand::SeedableRng;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use serde::Serialize;
+use tokio::time::timeout;
 use tokio_util::task::TaskTracker;
 
 use crate::context::RequestMonitoring;
-use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
+use crate::metrics::{NUM_CLIENT_CONNECTION_GAUGE, TLS_HANDSHAKE_FAILURES};
 use crate::protocol2::WithClientIp;
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
@@ -35,6 +36,7 @@ use std::convert::Infallible;
 use std::net::IpAddr;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Instrument};
@@ -128,7 +130,9 @@ pub async fn task_main(
             let peer = match conn.wait_for_addr().await {
                 Ok(peer) => peer,
                 Err(e) => {
-                    tracing::error!("could not parse PROXY protocol header: {e}");
+                    tracing::error!(
+                        "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}"
+                    );
                     return;
                 }
             };
@@ -137,10 +141,22 @@ pub async fn task_main(
                 peer_addr = peer;
             }
 
-            let conn = match tls.accept(conn).await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::error!(protocol = "http", "TLS failure: {e}");
+            let accept = tls.accept(conn);
+            let conn = match timeout(Duration::from_secs(10), accept).await {
+                Ok(Ok(conn)) => {
+                    info!(%peer_addr, protocol = "http", "accepted new TLS connection");
+                    conn
+                }
+                // The handshake failed, try getting another connection from the queue
+                Ok(Err(e)) => {
+                    TLS_HANDSHAKE_FAILURES.inc();
+                    warn!(%peer_addr, protocol = "http", "failed to accept TLS connection: {e:?}");
+                    return;
+                }
+                // The handshake timed out, try getting another connection from the queue
+                Err(_) => {
+                    TLS_HANDSHAKE_FAILURES.inc();
+                    warn!(%peer_addr, protocol = "http", "failed to accept TLS connection: timeout");
                     return;
                 }
             };
