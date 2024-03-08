@@ -1964,10 +1964,8 @@ impl TimelineMetrics {
     pub(crate) fn resident_physical_size_get(&self) -> u64 {
         self.resident_physical_size_gauge.get()
     }
-}
 
-impl Drop for TimelineMetrics {
-    fn drop(&mut self) {
+    pub(crate) fn shutdown(&self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;

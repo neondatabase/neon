@@ -1257,6 +1257,8 @@ impl Timeline {
 
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
+
+        self.metrics.shutdown();
     }
 
     pub(crate) fn set_state(&self, new_state: TimelineState) {

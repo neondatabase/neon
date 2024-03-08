@@ -1846,6 +1846,8 @@ impl Tenant {
         // Wait for any in-flight operations to complete
         self.gate.close().await;
 
+        remove_tenant_metrics(&self.tenant_shard_id);
+
         Ok(())
     }
 
@@ -3557,11 +3559,6 @@ async fn run_initdb(
     Ok(())
 }
 
-impl Drop for Tenant {
-    fn drop(&mut self) {
-        remove_tenant_metrics(&self.tenant_shard_id);
-    }
-}
 /// Dump contents of a layer file to stdout.
 pub async fn dump_layerfile_from_path(
     path: &Utf8Path,
