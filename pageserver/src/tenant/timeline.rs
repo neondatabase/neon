@@ -4375,6 +4375,9 @@ enum OpenLayerAction {
     None,
 }
 
+/// Order of updates in a batch are forced using this structure
+pub type OrderedBatchUpdates = BTreeMap<(Lsn, Key), Value>;
+
 impl<'a> TimelineWriter<'a> {
     /// Put a new page version that can be constructed from a WAL record
     ///
@@ -4571,16 +4574,12 @@ impl<'a> TimelineWriter<'a> {
         }
     }
 
-    /// Put a batch keys at the specified Lsns.
-    ///
-    /// The batch should be sorted by Lsn such that it's safe
-    /// to roll the open layer mid batch.
     pub(crate) async fn put_batch(
         &mut self,
-        batch: Vec<(Key, Lsn, Value)>,
+        batch: OrderedBatchUpdates,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for (key, lsn, val) in batch {
+        for ((lsn, key), val) in batch {
             self.put(key, lsn, &val, ctx).await?
         }
 

@@ -11,11 +11,11 @@ use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
+use crate::tenant::timeline::OrderedBatchUpdates;
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
-use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
@@ -1546,11 +1546,14 @@ impl<'a> DatadirModification<'a> {
         if !self.pending_updates.is_empty() {
             // The put_batch call below expects expects the inputs to be sorted by Lsn,
             // so we do that first.
-            let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = self
+            let lsn_ordered_batch: OrderedBatchUpdates = self
                 .pending_updates
                 .drain()
-                .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (key, lsn, val)))
-                .kmerge_by(|lhs, rhs| lhs.1 .0 < rhs.1 .0)
+                .flat_map(|(key, values)| {
+                    values
+                        .into_iter()
+                        .map(move |(lsn, value)| ((lsn, key), value))
+                })
                 .collect();
 
             writer.put_batch(lsn_ordered_batch, ctx).await?;
