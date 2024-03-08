@@ -3,4 +3,4 @@
 
 DROP VIEW IF EXISTS neon_lfc_stats CASCADE;
 
-DROP FUNCTION IF EXISTS neon_get_lfc_stats() CASCADE;
+DROP FUNCTION IF EXISTS neon_get_lfc_stats CASCADE;
