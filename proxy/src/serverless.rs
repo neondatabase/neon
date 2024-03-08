@@ -33,7 +33,7 @@ use crate::serverless::backend::PoolingBackend;
 use crate::{cancellation::CancellationHandler, config::ProxyConfig};
 
 use std::convert::Infallible;
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,6 +140,7 @@ pub async fn task_main(
             if let Some(peer) = peer {
                 peer_addr = peer;
             }
+            info!(%peer_addr, protocol = "http", "accepted new TCP connection");
 
             let accept = tls.accept(conn);
             let conn = match timeout(Duration::from_secs(10), accept).await {
@@ -177,7 +178,7 @@ pub async fn task_main(
                                 backend,
                                 ws_connections,
                                 cancellation_handler,
-                                peer_addr.ip(),
+                                peer_addr,
                                 endpoint_rate_limiter,
                             )
                             .await
@@ -281,7 +282,7 @@ async fn request_handler(
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
     cancellation_handler: Arc<CancellationHandler>,
-    peer_addr: IpAddr,
+    peer_addr: SocketAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
     let session_id = uuid::Uuid::new_v4();

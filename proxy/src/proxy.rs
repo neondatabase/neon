@@ -92,7 +92,7 @@ pub async fn task_main(
         connections.spawn(async move {
             let mut socket = WithClientIp::new(socket);
             let peer_addr = match socket.wait_for_addr().await {
-                Ok(Some(addr)) => addr.ip(),
+                Ok(Some(addr)) => addr,
                 Err(e) => {
                     error!("per-client task finished with an error: {e:#}");
                     return;
@@ -101,7 +101,7 @@ pub async fn task_main(
                     error!("missing required client IP");
                     return;
                 }
-                Ok(None) => peer_addr.ip()
+                Ok(None) => peer_addr
             };
 
             match socket.inner.set_nodelay(true) {

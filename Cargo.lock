@@ -7155,7 +7155,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-core",
- "tungstenite 0.20.1",
  "url",
  "uuid",
  "zeroize",

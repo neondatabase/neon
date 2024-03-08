@@ -175,7 +175,7 @@ async fn task_main(
                     .context("failed to set socket option")?;
 
                 info!(%peer_addr, "serving");
-                let ctx = RequestMonitoring::new(session_id, peer_addr.ip(), "sni_router", "sni");
+                let ctx = RequestMonitoring::new(session_id, peer_addr, "sni_router", "sni");
                 handle_client(ctx, dest_suffix, tls_config, tls_server_end_point, socket).await
             }
             .unwrap_or_else(|e| {

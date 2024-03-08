@@ -3,7 +3,7 @@
 use chrono::Utc;
 use once_cell::sync::OnceCell;
 use smol_str::SmolStr;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use tokio::sync::mpsc;
 use tracing::{field::display, info_span, Span};
 use uuid::Uuid;
@@ -62,7 +62,7 @@ pub enum AuthMethod {
 impl RequestMonitoring {
     pub fn new(
         session_id: Uuid,
-        peer_addr: IpAddr,
+        peer_addr: SocketAddr,
         protocol: &'static str,
         region: &'static str,
     ) -> Self {
@@ -75,7 +75,7 @@ impl RequestMonitoring {
         );
 
         Self {
-            peer_addr,
+            peer_addr: peer_addr.ip(),
             session_id,
             protocol,
             first_packet: Utc::now(),
@@ -100,7 +100,12 @@ impl RequestMonitoring {
 
     #[cfg(test)]
     pub fn test() -> Self {
-        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), "test", "test")
+        RequestMonitoring::new(
+            Uuid::now_v7(),
+            ([127, 0, 0, 1], 5432).into(),
+            "test",
+            "test",
+        )
     }
 
     pub fn console_application_name(&self) -> String {
