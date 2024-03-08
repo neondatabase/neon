@@ -49,14 +49,14 @@ def test_neon_extension_compatibility(neon_env_builder: NeonEnvBuilder):
                 for target_version in all_versions[idx + 1 :]:
                     if current_version != begin_version:
                         cur.execute(
-                            f"ALTER EXTENSION UPDATE TO {begin_version}; -- {current_version}->{begin_version}"
+                            f"ALTER EXTENSION neon UPDATE TO {begin_version}; -- {current_version}->{begin_version}"
                         )
                         current_version = begin_version
                     # downgrade
                     cur.execute(
-                        f"ALTER EXTENSION UPDATE TO {target_version}; -- {begin_version}->{target_version}"
+                        f"ALTER EXTENSION neon UPDATE TO {target_version}; -- {begin_version}->{target_version}"
                     )
                     # upgrade
                     cur.execute(
-                        f"ALTER EXTENSION UPDATE TO {begin_version}; -- {target_version}->{begin_version}"
+                        f"ALTER EXTENSION neon UPDATE TO {begin_version}; -- {target_version}->{begin_version}"
                     )
