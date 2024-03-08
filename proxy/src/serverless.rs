@@ -21,24 +21,19 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
 use crate::context::RequestMonitoring;
-use crate::metrics::TLS_HANDSHAKE_FAILURES;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp, WithConnectionGuard};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::{cancellation::CancellationHandler, config::ProxyConfig};
-use futures::StreamExt;
 use hyper::{
-    server::{
-        accept,
-        conn::{AddrIncoming, AddrStream},
-    },
+    server::conn::{AddrIncoming, AddrStream},
     Body, Method, Request, Response,
 };
 
 use std::convert::Infallible;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::task::Poll;
-use std::{future::ready, sync::Arc};
 use tls_listener::TlsListener;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -105,19 +100,7 @@ pub async fn task_main(
     let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
     ws_connections.close(); // allows `ws_connections.wait to complete`
 
-    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
-        if let Err(err) = conn {
-            error!(
-                protocol = "http",
-                "failed to accept TLS connection: {err:?}"
-            );
-            TLS_HANDSHAKE_FAILURES.inc();
-            ready(false)
-        } else {
-            info!(protocol = "http", "accepted new TLS connection");
-            ready(true)
-        }
-    });
+    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming, "http");
 
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<
@@ -174,7 +157,7 @@ pub async fn task_main(
         },
     );
 
-    hyper::Server::builder(accept::from_stream(tls_listener))
+    hyper::Server::builder(tls_listener)
         .serve(make_svc)
         .with_graceful_shutdown(cancellation_token.cancelled())
         .await?;
