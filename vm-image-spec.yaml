@@ -171,6 +171,22 @@ files:
               limit 1
            );
 
+      - metric_name: max_cluster_size
+        type: gauge
+        help: 'neon.max_cluster_size setting'
+        key_labels:
+        values: [max_cluster_size]
+        query: |
+          select setting::int as max_cluster_size from pg_settings where name = 'neon.max_cluster_size';
+
+      - metric_name: db_total_size
+        type: gauge
+        help: 'Size of all databases'
+        key_labels:
+        values: [total]
+        query: |
+          select sum(pg_database_size(datname)) as total from pg_database;
+
 build: |
   # Build cgroup-tools
   #
