@@ -1,5 +1,6 @@
 use crate::persistence::Persistence;
 use crate::service;
+use hyper::StatusCode;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
@@ -487,17 +488,29 @@ impl Reconciler {
                 )
                 .await
             {
-                Some(Ok(observed)) => observed,
+                Some(Ok(observed)) => Some(observed),
+                Some(Err(mgmt_api::Error::ApiError(status, _msg)))
+                    if status == StatusCode::NOT_FOUND =>
+                {
+                    None
+                }
                 Some(Err(e)) => return Err(e.into()),
                 None => return Err(ReconcileError::Cancel),
             };
             tracing::info!("Scanned location configuration on {attached_node}: {observed_conf:?}");
-            self.observed.locations.insert(
-                attached_node.get_id(),
-                ObservedStateLocation {
-                    conf: observed_conf,
-                },
-            );
+            match observed_conf {
+                Some(conf) => {
+                    // Pageserver returned a state: update it in observed.  This may still be an indeterminate (None) state,
+                    // if internally the pageserver's TenantSlot was being mutated (e.g. some long running API call is still running)
+                    self.observed
+                        .locations
+                        .insert(attached_node.get_id(), ObservedStateLocation { conf });
+                }
+                None => {
+                    // Pageserver returned 404: we have confirmation that there is no state for this shard on that pageserver.
+                    self.observed.locations.remove(&attached_node.get_id());
+                }
+            }
         }
 
         Ok(())
