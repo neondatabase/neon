@@ -1,18 +1,22 @@
 use std::pin::pin;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::future::select;
 use futures::future::try_join;
 use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
-use hyper::body::HttpBody;
-use hyper::header;
-use hyper::http::HeaderName;
-use hyper::http::HeaderValue;
-use hyper::Response;
-use hyper::StatusCode;
-use hyper::{Body, HeaderMap, Request};
+use http_body_util::BodyExt;
+use http_body_util::Full;
+use hyper1::body::Body;
+use hyper1::body::Incoming;
+use hyper1::header;
+use hyper1::http::HeaderName;
+use hyper1::http::HeaderValue;
+use hyper1::Response;
+use hyper1::StatusCode;
+use hyper1::{HeaderMap, Request};
 use serde_json::json;
 use serde_json::Value;
 use tokio::time;
@@ -29,7 +33,6 @@ use tracing::error;
 use tracing::info;
 use url::Url;
 use utils::http::error::ApiError;
-use utils::http::json::json_response;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
@@ -55,6 +58,7 @@ use super::conn_pool::ConnInfo;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
 use super::json::JsonConversionError;
+use super::util::json_response;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -218,10 +222,10 @@ fn get_conn_info(
 pub async fn handle(
     config: &'static ProxyConfig,
     mut ctx: RequestMonitoring,
-    request: Request<Body>,
+    request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
+) -> Result<Response<Full<Bytes>>, ApiError> {
     let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
 
     let mut response = match result {
@@ -332,10 +336,9 @@ pub async fn handle(
         }
     };
 
-    response.headers_mut().insert(
-        "Access-Control-Allow-Origin",
-        hyper::http::HeaderValue::from_static("*"),
-    );
+    response
+        .headers_mut()
+        .insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
     Ok(response)
 }
 
@@ -396,7 +399,7 @@ impl UserFacingError for SqlOverHttpError {
 #[derive(Debug, thiserror::Error)]
 pub enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
-    Read(#[from] hyper::Error),
+    Read(#[from] hyper1::Error),
     #[error("could not parse the HTTP request body: {0}")]
     Parse(#[from] serde_json::Error),
 }
@@ -437,7 +440,7 @@ struct HttpHeaders {
 }
 
 impl HttpHeaders {
-    fn try_parse(headers: &hyper::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
+    fn try_parse(headers: &hyper1::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
         // Determine the output options. Default behaviour is 'false'. Anything that is not
         // strictly 'true' assumed to be false.
         let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
@@ -488,9 +491,9 @@ async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    request: Request<Body>,
+    request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<Body>, SqlOverHttpError> {
+) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[ctx.protocol])
         .guard();
@@ -528,7 +531,7 @@ async fn handle_inner(
     }
 
     let fetch_and_process_request = async {
-        let body = hyper::body::to_bytes(request.into_body()).await?;
+        let body = request.into_body().collect().await?.to_bytes();
         info!(length = body.len(), "request payload read");
         let payload: Payload = serde_json::from_slice(&body)?;
         Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
@@ -596,7 +599,7 @@ async fn handle_inner(
     let body = serde_json::to_string(&result).expect("json serialization should not fail");
     let len = body.len();
     let response = response
-        .body(Body::from(body))
+        .body(Full::new(Bytes::from(body)))
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
