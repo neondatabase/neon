@@ -73,7 +73,7 @@ pub mod errors {
                         // Status 406: endpoint is disabled (we don't allow connections).
                         format!("{REQUEST_FAILED}: endpoint is disabled")
                     }
-                    http::StatusCode::LOCKED => {
+                    http::StatusCode::LOCKED | http::StatusCode::UNPROCESSABLE_ENTITY => {
                         // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
                         format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contact our support")
                     }
@@ -91,6 +91,12 @@ pub mod errors {
                     status: http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
                     ..
                 } => crate::error::ErrorKind::User,
+                ApiError::Console {
+                    status: http::StatusCode::UNPROCESSABLE_ENTITY,
+                    text,
+                } if text.contains("compute time quota of non-primary branches is exceeded") => {
+                    crate::error::ErrorKind::User
+                }
                 ApiError::Console {
                     status: http::StatusCode::LOCKED,
                     text,
@@ -120,6 +126,11 @@ pub mod errors {
                     status: http::StatusCode::BAD_REQUEST,
                     ..
                 } => true,
+                // don't retry when quotas are exceeded
+                Self::Console {
+                    status: http::StatusCode::UNPROCESSABLE_ENTITY,
+                    ref text,
+                } => !text.contains("compute time quota of non-primary branches is exceeded"),
                 // locked can be returned when the endpoint was in transition
                 // or when quotas are exceeded. don't retry when quotas are exceeded
                 Self::Console {
