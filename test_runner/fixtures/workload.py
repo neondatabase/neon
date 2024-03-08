@@ -112,7 +112,7 @@ class Workload:
         else:
             return False
 
-    def churn_rows(self, n, pageserver_id: Optional[int] = None, upload=True):
+    def churn_rows(self, n, pageserver_id: Optional[int] = None, upload=True, ingest=True):
         assert self.expect_rows >= n
 
         max_iters = 10
@@ -150,22 +150,28 @@ class Workload:
                 ]
             )
 
-        for tenant_shard_id, pageserver in tenant_get_shards(
-            self.env, self.tenant_id, pageserver_id
-        ):
-            last_flush_lsn = wait_for_last_flush_lsn(
-                self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
-            )
-            ps_http = pageserver.http_client()
-            wait_for_last_record_lsn(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
+        if ingest:
+            # Wait for written data to be ingested by the pageserver
+            for tenant_shard_id, pageserver in tenant_get_shards(
+                self.env, self.tenant_id, pageserver_id
+            ):
+                last_flush_lsn = wait_for_last_flush_lsn(
+                    self.env,
+                    endpoint,
+                    self.tenant_id,
+                    self.timeline_id,
+                    pageserver_id=pageserver_id,
+                )
+                ps_http = pageserver.http_client()
+                wait_for_last_record_lsn(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
 
-            if upload:
-                # force a checkpoint to trigger upload
-                ps_http.timeline_checkpoint(tenant_shard_id, self.timeline_id)
-                wait_for_upload(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
-                log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
-            else:
-                log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
+                if upload:
+                    # Wait for written data to be uploaded to S3 (force a checkpoint to trigger upload)
+                    ps_http.timeline_checkpoint(tenant_shard_id, self.timeline_id)
+                    wait_for_upload(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
+                    log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
+                else:
+                    log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
 
     def validate(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
