@@ -1,14 +1,19 @@
 use std::sync::Arc;
 
+use super::json_response;
 use anyhow::bail;
+use bytes::Bytes;
 use futures::StreamExt;
-use hyper::body::HttpBody;
-use hyper::header;
-use hyper::http::HeaderName;
-use hyper::http::HeaderValue;
-use hyper::Response;
-use hyper::StatusCode;
-use hyper::{Body, HeaderMap, Request};
+use http_body_util::BodyExt;
+use http_body_util::Full;
+use hyper1::body::Body;
+use hyper1::body::Incoming;
+use hyper1::header;
+use hyper1::http::HeaderName;
+use hyper1::http::HeaderValue;
+use hyper1::Response;
+use hyper1::StatusCode;
+use hyper1::{HeaderMap, Request};
 use serde_json::json;
 use serde_json::Value;
 use tokio::try_join;
@@ -22,7 +27,6 @@ use tracing::error;
 use tracing::info;
 use url::Url;
 use utils::http::error::ApiError;
-use utils::http::json::json_response;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
@@ -191,9 +195,9 @@ fn get_conn_info(
 pub async fn handle(
     config: &'static ProxyConfig,
     mut ctx: RequestMonitoring,
-    request: Request<Body>,
+    request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<Body>, ApiError> {
+) -> Result<Response<Full<Bytes>>, ApiError> {
     let result = tokio::time::timeout(
         config.http_config.request_timeout,
         handle_inner(config, &mut ctx, request, backend),
@@ -300,19 +304,18 @@ pub async fn handle(
         }
     };
 
-    response.headers_mut().insert(
-        "Access-Control-Allow-Origin",
-        hyper::http::HeaderValue::from_static("*"),
-    );
+    response
+        .headers_mut()
+        .insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
     Ok(response)
 }
 
 async fn handle_inner(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    request: Request<Body>,
+    request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
-) -> anyhow::Result<Response<Body>> {
+) -> anyhow::Result<Response<Full<Bytes>>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[ctx.protocol])
         .guard();
@@ -369,9 +372,12 @@ async fn handle_inner(
     }
 
     let fetch_and_process_request = async {
-        let body = hyper::body::to_bytes(request.into_body())
+        let body = request
+            .into_body()
+            .collect()
             .await
-            .map_err(anyhow::Error::from)?;
+            .map_err(anyhow::Error::from)?
+            .to_bytes();
         info!(length = body.len(), "request payload read");
         let payload: Payload = serde_json::from_slice(&body)?;
         Ok::<Payload, anyhow::Error>(payload) // Adjust error type accordingly
@@ -490,7 +496,7 @@ async fn handle_inner(
     let body = serde_json::to_string(&result).expect("json serialization should not fail");
     let len = body.len();
     let response = response
-        .body(Body::from(body))
+        .body(Full::new(Bytes::from(body)))
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
