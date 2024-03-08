@@ -68,24 +68,34 @@ where
         loop {
             match this.listener.as_mut().poll_accept(cx) {
                 Poll::Pending => break,
-                Poll::Ready(Some(Ok(conn))) => {
+                Poll::Ready(Some(Ok(mut conn))) => {
                     let t = *this.timeout;
-                    let accept = this.tls.accept(conn).into_fallible();
+                    let tls = this.tls.clone();
                     let protocol = *this.protocol;
                     this.waiting.spawn(async move {
+                        let mut peer_addr = conn.inner.inner.remote_addr();
+                        match conn.inner.wait_for_addr().await {
+                            Ok(Some(addr)) => peer_addr = addr,
+                            Err(e) => {
+                                tracing::error!("failed to accept TCP connection: missing PROXY protocol V2 header: {e:#}");
+                                return None;
+                            }
+                            Ok(None) => {}
+                        }
+
+                        let accept = tls.accept(conn);
                         match timeout(t, accept).await {
                             Ok(Ok(conn)) => Some(conn),
-                            Ok(Err((e, conn))) => {
-                                let peer_addr = conn
-                                    .inner
-                                    .client_addr()
-                                    .unwrap_or_else(|| conn.inner.inner.remote_addr());
+                            Ok(Err(e)) => {
                                 TLS_HANDSHAKE_FAILURES.inc();
                                 warn!(%peer_addr, protocol, "failed to accept TLS connection: {e:?}");
                                 None
                             }
                             // The handshake timed out, try getting another connection from the queue
-                            Err(_) => None,
+                            Err(_) => {
+                                warn!(%peer_addr, protocol, "failed to accept TLS connection: timeout");
+                                None
+                            }
                         }
                     });
                 }
