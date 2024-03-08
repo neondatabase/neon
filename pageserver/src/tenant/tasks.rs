@@ -217,7 +217,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
                 let allowed_rps = tenant.timeline_get_throttle.steady_rps();
                 let delta = now - prev;
-                warn!(
+                info!(
                     n_seconds=%format_args!("{:.3}",
                     delta.as_secs_f64()),
                     count_accounted,

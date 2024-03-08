@@ -63,7 +63,7 @@ pub async fn compact_tiered<E: CompactionJobExecutor>(
         );
 
         // Identify the range of LSNs that belong to this level. We assume that
-        // each file in this level span an LSN range up to 1.75x target file
+        // each file in this level spans an LSN range up to 1.75x target file
         // size. That should give us enough slop that if we created a slightly
         // oversized L0 layer, e.g. because flushing the in-memory layer was
         // delayed for some reason, we don't consider the oversized layer to
@@ -248,7 +248,6 @@ enum CompactionStrategy {
     CreateImage,
 }
 
-#[allow(dead_code)] // Todo
 struct CompactionJob<E: CompactionJobExecutor> {
     key_range: Range<E::Key>,
     lsn_range: Range<Lsn>,
@@ -345,7 +344,7 @@ where
     ///
     /// TODO: Currently, this is called exactly once for the level, and we
     /// decide whether to create new image layers to cover the whole level, or
-    /// write a new set of delta. In the future, this should try to partition
+    /// write a new set of deltas. In the future, this should try to partition
     /// the key space, and make the decision separately for each partition.
     async fn divide_job(&mut self, job_id: JobId, ctx: &E::RequestContext) -> anyhow::Result<()> {
         let job = &self.jobs[job_id.0];
@@ -709,18 +708,6 @@ where
     }
 }
 
-// Sliding window through keyspace and values
-//
-// This is used to decide what layer to write next, from the beginning of the window.
-//
-// Candidates:
-//
-// 1. Create an image layer, snapping to previous images
-// 2. Create a delta layer, snapping to previous images
-// 3. Create an image layer, snapping to
-//
-//
-
 // Take previous partitioning, based on the image layers below.
 //
 // Candidate is at the front:
@@ -739,6 +726,10 @@ struct WindowElement<K> {
     last_key: K,  // inclusive
     accum_size: u64,
 }
+
+// Sliding window through keyspace and values
+//
+// This is used to decide what layer to write next, from the beginning of the window.
 struct Window<K> {
     elems: VecDeque<WindowElement<K>>,
 

@@ -435,6 +435,8 @@ pub struct TenantShardLocation {
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigResponse {
     pub shards: Vec<TenantShardLocation>,
+    // If the shards' ShardCount count is >1, stripe_size will be set.
+    pub stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -537,10 +537,11 @@ impl PageServerNode {
         tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
+        lazy: bool,
     ) -> anyhow::Result<()> {
         Ok(self
             .http_client
-            .location_config(tenant_shard_id, config, flush_ms)
+            .location_config(tenant_shard_id, config, flush_ms, lazy)
             .await?)
     }
 
@@ -605,7 +606,7 @@ impl PageServerNode {
                 eprintln!("connection error: {}", e);
             }
         });
-        tokio::pin!(client);
+        let client = std::pin::pin!(client);
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;

@@ -1677,7 +1677,7 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
 pub(crate) struct AuxFilesDirectory {
     pub(crate) files: HashMap<String, Bytes>,
 }

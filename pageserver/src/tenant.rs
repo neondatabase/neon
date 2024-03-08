@@ -22,6 +22,7 @@ use pageserver_api::models;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
+use pageserver_api::shard::ShardStripeSize;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
@@ -151,7 +152,6 @@ pub(crate) mod ephemeral_file;
 pub mod layer_map;
 
 pub mod metadata;
-mod par_fsync;
 pub mod remote_timeline_client;
 pub mod storage_layer;
 
@@ -2085,6 +2085,10 @@ impl Tenant {
 
     pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
+    }
+
+    pub(crate) fn get_shard_stripe_size(&self) -> ShardStripeSize {
+        self.shard_identity.stripe_size
     }
 
     pub(crate) fn get_generation(&self) -> Generation {

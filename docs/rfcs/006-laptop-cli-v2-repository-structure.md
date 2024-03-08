@@ -1,14 +1,14 @@
 # Repository format
 
-A Zenith repository is similar to a traditional PostgreSQL backup
+A Neon repository is similar to a traditional PostgreSQL backup
 archive, like a WAL-G bucket or pgbarman backup catalogue. It holds
 multiple versions of a PostgreSQL database cluster.
 
-The distinguishing feature is that you can launch a Zenith Postgres
+The distinguishing feature is that you can launch a Neon Postgres
 server directly against a branch in the repository, without having to
-"restore" it first. Also, Zenith manages the storage automatically,
+"restore" it first. Also, Neon manages the storage automatically,
 there is no separation between full and incremental backups nor WAL
-archive. Zenith relies heavily on the WAL, and uses concepts similar
+archive. Neon relies heavily on the WAL, and uses concepts similar
 to incremental backups and WAL archiving internally, but it is hidden
 from the user.
 
@@ -19,15 +19,15 @@ efficient. Just something to get us started.
 
 The repository directory looks like this:
 
-    .zenith/timelines/4543be3daeab2ed4e58a285cbb8dd1fce6970f8c/wal/
-    .zenith/timelines/4543be3daeab2ed4e58a285cbb8dd1fce6970f8c/snapshots/<lsn>/
-    .zenith/timelines/4543be3daeab2ed4e58a285cbb8dd1fce6970f8c/history
+    .neon/timelines/4543be3daeab2ed4e58a285cbb8dd1fce6970f8c/wal/
+    .neon/timelines/4543be3daeab2ed4e58a285cbb8dd1fce6970f8c/snapshots/<lsn>/
+    .neon/timelines/4543be3daeab2ed4e58a285cbb8dd1fce6970f8c/history
     
-    .zenith/refs/branches/mybranch
-    .zenith/refs/tags/foo
-    .zenith/refs/tags/bar
+    .neon/refs/branches/mybranch
+    .neon/refs/tags/foo
+    .neon/refs/tags/bar
     
-    .zenith/datadirs/<timeline uuid>
+    .neon/datadirs/<timeline uuid>
 
 ### Timelines
 
@@ -39,7 +39,7 @@ All WAL is generated on a timeline. You can launch a read-only node
 against a tag or arbitrary LSN on a timeline, but in order to write,
 you need to create a timeline.
 
-Each timeline is stored in a directory under .zenith/timelines. It
+Each timeline is stored in a directory under .neon/timelines. It
 consists of a WAL archive, containing all the WAL in the standard
 PostgreSQL format, under the wal/ subdirectory.
 
@@ -66,18 +66,18 @@ contains the UUID of the timeline (and LSN, for tags).
 
 ### Datadirs
 
-.zenith/datadirs contains PostgreSQL data directories. You can launch
+.neon/datadirs contains PostgreSQL data directories. You can launch
 a Postgres instance on one of them with:
 
 ```
-  postgres -D .zenith/datadirs/4543be3daeab2ed4e58a285cbb8dd1fce6970f8c
+  postgres -D .neon/datadirs/4543be3daeab2ed4e58a285cbb8dd1fce6970f8c
 ```
 
 All the actual data is kept in the timeline directories, under
-.zenith/timelines. The data directories are only needed for active
+.neon/timelines. The data directories are only needed for active
 PostgreQSL instances. After an instance is stopped, the data directory
-can be safely removed. "zenith start" will recreate it quickly from
-the data in .zenith/timelines, if it's missing.
+can be safely removed. "neon start" will recreate it quickly from
+the data in .neon/timelines, if it's missing.
 
 ## Version 2
 
@@ -103,14 +103,14 @@ more advanced. The exact format is TODO. But it should support:
 
 ### Garbage collection
 
-When you run "zenith gc", old timelines that are no longer needed are
+When you run "neon gc", old timelines that are no longer needed are
 removed. That involves collecting the list of "unreachable" objects,
 starting from the named branches and tags.
 
 Also, if enough WAL has been generated on a timeline since last
 snapshot, a new snapshot or delta is created.
 
-### zenith push/pull
+### neon push/pull
 
 Compare the tags and branches on both servers, and copy missing ones.
 For each branch, compare the timeline it points to in both servers. If
@@ -123,7 +123,7 @@ every time you start up an instance? Then you would detect that the
 timelines have diverged. That would match with the "epoch" concept
 that we have in the WAL safekeeper
 
-### zenith checkout/commit
+### neon checkout/commit
 
 In this format, there is no concept of a "working tree", and hence no
 concept of checking out or committing. All modifications are done on
@@ -134,7 +134,7 @@ You can easily fork off a temporary timeline to emulate a "working tree".
 You can later remove it and have it garbage collected, or to "commit",
 re-point the branch to the new timeline.
 
-If we want to have a worktree and "zenith checkout/commit" concept, we can
+If we want to have a worktree and "neon checkout/commit" concept, we can
 emulate that with a temporary timeline. Create the temporary timeline at
-"zenith checkout", and have "zenith commit" modify the branch to point to
+"neon checkout", and have "neon commit" modify the branch to point to
 the new timeline.

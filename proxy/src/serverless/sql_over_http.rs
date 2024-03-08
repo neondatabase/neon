@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::bail;
-use futures::pin_mut;
 use futures::StreamExt;
 use hyper::body::HttpBody;
 use hyper::header;
@@ -531,13 +530,12 @@ async fn query_to_json<T: GenericClient>(
 ) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
     info!("executing query");
     let query_params = data.params;
-    let row_stream = client.query_raw_txt(&data.query, query_params).await?;
+    let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
     info!("finished executing query");
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
     // big.
-    pin_mut!(row_stream);
     let mut rows: Vec<tokio_postgres::Row> = Vec::new();
     while let Some(row) = row_stream.next().await {
         let row = row?;
