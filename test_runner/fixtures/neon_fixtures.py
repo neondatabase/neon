@@ -2322,16 +2322,16 @@ class NeonPageserver(PgProtocol):
     def assert_no_errors(self):
         logfile = self.workdir / "pageserver.log"
         if not logfile.exists():
-            log.warning(f"Skipping log check: {logfile} does not exist")
+            log.warning(f"Skipping log check on pageserver {self.id}: {logfile} does not exist")
             return
 
         with logfile.open("r") as f:
             errors = scan_pageserver_log_for_errors(f, self.allowed_errors)
 
         for _lineno, error in errors:
-            log.info(f"not allowed error: {error.strip()}")
+            log.info(f"not allowed error (pageserver {self.id}): {error.strip()}")
 
-        assert not errors
+        assert not errors, f"Pageserver {self.id}: {errors}"
 
     def assert_no_metric_errors(self):
         """
