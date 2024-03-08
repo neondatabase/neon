@@ -2257,7 +2257,7 @@ pub fn make_router(
         .get("/v1/location_config", |r| {
             api_handler(r, list_location_config_handler)
         })
-        .get("/v1/location_config/:tenant_id", |r| {
+        .get("/v1/location_config/:tenant_shard_id", |r| {
             api_handler(r, get_location_config_handler)
         })
         .put(
