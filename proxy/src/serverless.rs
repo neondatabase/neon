@@ -9,6 +9,7 @@ mod sql_over_http;
 mod util;
 mod websocket;
 
+use atomic_take::AtomicTake;
 use bytes::Bytes;
 pub use conn_pool::GlobalConnPoolOptions;
 
@@ -108,6 +109,7 @@ pub async fn task_main(
         }
         let conn_id = uuid::Uuid::new_v4();
         let http_conn_span = tracing::info_span!("http_conn", ?conn_id);
+        let session_id = uuid::Uuid::new_v4();
         let cancellation_token = cancellation_token.child_token();
 
         let tls = tls_acceptor.clone();
@@ -129,33 +131,35 @@ pub async fn task_main(
                 let peer = match conn.wait_for_addr().await {
                     Ok(peer) => peer,
                     Err(e) => {
-                        tracing::error!(%peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
+                        tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
                         return;
                     }
                 };
 
                 let peer_addr = peer.unwrap_or(peer_addr).ip();
-                info!(%peer_addr, "accepted new TCP connection");
+                info!(?session_id, %peer_addr, "accepted new TCP connection");
 
                 let accept = tls.accept(conn);
                 let conn = match timeout(config.handshake_timeout, accept).await {
                     Ok(Ok(conn)) => {
-                        info!(%peer_addr, "accepted new TLS connection");
+                        info!(?session_id, %peer_addr, "accepted new TLS connection");
                         conn
                     }
                     // The handshake failed, try getting another connection from the queue
                     Ok(Err(e)) => {
                         TLS_HANDSHAKE_FAILURES.inc();
-                        warn!(%peer_addr, "failed to accept TLS connection: {e:?}");
+                        warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
                         return;
                     }
                     // The handshake timed out, try getting another connection from the queue
                     Err(_) => {
                         TLS_HANDSHAKE_FAILURES.inc();
-                        warn!(%peer_addr, "failed to accept TLS connection: timeout");
+                        warn!(?session_id, %peer_addr, "failed to accept TLS connection: timeout");
                         return;
                     }
                 };
+
+                let session_id = AtomicTake::new(session_id);
 
                 // Cancel all current inflight HTTP requests if the HTTP connection is closed.
                 let http_cancellation_token = CancellationToken::new();
@@ -164,6 +168,9 @@ pub async fn task_main(
                 let conn = server.serve_connection_with_upgrades(
                     hyper_util::rt::TokioIo::new(conn),
                     hyper1::service::service_fn(move |req: hyper1::Request<Incoming>| {
+                        // First HTTP request shares the same session ID
+                        let session_id = session_id.take().unwrap_or_else(uuid::Uuid::new_v4);
+
                         let backend = backend.clone();
                         let ws_connections2 = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
@@ -185,6 +192,7 @@ pub async fn task_main(
                                     backend,
                                     ws_connections2,
                                     cancellation_handler,
+                                    session_id,
                                     peer_addr,
                                     endpoint_rate_limiter,
                                     http_cancellation_token,
@@ -232,13 +240,12 @@ async fn request_handler(
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
     cancellation_handler: Arc<CancellationHandlerMain>,
+    session_id: uuid::Uuid,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
-    let session_id = uuid::Uuid::new_v4();
-
     let host = request
         .headers()
         .get("host")

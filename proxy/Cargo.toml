@@ -12,6 +12,7 @@ testing = []
 anyhow.workspace = true
 async-compression.workspace = true
 async-trait.workspace = true
+atomic-take.workspace = true
 aws-config.workspace = true
 aws-sdk-iam.workspace = true
 aws-sigv4.workspace = true

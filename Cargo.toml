@@ -44,6 +44,7 @@ license = "Apache-2.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
+atomic-take = "1.1.0"
 azure_core = "0.18"
 azure_identity = "0.18"
 azure_storage = "0.18"
