@@ -1491,6 +1491,10 @@ impl TenantManager {
                 .join(",")
         );
 
+        fail::fail_point!("shard-split-pre-prepare", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+
         // Phase 1: Write out child shards' remote index files, in the parent tenant's current generation
         if let Err(e) = tenant.split_prepare(&child_shards).await {
             // If [`Tenant::split_prepare`] fails, we must reload the tenant, because it might
@@ -1499,6 +1503,10 @@ impl TenantManager {
             self.reset_tenant(tenant_shard_id, false, ctx).await?;
             return Err(e);
         }
+
+        fail::fail_point!("shard-split-post-prepare", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
 
         self.resources.deletion_queue_client.flush_advisory();
 
@@ -1521,11 +1529,16 @@ impl TenantManager {
                 anyhow::bail!("Detached parent shard in the middle of split!")
             }
         };
-
+        fail::fail_point!("shard-split-pre-hardlink", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
         // Optimization: hardlink layers from the parent into the children, so that they don't have to
         // re-download & duplicate the data referenced in their initial IndexPart
         self.shard_split_hardlink(parent, child_shards.clone())
             .await?;
+        fail::fail_point!("shard-split-post-hardlink", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
 
         // Take a snapshot of where the parent's WAL ingest had got to: we will wait for
         // child shards to reach this point.
@@ -1562,6 +1575,10 @@ impl TenantManager {
             .await?;
         }
 
+        fail::fail_point!("shard-split-post-child-conf", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+
         // Phase 4: wait for child chards WAL ingest to catch up to target LSN
         for child_shard_id in &child_shards {
             let child_shard_id = *child_shard_id;
@@ -1594,6 +1611,10 @@ impl TenantManager {
                         timeline.timeline_id,
                         target_lsn
                     );
+
+                    fail::fail_point!("shard-split-lsn-wait", |_| Err(anyhow::anyhow!(
+                        "failpoint"
+                    )));
                     if let Err(e) = timeline.wait_lsn(*target_lsn, ctx).await {
                         // Failure here might mean shutdown, in any case this part is an optimization
                         // and we shouldn't hold up the split operation.
@@ -1638,6 +1659,10 @@ impl TenantManager {
                     .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
             },
         );
+
+        fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
 
         parent_slot_guard.drop_old_value()?;
 
