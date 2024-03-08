@@ -932,6 +932,59 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
+  /v1/tenant/{tenant_shard_id}/heatmap_upload:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      description: |
+        If the location is in an attached mode, upload the current state to the remote heatmap
+      responses:
+        "200":
+          description: Success
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
+  /v1/tenant/{tenant_shard_id}/secondary/download:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      description: |
+        If the location is in secondary mode, download latest heatmap and layers
+      responses:
+        "200":
+          description: Success
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
+
 
   /v1/tenant/{tenant_id}/timeline/:
     parameters:
