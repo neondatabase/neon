@@ -155,6 +155,9 @@ files:
           - inserted
           - updated
           - deleted
+        # We export stats for only one non-system database. Without this limit
+        # it is too easy to abuse the system by creating lots of databases.
+        # We can try lifting this limit in the future after we understand the needs better.
         query: |
           select pg_database_size(datname) as db_size, deadlocks,
                  tup_inserted as inserted, tup_updated as updated, tup_deleted as deleted,
