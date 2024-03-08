@@ -213,7 +213,9 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             # This happens when timeline remains are cleaned up during loading
             ".*Timeline dir entry become invalid.*",
             # In one of the branches we poll for tenant to become active. Polls can generate this log message:
-            f".*Tenant {env.initial_tenant} is not active*",
+            f".*Tenant {env.initial_tenant} is not active.*",
+            # an on-demand is cancelled by shutdown
+            ".*initial size calculation failed: downloading failed, possibly for shutdown"
         ]
     )
 
