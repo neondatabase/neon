@@ -73,19 +73,19 @@ where
                     let tls = this.tls.clone();
                     let protocol = *this.protocol;
                     this.waiting.spawn(async move {
-                        let mut peer_addr = conn.inner.inner.remote_addr();
-                        match conn.inner.wait_for_addr().await {
-                            Ok(Some(addr)) => peer_addr = addr,
+                        let peer_addr = match conn.inner.wait_for_addr().await {
+                            Ok(Some(addr)) => addr,
                             Err(e) => {
-                                tracing::error!("failed to accept TCP connection: missing PROXY protocol V2 header: {e:#}");
+                                tracing::error!("failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
                                 return None;
                             }
-                            Ok(None) => {}
-                        }
+                            Ok(None) => conn.inner.inner.remote_addr()
+                        };
 
                         let accept = tls.accept(conn);
                         match timeout(t, accept).await {
                             Ok(Ok(conn)) => Some(conn),
+                            // The handshake failed, try getting another connection from the queue
                             Ok(Err(e)) => {
                                 TLS_HANDSHAKE_FAILURES.inc();
                                 warn!(%peer_addr, protocol, "failed to accept TLS connection: {e:?}");
@@ -93,6 +93,7 @@ where
                             }
                             // The handshake timed out, try getting another connection from the queue
                             Err(_) => {
+                                TLS_HANDSHAKE_FAILURES.inc();
                                 warn!(%peer_addr, protocol, "failed to accept TLS connection: timeout");
                                 None
                             }
