@@ -402,6 +402,7 @@ impl Timeline {
         )));
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
+        let walreceivers = WalReceivers::new();
         Ok(Timeline {
             ttid,
             wal_backup_launcher_tx,
@@ -410,8 +411,8 @@ impl Timeline {
             term_flush_lsn_watch_tx,
             term_flush_lsn_watch_rx,
             mutex: Mutex::new(shared_state),
-            walsenders: WalSenders::new(),
-            walreceivers: WalReceivers::new(),
+            walsenders: WalSenders::new(walreceivers.clone()),
+            walreceivers,
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
@@ -435,6 +436,7 @@ impl Timeline {
         let state =
             TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
+        let walreceivers = WalReceivers::new();
         Ok(Timeline {
             ttid,
             wal_backup_launcher_tx,
@@ -443,8 +445,8 @@ impl Timeline {
             term_flush_lsn_watch_tx,
             term_flush_lsn_watch_rx,
             mutex: Mutex::new(SharedState::create_new(conf, &ttid, state)?),
-            walsenders: WalSenders::new(),
-            walreceivers: WalReceivers::new(),
+            walsenders: WalSenders::new(walreceivers.clone()),
+            walreceivers,
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
@@ -656,12 +658,9 @@ impl Timeline {
             let mut shared_state = self.write_shared_state().await;
             rmsg = shared_state.sk.process_msg(msg).await?;
 
-            // if this is AppendResponse, fill in proper pageserver and hot
-            // standby feedback.
+            // if this is AppendResponse, fill in proper hot standby feedback.
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
-                let (ps_feedback, hs_feedback) = self.walsenders.get_feedbacks();
-                resp.hs_feedback = hs_feedback;
-                resp.pageserver_feedback = ps_feedback;
+                resp.hs_feedback = self.walsenders.get_hotstandby();
             }
 
             commit_lsn = shared_state.sk.state.inmem.commit_lsn;

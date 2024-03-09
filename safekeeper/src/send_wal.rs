@@ -2,6 +2,7 @@
 //! with the "START_REPLICATION" message, and registry of walsenders.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
 use crate::timeline::Timeline;
 use crate::wal_service::ConnectionId;
@@ -90,12 +91,14 @@ pub struct StandbyFeedback {
 /// WalSenders registry. Timeline holds it (wrapped in Arc).
 pub struct WalSenders {
     mutex: Mutex<WalSendersShared>,
+    walreceivers: Arc<WalReceivers>,
 }
 
 impl WalSenders {
-    pub fn new() -> Arc<WalSenders> {
+    pub fn new(walreceivers: Arc<WalReceivers>) -> Arc<WalSenders> {
         Arc::new(WalSenders {
             mutex: Mutex::new(WalSendersShared::new()),
+            walreceivers,
         })
     }
 
@@ -156,16 +159,20 @@ impl WalSenders {
         self.mutex.lock().agg_ps_feedback
     }
 
-    /// Get aggregated pageserver and hot standby feedback (we send them to compute).
-    pub fn get_feedbacks(self: &Arc<WalSenders>) -> (PageserverFeedback, HotStandbyFeedback) {
-        let shared = self.mutex.lock();
-        (shared.agg_ps_feedback, shared.agg_hs_feedback)
+    /// Get aggregated hot standby feedback (we send it to compute).
+    pub fn get_hotstandby(self: &Arc<WalSenders>) -> HotStandbyFeedback {
+        self.mutex.lock().agg_hs_feedback
     }
 
     /// Record new pageserver feedback, update aggregated values.
     fn record_ps_feedback(self: &Arc<WalSenders>, id: WalSenderId, feedback: &PageserverFeedback) {
         let mut shared = self.mutex.lock();
         shared.get_slot_mut(id).feedback = ReplicationFeedback::Pageserver(*feedback);
+
+        // send feedback to connected walproposers
+        self.walreceivers.broadcast_pageserver_feedback(*feedback);
+
+        // TODO: remove
         shared.update_ps_feedback();
     }
 
