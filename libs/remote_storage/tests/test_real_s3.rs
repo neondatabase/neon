@@ -17,6 +17,7 @@ use remote_storage::{
 };
 use test_context::test_context;
 use test_context::AsyncTestContext;
+use tokio::io::AsyncBufReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -484,32 +485,33 @@ async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
     ))
     .unwrap();
 
-    let len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+    let file_len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
 
     {
-        let mut stream = ctx
+        let stream = ctx
             .client
             .download(&path, &cancel)
             .await
             .expect("download succeeds")
             .download_stream;
 
-        let first = stream
-            .next()
-            .await
-            .expect("should have the first blob")
-            .expect("should have succeeded");
+        let mut reader = std::pin::pin!(tokio_util::io::StreamReader::new(stream));
 
-        tracing::info!(len = first.len(), "downloaded first chunk");
+        let first = reader.fill_buf().await.expect("should have the first blob");
+
+        let len = first.len();
+        tracing::info!(len, "downloaded first chunk");
 
         assert!(
-            first.len() < len,
+            first.len() < file_len,
             "uploaded file is too small, we downloaded all on first chunk"
         );
 
+        reader.consume(len);
+
         cancel.cancel();
 
-        let next = stream.next().await.expect("stream should have more");
+        let next = reader.fill_buf().await;
 
         let e = next.expect_err("expected an error, but got a chunk?");
 
@@ -520,6 +522,10 @@ async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
                 .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
             "{inner:?}"
         );
+
+        let e = DownloadError::from(e);
+
+        assert!(matches!(e, DownloadError::Cancelled), "{e:?}");
     }
 
     let cancel = CancellationToken::new();

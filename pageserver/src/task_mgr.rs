@@ -272,9 +272,6 @@ pub enum TaskKind {
     // Task that uploads a file to remote storage
     RemoteUploadTask,
 
-    // Task that downloads a file from remote storage
-    RemoteDownloadTask,
-
     // task that handles the initial downloading of all tenants
     InitialLoad,
 
