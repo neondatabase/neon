@@ -26,7 +26,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::context::RequestMonitoring;
 use crate::metrics::{NUM_CLIENT_CONNECTION_GAUGE, TLS_HANDSHAKE_FAILURES};
-use crate::protocol2::WithClientIp;
+use crate::protocol2::read_proxy_protocol;
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
@@ -126,9 +126,8 @@ pub async fn task_main(
                 .guard();
 
             // handle PROXY protocol
-            let mut conn = WithClientIp::new(conn);
-            let peer = match conn.wait_for_addr().await {
-                Ok(peer) => peer,
+            let (conn, peer) = match read_proxy_protocol(conn).await {
+                Ok(c) => c,
                 Err(e) => {
                     tracing::error!(
                         "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}"
