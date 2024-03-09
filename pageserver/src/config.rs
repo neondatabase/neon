@@ -83,6 +83,10 @@ pub mod defaults {
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 
+    #[cfg(target_os = "linux")]
+    pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "tokio-epoll-uring";
+
+    #[cfg(not(target_os = "linux"))]
     pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
 
     pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
