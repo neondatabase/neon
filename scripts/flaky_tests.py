@@ -46,11 +46,11 @@ def main(args: argparse.Namespace):
         logging.error("cannot fetch flaky tests from the DB due to an error", exc)
         rows = []
 
-    # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not std-fs),
+    # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not tokio-epoll-uring),
     # use it to parametrize test name along with build_type and pg_version
     #
     # See test_runner/fixtures/parametrize.py for details
-    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in ("", "std-fs"):
+    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in ("", "tokio-epoll-uring"):
         pageserver_virtual_file_io_engine_parameter = f"-{io_engine}"
     else:
         pageserver_virtual_file_io_engine_parameter = ""
