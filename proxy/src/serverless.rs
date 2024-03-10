@@ -4,6 +4,7 @@
 
 mod backend;
 mod conn_pool;
+mod http_auto;
 mod json;
 mod sql_over_http;
 mod websocket;
@@ -98,7 +99,7 @@ pub async fn task_main(
     let http_connections = tokio_util::task::task_tracker::TaskTracker::new();
     http_connections.close();
 
-    let server = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    let server = http_auto::Builder::new();
 
     loop {
         let Some(res) = run_until_cancelled(ws_listener.accept(), &cancellation_token).await else {
