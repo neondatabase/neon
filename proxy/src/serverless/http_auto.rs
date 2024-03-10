@@ -5,7 +5,7 @@ use futures::ready;
 use hyper1::body::Body;
 use hyper1::rt::ReadBufCursor;
 use hyper1::service::HttpService;
-use hyper_util::rt::{TokioExecutor, TokioTimer};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use std::future::Future;
 use std::marker::PhantomPinned;
 use std::mem::MaybeUninit;
@@ -68,7 +68,7 @@ impl Builder {
         S::Error: Into<Box<dyn StdError + Send + Sync>>,
         B: Body + 'static,
         B::Error: Into<Box<dyn StdError + Send + Sync>>,
-        I: Read + Write + Unpin + Send + 'static,
+        I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
         TokioExecutor: Http2ServerConnExec<S::Future, B>,
     {
         match version {
@@ -96,10 +96,10 @@ pub(crate) enum Version {
 
 pub(crate) fn read_version<I>(io: I) -> ReadVersion<I>
 where
-    I: Read + Unpin,
+    I: tokio::io::AsyncRead + Unpin,
 {
     ReadVersion {
-        io: Some(io),
+        io: Some(TokioIo::new(io)),
         buf: [MaybeUninit::uninit(); 24],
         filled: 0,
         version: Version::H2,
@@ -109,7 +109,7 @@ where
 
 pin_project! {
     pub(crate) struct ReadVersion<I> {
-        io: Option<I>,
+        io: Option<TokioIo<I>>,
         buf: [MaybeUninit<u8>; 24],
         // the amount of `buf` thats been filled
         filled: usize,
@@ -122,7 +122,7 @@ pin_project! {
 
 impl<I> Future for ReadVersion<I>
 where
-    I: Read + Unpin,
+    I: tokio::io::AsyncRead + Unpin,
 {
     type Output = io::Result<(Version, Rewind<I>)>;
 
@@ -195,7 +195,7 @@ impl<I, S, B> UpgradeableConnection<I, S>
 where
     S: HttpService<Incoming, ResBody = B>,
     S::Error: Into<Box<dyn StdError + Send + Sync>>,
-    I: Read + Write + Unpin,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     B: Body + 'static,
     B::Error: Into<Box<dyn StdError + Send + Sync>>,
     TokioExecutor: Http2ServerConnExec<S::Future, B>,
@@ -223,7 +223,7 @@ where
     S::Error: Into<Box<dyn StdError + Send + Sync>>,
     B: Body + 'static,
     B::Error: Into<Box<dyn StdError + Send + Sync>>,
-    I: Read + Write + Unpin + Send + 'static,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     TokioExecutor: Http2ServerConnExec<S::Future, B>,
 {
     type Output = Result<()>;
@@ -241,18 +241,18 @@ where
 #[derive(Debug)]
 pub(crate) struct Rewind<T> {
     pre: Option<Bytes>,
-    inner: T,
+    inner: TokioIo<T>,
 }
 
 impl<T> Rewind<T> {
     pub(crate) fn new(io: T) -> Self {
         Rewind {
             pre: None,
-            inner: io,
+            inner: TokioIo::new(io),
         }
     }
 
-    pub(crate) fn new_buffered(io: T, buf: Bytes) -> Self {
+    pub(crate) fn new_buffered(io: TokioIo<T>, buf: Bytes) -> Self {
         Rewind {
             pre: Some(buf),
             inner: io,
@@ -262,7 +262,7 @@ impl<T> Rewind<T> {
 
 impl<T> Read for Rewind<T>
 where
-    T: Read + Unpin,
+    T: tokio::io::AsyncRead + Unpin,
 {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -317,7 +317,7 @@ fn put_slice(cursor: &mut ReadBufCursor<'_>, slice: &[u8]) {
 
 impl<T> Write for Rewind<T>
 where
-    T: Write + Unpin,
+    T: tokio::io::AsyncWrite + Unpin,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,
