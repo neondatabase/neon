@@ -163,31 +163,34 @@ pub async fn task_main(
                 }
             };
 
-            let conn = server.serve_connection_with_upgrades(
-                hyper_util::rt::TokioIo::new(conn),
-                hyper1::service::service_fn(move |req: hyper1::Request<Incoming>| {
-                    let backend = backend.clone();
-                    let ws_connections = ws_connections.clone();
-                    let endpoint_rate_limiter = endpoint_rate_limiter.clone();
-                    let cancellation_handler = cancellation_handler.clone();
+            let service = hyper1::service::service_fn(move |req: hyper1::Request<Incoming>| {
+                let backend = backend.clone();
+                let ws_connections = ws_connections.clone();
+                let endpoint_rate_limiter = endpoint_rate_limiter.clone();
+                let cancellation_handler = cancellation_handler.clone();
 
-                    async move {
-                        Ok::<_, Infallible>(
-                            request_handler(
-                                req,
-                                config,
-                                backend,
-                                ws_connections,
-                                cancellation_handler,
-                                peer_addr,
-                                endpoint_rate_limiter,
-                            )
-                            .await
-                            .map_or_else(api_error_into_response, |r| r),
+                async move {
+                    Ok::<_, Infallible>(
+                        request_handler(
+                            req,
+                            config,
+                            backend,
+                            ws_connections,
+                            cancellation_handler,
+                            peer_addr,
+                            endpoint_rate_limiter,
                         )
-                    }
-                }),
-            );
+                        .await
+                        .map_or_else(api_error_into_response, |r| r),
+                    )
+                }
+            });
+
+            let conn = match conn.get_ref().1.alpn_protocol() {
+                Some(b"http/1.1") => server.serve_http1_connection_with_upgrades(hyper_util::rt::TokioIo::new(conn), service),
+                Some(b"h2") => server.serve_http2_connection(hyper_util::rt::TokioIo::new(conn), service),
+                _ => server.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(conn), service)
+            };
 
             let cancel = pin!(cancellation_token.cancelled());
             let conn = pin!(conn);
