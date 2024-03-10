@@ -30,8 +30,8 @@ hostname.workspace = true
 humantime.workspace = true
 hyper-tungstenite.workspace = true
 hyper.workspace = true
-hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
-hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
+hyper1 = { package = "hyper", version = "1.2", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 http1 = { package = "http", version = "1" }
 http-body-util = { version = "0.1" }
 ipnet.workspace = true

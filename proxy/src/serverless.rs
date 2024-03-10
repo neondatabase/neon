@@ -31,6 +31,7 @@ use crate::protocol2::WithClientIp;
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
+use crate::serverless::http_auto::Rewind;
 use crate::{cancellation::CancellationHandler, config::ProxyConfig};
 
 use std::convert::Infallible;
@@ -163,34 +164,45 @@ pub async fn task_main(
                 }
             };
 
-            let service = hyper1::service::service_fn(move |req: hyper1::Request<Incoming>| {
-                let backend = backend.clone();
-                let ws_connections = ws_connections.clone();
-                let endpoint_rate_limiter = endpoint_rate_limiter.clone();
-                let cancellation_handler = cancellation_handler.clone();
-
-                async move {
-                    Ok::<_, Infallible>(
-                        request_handler(
-                            req,
-                            config,
-                            backend,
-                            ws_connections,
-                            cancellation_handler,
-                            peer_addr,
-                            endpoint_rate_limiter,
-                        )
-                        .await
-                        .map_or_else(api_error_into_response, |r| r),
-                    )
+            let (version, conn) =match conn.get_ref().1.alpn_protocol() {
+                Some(b"http/1.1") => (http_auto::Version::H1, Rewind::new(hyper_util::rt::TokioIo::new(conn))),
+                Some(b"h2") => (http_auto::Version::H2, Rewind::new(hyper_util::rt::TokioIo::new(conn))),
+                _ => match http_auto::read_version(hyper_util::rt::TokioIo::new(conn)).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("HTTP connection error {e}");
+                        return;
+                    },
                 }
-            });
-
-            let conn = match conn.get_ref().1.alpn_protocol() {
-                Some(b"http/1.1") => server.serve_http1_connection_with_upgrades(hyper_util::rt::TokioIo::new(conn), service),
-                Some(b"h2") => server.serve_http2_connection(hyper_util::rt::TokioIo::new(conn), service),
-                _ => server.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(conn), service)
             };
+
+            let conn = server.serve_connection_with_upgrades(
+                conn,
+                version,
+                hyper1::service::service_fn(move |req: hyper1::Request<Incoming>| {
+                    let backend = backend.clone();
+                    let ws_connections = ws_connections.clone();
+                    let endpoint_rate_limiter = endpoint_rate_limiter.clone();
+                    let cancellation_handler = cancellation_handler.clone();
+
+                    async move {
+                        Ok::<_, Infallible>(
+                            request_handler(
+                                req,
+                                config,
+                                backend,
+                                ws_connections,
+                                cancellation_handler,
+                                peer_addr,
+                                endpoint_rate_limiter,
+                            )
+                            .await
+                            .map_or_else(api_error_into_response, |r| r),
+                        )
+                    }
+                })
+            );
+
 
             let cancel = pin!(cancellation_token.cancelled());
             let conn = pin!(conn);
