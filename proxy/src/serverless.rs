@@ -167,12 +167,20 @@ pub async fn task_main(
             let (version, conn) = match conn.get_ref().1.alpn_protocol() {
                 Some(b"http/1.1") => (http_auto::Version::H1, Rewind::new(conn)),
                 Some(b"h2") => (http_auto::Version::H2, Rewind::new(conn)),
-                _ => match http_auto::read_version(conn).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("HTTP connection error {e}");
-                        return;
-                    },
+                _ => {
+                    tracing::debug!("HTTP: no ALPN negotiated");
+                    let conn = timeout(Duration::from_secs(10), http_auto::read_version(conn)).await;
+                    match conn {
+                        Ok(Ok(v)) => v,
+                        Ok(Err(e)) => {
+                            tracing::warn!("HTTP connection error: {e}");
+                            return;
+                        },
+                        Err(_) => {
+                            tracing::warn!("HTTP connection error: timeout determining http version");
+                            return;
+                        }
+                    }
                 }
             };
 
