@@ -70,6 +70,12 @@ fn report_error(e: &WakeComputeError, retry: bool) {
             "quota_exceeded"
         }
         WakeComputeError::ApiError(ApiError::Console {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            ref text,
+        }) if text.contains("compute time quota of non-primary branches is exceeded") => {
+            "quota_exceeded"
+        }
+        WakeComputeError::ApiError(ApiError::Console {
             status: StatusCode::LOCKED,
             ..
         }) => "api_console_locked",
