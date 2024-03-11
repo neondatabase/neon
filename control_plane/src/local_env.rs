@@ -227,7 +227,7 @@ impl LocalEnv {
         self.neon_distrib_dir.join("pageserver")
     }
 
-    pub fn attachment_service_bin(&self) -> PathBuf {
+    pub fn storage_controller_bin(&self) -> PathBuf {
         // Irrespective of configuration, attachment service binary is always
         // run from the same location as neon_local.  This means that for compatibility
         // tests that run old pageserver/safekeeper, they still run latest attachment service.

@@ -31,7 +31,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::attachment_service::AttachmentService;
+use crate::attachment_service::StorageController;
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
@@ -111,7 +111,7 @@ impl PageServerNode {
                 control_plane_api.as_str()
             ));
 
-            // Attachment service uses the same auth as pageserver: if JWT is enabled
+            // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
             if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
@@ -214,7 +214,7 @@ impl PageServerNode {
         // Register the node with the storage controller before starting pageserver: pageserver must be registered to
         // successfully call /re-attach and finish starting up.
         if register {
-            let attachment_service = AttachmentService::from_env(&self.env);
+            let attachment_service = StorageController::from_env(&self.env);
             let (pg_host, pg_port) =
                 parse_host_port(&self.conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
             let (http_host, http_port) = parse_host_port(&self.conf.listen_http_addr)

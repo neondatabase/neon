@@ -8,7 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
-use control_plane::attachment_service::AttachmentService;
+use control_plane::attachment_service::StorageController;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::{InitForceMode, LocalEnv};
 use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
@@ -447,7 +447,7 @@ async fn handle_tenant(
 
             // We must register the tenant with the attachment service, so
             // that when the pageserver restarts, it will be re-attached.
-            let storage_controller = AttachmentService::from_env(env);
+            let storage_controller = StorageController::from_env(env);
             storage_controller
                 .tenant_create(TenantCreateRequest {
                     // Note that ::unsharded here isn't actually because the tenant is unsharded, its because the
@@ -528,7 +528,7 @@ async fn handle_tenant(
             let new_pageserver = get_pageserver(env, matches)?;
             let new_pageserver_id = new_pageserver.conf.id;
 
-            let storage_controller = AttachmentService::from_env(env);
+            let storage_controller = StorageController::from_env(env);
             storage_controller
                 .tenant_migrate(tenant_shard_id, new_pageserver_id)
                 .await?;
@@ -543,7 +543,7 @@ async fn handle_tenant(
 
             let mut tenant_synthetic_size = None;
 
-            let storage_controller = AttachmentService::from_env(env);
+            let storage_controller = StorageController::from_env(env);
             for shard in storage_controller.tenant_locate(tenant_id).await?.shards {
                 let pageserver =
                     PageServerNode::from_env(env, env.get_pageserver_conf(shard.node_id)?);
@@ -586,7 +586,7 @@ async fn handle_tenant(
             let tenant_id = get_tenant_id(matches, env)?;
             let shard_count: u8 = matches.get_one::<u8>("shard-count").cloned().unwrap_or(0);
 
-            let storage_controller = AttachmentService::from_env(env);
+            let storage_controller = StorageController::from_env(env);
             let result = storage_controller
                 .tenant_split(tenant_id, shard_count)
                 .await?;
@@ -633,7 +633,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
             let new_timeline_id_opt = parse_timeline_id(create_match)?;
             let new_timeline_id = new_timeline_id_opt.unwrap_or(TimelineId::generate());
 
-            let storage_controller = AttachmentService::from_env(env);
+            let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
                 ancestor_timeline_id: None,
@@ -730,7 +730,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .transpose()
                 .context("Failed to parse ancestor start Lsn from the request")?;
             let new_timeline_id = TimelineId::generate();
-            let storage_controller = AttachmentService::from_env(env);
+            let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
                 ancestor_timeline_id: Some(ancestor_timeline_id),
@@ -958,7 +958,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,
                 // to pass these on to postgres.
-                let storage_controller = AttachmentService::from_env(env);
+                let storage_controller = StorageController::from_env(env);
                 let locate_result = storage_controller.tenant_locate(endpoint.tenant_id).await?;
                 let pageservers = locate_result
                     .shards
@@ -1015,7 +1015,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                         pageserver.pg_connection_config.port(),
                     )]
                 } else {
-                    let storage_controller = AttachmentService::from_env(env);
+                    let storage_controller = StorageController::from_env(env);
                     storage_controller
                         .tenant_locate(endpoint.tenant_id)
                         .await?
@@ -1144,7 +1144,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             let scheduling = subcommand_args.get_one("scheduling");
             let availability = subcommand_args.get_one("availability");
 
-            let storage_controller = AttachmentService::from_env(env);
+            let storage_controller = StorageController::from_env(env);
             storage_controller
                 .node_configure(NodeConfigureRequest {
                     node_id: pageserver.conf.id,
@@ -1174,7 +1174,7 @@ async fn handle_storage_controller(
     sub_match: &ArgMatches,
     env: &local_env::LocalEnv,
 ) -> Result<()> {
-    let svc = AttachmentService::from_env(env);
+    let svc = StorageController::from_env(env);
     match sub_match.subcommand() {
         Some(("start", _start_match)) => {
             if let Err(e) = svc.start().await {
@@ -1282,7 +1282,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
 
     // Only start the attachment service if the pageserver is configured to need it
     if env.control_plane_api.is_some() {
-        let storage_controller = AttachmentService::from_env(env);
+        let storage_controller = StorageController::from_env(env);
         if let Err(e) = storage_controller.start().await {
             eprintln!("storage_controller start failed: {:#}", e);
             try_stop_all(env, true).await;
@@ -1356,7 +1356,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     }
 
     if env.control_plane_api.is_some() {
-        let storage_controller = AttachmentService::from_env(env);
+        let storage_controller = StorageController::from_env(env);
         if let Err(e) = storage_controller.stop(immediate).await {
             eprintln!("attachment service stop failed: {e:#}");
         }
