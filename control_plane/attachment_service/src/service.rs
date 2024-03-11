@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Context;
-use control_plane::attachment_service::{
+use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
 use diesel::result::DatabaseErrorKind;
@@ -849,7 +849,7 @@ impl Service {
             tenant_state.generation = Some(new_generation);
         } else {
             // This is a detach notification.  We must update placement policy to avoid re-attaching
-            // during background scheduling/reconciliation, or during attachment service restart.
+            // during background scheduling/reconciliation, or during storage controller restart.
             assert!(attach_req.node_id.is_none());
             tenant_state.policy = PlacementPolicy::Detached;
         }

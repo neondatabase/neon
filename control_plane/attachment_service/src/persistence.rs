@@ -20,7 +20,7 @@ use crate::node::Node;
 
 /// ## What do we store?
 ///
-/// The attachment service does not store most of its state durably.
+/// The storage controller service does not store most of its state durably.
 ///
 /// The essential things to store durably are:
 /// - generation numbers, as these must always advance monotonically to ensure data safety.
@@ -34,7 +34,7 @@ use crate::node::Node;
 ///
 /// ## Performance/efficiency
 ///
-/// The attachment service does not go via the database for most things: there are
+/// The storage controller service does not go via the database for most things: there are
 /// a couple of places where we must, and where efficiency matters:
 /// - Incrementing generation numbers: the Reconciler has to wait for this to complete
 ///   before it can attach a tenant, so this acts as a bound on how fast things like
