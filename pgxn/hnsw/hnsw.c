@@ -132,7 +132,7 @@ hnsw_check_available_memory(Size requested)
 {
 	size_t total;
 	if (sysctlbyname("hw.memsize", NULL, &total, NULL, 0) < 0)
-		elog(ERROR, "Failed to get amount of RAM");
+		elog(ERROR, "Failed to get amount of RAM: %m");
 
 	if ((Size)NBuffers*BLCKSZ + requested >= total)
 		elog(ERROR, "HNSW index requeries %ld bytes while only %ld are available",
@@ -149,7 +149,7 @@ hnsw_check_available_memory(Size requested)
 	struct sysinfo si;
 	Size total;
 	if (sysinfo(&si) < 0)
-		elog(ERROR, "Failed to get amount of RAM");
+		elog(ERROR, "Failed to get amount of RAM: %m");
 
 	total = si.totalram*si.mem_unit;
 	if ((Size)NBuffers*BLCKSZ + requested >= total)
