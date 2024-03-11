@@ -7,7 +7,7 @@ use std::time::SystemTime;
 ///
 /// `format: int64` fields must use `ser_saturating_u63` because openapi generated clients might
 /// not handle full u64 values properly.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct PageserverUtilization {
     /// Used disk space
     #[serde(serialize_with = "ser_saturating_u63")]

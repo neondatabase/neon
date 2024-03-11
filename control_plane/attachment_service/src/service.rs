@@ -23,11 +23,13 @@ use pageserver_api::{
     models::TenantConfigRequest,
 };
 use pageserver_api::{
+    controller_api::{NodeAvailabilityWrapper, UtilizationScore},
     models::{
-        self, LocationConfig, LocationConfigListResponse, LocationConfigMode, ShardParameters,
-        TenantConfig, TenantCreateRequest, TenantLocationConfigRequest,
-        TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
-        TenantShardSplitResponse, TenantTimeTravelRequest, TimelineCreateRequest, TimelineInfo,
+        self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
+        PageserverUtilization, ShardParameters, TenantConfig, TenantCreateRequest,
+        TenantLocationConfigRequest, TenantLocationConfigResponse, TenantShardLocation,
+        TenantShardSplitRequest, TenantShardSplitResponse, TenantTimeTravelRequest,
+        TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
     upcall_api::{
@@ -49,6 +51,7 @@ use utils::{
 
 use crate::{
     compute_hook::{self, ComputeHook},
+    heartbeater::{HeartbeaterHandler, PageserverState},
     node::{AvailabilityTransition, Node},
     persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
@@ -147,6 +150,8 @@ pub struct Service {
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
 
+    heartbeater_handler: HeartbeaterHandler,
+
     // Process shutdown will fire this token
     cancel: CancellationToken,
 
@@ -197,8 +202,6 @@ impl Service {
         let mut observed: HashMap<TenantShardId, Vec<(NodeId, Option<LocationConfig>)>> =
             HashMap::new();
 
-        let mut nodes_online = HashSet::new();
-
         // Startup reconciliation does I/O to other services: whether they
         // are responsive or not, we should aim to finish within our deadline, because:
         // - If we don't, a k8s readiness hook watching /ready will kill us.
@@ -227,7 +230,6 @@ impl Service {
                 tenant_shards.len(),
                 node_id
             );
-            nodes_online.insert(node_id);
 
             for (tenant_shard_id, conf_opt) in tenant_shards {
                 let shard_observations = observed.entry(tenant_shard_id).or_default();
@@ -239,6 +241,8 @@ impl Service {
         let mut compute_notifications = Vec::new();
 
         // Populate intent and observed states for all tenants, based on reported state on pageservers
+        let nodes_online = self.initial_heartbeat_round().await;
+
         let shard_count = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
@@ -246,8 +250,10 @@ impl Service {
             // Mark nodes online if they responded to us: nodes are offline by default after a restart.
             let mut new_nodes = (**nodes).clone();
             for (node_id, node) in new_nodes.iter_mut() {
-                if nodes_online.contains(node_id) {
-                    node.set_availability(NodeAvailability::Active);
+                if let Some(utilization) = nodes_online.get(node_id) {
+                    node.set_availability(NodeAvailability::Active(UtilizationScore(
+                        utilization.utilization_score,
+                    )));
                     scheduler.node_upsert(node);
                 }
             }
@@ -336,6 +342,32 @@ impl Service {
         tracing::info!("Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)");
     }
 
+    async fn initial_heartbeat_round(&self) -> HashMap<NodeId, PageserverUtilization> {
+        assert!(!self.startup_complete.is_ready());
+
+        let nodes = {
+            let locked = self.inner.read().unwrap();
+            locked.nodes.clone()
+        };
+
+        let res = self.heartbeater_handler.heartbeat(nodes).await;
+
+        let mut online_nodes = HashMap::new();
+        if let Ok(deltas) = res {
+            for (node_id, status) in deltas.0 {
+                tracing::info!("HB: {node_id} -> {status:?}");
+                match status {
+                    PageserverState::Available { utilization, .. } => {
+                        online_nodes.insert(node_id, utilization);
+                    }
+                    PageserverState::Offline => {}
+                }
+            }
+        }
+
+        online_nodes
+    }
+
     /// Used during [`Self::startup_reconcile`]: issue GETs to all nodes concurrently, with a deadline.
     ///
     /// The result includes only nodes which responded within the deadline
@@ -356,7 +388,7 @@ impl Service {
             node_list_futs.push({
                 async move {
                     tracing::info!("Scanning shards on node {node}...");
-                    let timeout = Duration::from_secs(5);
+                    let timeout = Duration::from_secs(1);
                     let response = node
                         .with_client_retries(
                             |client| async move { client.list_location_config().await },
@@ -551,6 +583,55 @@ impl Service {
             }
         }
     }
+    #[instrument(skip_all)]
+    async fn spawn_heartbeat_driver(&self) {
+        self.startup_complete.clone().wait().await;
+
+        const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        while !self.cancel.is_cancelled() {
+            tokio::select! {
+              _ = interval.tick() => { }
+              _ = self.cancel.cancelled() => return
+            };
+
+            let nodes = {
+                let locked = self.inner.read().unwrap();
+                locked.nodes.clone()
+            };
+
+            let res = self.heartbeater_handler.heartbeat(nodes).await;
+            if let Ok(deltas) = res {
+                let mut locked = self.inner.write().unwrap();
+                let mut new_nodes = (*locked.nodes).clone();
+
+                tracing::info!("new_nodes={new_nodes:?}");
+                for (node_id, state) in deltas.0 {
+                    tracing::info!("HB: {node_id} -> {state:?}");
+                    let node = match new_nodes.get_mut(&node_id) {
+                        Some(node) => node,
+                        None => continue,
+                    };
+
+                    match state {
+                        PageserverState::Available { utilization, .. } => {
+                            node.set_availability(NodeAvailability::Active(UtilizationScore(
+                                utilization.utilization_score,
+                            )));
+                        }
+                        PageserverState::Offline => {
+                            node.set_availability(NodeAvailability::Offline);
+                        }
+                    }
+
+                    locked.scheduler.node_upsert(node);
+                }
+
+                locked.nodes = Arc::new(new_nodes);
+            }
+        }
+    }
 
     /// Apply the contents of a [`ReconcileResult`] to our in-memory state: if the reconciliation
     /// was successful, this will update the observed state of the tenant such that subsequent
@@ -720,6 +801,12 @@ impl Service {
 
         let (startup_completion, startup_complete) = utils::completion::channel();
 
+        let cancel = CancellationToken::new();
+        let heartbeater_handler = HeartbeaterHandler::new(
+            config.jwt_token.clone(),
+            Duration::from_secs(10),
+            cancel.clone(),
+        );
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
                 nodes, tenants, scheduler,
@@ -728,8 +815,9 @@ impl Service {
             persistence,
             compute_hook: Arc::new(ComputeHook::new(config)),
             result_tx,
+            heartbeater_handler,
             startup_complete: startup_complete.clone(),
-            cancel: CancellationToken::new(),
+            cancel,
             gate: Gate::default(),
         });
 
@@ -753,10 +841,25 @@ impl Service {
                 };
 
                 this.startup_reconcile().await;
-
                 drop(startup_completion);
+            }
+        });
 
+        tokio::task::spawn({
+            let this = this.clone();
+            let startup_complete = startup_complete.clone();
+            async move {
+                startup_complete.wait().await;
                 this.background_reconcile().await;
+            }
+        });
+
+        tokio::task::spawn({
+            let this = this.clone();
+            let startup_complete = startup_complete.clone();
+            async move {
+                startup_complete.wait().await;
+                this.spawn_heartbeat_driver().await;
             }
         });
 
@@ -926,11 +1029,11 @@ impl Service {
             self.node_register(register_req).await?;
         }
 
-        // Take a re-attach as indication that the node is available: this is a precursor to proper
-        // heartbeating in https://github.com/neondatabase/neon/issues/6844
+        // Take a re-attach as indication that the node is available. This enables quick
+        // scheduling when the attachment service and pageservers start up at the same time.
         self.node_configure(NodeConfigureRequest {
             node_id: reattach_req.node_id,
-            availability: Some(NodeAvailability::Active),
+            availability: Some(NodeAvailabilityWrapper::Active),
             scheduling: None,
         })
         .await?;
@@ -2777,8 +2880,8 @@ impl Service {
             ));
         };
 
-        let availability_transition = if let Some(availability) = &config_req.availability {
-            node.set_availability(*availability)
+        let availability_transition = if let Some(availability) = config_req.availability {
+            node.set_availability(availability.into())
         } else {
             AvailabilityTransition::Unchanged
         };
