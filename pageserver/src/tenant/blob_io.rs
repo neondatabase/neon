@@ -11,7 +11,7 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 use crate::context::RequestContext;
@@ -237,39 +237,56 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         (src_buf, Ok(()))
     }
 
-    pub async fn write_compressed_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+    pub async fn write_compressed_blob(&mut self, srcbuf: Bytes) -> Result<u64, Error> {
         let offset = self.offset;
-        if srcbuf.len() < 128 {
-            self.write_all(&[NO_COMPRESSION]).await?;
+
+        let len = srcbuf.len();
+
+        let mut io_buf = self.io_buf.take().expect("we always put it back below");
+        io_buf.clear();
+        let mut is_compressed = false;
+        if len < 128 {
             // Short blob. Write a 1-byte length header
-            let len_buf = srcbuf.len() as u8;
-            self.write_all(&[len_buf]).await?;
+            io_buf.put_u8(NO_COMPRESSION);
+            io_buf.put_u8(len as u8);
         } else {
             // Write a 4-byte length header
-            if srcbuf.len() == BLCKSZ as usize {
-                let compressed = lz4_flex::block::compress(srcbuf);
-                if compressed.len() < srcbuf.len() {
-                    self.write_all(&[LZ4_COMPRESSION]).await?;
-                    let mut len_buf = (compressed.len() as u32).to_be_bytes();
-                    len_buf[0] |= 0x80;
-                    self.write_all(&len_buf).await?;
-                    self.write_all(&compressed).await?;
-                    return Ok(offset);
-                }
-            }
-            if srcbuf.len() > 0x7fff_ffff {
+            if len > 0x7fff_ffff {
                 return Err(Error::new(
                     ErrorKind::Other,
-                    format!("blob too large ({} bytes)", srcbuf.len()),
+                    format!("blob too large ({} bytes)", len),
                 ));
             }
-            self.write_all(&[NO_COMPRESSION]).await?;
-            let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
-            len_buf[0] |= 0x80;
-            self.write_all(&len_buf).await?;
+            if len == BLCKSZ as usize {
+                let compressed = lz4_flex::block::compress(&srcbuf);
+                if compressed.len() < len {
+                    io_buf.put_u8(LZ4_COMPRESSION);
+                    let mut len_buf = (compressed.len() as u32).to_be_bytes();
+                    len_buf[0] |= 0x80;
+                    io_buf.extend_from_slice(&len_buf[..]);
+                    io_buf.extend_from_slice(&compressed[..]);
+                    is_compressed = true;
+                }
+                if is_compressed {
+                    io_buf.put_u8(NO_COMPRESSION);
+                    let mut len_buf = (len as u32).to_be_bytes();
+                    len_buf[0] |= 0x80;
+                    io_buf.extend_from_slice(&len_buf[..]);
+                }
+            }
         }
-        self.write_all(srcbuf).await?;
-        Ok(offset)
+        let (io_buf, hdr_res) = self.write_all(io_buf).await;
+        match hdr_res {
+            Ok(_) => (),
+            Err(e) => return Err(e),
+        }
+        self.io_buf = Some(io_buf);
+        if is_compressed {
+            hdr_res.map(|_| offset)
+        } else {
+            let (_buf, res) = self.write_all(srcbuf).await;
+            res.map(|_| offset)
+        }
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
@@ -288,7 +305,6 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             if len < 128 {
                 // Short blob. Write a 1-byte length header
                 io_buf.put_u8(len as u8);
-                self.write_all(io_buf).await
             } else {
                 // Write a 4-byte length header
                 if len > 0x7fff_ffff {
@@ -303,8 +319,8 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 let mut len_buf = (len as u32).to_be_bytes();
                 len_buf[0] |= 0x80;
                 io_buf.extend_from_slice(&len_buf[..]);
-                self.write_all(io_buf).await
             }
+            self.write_all(io_buf).await
         }
         .await;
         self.io_buf = Some(io_buf);

@@ -26,7 +26,6 @@
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
-use crate::pgdatadir_mapping::is_rel_data_key;
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
@@ -37,21 +36,17 @@ use crate::tenant::storage_layer::{
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
-use crate::tenant::Timeline;
-use crate::virtual_file::VirtualFile;
-use crate::{
-    COMPRESSED_STORAGE_FORMAT_VERSION, IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX,
 };
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
-use crate::{IMAGE_FILE_MAGIC, LZ4_COMPRESSION, NO_COMPRESSION, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
+use crate::{
+    COMPRESSED_STORAGE_FORMAT_VERSION, IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX,
+};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use pageserver_api::keyspace::KeySpace;
-use lz4_flex;
-use pageserver_api::key::is_rel_data_key;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
@@ -450,9 +445,12 @@ impl ImageLayerInner {
                 .page_content_kind(PageContentKind::ImageLayerValue)
                 .build();
             let blob = (if self.format_version >= COMPRESSED_STORAGE_FORMAT_VERSION {
-                file.block_cursor().read_compressed_blob(offset, &ctx).await
+                block_reader
+                    .block_cursor()
+                    .read_compressed_blob(offset, &ctx)
+                    .await
             } else {
-                file.block_cursor().read_blob(offset, &ctx).await
+                block_reader.block_cursor().read_blob(offset, &ctx).await
             })
             .with_context(|| format!("failed to read value from offset {}", offset))?;
 
@@ -667,9 +665,7 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_compressed_blob(img).await?;
-        // TODO: re-use the buffer for `img` further upstack
-        let off = res?;
+        let off = self.blob_writer.write_compressed_blob(img).await?;
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;

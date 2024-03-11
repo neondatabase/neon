@@ -1085,6 +1085,7 @@ impl PagestreamBeMessage {
             Self::Error(_) => "Error",
             Self::DbSize(_) => "DbSize",
             Self::GetSlruSegment(_) => "GetSlruSegment",
+            Self::GetCompressedPage(_) => "GetCompressedPage",
         }
     }
 }

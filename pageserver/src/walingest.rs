@@ -472,8 +472,8 @@ impl WalIngest {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
             // only lz4 compression of WAL is now supported, for other compression algorithms fall back to storing the original WAL record
-            && (!postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.timeline.pg_version)? ||
-                postgres_ffi::bkpimage_is_compressed_lz4(blk.bimg_info, modification.timeline.pg_version)?)
+            && (!postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)? ||
+                postgres_ffi::bkpimage_is_compressed_lz4(blk.bimg_info, modification.tline.pg_version)?)
             // do not materialize null pages because them most likely be soon replaced with real data
             && blk.bimg_len != 0
         {
@@ -481,7 +481,10 @@ impl WalIngest {
             let img_len = blk.bimg_len as usize;
             let img_offs = blk.bimg_offset as usize;
             let mut image = BytesMut::with_capacity(BLCKSZ as usize);
-            if postgres_ffi::bkpimage_is_compressed_lz4(blk.bimg_info, self.timeline.pg_version)? {
+            if postgres_ffi::bkpimage_is_compressed_lz4(
+                blk.bimg_info,
+                modification.tline.pg_version,
+            )? {
                 let decompressed_img_len = (BLCKSZ - blk.hole_length) as usize;
                 let decompressed = lz4_flex::block::decompress(
                     &decoded.record[img_offs..img_offs + img_len],

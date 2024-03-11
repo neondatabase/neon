@@ -14,9 +14,9 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_i
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
-use lz4_flex;
 use enum_map::Enum;
 use itertools::Itertools;
+use lz4_flex;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,

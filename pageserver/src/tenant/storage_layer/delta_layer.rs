@@ -1148,6 +1148,11 @@ impl DeltaLayerInner {
                         let checkpoint = CheckPoint::decode(&img)?;
                         println!("   CHECKPOINT: {:?}", checkpoint);
                     }
+                    Value::CompressedImage(img) => {
+                        let decompressed = lz4_flex::block::decompress(&img, BLCKSZ as usize)?;
+                        let checkpoint = CheckPoint::decode(&decompressed)?;
+                        println!("   CHECKPOINT: {:?}", checkpoint);
+                    }
                     Value::WalRecord(_rec) => {
                         println!("   unexpected walrecord value for checkpoint key");
                     }
