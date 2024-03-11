@@ -57,9 +57,9 @@ use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 
-use crate::attachment_service::StorageController;
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
+use crate::storage_controller::StorageController;
 
 use compute_api::responses::{ComputeState, ComputeStatus};
 use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
@@ -752,8 +752,8 @@ impl Endpoint {
 
         // If we weren't given explicit pageservers, query the attachment service
         if pageservers.is_empty() {
-            let attachment_service = StorageController::from_env(&self.env);
-            let locate_result = attachment_service.tenant_locate(self.tenant_id).await?;
+            let storage_controller = StorageController::from_env(&self.env);
+            let locate_result = storage_controller.tenant_locate(self.tenant_id).await?;
             pageservers = locate_result
                 .shards
                 .into_iter()
