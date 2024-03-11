@@ -750,7 +750,7 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        // If we weren't given explicit pageservers, query the attachment service
+        // If we weren't given explicit pageservers, query the storage controller
         if pageservers.is_empty() {
             let storage_controller = StorageController::from_env(&self.env);
             let locate_result = storage_controller.tenant_locate(self.tenant_id).await?;
@@ -760,7 +760,7 @@ impl Endpoint {
                 .map(|shard| {
                     (
                         Host::parse(&shard.listen_pg_addr)
-                            .expect("Attachment service reported bad hostname"),
+                            .expect("Storage controller reported bad hostname"),
                         shard.listen_pg_port,
                     )
                 })

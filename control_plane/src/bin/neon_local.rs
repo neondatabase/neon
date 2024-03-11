@@ -445,14 +445,14 @@ async fn handle_tenant(
             // If tenant ID was not specified, generate one
             let tenant_id = parse_tenant_id(create_match)?.unwrap_or_else(TenantId::generate);
 
-            // We must register the tenant with the attachment service, so
+            // We must register the tenant with the storage controller, so
             // that when the pageserver restarts, it will be re-attached.
             let storage_controller = StorageController::from_env(env);
             storage_controller
                 .tenant_create(TenantCreateRequest {
                     // Note that ::unsharded here isn't actually because the tenant is unsharded, its because the
-                    // attachment service expecfs a shard-naive tenant_id in this attribute, and the TenantCreateRequest
-                    // type is used both in attachment service (for creating tenants) and in pageserver (for creating shards)
+                    // storage controller expecfs a shard-naive tenant_id in this attribute, and the TenantCreateRequest
+                    // type is used both in storage controller (for creating tenants) and in pageserver (for creating shards)
                     new_tenant_id: TenantShardId::unsharded(tenant_id),
                     generation: None,
                     shard_parameters: ShardParameters {
@@ -476,7 +476,7 @@ async fn handle_tenant(
                 .context("Failed to parse postgres version from the argument string")?;
 
             // FIXME: passing None for ancestor_start_lsn is not kosher in a sharded world: we can't have
-            // different shards picking different start lsns.  Maybe we have to teach attachment service
+            // different shards picking different start lsns.  Maybe we have to teach storage controller
             // to let shard 0 branch first and then propagate the chosen LSN to other shards.
             storage_controller
                 .tenant_timeline_create(
@@ -613,7 +613,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
 
     match timeline_match.subcommand() {
         Some(("list", list_match)) => {
-            // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the attachment service
+            // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the storage controller
             // where shard 0 is attached, and query there.
             let tenant_shard_id = get_tenant_shard_id(list_match, env)?;
             let timelines = pageserver.timeline_list(&tenant_shard_id).await?;
@@ -767,7 +767,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
     match sub_name {
         "list" => {
-            // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the attachment service
+            // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the storage controller
             // where shard 0 is attached, and query there.
             let tenant_shard_id = get_tenant_shard_id(sub_args, env)?;
             let timeline_infos = get_timeline_infos(env, &tenant_shard_id)
@@ -952,7 +952,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 (
                     vec![(parsed.0, parsed.1.unwrap_or(5432))],
                     // If caller is telling us what pageserver to use, this is not a tenant which is
-                    // full managed by attachment service, therefore not sharded.
+                    // full managed by storage controller, therefore not sharded.
                     ShardParameters::DEFAULT_STRIPE_SIZE,
                 )
             } else {
@@ -966,7 +966,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                     .map(|shard| {
                         (
                             Host::parse(&shard.listen_pg_addr)
-                                .expect("Attachment service reported bad hostname"),
+                                .expect("Storage controller reported bad hostname"),
                             shard.listen_pg_port,
                         )
                     })
@@ -1024,7 +1024,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                         .map(|shard| {
                             (
                                 Host::parse(&shard.listen_pg_addr)
-                                    .expect("Attachment service reported malformed host"),
+                                    .expect("Storage controller reported malformed host"),
                                 shard.listen_pg_port,
                             )
                         })
@@ -1280,7 +1280,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
 
     broker::start_broker_process(env).await?;
 
-    // Only start the attachment service if the pageserver is configured to need it
+    // Only start the storage controller if the pageserver is configured to need it
     if env.control_plane_api.is_some() {
         let storage_controller = StorageController::from_env(env);
         if let Err(e) = storage_controller.start().await {
@@ -1358,7 +1358,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     if env.control_plane_api.is_some() {
         let storage_controller = StorageController::from_env(env);
         if let Err(e) = storage_controller.stop(immediate).await {
-            eprintln!("attachment service stop failed: {e:#}");
+            eprintln!("storage controller stop failed: {e:#}");
         }
     }
 }
