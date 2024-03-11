@@ -46,9 +46,12 @@ def pytest_generate_tests(metafunc: Metafunc):
 
     metafunc.parametrize("pg_version", pg_versions, ids=map(lambda v: f"pg{v}", pg_versions))
 
-    # A hacky way to parametrize tests only for `pageserver_virtual_file_io_engine=tokio-epoll-uring`
-    # And do not change test name for default `pageserver_virtual_file_io_engine=std-fs` to keep tests statistics
-    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in ("", "std-fs"):
+    # A hacky way to parametrize tests only for `pageserver_virtual_file_io_engine=std-fs`
+    # And do not change test name for default `pageserver_virtual_file_io_engine=tokio-epoll-uring` to keep tests statistics
+    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in (
+        "",
+        "tokio-epoll-uring",
+    ):
         metafunc.parametrize("pageserver_virtual_file_io_engine", [io_engine])
 
     # For performance tests, parametrize also by platform

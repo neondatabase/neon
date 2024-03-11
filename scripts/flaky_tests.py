@@ -15,7 +15,8 @@ FLAKY_TESTS_QUERY = """
         DISTINCT parent_suite, suite, name
     FROM results
     WHERE
-        started_at > CURRENT_DATE - INTERVAL '%s' day
+        started_at > CURRENT_DATE - INTERVAL '10' day
+        AND started_at > '2024-03-11 11:32:12.874+00' -- TODO(update the date in a separate PR): we switched the default PAGESERVER_VIRTUAL_FILE_IO_ENGINE to `tokio-epoll-uring` from `std-fs` on this date, we want to ignore the flaky tests for `std-fs`
         AND (
             (status IN ('failed', 'broken') AND reference = 'refs/heads/main')
             OR flaky
@@ -46,11 +47,14 @@ def main(args: argparse.Namespace):
         logging.error("cannot fetch flaky tests from the DB due to an error", exc)
         rows = []
 
-    # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not std-fs),
+    # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not tokio-epoll-uring),
     # use it to parametrize test name along with build_type and pg_version
     #
     # See test_runner/fixtures/parametrize.py for details
-    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in ("", "std-fs"):
+    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in (
+        "",
+        "tokio-epoll-uring",
+    ):
         pageserver_virtual_file_io_engine_parameter = f"-{io_engine}"
     else:
         pageserver_virtual_file_io_engine_parameter = ""
