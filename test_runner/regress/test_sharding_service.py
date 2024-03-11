@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Union
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    AttachmentServiceApiException,
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    StorageControllerApiException,
     TokenScope,
 )
 from fixtures.pageserver.http import PageserverHttpClient
@@ -234,7 +234,7 @@ def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
     # TODO: extend this test to use multiple pageservers, and check that locations don't move around
     # on restart.
 
-    # Attachment service restart
+    # Storage controller restart
     env.storage_controller.stop()
     env.storage_controller.start()
 
@@ -517,7 +517,7 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     # Check that the consistency check passes on a freshly setup system
     env.storage_controller.consistency_check()
 
-    # These APIs are intentionally not implemented as methods on NeonAttachmentService, as
+    # These APIs are intentionally not implemented as methods on NeonStorageController, as
     # they're just for use in unanticipated circumstances.
 
     # Initial tenant (1 shard) and the one we just created (2 shards) should be visible
@@ -684,14 +684,14 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
 
     # No token
     with pytest.raises(
-        AttachmentServiceApiException,
+        StorageControllerApiException,
         match="Unauthorized: missing authorization header",
     ):
         svc.request("POST", f"{env.storage_controller_api}/v1/tenant", json=body)
 
     # Token with incorrect scope
     with pytest.raises(
-        AttachmentServiceApiException,
+        StorageControllerApiException,
         match="Forbidden: JWT authentication error",
     ):
         svc.request("POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.ADMIN))
@@ -703,14 +703,14 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
 
     # No token
     with pytest.raises(
-        AttachmentServiceApiException,
+        StorageControllerApiException,
         match="Unauthorized: missing authorization header",
     ):
         svc.request("GET", f"{api}/debug/v1/tenant")
 
     # Token with incorrect scope
     with pytest.raises(
-        AttachmentServiceApiException,
+        StorageControllerApiException,
         match="Forbidden: JWT authentication error",
     ):
         svc.request(
@@ -719,14 +719,14 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
 
     # No token
     with pytest.raises(
-        AttachmentServiceApiException,
+        StorageControllerApiException,
         match="Unauthorized: missing authorization header",
     ):
         svc.request("POST", f"{api}/upcall/v1/re-attach")
 
     # Token with incorrect scope
     with pytest.raises(
-        AttachmentServiceApiException,
+        StorageControllerApiException,
         match="Forbidden: JWT authentication error",
     ):
         svc.request(

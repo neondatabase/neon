@@ -1029,7 +1029,7 @@ class NeonEnv:
         # For testing this with a fake HTTP server, enable passing through a URL from config
         self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
 
-        self.storage_controller: NeonAttachmentService = NeonAttachmentService(
+        self.storage_controller: NeonStorageController = NeonStorageController(
             self, config.auth_enabled
         )
 
@@ -1940,14 +1940,14 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
-class AttachmentServiceApiException(Exception):
+class StorageControllerApiException(Exception):
     def __init__(self, message, status_code: int):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
 
 
-class NeonAttachmentService(MetricsGetter):
+class NeonStorageController(MetricsGetter):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
@@ -1959,7 +1959,7 @@ class NeonAttachmentService(MetricsGetter):
         self.running = True
         return self
 
-    def stop(self, immediate: bool = False) -> "NeonAttachmentService":
+    def stop(self, immediate: bool = False) -> "NeonStorageController":
         if self.running:
             self.env.neon_cli.storage_controller_stop(immediate)
             self.running = False
@@ -1974,7 +1974,7 @@ class NeonAttachmentService(MetricsGetter):
                 msg = res.json()["msg"]
             except:  # noqa: E722
                 msg = ""
-            raise AttachmentServiceApiException(msg, res.status_code) from e
+            raise StorageControllerApiException(msg, res.status_code) from e
 
     def pageserver_api(self) -> PageserverHttpClient:
         """
@@ -1989,7 +1989,7 @@ class NeonAttachmentService(MetricsGetter):
 
     def request(self, method, *args, **kwargs) -> requests.Response:
         resp = requests.request(method, *args, **kwargs)
-        NeonAttachmentService.raise_api_exception(resp)
+        NeonStorageController.raise_api_exception(resp)
 
         return resp
 
@@ -2010,7 +2010,7 @@ class NeonAttachmentService(MetricsGetter):
         try:
             resp = self.request("GET", f"{self.env.storage_controller_api}/ready")
             status = resp.status_code
-        except AttachmentServiceApiException as e:
+        except StorageControllerApiException as e:
             status = e.status_code
 
         if status == 503:
@@ -2168,7 +2168,7 @@ class NeonAttachmentService(MetricsGetter):
         )
         log.info("storage controller passed consistency check")
 
-    def __enter__(self) -> "NeonAttachmentService":
+    def __enter__(self) -> "NeonStorageController":
         return self
 
     def __exit__(
