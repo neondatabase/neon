@@ -39,7 +39,9 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
-use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
+use crate::{
+    COMPRESSED_STORAGE_FORMAT_VERSION, IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX,
+};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -153,6 +155,7 @@ pub struct ImageLayerInner {
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
+    format_version: u16,
 
     lsn: Lsn,
 
@@ -167,6 +170,7 @@ impl std::fmt::Debug for ImageLayerInner {
         f.debug_struct("ImageLayerInner")
             .field("index_start_blk", &self.index_start_blk)
             .field("index_root_blk", &self.index_root_blk)
+            .field("format_version", &self.format_version)
             .finish()
     }
 }
@@ -408,6 +412,7 @@ impl ImageLayerInner {
         Ok(Ok(ImageLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
+            format_version: actual_summary.format_version,
             lsn,
             file,
             file_id,
@@ -436,18 +441,20 @@ impl ImageLayerInner {
             )
             .await?
         {
-            let blob = block_reader
-                .block_cursor()
-                .read_blob(
-                    offset,
-                    &RequestContextBuilder::extend(ctx)
-                        .page_content_kind(PageContentKind::ImageLayerValue)
-                        .build(),
-                )
-                .await
-                .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
+            let ctx = RequestContextBuilder::extend(ctx)
+                .page_content_kind(PageContentKind::ImageLayerValue)
+                .build();
+            let blob = (if self.format_version >= COMPRESSED_STORAGE_FORMAT_VERSION {
+                block_reader
+                    .block_cursor()
+                    .read_compressed_blob(offset, &ctx)
+                    .await
+            } else {
+                block_reader.block_cursor().read_blob(offset, &ctx).await
+            })
+            .with_context(|| format!("failed to read value from offset {}", offset))?;
 
+            let value = Bytes::from(blob);
             reconstruct_state.img = Some((self.lsn, value));
             Ok(ValueReconstructResult::Complete)
         } else {
@@ -658,10 +665,7 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img).await;
-        // TODO: re-use the buffer for `img` further upstack
-        let off = res?;
-
+        let off = self.blob_writer.write_compressed_blob(img).await?;
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;
