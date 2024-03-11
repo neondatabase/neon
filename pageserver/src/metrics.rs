@@ -167,7 +167,7 @@ impl GetVectoredLatency {
 pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_get_vectored_seconds",
-        "Time spent in get_vectored",
+        "Time spent in get_vectored, excluding time spent in timeline_get_throttle.",
         &["task_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
@@ -1282,7 +1282,6 @@ pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|
     })
 });
 
-#[must_use]
 pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
     parent: &'a BasebackupQueryTime,
     ctx: &'c RequestContext,

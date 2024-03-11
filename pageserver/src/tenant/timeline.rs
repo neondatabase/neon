@@ -890,6 +890,7 @@ impl Timeline {
         Ok(results)
     }
 
+    /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn validate_get_vectored_impl(
         &self,
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
