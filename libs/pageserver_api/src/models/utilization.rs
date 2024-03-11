@@ -7,7 +7,7 @@ use std::time::SystemTime;
 ///
 /// `format: int64` fields must use `ser_saturating_u63` because openapi generated clients might
 /// not handle full u64 values properly.
-#[derive(serde::Serialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PageserverUtilization {
     /// Used disk space
     #[serde(serialize_with = "ser_saturating_u63")]
@@ -21,7 +21,10 @@ pub struct PageserverUtilization {
     /// When was this snapshot captured, pageserver local time.
     ///
     /// Use millis to give confidence that the value is regenerated often enough.
-    #[serde(serialize_with = "ser_rfc3339_millis")]
+    #[serde(
+        serialize_with = "ser_rfc3339_millis",
+        deserialize_with = "deser_rfc3339_millis"
+    )]
     pub captured_at: SystemTime,
 }
 
@@ -30,6 +33,14 @@ fn ser_rfc3339_millis<S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.collect_str(&humantime::format_rfc3339_millis(*ts))
+}
+
+fn deser_rfc3339_millis<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let s: String = serde::de::Deserialize::deserialize(deserializer)?;
+    humantime::parse_rfc3339(&s).map_err(serde::de::Error::custom)
 }
 
 /// openapi knows only `format: int64`, so avoid outputting a non-parseable value by generated clients.
