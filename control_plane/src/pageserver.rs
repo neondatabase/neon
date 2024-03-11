@@ -200,6 +200,31 @@ impl PageServerNode {
             String::from_utf8_lossy(&init_output.stderr),
         );
 
+        // Write metadata file, used by pageserver on startup to register itself with
+        // the storage controller
+        let metadata_path = datadir.join("metadata.json");
+
+        let (_http_host, http_port) =
+            parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
+        let http_port = http_port.unwrap_or(9898);
+        // Intentionally hand-craft JSON: this acts as an implicit format compat test
+        // in case the pageserver-side structure is edited, and reflects the real life
+        // situation: the metadata is written by some other script.
+        std::fs::write(
+            metadata_path,
+            format!(
+                "{{
+  \"host\": \"localhost\",
+  \"port\": {},
+  \"http_host\": \"localhost\",
+  \"http_port\": {}
+}}",
+                self.pg_connection_config.port(),
+                http_port,
+            ),
+        )
+        .expect("Failed to write metadata file");
+
         Ok(())
     }
 
