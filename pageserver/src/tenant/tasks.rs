@@ -101,6 +101,7 @@ pub fn start_background_loops(
                     _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
                 };
                 compaction_loop(tenant, cancel)
+                    // If you rename this span, change the RUST_LOG env variable in test_runner/performance/test_branch_creation.py
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
@@ -198,7 +199,11 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Compaction);
+            let elapsed = started_at.elapsed();
+            warn_when_period_overrun(elapsed, period, BackgroundLoopKind::Compaction);
+
+            // the duration is recorded by performance tests by enabling debug in this function
+            tracing::debug!(elapsed_ms=elapsed.as_millis(), "compaction iteration complete");
 
             // Perhaps we did no work and the walredo process has been idle for some time:
             // give it a chance to shut down to avoid leaving walredo process running indefinitely.
@@ -217,7 +222,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
                 let allowed_rps = tenant.timeline_get_throttle.steady_rps();
                 let delta = now - prev;
-                warn!(
+                info!(
                     n_seconds=%format_args!("{:.3}",
                     delta.as_secs_f64()),
                     count_accounted,

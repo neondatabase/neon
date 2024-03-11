@@ -195,6 +195,7 @@ impl Layer {
         let downloaded = resident.expect("just initialized");
 
         // if the rename works, the path is as expected
+        // TODO: sync system call
         std::fs::rename(temp_path, owner.local_path())
             .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
@@ -879,23 +880,18 @@ impl LayerInner {
     ) -> Result<heavier_once_cell::InitPermit, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let task_name = format!("download layer {}", self);
-
         let (tx, rx) = tokio::sync::oneshot::channel();
-
-        // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
-        // block tenant::mgr::remove_tenant_from_memory.
 
         let this: Arc<Self> = self.clone();
 
-        crate::task_mgr::spawn(
-            &tokio::runtime::Handle::current(),
-            crate::task_mgr::TaskKind::RemoteDownloadTask,
-            Some(self.desc.tenant_shard_id),
-            Some(self.desc.timeline_id),
-            &task_name,
-            false,
-            async move {
+        let guard = timeline
+            .gate
+            .enter()
+            .map_err(|_| DownloadError::DownloadCancelled)?;
+
+        tokio::task::spawn(async move {
+
+                let _guard = guard;
 
                 let client = timeline
                     .remote_client
@@ -905,7 +901,7 @@ impl LayerInner {
                 let result = client.download_layer_file(
                     &this.desc.filename(),
                     &this.metadata(),
-                    &crate::task_mgr::shutdown_token()
+                    &timeline.cancel
                 )
                 .await;
 
@@ -928,7 +924,6 @@ impl LayerInner {
 
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {},
-                            _ = crate::task_mgr::shutdown_token().cancelled_owned() => {},
                             _ = timeline.cancel.cancelled() => {},
                         };
 
@@ -958,11 +953,10 @@ impl LayerInner {
                         }
                     }
                 }
-
-                Ok(())
             }
             .in_current_span(),
         );
+
         match rx.await {
             Ok((Ok(()), permit)) => {
                 if let Some(reason) = self
@@ -975,7 +969,7 @@ impl LayerInner {
                 }
 
                 self.consecutive_failures.store(0, Ordering::Relaxed);
-                tracing::info!("on-demand download successful");
+                tracing::info!(size=%self.desc.file_size, "on-demand download successful");
 
                 Ok(permit)
             }

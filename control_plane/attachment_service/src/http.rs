@@ -1,6 +1,5 @@
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
-use crate::PlacementPolicy;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
@@ -119,13 +118,9 @@ async fn handle_tenant_create(
 
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
 
-    // TODO: enable specifying this.  Using Single as a default helps legacy tests to work (they
-    // have no expectation of HA).
-    let placement_policy = PlacementPolicy::Single;
-
     json_response(
         StatusCode::CREATED,
-        service.tenant_create(create_req, placement_policy).await?,
+        service.tenant_create(create_req).await?,
     )
 }
 

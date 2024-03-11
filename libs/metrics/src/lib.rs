@@ -29,7 +29,6 @@ pub mod launch_timestamp;
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
 mod hll;
-pub mod metric_vec_duration;
 pub use hll::{HyperLogLog, HyperLogLogVec};
 #[cfg(target_os = "linux")]
 pub mod more_process_metrics;

@@ -29,6 +29,7 @@
 #include "utils/guc.h"
 #include "utils/wait_event.h"
 
+#include "extension_server.h"
 #include "neon.h"
 #include "walproposer.h"
 #include "pagestore_client.h"

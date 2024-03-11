@@ -910,7 +910,7 @@ impl PageServerHandler {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelExists);
+            .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -938,7 +938,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelSize);
+            .start_timer(metrics::SmgrQueryType::GetRelSize, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -966,7 +966,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetDbSize);
+            .start_timer(metrics::SmgrQueryType::GetDbSize, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -1144,7 +1144,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetPageAtLsn);
+            .start_timer(metrics::SmgrQueryType::GetPageAtLsn, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -1172,7 +1172,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetSlruSegment);
+            .start_timer(metrics::SmgrQueryType::GetSlruSegment, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -1199,7 +1199,7 @@ impl PageServerHandler {
         prev_lsn: Option<Lsn>,
         full_backup: bool,
         gzip: bool,
-        ctx: RequestContext,
+        ctx: &RequestContext,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
@@ -1214,7 +1214,7 @@ impl PageServerHandler {
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", lsn);
-            timeline.wait_lsn(lsn, &ctx).await?;
+            timeline.wait_lsn(lsn, ctx).await?;
             timeline
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;
@@ -1236,7 +1236,7 @@ impl PageServerHandler {
                 lsn,
                 prev_lsn,
                 full_backup,
-                &ctx,
+                ctx,
             )
             .await?;
         } else {
@@ -1257,7 +1257,7 @@ impl PageServerHandler {
                     lsn,
                     prev_lsn,
                     full_backup,
-                    &ctx,
+                    ctx,
                 )
                 .await?;
                 // shutdown the encoder to ensure the gzip footer is written
@@ -1269,7 +1269,7 @@ impl PageServerHandler {
                     lsn,
                     prev_lsn,
                     full_backup,
-                    &ctx,
+                    ctx,
                 )
                 .await?;
             }
@@ -1449,25 +1449,25 @@ where
                 false
             };
 
-            ::metrics::metric_vec_duration::observe_async_block_duration_by_result(
-                &*metrics::BASEBACKUP_QUERY_TIME,
-                async move {
-                    self.handle_basebackup_request(
-                        pgb,
-                        tenant_id,
-                        timeline_id,
-                        lsn,
-                        None,
-                        false,
-                        gzip,
-                        ctx,
-                    )
-                    .await?;
-                    pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-                    Result::<(), QueryError>::Ok(())
-                },
-            )
-            .await?;
+            let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
+            let res = async {
+                self.handle_basebackup_request(
+                    pgb,
+                    tenant_id,
+                    timeline_id,
+                    lsn,
+                    None,
+                    false,
+                    gzip,
+                    &ctx,
+                )
+                .await?;
+                pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                Result::<(), QueryError>::Ok(())
+            }
+            .await;
+            metric_recording.observe(&res);
+            res?;
         }
         // return pair of prev_lsn and last_lsn
         else if query_string.starts_with("get_last_record_rlsn ") {
@@ -1563,7 +1563,7 @@ where
                 prev_lsn,
                 true,
                 false,
-                ctx,
+                &ctx,
             )
             .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;

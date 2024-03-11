@@ -7,11 +7,9 @@ use self::split_state::SplitState;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use diesel::pg::PgConnection;
-use diesel::{
-    Connection, ExpressionMethods, Insertable, QueryDsl, QueryResult, Queryable, RunQueryDsl,
-    Selectable, SelectableHelper,
-};
-use pageserver_api::controller_api::NodeSchedulingPolicy;
+use diesel::prelude::*;
+use diesel::Connection;
+use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
 use serde::{Deserialize, Serialize};
@@ -19,7 +17,6 @@ use utils::generation::Generation;
 use utils::id::{NodeId, TenantId};
 
 use crate::node::Node;
-use crate::PlacementPolicy;
 
 /// ## What do we store?
 ///
@@ -210,7 +207,7 @@ impl Persistence {
                 tenant.tenant_id = tenant_id.to_string();
                 tenant.config = serde_json::to_string(&TenantConfig::default())
                     .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
-                tenant.placement_policy = serde_json::to_string(&PlacementPolicy::default())
+                tenant.placement_policy = serde_json::to_string(&PlacementPolicy::Single)
                     .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
             }
         }

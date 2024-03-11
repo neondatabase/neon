@@ -4,27 +4,27 @@ How it works now
 1. Create repository, start page server on it
 
 ```
-$ zenith init
+$ neon init
 ...
 created main branch
-new zenith repository was created in .zenith
+new neon repository was created in .neon
 
-$ zenith pageserver start
-Starting pageserver at '127.0.0.1:64000' in .zenith
+$ neon pageserver start
+Starting pageserver at '127.0.0.1:64000' in .neon
 Page server started
 ```
 
 2. Create a branch, and start a Postgres instance on it
 
 ```
-$ zenith branch heikki main
+$ neon branch heikki main
 branching at end of WAL: 0/15ECF68
 
-$ zenith pg create heikki
+$ neon pg create heikki
 Initializing Postgres on timeline 76cf9279915be7797095241638e64644...
-Extracting base backup to create postgres instance: path=.zenith/pgdatadirs/pg1 port=55432
+Extracting base backup to create postgres instance: path=.neon/pgdatadirs/pg1 port=55432
 
-$ zenith pg start pg1
+$ neon pg start pg1
 Starting postgres node at 'host=127.0.0.1 port=55432 user=heikki'
 waiting for server to start.... done
 server started
@@ -52,20 +52,20 @@ serverless on your laptop, so that the workflow becomes just:
 1. Create repository, start page server on it (same as before)
 
 ```
-$ zenith init
+$ neon init
 ...
 created main branch
-new zenith repository was created in .zenith
+new neon repository was created in .neon
 
-$ zenith pageserver start
-Starting pageserver at '127.0.0.1:64000' in .zenith
+$ neon pageserver start
+Starting pageserver at '127.0.0.1:64000' in .neon
 Page server started
 ```
 
 2. Create branch
 
 ```
-$ zenith branch heikki main
+$ neon branch heikki main
 branching at end of WAL: 0/15ECF68
 ```
 
