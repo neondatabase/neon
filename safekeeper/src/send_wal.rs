@@ -23,7 +23,7 @@ use utils::failpoint_support;
 use utils::id::TenantTimelineId;
 use utils::pageserver_feedback::PageserverFeedback;
 
-use std::cmp::{min};
+use std::cmp::min;
 use std::net::SocketAddr;
 use std::str;
 use std::sync::Arc;
@@ -426,7 +426,7 @@ impl SafekeeperPostgresHandler {
         };
         let mut reply_reader = ReplyReader {
             reader,
-            ws_guard,
+            ws_guard: ws_guard.clone(),
             tli,
         };
 
@@ -435,6 +435,18 @@ impl SafekeeperPostgresHandler {
             r = sender.run() => r,
             r = reply_reader.run() => r,
         };
+
+        let ws_state = ws_guard
+            .walsenders
+            .mutex
+            .lock()
+            .get_slot(ws_guard.id)
+            .clone();
+        info!(
+            "finished streaming to {}, feedback={:?}",
+            ws_state.addr, ws_state.feedback,
+        );
+
         // Join pg backend back.
         pgb.unsplit(reply_reader.reader)?;
 
