@@ -1538,6 +1538,7 @@ broker_endpoint = '{broker_endpoint}'
 
         let broker_endpoint = "http://127.0.0.1:7777";
         let trace_read_requests = true;
+        let compress_image_layer = true;
 
         let config_string = format!(
             r#"{ALL_BASE_VALUES_TOML}
@@ -1545,7 +1546,8 @@ pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 [tenant_config]
-trace_read_requests = {trace_read_requests}"#,
+trace_read_requests = {trace_read_requests},
+compress_image_layer = {compress_image_layer}"#,
         );
 
         let toml = config_string.parse()?;
@@ -1553,6 +1555,10 @@ trace_read_requests = {trace_read_requests}"#,
         let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
         assert_eq!(
             conf.default_tenant_conf.trace_read_requests, trace_read_requests,
+            "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
+        );
+        assert_eq!(
+            conf.default_tenant_conf.compress_image_layer, compress_image_layer,
             "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
         );
 

@@ -182,7 +182,7 @@ pub(crate) struct AuxFilesState {
 }
 
 pub struct Timeline {
-    conf: &'static PageServerConf,
+    pub(crate) conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<AttachedTenantConf>>,
 
     myself: Weak<Self>,
@@ -1513,6 +1513,13 @@ impl Timeline {
         tenant_conf
             .evictions_low_residence_duration_metric_threshold
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
+    }
+
+    pub fn get_image_layer_compression(&self) -> bool {
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        tenant_conf
+            .compress_image_layer
+            .unwrap_or(self.conf.default_tenant_conf.compress_image_layer)
     }
 
     pub(super) fn tenant_conf_updated(&self) {
@@ -3458,14 +3465,7 @@ impl Timeline {
                 continue;
             }
 
-            let mut image_layer_writer = ImageLayerWriter::new(
-                self.conf,
-                self.timeline_id,
-                self.tenant_shard_id,
-                &img_range,
-                lsn,
-            )
-            .await?;
+            let mut image_layer_writer = ImageLayerWriter::new(self, &img_range, lsn).await?;
 
             fail_point!("image-layer-writer-fail-before-finish", |_| {
                 Err(CreateImageLayersError::Other(anyhow::anyhow!(

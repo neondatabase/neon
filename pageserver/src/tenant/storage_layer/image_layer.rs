@@ -598,6 +598,7 @@ struct ImageLayerWriterInner {
     timeline_id: TimelineId,
     tenant_shard_id: TenantShardId,
     key_range: Range<Key>,
+    compression: bool,
     lsn: Lsn,
 
     blob_writer: BlobWriter<false>,
@@ -609,16 +610,17 @@ impl ImageLayerWriterInner {
     /// Start building a new image layer.
     ///
     async fn new(
-        conf: &'static PageServerConf,
-        timeline_id: TimelineId,
-        tenant_shard_id: TenantShardId,
+        timeline: &Arc<Timeline>,
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<Self> {
+        let timeline_id = timeline.timeline_id;
+        let tenant_shard_id = timeline.tenant_shard_id;
+        let compression = timeline.get_image_layer_compression();
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
         let path = ImageLayer::temp_path_for(
-            conf,
+            timeline.conf,
             timeline_id,
             tenant_shard_id,
             &ImageFileName {
@@ -645,11 +647,12 @@ impl ImageLayerWriterInner {
         let tree_builder = DiskBtreeBuilder::new(block_buf);
 
         let writer = Self {
-            conf,
+            conf: timeline.conf,
             path,
             timeline_id,
             tenant_shard_id,
             key_range: key_range.clone(),
+            compression,
             lsn,
             tree: tree_builder,
             blob_writer,
@@ -665,7 +668,13 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_compressed_blob(img).await?;
+        let off = if self.compression {
+            self.blob_writer.write_compressed_blob(img).await?
+        } else {
+            let (_img, res) = self.blob_writer.write_blob(img).await;
+            // TODO: re-use the buffer for `img` further upstack
+            res?
+        };
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;
@@ -770,17 +779,12 @@ impl ImageLayerWriter {
     /// Start building a new image layer.
     ///
     pub async fn new(
-        conf: &'static PageServerConf,
-        timeline_id: TimelineId,
-        tenant_shard_id: TenantShardId,
+        timeline: &Arc<Timeline>,
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
-            inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn)
-                    .await?,
-            ),
+            inner: Some(ImageLayerWriterInner::new(timeline, key_range, lsn).await?),
         })
     }
 

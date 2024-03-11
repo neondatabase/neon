@@ -997,14 +997,7 @@ impl TimelineAdaptor {
     ) -> Result<(), PageReconstructError> {
         let timer = self.timeline.metrics.create_images_time_histo.start_timer();
 
-        let mut image_layer_writer = ImageLayerWriter::new(
-            self.timeline.conf,
-            self.timeline.timeline_id,
-            self.timeline.tenant_shard_id,
-            key_range,
-            lsn,
-        )
-        .await?;
+        let mut image_layer_writer = ImageLayerWriter::new(&self.timeline, key_range, lsn).await?;
 
         fail_point!("image-layer-writer-fail-before-finish", |_| {
             Err(PageReconstructError::Other(anyhow::anyhow!(

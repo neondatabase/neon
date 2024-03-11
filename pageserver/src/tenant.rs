@@ -2288,6 +2288,13 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
+    pub fn get_compress_image_layer(&self) -> bool {
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        tenant_conf
+            .compress_image_layer
+            .unwrap_or(self.conf.default_tenant_conf.compress_image_layer)
+    }
+
     pub fn get_min_resident_size_override(&self) -> Option<u64> {
         let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
@@ -3637,6 +3644,7 @@ pub(crate) mod harness {
                 lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
                 max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
                 trace_read_requests: Some(tenant_conf.trace_read_requests),
+                compress_image_layer: Some(tenant_conf.compress_image_layer),
                 eviction_policy: Some(tenant_conf.eviction_policy),
                 min_resident_size_override: tenant_conf.min_resident_size_override,
                 evictions_low_residence_duration_metric_threshold: Some(

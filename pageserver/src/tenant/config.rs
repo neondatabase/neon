@@ -345,6 +345,7 @@ pub struct TenantConf {
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
     pub trace_read_requests: bool,
+    pub compress_image_layer: bool,
     pub eviction_policy: EvictionPolicy,
     pub min_resident_size_override: Option<u64>,
     // See the corresponding metric's help string.
@@ -431,6 +432,10 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    pub compress_image_layer: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub eviction_policy: Option<EvictionPolicy>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -492,6 +497,9 @@ impl TenantConfOpt {
             trace_read_requests: self
                 .trace_read_requests
                 .unwrap_or(global_conf.trace_read_requests),
+            compress_image_layer: self
+                .compress_image_layer
+                .unwrap_or(global_conf.compress_image_layer),
             eviction_policy: self.eviction_policy.unwrap_or(global_conf.eviction_policy),
             min_resident_size_override: self
                 .min_resident_size_override
@@ -538,6 +546,7 @@ impl Default for TenantConf {
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
             trace_read_requests: false,
+            compress_image_layer: false,
             eviction_policy: EvictionPolicy::NoEviction,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
@@ -612,6 +621,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             lagging_wal_timeout: value.lagging_wal_timeout.map(humantime),
             max_lsn_wal_lag: value.max_lsn_wal_lag,
             trace_read_requests: value.trace_read_requests,
+            compress_image_layer: value.compress_image_layer,
             eviction_policy: value.eviction_policy,
             min_resident_size_override: value.min_resident_size_override,
             evictions_low_residence_duration_metric_threshold: value
