@@ -1443,7 +1443,7 @@ impl TenantManager {
     ) -> anyhow::Result<Vec<TenantShardId>> {
         let tenant = get_tenant(tenant_shard_id, true)?;
 
-        // Plan: identify what the new child shards will be
+        // Validate the incoming request
         if new_shard_count.count() <= tenant_shard_id.shard_count.count() {
             anyhow::bail!("Requested shard count is not an increase");
         }
@@ -1452,10 +1452,7 @@ impl TenantManager {
             anyhow::bail!("Requested split is not a power of two");
         }
 
-        let parent_shard_identity = tenant.shard_identity;
-        let parent_tenant_conf = tenant.get_tenant_conf();
-        let parent_generation = tenant.generation;
-
+        // Plan: identify what the new child shards will be
         let child_shards = tenant_shard_id.split(new_shard_count);
         tracing::info!(
             "Shard {} splits into: {}",
@@ -1465,6 +1462,10 @@ impl TenantManager {
                 .map(|id| format!("{}", id.to_index()))
                 .join(",")
         );
+
+        let parent_shard_identity = tenant.shard_identity;
+        let parent_tenant_conf = tenant.get_tenant_conf();
+        let parent_generation = tenant.generation;
 
         // Phase 1: Write out child shards' remote index files, in the parent tenant's current generation
         if let Err(e) = tenant.split_prepare(&child_shards).await {
