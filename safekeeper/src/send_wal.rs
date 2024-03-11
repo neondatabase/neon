@@ -155,6 +155,7 @@ impl WalSenders {
     }
 
     /// Get aggregated pageserver feedback.
+    /// Deprecated, TODO: remove me.
     pub fn get_ps_feedback(self: &Arc<WalSenders>) -> PageserverFeedback {
         self.mutex.lock().agg_ps_feedback
     }
