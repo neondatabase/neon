@@ -769,3 +769,68 @@ def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
     assert "pitr_interval" not in readback_ps.tenant_specific_overrides
 
     env.storage_controller.consistency_check()
+
+
+def test_sharding_service_heartbeats(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_start()
+
+    # Initially we have two online pageservers
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 2
+    assert all([n["availability"] == "Active" for n in nodes])
+
+    # ... then we stop one of the pageservers
+    offline_node_id = env.pageservers[1].id
+    env.pageservers[1].stop()
+
+    # ... then we expect the heartbeats to mark it offline
+    def node_offline():
+        nodes = env.storage_controller.node_list()
+        log.info(f"nodes={nodes}")
+        target = next(n for n in nodes if n["id"] == offline_node_id)
+        assert target["availability"] == "Offline"
+
+    wait_until(10, 1, node_offline)
+
+    # ... then we create two tenants and write some data into them
+    def create_tenant(tid: TenantId):
+        env.storage_controller.tenant_create(tid)
+
+        branch_name = "main"
+        env.neon_cli.create_timeline(
+            branch_name,
+            tenant_id=tid,
+        )
+
+        with env.endpoints.create_start("main", tenant_id=tid) as endpoint:
+            run_pg_bench_small(pg_bin, endpoint.connstr())
+            endpoint.safe_psql("CREATE TABLE created_foo(id integer);")
+
+    tenant_ids = [TenantId.generate(), TenantId.generate()]
+    for tid in tenant_ids:
+        create_tenant(tid)
+
+    # ... then we bring the pageserver back up
+    env.pageservers[1].start()
+
+    # ... then we expect it to be marked active
+    def node_online():
+        nodes = env.storage_controller.node_list()
+        target = next(n for n in nodes if n["id"] == offline_node_id)
+        assert target["availability"] == "Active"
+
+    wait_until(10, 1, node_online)
+
+    time.sleep(5)
+
+    # ... then we create a new tenant and expect it to be placed
+    # on the node that just came back online
+    tid = TenantId.generate()
+    env.storage_controller.tenant_create(tid)
+
+    tenants = env.storage_controller.tenant_list()
+    newest_tenant = next(t for t in tenants if t["tenant_shard_id"] == str(tid))
+    locations = list(newest_tenant["observed"]["locations"].keys())
+    locations = [int(node_id) for node_id in locations]
+    assert locations == [offline_node_id]
