@@ -416,4 +416,13 @@ impl Client {
             .await
             .map_err(Error::ReceiveBody)
     }
+
+    pub async fn get_utilization(&self) -> Result<PageserverUtilization> {
+        let uri = format!("{}/v1/utilization", self.mgmt_api_endpoint);
+        self.get(uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
 }
