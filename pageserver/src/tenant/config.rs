@@ -354,6 +354,7 @@ pub struct TenantConf {
     /// If non-zero, the period between uploads of a heatmap from attached tenants.  This
     /// may be disabled if a Tenant will not have secondary locations: only secondary
     /// locations will use the heatmap uploaded by attached locations.
+    #[serde(with = "humantime_serde")]
     pub heatmap_period: Duration,
 
     /// If true then SLRU segments are dowloaded on demand, if false SLRU segments are included in basebackup
