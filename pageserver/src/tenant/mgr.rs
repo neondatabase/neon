@@ -6,7 +6,9 @@ use futures::stream::StreamExt;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::ShardParameters;
-use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
+use pageserver_api::shard::{
+    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -1439,6 +1441,7 @@ impl TenantManager {
         &self,
         tenant_shard_id: TenantShardId,
         new_shard_count: ShardCount,
+        new_stripe_size: Option<ShardStripeSize>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<TenantShardId>> {
         let tenant = get_tenant(tenant_shard_id, true)?;
@@ -1450,6 +1453,17 @@ impl TenantManager {
         let expansion_factor = new_shard_count.count() / tenant_shard_id.shard_count.count();
         if !expansion_factor.is_power_of_two() {
             anyhow::bail!("Requested split is not a power of two");
+        }
+
+        if let Some(new_stripe_size) = new_stripe_size {
+            if tenant.get_shard_stripe_size() != new_stripe_size
+                && tenant_shard_id.shard_count.count() > 1
+            {
+                // This tenant already has multiple shards, it is illegal to try and change its stripe size
+                anyhow::bail!(
+                    "Shard stripe size may not be modified once tenant has multiple shards"
+                );
+            }
         }
 
         // Plan: identify what the new child shards will be
@@ -1516,6 +1530,9 @@ impl TenantManager {
         // Phase 3: Spawn the child shards
         for child_shard in &child_shards {
             let mut child_shard_identity = parent_shard_identity;
+            if let Some(new_stripe_size) = new_stripe_size {
+                child_shard_identity.stripe_size = new_stripe_size;
+            }
             child_shard_identity.count = child_shard.shard_count;
             child_shard_identity.number = child_shard.shard_number;
 

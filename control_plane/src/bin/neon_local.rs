@@ -585,10 +585,14 @@ async fn handle_tenant(
         Some(("shard-split", matches)) => {
             let tenant_id = get_tenant_id(matches, env)?;
             let shard_count: u8 = matches.get_one::<u8>("shard-count").cloned().unwrap_or(0);
+            let shard_stripe_size: Option<ShardStripeSize> = matches
+                .get_one::<Option<ShardStripeSize>>("shard-stripe-size")
+                .cloned()
+                .unwrap();
 
             let attachment_service = AttachmentService::from_env(env);
             let result = attachment_service
-                .tenant_split(tenant_id, shard_count)
+                .tenant_split(tenant_id, shard_count, shard_stripe_size)
                 .await?;
             println!(
                 "Split tenant {} into shards {}",
@@ -1586,6 +1590,7 @@ fn cli() -> Command {
                 .about("Increase the number of shards in the tenant")
                 .arg(tenant_id_arg.clone())
                 .arg(Arg::new("shard-count").value_parser(value_parser!(u8)).long("shard-count").action(ArgAction::Set).help("Number of shards in the new tenant (default 1)"))
+                .arg(Arg::new("shard-stripe-size").value_parser(value_parser!(u32)).long("shard-stripe-size").action(ArgAction::Set).help("Sharding stripe size in pages"))
                 )
         )
         .subcommand(
