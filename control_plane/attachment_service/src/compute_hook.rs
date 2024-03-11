@@ -235,6 +235,10 @@ pub(super) struct ComputeHook {
     state: std::sync::Mutex<HashMap<TenantId, ComputeHookTenant>>,
     authorization_header: Option<String>,
 
+    // Concurrency limiter, so that we do not overload the cloud control plane when updating
+    // large numbers of tenants (e.g. when failing over after a node failure)
+    api_concurrency: tokio::sync::Semaphore,
+
     // This lock is only used in testing enviroments, to serialize calls into neon_lock
     neon_local_lock: tokio::sync::Mutex<()>,
 }
@@ -251,6 +255,7 @@ impl ComputeHook {
             config,
             authorization_header,
             neon_local_lock: Default::default(),
+            api_concurrency: tokio::sync::Semaphore::new(API_CONCURRENCY),
         }
     }
 
@@ -376,6 +381,17 @@ impl ComputeHook {
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let client = reqwest::Client::new();
+
+        // We hold these semaphore units across all retries, rather than only across each
+        // HTTP request: this is to preserve fairness and avoid a situation where a retry might
+        // time out waiting for a semaphore.
+        let _units = self
+            .api_concurrency
+            .acquire()
+            .await
+            // Interpret closed semaphore as shutdown
+            .map_err(|_| NotifyError::ShuttingDown)?;
+
         backoff::retry(
             || self.do_notify_iteration(&client, url, reconfigure_request, cancel),
             |e| {
