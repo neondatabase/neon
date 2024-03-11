@@ -1,3 +1,4 @@
+import threading
 from typing import Optional
 
 from fixtures.log_helper import log
@@ -10,6 +11,10 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.types import TenantId, TimelineId
+
+# neon_local doesn't handle creating/modifying endpoints concurrently, so we use a mutex
+# to ensure we don't do that: this enables running lots of Workloads in parallel safely.
+ENDPOINT_LOCK = threading.Lock()
 
 
 class Workload:
@@ -41,17 +46,30 @@ class Workload:
 
         self._endpoint: Optional[Endpoint] = None
 
+    def reconfigure(self):
+        """
+        Request the endpoint to reconfigure based on location reported by storage controller
+        """
+        if self._endpoint is not None:
+            with ENDPOINT_LOCK:
+                self._endpoint.reconfigure()
+
     def endpoint(self, pageserver_id: Optional[int] = None) -> Endpoint:
-        if self._endpoint is None:
-            self._endpoint = self.env.endpoints.create(
-                self.branch_name,
-                tenant_id=self.tenant_id,
-                pageserver_id=pageserver_id,
-                endpoint_id="ep-workload",
-            )
-            self._endpoint.start(pageserver_id=pageserver_id)
-        else:
-            self._endpoint.reconfigure(pageserver_id=pageserver_id)
+        # We may be running alongside other Workloads for different tenants.  Full TTID is
+        # obnoxiously long for use here, but a cut-down version is still unique enough for tests.
+        endpoint_id = f"ep-workload-{str(self.tenant_id)[0:4]}-{str(self.timeline_id)[0:4]}"
+
+        with ENDPOINT_LOCK:
+            if self._endpoint is None:
+                self._endpoint = self.env.endpoints.create(
+                    self.branch_name,
+                    tenant_id=self.tenant_id,
+                    pageserver_id=pageserver_id,
+                    endpoint_id=endpoint_id,
+                )
+                self._endpoint.start(pageserver_id=pageserver_id)
+            else:
+                self._endpoint.reconfigure(pageserver_id=pageserver_id)
 
         connstring = self._endpoint.safe_psql(
             "SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'"
