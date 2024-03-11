@@ -95,7 +95,6 @@ get_num_snap_files_lsn_threshold(void)
 	DIR		   *dirdesc;
 	struct dirent *de;
 	char	   *snap_path = "pg_logical/snapshots/";
-	int			cnt = 0;
 	int			lsns_allocated = 1024;
 	int			lsns_num = 0;
 	XLogRecPtr *lsns;
@@ -161,9 +160,6 @@ get_num_snap_files_lsn_threshold(void)
 PGDLLEXPORT void
 LogicalSlotsMonitorMain(Datum main_arg)
 {
-	TimestampTz now,
-				last_checked;
-
 	/* Establish signal handlers. */
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);

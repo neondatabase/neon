@@ -1026,7 +1026,7 @@ static void
 StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 {
 	XLogRecPtr	FlushPtr;
-	TimeLineID	currTLI;
+	 __attribute__((unused)) TimeLineID	currTLI;
 
 #if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)
@@ -1230,7 +1230,6 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 	TimeLineID	timeline;
 	XLogRecPtr	startpos;
 	XLogRecPtr	endpos;
-	uint64		download_range_mb;
 
 	startpos = GetLogRepRestartLSN(wp);
 	if (startpos == InvalidXLogRecPtr)
