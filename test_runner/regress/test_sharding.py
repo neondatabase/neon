@@ -43,7 +43,7 @@ def test_sharding_smoke(
     tenant_id = env.initial_tenant
 
     pageservers = dict((int(p.id), p) for p in env.pageservers)
-    shards = env.attachment_service.locate(tenant_id)
+    shards = env.storage_controller.locate(tenant_id)
 
     def get_sizes():
         sizes = {}
@@ -86,7 +86,7 @@ def test_sharding_smoke(
         )
         assert timelines == {env.initial_timeline, timeline_b}
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_split_unsharded(
@@ -102,7 +102,7 @@ def test_sharding_split_unsharded(
 
     # Check that we created with an unsharded TenantShardId: this is the default,
     # but check it in case we change the default in future
-    assert env.attachment_service.inspect(TenantShardId(tenant_id, 0, 0)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 0)) is not None
 
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
@@ -110,15 +110,15 @@ def test_sharding_split_unsharded(
     workload.validate()
 
     # Split one shard into two
-    env.attachment_service.tenant_shard_split(tenant_id, shard_count=2)
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=2)
 
     # Check we got the shard IDs we expected
-    assert env.attachment_service.inspect(TenantShardId(tenant_id, 0, 2)) is not None
-    assert env.attachment_service.inspect(TenantShardId(tenant_id, 1, 2)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 2)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 1, 2)) is not None
 
     workload.validate()
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_split_smoke(
@@ -161,7 +161,7 @@ def test_sharding_split_smoke(
     workload.write_rows(256)
 
     # Note which pageservers initially hold a shard after tenant creation
-    pre_split_pageserver_ids = [loc["node_id"] for loc in env.attachment_service.locate(tenant_id)]
+    pre_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
 
     # For pageservers holding a shard, validate their ingest statistics
     # reflect a proper splitting of the WAL.
@@ -213,9 +213,9 @@ def test_sharding_split_smoke(
     # Before split, old shards exist
     assert shards_on_disk(old_shard_ids)
 
-    env.attachment_service.tenant_shard_split(tenant_id, shard_count=split_shard_count)
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
-    post_split_pageserver_ids = [loc["node_id"] for loc in env.attachment_service.locate(tenant_id)]
+    post_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
     # We should have split into 8 shards, on the same 4 pageservers we started on.
     assert len(post_split_pageserver_ids) == split_shard_count
     assert len(set(post_split_pageserver_ids)) == shard_count
@@ -261,7 +261,7 @@ def test_sharding_split_smoke(
     # Check that we didn't do any spurious reconciliations.
     # Total number of reconciles should have been one per original shard, plus
     # one for each shard that was migrated.
-    reconcile_ok = env.attachment_service.get_metric_value(
+    reconcile_ok = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
     assert reconcile_ok == shard_count + split_shard_count // 2
@@ -269,19 +269,19 @@ def test_sharding_split_smoke(
     # Check that no cancelled or errored reconciliations occurred: this test does no
     # failure injection and should run clean.
     assert (
-        env.attachment_service.get_metric_value(
+        env.storage_controller.get_metric_value(
             "storage_controller_reconcile_complete_total", filter={"status": "cancel"}
         )
         is None
     )
     assert (
-        env.attachment_service.get_metric_value(
+        env.storage_controller.get_metric_value(
             "storage_controller_reconcile_complete_total", filter={"status": "error"}
         )
         is None
     )
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
     # Validate pageserver state
     shards_exist: list[TenantShardId] = []
@@ -360,7 +360,7 @@ def test_sharding_ingest(
     huge_layer_count = 0
 
     # Inspect the resulting layer map, count how many layers are undersized.
-    for shard in env.attachment_service.locate(tenant_id):
+    for shard in env.storage_controller.locate(tenant_id):
         pageserver = env.get_pageserver(shard["node_id"])
         shard_id = shard["shard_id"]
         layer_map = pageserver.http_client().layer_map_info(shard_id, timeline_id)

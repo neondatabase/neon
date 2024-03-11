@@ -36,7 +36,7 @@ from werkzeug.wrappers.response import Response
 def get_node_shard_counts(env: NeonEnv, tenant_ids):
     counts: defaultdict[str, int] = defaultdict(int)
     for tid in tenant_ids:
-        for shard in env.attachment_service.locate(tid):
+        for shard in env.storage_controller.locate(tid):
             counts[shard["node_id"]] += 1
     return counts
 
@@ -62,20 +62,20 @@ def test_sharding_service_smoke(
 
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.try_start()
-    env.attachment_service.start()
+    env.storage_controller.start()
     env.pageservers[0].start()
     env.pageservers[1].start()
     for sk in env.safekeepers:
         sk.start()
 
     # The pageservers we started should have registered with the sharding service on startup
-    nodes = env.attachment_service.node_list()
+    nodes = env.storage_controller.node_list()
     assert len(nodes) == 2
     assert set(n["id"] for n in nodes) == {env.pageservers[0].id, env.pageservers[1].id}
 
     # Starting an additional pageserver should register successfully
     env.pageservers[2].start()
-    nodes = env.attachment_service.node_list()
+    nodes = env.storage_controller.node_list()
     assert len(nodes) == 3
     assert set(n["id"] for n in nodes) == {ps.id for ps in env.pageservers}
 
@@ -99,22 +99,22 @@ def test_sharding_service_smoke(
     # Creating and deleting timelines should work, using identical API to pageserver
     timeline_crud_tenant = next(iter(tenant_ids))
     timeline_id = TimelineId.generate()
-    env.attachment_service.pageserver_api().timeline_create(
+    env.storage_controller.pageserver_api().timeline_create(
         pg_version=PgVersion.NOT_SET, tenant_id=timeline_crud_tenant, new_timeline_id=timeline_id
     )
-    timelines = env.attachment_service.pageserver_api().timeline_list(timeline_crud_tenant)
+    timelines = env.storage_controller.pageserver_api().timeline_list(timeline_crud_tenant)
     assert len(timelines) == 2
     assert timeline_id in set(TimelineId(t["timeline_id"]) for t in timelines)
     #    virtual_ps_http.timeline_delete(tenant_id=timeline_crud_tenant, timeline_id=timeline_id)
     timeline_delete_wait_completed(
-        env.attachment_service.pageserver_api(), timeline_crud_tenant, timeline_id
+        env.storage_controller.pageserver_api(), timeline_crud_tenant, timeline_id
     )
-    timelines = env.attachment_service.pageserver_api().timeline_list(timeline_crud_tenant)
+    timelines = env.storage_controller.pageserver_api().timeline_list(timeline_crud_tenant)
     assert len(timelines) == 1
     assert timeline_id not in set(TimelineId(t["timeline_id"]) for t in timelines)
 
     # Marking a pageserver offline should migrate tenants away from it.
-    env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
+    env.storage_controller.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
     def node_evacuated(node_id: int) -> None:
         counts = get_node_shard_counts(env, tenant_ids)
@@ -124,7 +124,7 @@ def test_sharding_service_smoke(
 
     # Marking pageserver active should not migrate anything to it
     # immediately
-    env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Active"})
+    env.storage_controller.node_configure(env.pageservers[0].id, {"availability": "Active"})
     time.sleep(1)
     assert get_node_shard_counts(env, tenant_ids)[env.pageservers[0].id] == 0
 
@@ -144,13 +144,13 @@ def test_sharding_service_smoke(
 
     # Delete all the tenants
     for tid in tenant_ids:
-        tenant_delete_wait_completed(env.attachment_service.pageserver_api(), tid, 10)
+        tenant_delete_wait_completed(env.storage_controller.pageserver_api(), tid, 10)
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
     # Set a scheduling policy on one node, create all the tenants, observe
     # that the scheduling policy is respected.
-    env.attachment_service.node_configure(env.pageservers[1].id, {"scheduling": "Draining"})
+    env.storage_controller.node_configure(env.pageservers[1].id, {"scheduling": "Draining"})
 
     # Create some fresh tenants
     tenant_ids = set(TenantId.generate() for i in range(0, tenant_count))
@@ -163,7 +163,7 @@ def test_sharding_service_smoke(
     assert counts[env.pageservers[0].id] == tenant_shard_count // 2
     assert counts[env.pageservers[2].id] == tenant_shard_count // 2
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_node_status_after_restart(
@@ -173,28 +173,28 @@ def test_node_status_after_restart(
     env = neon_env_builder.init_start()
 
     # Initially we have two online pageservers
-    nodes = env.attachment_service.node_list()
+    nodes = env.storage_controller.node_list()
     assert len(nodes) == 2
 
     env.pageservers[1].stop()
 
-    env.attachment_service.stop()
-    env.attachment_service.start()
+    env.storage_controller.stop()
+    env.storage_controller.start()
 
     def is_ready():
-        assert env.attachment_service.ready() is True
+        assert env.storage_controller.ready() is True
 
     wait_until(30, 1, is_ready)
 
     # We loaded nodes from database on restart
-    nodes = env.attachment_service.node_list()
+    nodes = env.storage_controller.node_list()
     assert len(nodes) == 2
 
     # We should still be able to create a tenant, because the pageserver which is still online
     # should have had its availabilty state set to Active.
-    env.attachment_service.tenant_create(TenantId.generate())
+    env.storage_controller.tenant_create(TenantId.generate())
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_service_passthrough(
@@ -208,9 +208,9 @@ def test_sharding_service_passthrough(
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_start()
 
-    # We will talk to attachment service as if it was a pageserver, using the pageserver
+    # We will talk to storage controller as if it was a pageserver, using the pageserver
     # HTTP client
-    client = PageserverHttpClient(env.attachment_service_port, lambda: True)
+    client = PageserverHttpClient(env.storage_controller_port, lambda: True)
     timelines = client.timeline_list(tenant_id=env.initial_tenant)
     assert len(timelines) == 1
 
@@ -221,22 +221,22 @@ def test_sharding_service_passthrough(
     }
     assert status["state"]["slug"] == "Active"
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     tenant_a = env.initial_tenant
     tenant_b = TenantId.generate()
-    env.attachment_service.tenant_create(tenant_b)
+    env.storage_controller.tenant_create(tenant_b)
     env.pageserver.tenant_detach(tenant_a)
 
     # TODO: extend this test to use multiple pageservers, and check that locations don't move around
     # on restart.
 
     # Attachment service restart
-    env.attachment_service.stop()
-    env.attachment_service.start()
+    env.storage_controller.stop()
+    env.storage_controller.start()
 
     observed = set(TenantId(tenant["id"]) for tenant in env.pageserver.http_client().tenant_list())
 
@@ -255,7 +255,7 @@ def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
     assert tenant_a not in observed
     assert tenant_b in observed
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 @pytest.mark.parametrize("warm_up", [True, False])
@@ -271,7 +271,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
     env.broker.try_start()
-    env.attachment_service.start()
+    env.storage_controller.start()
 
     # This is the pageserver where we'll initially create the tenant.  Run it in emergency
     # mode so that it doesn't talk to storage controller, and do not register it.
@@ -286,12 +286,12 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     # will be attached after onboarding
     env.pageservers[1].start(register=True)
     dest_ps = env.pageservers[1]
-    virtual_ps_http = PageserverHttpClient(env.attachment_service_port, lambda: True)
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
     for sk in env.safekeepers:
         sk.start()
 
-    # Create a tenant directly via pageserver HTTP API, skipping the attachment service
+    # Create a tenant directly via pageserver HTTP API, skipping the storage controller
     tenant_id = TenantId.generate()
     generation = 123
     origin_ps.http_client().tenant_create(tenant_id, generation=generation)
@@ -324,7 +324,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
 
         virtual_ps_http.tenant_secondary_download(tenant_id)
 
-    # Call into attachment service to onboard the tenant
+    # Call into storage controller to onboard the tenant
     generation += 1
     virtual_ps_http.tenant_location_conf(
         tenant_id,
@@ -347,7 +347,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
         },
     )
 
-    # As if doing a live migration, call into the attachment service to
+    # As if doing a live migration, call into the storage controller to
     # set it to AttachedSingle: this is a no-op, but we test it because the
     # cloud control plane may call this for symmetry with live migration to
     # an individual pageserver
@@ -375,8 +375,8 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     assert dest_tenants[0]["generation"] == generation + 1
 
     # The onboarded tenant should survive a restart of sharding service
-    env.attachment_service.stop()
-    env.attachment_service.start()
+    env.storage_controller.stop()
+    env.storage_controller.start()
 
     # The onboarded tenant should surviev a restart of pageserver
     dest_ps.stop()
@@ -407,7 +407,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     dest_tenant_conf_after = dest_ps.http_client().tenant_config(tenant_id)
     assert dest_tenant_conf_after.tenant_specific_overrides == modified_tenant_conf
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_service_compute_hook(
@@ -419,7 +419,7 @@ def test_sharding_service_compute_hook(
     Test that the sharding service calls out to the configured HTTP endpoint on attachment changes
     """
 
-    # We will run two pageserver to migrate and check that the attachment service sends notifications
+    # We will run two pageserver to migrate and check that the storage controller sends notifications
     # when migrating.
     neon_env_builder.num_pageservers = 2
     (host, port) = httpserver_listen_address
@@ -450,7 +450,7 @@ def test_sharding_service_compute_hook(
     }
     assert notifications[0] == expect
 
-    env.attachment_service.node_configure(env.pageservers[0].id, {"availability": "Offline"})
+    env.storage_controller.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
     def node_evacuated(node_id: int) -> None:
         counts = get_node_shard_counts(env, [env.initial_tenant])
@@ -473,8 +473,8 @@ def test_sharding_service_compute_hook(
     wait_until(20, 0.25, received_migration_notification)
 
     # When we restart, we should re-emit notifications for all tenants
-    env.attachment_service.stop()
-    env.attachment_service.start()
+    env.storage_controller.stop()
+    env.storage_controller.start()
 
     def received_restart_notification():
         assert len(notifications) == 3
@@ -483,7 +483,7 @@ def test_sharding_service_compute_hook(
     wait_until(10, 1, received_restart_notification)
 
     # Splitting a tenant should cause its stripe size to become visible in the compute notification
-    env.attachment_service.tenant_shard_split(env.initial_tenant, shard_count=2)
+    env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=2)
     expect = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": 32768,
@@ -499,7 +499,7 @@ def test_sharding_service_compute_hook(
 
     wait_until(10, 1, received_split_notification)
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
@@ -512,55 +512,55 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = TenantId.generate()
-    env.attachment_service.tenant_create(tenant_id, shard_count=2, shard_stripe_size=8192)
+    env.storage_controller.tenant_create(tenant_id, shard_count=2, shard_stripe_size=8192)
 
     # Check that the consistency check passes on a freshly setup system
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
     # These APIs are intentionally not implemented as methods on NeonAttachmentService, as
     # they're just for use in unanticipated circumstances.
 
     # Initial tenant (1 shard) and the one we just created (2 shards) should be visible
-    response = env.attachment_service.request(
+    response = env.storage_controller.request(
         "GET",
-        f"{env.attachment_service_api}/debug/v1/tenant",
-        headers=env.attachment_service.headers(TokenScope.ADMIN),
+        f"{env.storage_controller_api}/debug/v1/tenant",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
     assert len(response.json()) == 3
 
     # Scheduler should report the expected nodes and shard counts
-    response = env.attachment_service.request(
-        "GET", f"{env.attachment_service_api}/debug/v1/scheduler"
+    response = env.storage_controller.request(
+        "GET", f"{env.storage_controller_api}/debug/v1/scheduler"
     )
     # Two nodes, in a dict of node_id->node
     assert len(response.json()["nodes"]) == 2
     assert sum(v["shard_count"] for v in response.json()["nodes"].values()) == 3
     assert all(v["may_schedule"] for v in response.json()["nodes"].values())
 
-    response = env.attachment_service.request(
+    response = env.storage_controller.request(
         "POST",
-        f"{env.attachment_service_api}/debug/v1/node/{env.pageservers[1].id}/drop",
-        headers=env.attachment_service.headers(TokenScope.ADMIN),
+        f"{env.storage_controller_api}/debug/v1/node/{env.pageservers[1].id}/drop",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
-    assert len(env.attachment_service.node_list()) == 1
+    assert len(env.storage_controller.node_list()) == 1
 
-    response = env.attachment_service.request(
+    response = env.storage_controller.request(
         "POST",
-        f"{env.attachment_service_api}/debug/v1/tenant/{tenant_id}/drop",
-        headers=env.attachment_service.headers(TokenScope.ADMIN),
+        f"{env.storage_controller_api}/debug/v1/tenant/{tenant_id}/drop",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
 
     # Tenant drop should be reflected in dump output
-    response = env.attachment_service.request(
+    response = env.storage_controller.request(
         "GET",
-        f"{env.attachment_service_api}/debug/v1/tenant",
-        headers=env.attachment_service.headers(TokenScope.ADMIN),
+        f"{env.storage_controller_api}/debug/v1/tenant",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
     assert len(response.json()) == 1
 
     # Check that the 'drop' APIs didn't leave things in a state that would fail a consistency check: they're
     # meant to be unclean wrt the pageserver state, but not leave a broken storage controller behind.
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_service_s3_time_travel_recovery(
@@ -584,10 +584,10 @@ def test_sharding_service_s3_time_travel_recovery(
     neon_env_builder.num_pageservers = 1
 
     env = neon_env_builder.init_start()
-    virtual_ps_http = PageserverHttpClient(env.attachment_service_port, lambda: True)
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
     tenant_id = TenantId.generate()
-    env.attachment_service.tenant_create(
+    env.storage_controller.tenant_create(
         tenant_id,
         shard_count=2,
         shard_stripe_size=8192,
@@ -595,7 +595,7 @@ def test_sharding_service_s3_time_travel_recovery(
     )
 
     # Check that the consistency check passes
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
     branch_name = "main"
     timeline_id = env.neon_cli.create_timeline(
@@ -670,14 +670,14 @@ def test_sharding_service_s3_time_travel_recovery(
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         endpoint.safe_psql("SELECT * FROM created_foo;")
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
-    svc = env.attachment_service
-    api = env.attachment_service_api
+    svc = env.storage_controller
+    api = env.storage_controller_api
 
     tenant_id = TenantId.generate()
     body: Dict[str, Any] = {"new_tenant_id": str(tenant_id)}
@@ -687,7 +687,7 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
         AttachmentServiceApiException,
         match="Unauthorized: missing authorization header",
     ):
-        svc.request("POST", f"{env.attachment_service_api}/v1/tenant", json=body)
+        svc.request("POST", f"{env.storage_controller_api}/v1/tenant", json=body)
 
     # Token with incorrect scope
     with pytest.raises(
@@ -743,7 +743,7 @@ def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
 
-    http = env.attachment_service.pageserver_api()
+    http = env.storage_controller.pageserver_api()
 
     default_value = "7days"
     new_value = "1h"
@@ -769,4 +769,4 @@ def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
     assert readback_ps.effective_config["pitr_interval"] == default_value
     assert "pitr_interval" not in readback_ps.tenant_specific_overrides
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
