@@ -2676,6 +2676,12 @@ pub fn preinitialize_metrics() {
     Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
     Lazy::force(&disk_usage_based_eviction::METRICS);
 
+    for state_name in pageserver_api::models::TenantState::VARIANTS {
+        // initialize the metric for all gauges, otherwise the time series might seemingly show
+        // values from last restart.
+        TENANT_STATE_METRIC.with_label_values(&[state_name]).set(0);
+    }
+
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
         .into_iter()
