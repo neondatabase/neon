@@ -7,8 +7,9 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{RemotePath, RemoteStorageConfig};
+use serde;
 use serde::de::IntoDeserializer;
-use std::env;
+use std::{collections::HashMap, env};
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
@@ -298,6 +299,26 @@ impl<T> BuilderValue<T> {
             Self::NotSet => Err(err),
         }
     }
+}
+
+// Certain metadata (e.g. externally-addressable name, AZ) is delivered
+// as a separate structure.  This is information neeed by the pageserver
+// itself, it is only used for registering the pageserver with the control
+// plane and/or storage controller.
+//
+#[derive(serde::Deserialize)]
+pub(crate) struct NodeMetadata {
+    #[serde(rename = "host")]
+    pub(crate) postgres_host: String,
+    #[serde(rename = "port")]
+    pub(crate) postgres_port: u16,
+    pub(crate) http_host: String,
+    pub(crate) http_port: u16,
+
+    // Deployment tools may write fields to the metadata file beyond what we
+    // use in this type: this type intentionally only names fields that require.
+    #[serde(flatten)]
+    pub(crate) other: HashMap<String, serde_json::Value>,
 }
 
 // needed to simplify config construction
@@ -755,6 +776,10 @@ impl PageServerConf {
 
     pub fn deletion_prefix(&self) -> Utf8PathBuf {
         self.workdir.join("deletion")
+    }
+
+    pub fn metadata_path(&self) -> Utf8PathBuf {
+        self.workdir.join("metadata.json")
     }
 
     pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
