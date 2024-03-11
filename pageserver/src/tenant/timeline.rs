@@ -610,6 +610,13 @@ pub enum GetVectoredImpl {
     Vectored,
 }
 
+/// Used by [`Timeline::get_vectored`] to keep track of whether to call
+/// [`Timeline::get`] vs [`Timeline::get0`].
+enum ApplyThrottle {
+    No,
+    Yes,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -634,6 +641,8 @@ impl Timeline {
     /// If a remote layer file is needed, it is downloaded as part of this
     /// call.
     ///
+    /// This method enforces [`Self::timeline_get_throttle`] internally.
+    ///
     /// NOTE: It is considered an error to 'get' a key that doesn't exist. The
     /// abstraction above this needs to store suitable metadata to track what
     /// data exists with what keys, in separate metadata entries. If a
@@ -650,11 +659,18 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
+        self.timeline_get_throttle.throttle(ctx, 1).await;
+        self.get0(key, lsn, ctx).await
+    }
+    async fn get0(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
-
-        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
@@ -752,10 +768,6 @@ impl Timeline {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
-        self.timeline_get_throttle
-            .throttle(ctx, key_count as usize)
-            .await;
-
         for range in &keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
@@ -772,38 +784,58 @@ impl Timeline {
             self.conf.get_vectored_impl
         );
 
-        let _timer = crate::metrics::GET_VECTORED_LATENCY
-            .for_task_kind(ctx.task_kind())
-            .map(|t| t.start_timer());
+        let ongoing_recording = crate::metrics::GET_VECTORED_LATENCY.start_recording(ctx);
 
-        match self.conf.get_vectored_impl {
+        // start counting after starting the observation so that throttle time
+        // is always less than observation time
+        self.timeline_get_throttle
+            .throttle(ctx, key_count as usize)
+            .await;
+
+        let res = match self.conf.get_vectored_impl {
             GetVectoredImpl::Sequential => {
-                self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
+                self.get_vectored_sequential_impl(keyspace, lsn, ApplyThrottle::No, ctx)
+                    .await
             }
             GetVectoredImpl::Vectored => {
                 let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
 
                 if self.conf.validate_vectored_get {
-                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                        .await;
+                    self.validate_get_vectored_impl(
+                        &vectored_res,
+                        keyspace,
+                        lsn,
+                        ApplyThrottle::No,
+                        ctx,
+                    )
+                    .await;
                 }
 
                 vectored_res
             }
-        }
+        };
+
+        ongoing_recording.observe();
+
+        res
     }
 
+    /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn get_vectored_sequential_impl(
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        apply_throttle: ApplyThrottle,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let mut values = BTreeMap::new();
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                let block = self.get(key, lsn, ctx).await;
+                let block = match apply_throttle {
+                    ApplyThrottle::Yes => self.get(key, lsn, ctx).await,
+                    ApplyThrottle::No => self.get0(key, lsn, ctx).await,
+                };
 
                 use PageReconstructError::*;
                 match block {
@@ -858,10 +890,11 @@ impl Timeline {
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
         keyspace: KeySpace,
         lsn: Lsn,
+        apply_throttle: ApplyThrottle,
         ctx: &RequestContext,
     ) {
         let sequential_res = self
-            .get_vectored_sequential_impl(keyspace.clone(), lsn, ctx)
+            .get_vectored_sequential_impl(keyspace.clone(), lsn, apply_throttle, ctx)
             .await;
 
         fn errors_match(lhs: &GetVectoredError, rhs: &GetVectoredError) -> bool {

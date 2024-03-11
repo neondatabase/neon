@@ -31,6 +31,13 @@ impl CounterU32 {
         }
     }
 
+    pub fn get(&self) -> Result<u32, &'static str> {
+        match self.inner.fetch(Ordering::Relaxed) {
+            u32::MAX => Err("get() called on closed state"),
+            x => Ok(x),
+        }
+    }
+
     pub fn add(&self, count: u32) -> Result<(), &'static str> {
         if count == 0 {
             return Ok(());
@@ -71,6 +78,10 @@ impl MicroSecondsCounterU32 {
             Ok(x) => self.inner.add(x),
             Err(_) => Err("add(): duration conversion error"),
         }
+    }
+    pub fn get_and_checked_sub_from(&self, from: Duration) -> Result<Duration, &'static str> {
+        let val = self.inner.get()?;
+        Ok(Duration::from_micros(val as u64))
     }
     pub fn close_and_checked_sub_from(&self, from: Duration) -> Result<Duration, &'static str> {
         let val = self.inner.close()?;

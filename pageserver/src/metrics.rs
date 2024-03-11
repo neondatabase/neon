@@ -154,13 +154,73 @@ pub(crate) struct GetVectoredLatency {
     map: EnumMap<TaskKind, Option<Histogram>>,
 }
 
+#[must_use]
+pub(crate) enum GetVectoredLatencyOngoingRecording<'a, 'c> {
+    Ignored,
+    Started {
+        histo: Histogram,
+        ctx: &'c RequestContext,
+        start: std::time::Instant,
+    },
+}
+
 impl GetVectoredLatency {
     // Only these task types perform vectored gets. Filter all other tasks out to reduce total
     // cardinality of the metric.
     const TRACKED_TASK_KINDS: [TaskKind; 2] = [TaskKind::Compaction, TaskKind::PageRequestHandler];
 
-    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
-        self.map[task_kind].as_ref()
+    pub(crate) fn start_recording<'c: 'a, 'a>(
+        &'a self,
+        ctx: &'c RequestContext,
+    ) -> GetVectoredLatencyOngoingRecording<'a, 'c> {
+        let Some(histo) = self.map[task_kind].as_ref() else {
+            return GetVectoredLatencyOngoingRecording::Ignored;
+        };
+        let start = Instant::now();
+        match ctx.micros_spent_throttled.open() {
+            Ok(()) => (),
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!(error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
+                });
+            }
+        }
+        Some(GetVectoredLatencyOngoingRecording { histo, ctx, start })
+    }
+}
+
+impl<'a, 'c> GetVectoredLatencyOngoingRecording<'a, 'c> {
+    pub(crate) fn observe<T, E>(self) {
+        match self {
+            GetVectoredLatencyOngoingRecording::Ignored => (),
+            GetVectoredLatencyOngoingRecording::Started { histo, ctx, start } => {
+                let elapsed = start.elapsed();
+                let ex_throttled = ctx
+                    .micros_spent_throttled
+                    // NB: unlike the other two similar patterns of code in this file,
+                    // we don't use close_... here, but get_... because Self is used
+                    // nested within the basebackup handler.
+                    .get_and_checked_sub_from(elapsed);
+                let ex_throttled = match ex_throttled {
+                    Ok(ex_throttled) => ex_throttled,
+                    Err(error) => {
+                        use utils::rate_limit::RateLimit;
+                        static LOGGED: Lazy<Mutex<RateLimit>> =
+                            Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                        let mut rate_limit = LOGGED.lock().unwrap();
+                        rate_limit.call(|| {
+                            warn!(error, "error deducting time spent throttled; this message is logged at a global rate limit");
+                        });
+                        elapsed
+                    }
+                };
+                histo.observe(ex_throttled.as_secs_f64());
+            }
+        }
     }
 }
 
@@ -1282,6 +1342,7 @@ pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|
     })
 });
 
+#[must_use]
 pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
     parent: &'a BasebackupQueryTime,
     ctx: &'c RequestContext,
