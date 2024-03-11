@@ -2,6 +2,7 @@
 //! with the "START_REPLICATION" message, and registry of walsenders.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::RECEIVED_PS_FEEDBACKS;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
 use crate::timeline::Timeline;
@@ -22,7 +23,7 @@ use utils::failpoint_support;
 use utils::id::TenantTimelineId;
 use utils::pageserver_feedback::PageserverFeedback;
 
-use std::cmp::{max, min};
+use std::cmp::{min};
 use std::net::SocketAddr;
 use std::str;
 use std::sync::Arc;
@@ -154,10 +155,10 @@ impl WalSenders {
             .min()
     }
 
-    /// Get aggregated pageserver feedback.
-    /// Deprecated, TODO: remove me.
-    pub fn get_ps_feedback(self: &Arc<WalSenders>) -> PageserverFeedback {
-        self.mutex.lock().agg_ps_feedback
+    /// Returns total counter of pageserver feedbacks received and last feedback.
+    pub fn get_ps_feedback_stats(self: &Arc<WalSenders>) -> (u64, PageserverFeedback) {
+        let shared = self.mutex.lock();
+        (shared.ps_feedback_counter, shared.last_ps_feedback)
     }
 
     /// Get aggregated hot standby feedback (we send it to compute).
@@ -169,12 +170,14 @@ impl WalSenders {
     fn record_ps_feedback(self: &Arc<WalSenders>, id: WalSenderId, feedback: &PageserverFeedback) {
         let mut shared = self.mutex.lock();
         shared.get_slot_mut(id).feedback = ReplicationFeedback::Pageserver(*feedback);
+        shared.last_ps_feedback = *feedback;
+        shared.ps_feedback_counter += 1;
+        drop(shared);
+
+        RECEIVED_PS_FEEDBACKS.inc();
 
         // send feedback to connected walproposers
         self.walreceivers.broadcast_pageserver_feedback(*feedback);
-
-        // TODO: remove
-        shared.update_ps_feedback();
     }
 
     /// Record standby reply.
@@ -230,8 +233,10 @@ impl WalSenders {
 struct WalSendersShared {
     // aggregated over all walsenders value
     agg_hs_feedback: HotStandbyFeedback,
-    // aggregated over all walsenders value
-    agg_ps_feedback: PageserverFeedback,
+    // last feedback ever received from any pageserver, empty if none
+    last_ps_feedback: PageserverFeedback,
+    // total counter of pageserver feedbacks received
+    ps_feedback_counter: u64,
     slots: Vec<Option<WalSenderState>>,
 }
 
@@ -239,7 +244,8 @@ impl WalSendersShared {
     fn new() -> Self {
         WalSendersShared {
             agg_hs_feedback: HotStandbyFeedback::empty(),
-            agg_ps_feedback: PageserverFeedback::empty(),
+            last_ps_feedback: PageserverFeedback::empty(),
+            ps_feedback_counter: 0,
             slots: Vec::new(),
         }
     }
@@ -283,37 +289,6 @@ impl WalSendersShared {
             }
         }
         self.agg_hs_feedback = agg;
-    }
-
-    /// Update aggregated pageserver feedback. LSNs (last_received,
-    /// disk_consistent, remote_consistent) and reply timestamp are just
-    /// maximized; timeline_size if taken from feedback with highest
-    /// last_received lsn. This is generally reasonable, but we might want to
-    /// implement other policies once multiple pageservers start to be actively
-    /// used.
-    fn update_ps_feedback(&mut self) {
-        let init = PageserverFeedback::empty();
-        let acc =
-            self.slots
-                .iter()
-                .flatten()
-                .fold(init, |mut acc, ws_state| match ws_state.feedback {
-                    ReplicationFeedback::Pageserver(feedback) => {
-                        if feedback.last_received_lsn > acc.last_received_lsn {
-                            acc.current_timeline_size = feedback.current_timeline_size;
-                        }
-                        acc.last_received_lsn =
-                            max(feedback.last_received_lsn, acc.last_received_lsn);
-                        acc.disk_consistent_lsn =
-                            max(feedback.disk_consistent_lsn, acc.disk_consistent_lsn);
-                        acc.remote_consistent_lsn =
-                            max(feedback.remote_consistent_lsn, acc.remote_consistent_lsn);
-                        acc.replytime = max(feedback.replytime, acc.replytime);
-                        acc
-                    }
-                    ReplicationFeedback::Standby(_) => acc,
-                });
-        self.agg_ps_feedback = acc;
     }
 }
 
@@ -741,7 +716,6 @@ async fn wait_for_lsn(
 
 #[cfg(test)]
 mod tests {
-    use postgres_protocol::PG_EPOCH;
     use utils::id::{TenantId, TimelineId};
 
     use super::*;
@@ -799,28 +773,5 @@ mod tests {
         push_feedback(&mut wss, hs_feedback(1, 64));
         wss.update_hs_feedback();
         assert_eq!(wss.agg_hs_feedback.xmin, 42);
-    }
-
-    // form pageserver feedback with given last_record_lsn / tli size and the
-    // rest set to dummy values.
-    fn ps_feedback(current_timeline_size: u64, last_received_lsn: Lsn) -> ReplicationFeedback {
-        ReplicationFeedback::Pageserver(PageserverFeedback {
-            current_timeline_size,
-            last_received_lsn,
-            disk_consistent_lsn: Lsn::INVALID,
-            remote_consistent_lsn: Lsn::INVALID,
-            replytime: *PG_EPOCH,
-        })
-    }
-
-    // test that ps aggregation works as expected
-    #[test]
-    fn test_ps_feedback() {
-        let mut wss = WalSendersShared::new();
-        push_feedback(&mut wss, ps_feedback(8, Lsn(42)));
-        push_feedback(&mut wss, ps_feedback(4, Lsn(84)));
-        wss.update_ps_feedback();
-        assert_eq!(wss.agg_ps_feedback.current_timeline_size, 4);
-        assert_eq!(wss.agg_ps_feedback.last_received_lsn, Lsn(84));
     }
 }

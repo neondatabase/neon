@@ -897,12 +897,13 @@ impl Timeline {
             return None;
         }
 
-        let ps_feedback = self.walsenders.get_ps_feedback();
+        let (ps_feedback_count, last_ps_feedback) = self.walsenders.get_ps_feedback_stats();
         let state = self.write_shared_state().await;
         if state.active {
             Some(FullTimelineInfo {
                 ttid: self.ttid,
-                ps_feedback,
+                ps_feedback_count,
+                last_ps_feedback,
                 wal_backup_active: state.wal_backup_active,
                 timeline_is_active: state.active,
                 num_computes: self.walreceivers.get_num() as u32,
