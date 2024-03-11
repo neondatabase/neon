@@ -1101,6 +1101,10 @@ impl LayerInner {
             return Err(EvictionCancelled::TimelineGone);
         };
 
+        let Ok(_gate) = timeline.gate.enter() else {
+            return Err(EvictionCancelled::TimelineGone);
+        };
+
         // to avoid starting a new download while we evict, keep holding on to the
         // permit.
         let _permit = {
