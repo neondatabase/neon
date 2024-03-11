@@ -536,6 +536,18 @@ impl Drop for LayerInner {
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
 
+            let Some(timeline) = timeline.upgrade() else {
+                // no need to nag that timeline is gone: under normal situation on
+                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            };
+
+            let Ok(_guard) = timeline.gate.enter() else {
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            };
+
             let removed = match std::fs::remove_file(path) {
                 Ok(()) => true,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -554,32 +566,26 @@ impl Drop for LayerInner {
                 }
             };
 
-            if let Some(timeline) = timeline.upgrade() {
-                if removed {
-                    timeline.metrics.resident_physical_size_sub(file_size);
-                }
-                if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
+            if removed {
+                timeline.metrics.resident_physical_size_sub(file_size);
+            }
+            if let Some(remote_client) = timeline.remote_client.as_ref() {
+                let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
-                    if let Err(e) = res {
-                        // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
-                        // demonstrating this deadlock (without spawn_blocking): stop will drop
-                        // queued items, which will have ResidentLayer's, and those drops would try
-                        // to re-entrantly lock the RemoteTimelineClient inner state.
-                        if !timeline.is_active() {
-                            tracing::info!("scheduling deletion on drop failed: {e:#}");
-                        } else {
-                            tracing::warn!("scheduling deletion on drop failed: {e:#}");
-                        }
-                        LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                if let Err(e) = res {
+                    // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
+                    // demonstrating this deadlock (without spawn_blocking): stop will drop
+                    // queued items, which will have ResidentLayer's, and those drops would try
+                    // to re-entrantly lock the RemoteTimelineClient inner state.
+                    if !timeline.is_active() {
+                        tracing::info!("scheduling deletion on drop failed: {e:#}");
                     } else {
-                        LAYER_IMPL_METRICS.inc_completed_deletes();
+                        tracing::warn!("scheduling deletion on drop failed: {e:#}");
                     }
+                    LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                } else {
+                    LAYER_IMPL_METRICS.inc_completed_deletes();
                 }
-            } else {
-                // no need to nag that timeline is gone: under normal situation on
-                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
             }
         });
     }
