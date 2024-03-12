@@ -6,6 +6,7 @@ use futures::future::select;
 use futures::future::try_join;
 use futures::future::Either;
 use futures::StreamExt;
+use futures::TryFutureExt;
 use hyper::body::HttpBody;
 use hyper::header;
 use hyper::http::HeaderName;
@@ -40,6 +41,7 @@ use crate::context::RequestMonitoring;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
+use crate::serverless::backend::HttpConnError;
 use crate::DbName;
 use crate::RoleName;
 
@@ -319,6 +321,22 @@ pub async fn handle(
 
 struct Cancelled();
 
+#[derive(Debug, thiserror::Error)]
+pub enum SqlOverHttpError {
+    #[error("{0}")]
+    ReadPayload(#[from] ReadPayloadError),
+    #[error("{0}")]
+    ConnectCompute(#[from] HttpConnError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReadPayloadError {
+    #[error("could not read the HTTP request body: {0}")]
+    Read(#[from] hyper::Error),
+    #[error("could not parse the HTTP request body: {0}")]
+    Parse(#[from] serde_json::Error),
+}
+
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
@@ -382,13 +400,12 @@ async fn handle_inner(
     }
 
     let fetch_and_process_request = async {
-        let body = hyper::body::to_bytes(request.into_body())
-            .await
-            .map_err(anyhow::Error::from)?;
+        let body = hyper::body::to_bytes(request.into_body()).await?;
         info!(length = body.len(), "request payload read");
         let payload: Payload = serde_json::from_slice(&body)?;
-        Ok::<Payload, anyhow::Error>(payload) // Adjust error type accordingly
-    };
+        Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
+    }
+    .map_err(SqlOverHttpError::from);
 
     let authenticate_and_connect = async {
         let keys = backend.authenticate(ctx, &conn_info).await?;
@@ -398,8 +415,9 @@ async fn handle_inner(
         // not strictly necessary to mark success here,
         // but it's just insurance for if we forget it somewhere else
         ctx.latency_timer.success();
-        Ok::<_, anyhow::Error>(client)
-    };
+        Ok::<_, HttpConnError>(client)
+    }
+    .map_err(SqlOverHttpError::from);
 
     // Run both operations in parallel
     let (payload, mut client) = match select(
