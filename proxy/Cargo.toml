@@ -68,7 +68,6 @@ task-local-extensions.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
-tls-listener.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true

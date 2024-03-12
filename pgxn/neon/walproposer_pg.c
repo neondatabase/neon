@@ -68,6 +68,8 @@ static WalproposerShmemState *walprop_shared;
 static WalProposerConfig walprop_config;
 static XLogRecPtr sentPtr = InvalidXLogRecPtr;
 static const walproposer_api walprop_pg;
+static volatile sig_atomic_t got_SIGUSR2 = false;
+static bool reported_sigusr2 = false;
 
 static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
@@ -100,6 +102,8 @@ static void XLogWalPropClose(XLogRecPtr recptr);
 static void add_nwr_event_set(Safekeeper *sk, uint32 events);
 static void update_nwr_event_set(Safekeeper *sk, uint32 events);
 static void rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk);
+
+static void CheckGracefulShutdown(WalProposer *wp);
 
 static XLogRecPtr GetLogRepRestartLSN(WalProposer *wp);
 
@@ -398,7 +402,7 @@ walprop_pg_get_shmem_state(WalProposer *wp)
 	return walprop_shared;
 }
 
-void
+static void
 replication_feedback_set(PageserverFeedback *rf)
 {
 	SpinLockAcquire(&walprop_shared->mutex);
@@ -492,6 +496,24 @@ walprop_pg_init_standalone_sync_safekeepers(void)
 	BackgroundWorkerUnblockSignals();
 }
 
+/*
+ * We pretend to be a walsender process, and the lifecycle of a walsender is
+ * slightly different than other procesess. At shutdown, walsender processes
+ * stay alive until the very end, after the checkpointer has written the
+ * shutdown checkpoint. When the checkpointer exits, the postmaster sends all
+ * remaining walsender processes SIGUSR2. On receiving SIGUSR2, we try to send
+ * the remaining WAL, and then exit. This ensures that the checkpoint record
+ * reaches durable storage (in safekeepers), before the server shuts down
+ * completely.
+ */
+static void
+walprop_sigusr2(SIGNAL_ARGS)
+{
+	got_SIGUSR2 = true;
+
+	SetLatch(MyLatch);
+}
+
 static void
 walprop_pg_init_bgworker(void)
 {
@@ -503,6 +525,7 @@ walprop_pg_init_bgworker(void)
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
 	pqsignal(SIGTERM, die);
+	pqsignal(SIGUSR2, walprop_sigusr2);
 
 	BackgroundWorkerUnblockSignals();
 
@@ -1026,7 +1049,7 @@ static void
 StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 {
 	XLogRecPtr	FlushPtr;
-	TimeLineID	currTLI;
+	 __attribute__((unused)) TimeLineID	currTLI;
 
 #if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)
@@ -1075,14 +1098,26 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 #endif
 
 	/*
-	 * When we first start replication the standby will be behind the primary.
-	 * For some applications, for example synchronous replication, it is
-	 * important to have a clear state for this initial catchup mode, so we
-	 * can trigger actions when we change streaming state later. We may stay
-	 * in this state for a long time, which is exactly why we want to be able
-	 * to monitor whether or not we are still here.
+	 * XXX: Move straight to STOPPING state, skipping the STREAMING state.
+	 *
+	 * This is a bit weird. Normal walsenders stay in STREAMING state, until
+	 * the checkpointer signals them that it is about to start writing the
+	 * shutdown checkpoint. The walsenders acknowledge that they have received
+	 * that signal by switching to STOPPING state. That tells the walsenders
+	 * that they must not write any new WAL.
+	 *
+	 * However, we cannot easily intercept that signal from the checkpointer.
+	 * It's sent by WalSndInitStopping(), using
+	 * SendProcSignal(PROCSIGNAL_WALSND_INIT_STOPPING). It's received by
+	 * HandleWalSndInitStopping, which sets a process-local got_STOPPING flag.
+	 * However, that's all private to walsender.c.
+	 *
+	 * We don't need to do anything special upon receiving the signal, the
+	 * walproposer doesn't write any WAL anyway, so we skip the STREAMING
+	 * state and go directly to STOPPING mode. That way, the checkpointer
+	 * won't wait for us.
 	 */
-	WalSndSetState(WALSNDSTATE_CATCHUP);
+	WalSndSetState(WALSNDSTATE_STOPPING);
 
 	/*
 	 * Don't allow a request to stream from a future point in WAL that hasn't
@@ -1122,6 +1157,8 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 static void
 WalSndLoop(WalProposer *wp)
 {
+	XLogRecPtr	flushPtr;
+
 	/* Clear any already-pending wakeups */
 	ResetLatch(MyLatch);
 
@@ -1130,9 +1167,6 @@ WalSndLoop(WalProposer *wp)
 		CHECK_FOR_INTERRUPTS();
 
 		XLogBroadcastWalProposer(wp);
-
-		if (MyWalSnd->state == WALSNDSTATE_CATCHUP)
-			WalSndSetState(WALSNDSTATE_STREAMING);
 		WalProposerPoll(wp);
 	}
 }
@@ -1230,7 +1264,6 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 	TimeLineID	timeline;
 	XLogRecPtr	startpos;
 	XLogRecPtr	endpos;
-	uint64		download_range_mb;
 
 	startpos = GetLogRepRestartLSN(wp);
 	if (startpos == InvalidXLogRecPtr)
@@ -1745,6 +1778,9 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	{
 		ConditionVariableCancelSleep();
 		ResetLatch(MyLatch);
+
+		CheckGracefulShutdown(wp);
+
 		*events = WL_LATCH_SET;
 		return 1;
 	}
@@ -1796,6 +1832,41 @@ walprop_pg_finish_sync_safekeepers(WalProposer *wp, XLogRecPtr lsn)
 {
 	fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(lsn));
 	exit(0);
+}
+
+/*
+ * Like vanilla walsender, on sigusr2 send all remaining WAL and exit.
+ *
+ * Note that unlike sync-safekeepers waiting here is not reliable: we
+ * don't check that majority of safekeepers received and persisted
+ * commit_lsn -- only that walproposer reached it (which immediately
+ * broadcasts new value). Doing that without incurring redundant control
+ * file syncing would need wp -> sk protocol change. OTOH unlike
+ * sync-safekeepers which must bump commit_lsn or basebackup will fail,
+ * this catchup is important only for tests where safekeepers/network
+ * don't crash on their own.
+ */
+static void
+CheckGracefulShutdown(WalProposer *wp)
+{
+	if (got_SIGUSR2)
+	{
+		if (!reported_sigusr2)
+		{
+			XLogRecPtr	flushPtr = walprop_pg_get_flush_rec_ptr(wp);
+
+			wpg_log(LOG, "walproposer will send and wait for remaining WAL between %X/%X and %X/%X",
+					LSN_FORMAT_ARGS(wp->commitLsn), LSN_FORMAT_ARGS(flushPtr));
+			reported_sigusr2 = true;
+		}
+
+		if (wp->commitLsn >= walprop_pg_get_flush_rec_ptr(wp))
+		{
+			wpg_log(LOG, "walproposer sent all WAL up to %X/%X, exiting",
+					LSN_FORMAT_ARGS(wp->commitLsn));
+			proc_exit(0);
+		}
+	}
 }
 
 /*
@@ -1878,7 +1949,7 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
  * None of that is functional in sync-safekeepers.
  */
 static void
-walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
+walprop_pg_process_safekeeper_feedback(WalProposer *wp)
 {
 	HotStandbyFeedback hsFeedback;
 	XLogRecPtr	oldDiskConsistentLsn;
@@ -1893,10 +1964,10 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
 	replication_feedback_set(&quorumFeedback.rf);
 	SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
 
-	if (commitLsn > quorumFeedback.flushLsn || oldDiskConsistentLsn != quorumFeedback.rf.disk_consistent_lsn)
+	if (wp->commitLsn > quorumFeedback.flushLsn || oldDiskConsistentLsn != quorumFeedback.rf.disk_consistent_lsn)
 	{
-		if (commitLsn > quorumFeedback.flushLsn)
-			quorumFeedback.flushLsn = commitLsn;
+		if (wp->commitLsn > quorumFeedback.flushLsn)
+			quorumFeedback.flushLsn = wp->commitLsn;
 
 		/*
 		 * Advance the replication slot to commitLsn. WAL before it is
@@ -1929,6 +2000,8 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
 								 XidFromFullTransactionId(hsFeedback.catalog_xmin),
 								 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
 	}
+
+	CheckGracefulShutdown(wp);
 }
 
 static XLogRecPtr

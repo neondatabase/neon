@@ -4,12 +4,11 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    flush_ep_to_pageserver,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import wait_for_upload
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
-from fixtures.utils import query_scalar
 
 
 # Crates a few layers, ensures that we can evict them (removing locally but keeping track of them anyway)
@@ -46,14 +45,15 @@ def test_basic_eviction(
             FROM generate_series(1, 5000000) g
             """
         )
-        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
-    wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
+    # stops the endpoint
+    current_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
+
     client.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
 
-    # disable compute & sks to avoid on-demand downloads by walreceiver / getpage
-    endpoint.stop()
+    # stop sks to avoid on-demand downloads by walreceiver / getpage; endpoint
+    # has already been stopped by flush_ep_to_pageserver
     for sk in env.safekeepers:
         sk.stop()
 

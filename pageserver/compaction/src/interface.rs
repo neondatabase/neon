@@ -4,12 +4,12 @@
 //! All the heavy lifting is done by the create_image and create_delta
 //! functions that the implementor provides.
 use async_trait::async_trait;
+use futures::Future;
 use pageserver_api::{key::Key, keyspace::key_range_size};
 use std::ops::Range;
 use utils::lsn::Lsn;
 
 /// Public interface. This is the main thing that the implementor needs to provide
-#[async_trait]
 pub trait CompactionJobExecutor {
     // Type system.
     //
@@ -17,8 +17,7 @@ pub trait CompactionJobExecutor {
     // compaction doesn't distinguish whether they are stored locally or
     // remotely.
     //
-    // The keyspace is defined by CompactionKey trait.
-    //
+    // The keyspace is defined by the CompactionKey trait.
     type Key: CompactionKey;
 
     type Layer: CompactionLayer<Self::Key> + Clone;
@@ -35,27 +34,27 @@ pub trait CompactionJobExecutor {
     // ----
 
     /// Return all layers that overlap the given bounding box.
-    async fn get_layers(
+    fn get_layers(
         &mut self,
         key_range: &Range<Self::Key>,
         lsn_range: &Range<Lsn>,
         ctx: &Self::RequestContext,
-    ) -> anyhow::Result<Vec<Self::Layer>>;
+    ) -> impl Future<Output = anyhow::Result<Vec<Self::Layer>>> + Send;
 
-    async fn get_keyspace(
+    fn get_keyspace(
         &mut self,
         key_range: &Range<Self::Key>,
         lsn: Lsn,
         ctx: &Self::RequestContext,
-    ) -> anyhow::Result<CompactionKeySpace<Self::Key>>;
+    ) -> impl Future<Output = anyhow::Result<CompactionKeySpace<Self::Key>>> + Send;
 
     /// NB: This is a pretty expensive operation. In the real pageserver
     /// implementation, it downloads the layer, and keeps it resident
     /// until the DeltaLayer is dropped.
-    async fn downcast_delta_layer(
+    fn downcast_delta_layer(
         &self,
         layer: &Self::Layer,
-    ) -> anyhow::Result<Option<Self::DeltaLayer>>;
+    ) -> impl Future<Output = anyhow::Result<Option<Self::DeltaLayer>>> + Send;
 
     // ----
     // Functions to execute the plan
@@ -63,33 +62,33 @@ pub trait CompactionJobExecutor {
 
     /// Create a new image layer, materializing all the values in the key range,
     /// at given 'lsn'.
-    async fn create_image(
+    fn create_image(
         &mut self,
         lsn: Lsn,
         key_range: &Range<Self::Key>,
         ctx: &Self::RequestContext,
-    ) -> anyhow::Result<()>;
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     /// Create a new delta layer, containing all the values from 'input_layers'
     /// in the given key and LSN range.
-    async fn create_delta(
+    fn create_delta(
         &mut self,
         lsn_range: &Range<Lsn>,
         key_range: &Range<Self::Key>,
         input_layers: &[Self::DeltaLayer],
         ctx: &Self::RequestContext,
-    ) -> anyhow::Result<()>;
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     /// Delete a layer. The compaction implementation will call this only after
     /// all the create_image() or create_delta() calls that deletion of this
     /// layer depends on have finished. But if the implementor has extra lazy
-    /// background tasks, like uploading the index json file to remote storage,
+    /// background tasks, like uploading the index json file to remote storage.
     /// it is the implementation's responsibility to track those.
-    async fn delete_layer(
+    fn delete_layer(
         &mut self,
         layer: &Self::Layer,
         ctx: &Self::RequestContext,
-    ) -> anyhow::Result<()>;
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 pub trait CompactionKey: std::cmp::Ord + Clone + Copy + std::fmt::Display {

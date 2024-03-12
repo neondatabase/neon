@@ -1,5 +1,4 @@
 use enum_map::EnumMap;
-use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
@@ -11,6 +10,7 @@ use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, IntoEnumIterator, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
+use tracing::warn;
 use utils::id::TimelineId;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -1005,15 +1005,39 @@ impl GlobalAndPerTimelineHistogram {
     }
 }
 
-struct GlobalAndPerTimelineHistogramTimer<'a> {
+struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     h: &'a GlobalAndPerTimelineHistogram,
+    ctx: &'c RequestContext,
     start: std::time::Instant,
+    op: SmgrQueryType,
 }
 
-impl<'a> Drop for GlobalAndPerTimelineHistogramTimer<'a> {
+impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
-        self.h.observe(elapsed.as_secs_f64());
+        let ex_throttled = self
+            .ctx
+            .micros_spent_throttled
+            .close_and_checked_sub_from(elapsed);
+        let ex_throttled = match ex_throttled {
+            Ok(res) => res,
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
+                    Lazy::new(|| {
+                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
+                            RateLimit::new(Duration::from_secs(10))
+                        })))
+                    });
+                let mut guard = LOGGED.lock().unwrap();
+                let rate_limit = &mut guard[self.op];
+                rate_limit.call(|| {
+                    warn!(op=?self.op, error, "error deducting time spent throttled; this message is logged at a global rate limit");
+                });
+                elapsed
+            }
+        };
+        self.h.observe(ex_throttled.as_secs_f64());
     }
 }
 
@@ -1025,6 +1049,7 @@ impl<'a> Drop for GlobalAndPerTimelineHistogramTimer<'a> {
     strum_macros::EnumCount,
     strum_macros::EnumIter,
     strum_macros::FromRepr,
+    enum_map::Enum,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum SmgrQueryType {
@@ -1130,11 +1155,35 @@ impl SmgrQueryTimePerTimeline {
         });
         Self { metrics }
     }
-    pub(crate) fn start_timer(&self, op: SmgrQueryType) -> impl Drop + '_ {
+    pub(crate) fn start_timer<'c: 'a, 'a>(
+        &'a self,
+        op: SmgrQueryType,
+        ctx: &'c RequestContext,
+    ) -> impl Drop + '_ {
         let metric = &self.metrics[op as usize];
+        let start = Instant::now();
+        match ctx.micros_spent_throttled.open() {
+            Ok(()) => (),
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
+                    Lazy::new(|| {
+                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
+                            RateLimit::new(Duration::from_secs(10))
+                        })))
+                    });
+                let mut guard = LOGGED.lock().unwrap();
+                let rate_limit = &mut guard[op];
+                rate_limit.call(|| {
+                    warn!(?op, error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
+                });
+            }
+        }
         GlobalAndPerTimelineHistogramTimer {
             h: metric,
-            start: std::time::Instant::now(),
+            ctx,
+            start,
+            op,
         }
     }
 }
@@ -1144,6 +1193,11 @@ mod smgr_query_time_tests {
     use pageserver_api::shard::TenantShardId;
     use strum::IntoEnumIterator;
     use utils::id::{TenantId, TimelineId};
+
+    use crate::{
+        context::{DownloadBehavior, RequestContext},
+        task_mgr::TaskKind,
+    };
 
     // Regression test, we used hard-coded string constants before using an enum.
     #[test]
@@ -1193,7 +1247,8 @@ mod smgr_query_time_tests {
             let (pre_global, pre_per_tenant_timeline) = get_counts();
             assert_eq!(pre_per_tenant_timeline, 0);
 
-            let timer = metrics.start_timer(*op);
+            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
+            let timer = metrics.start_timer(*op, &ctx);
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();
@@ -1227,11 +1282,65 @@ pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|
     })
 });
 
-impl DurationResultObserver for BasebackupQueryTime {
-    fn observe_result<T, E>(&self, res: &Result<T, E>, duration: std::time::Duration) {
+pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
+    parent: &'a BasebackupQueryTime,
+    ctx: &'c RequestContext,
+    start: std::time::Instant,
+}
+
+impl BasebackupQueryTime {
+    pub(crate) fn start_recording<'c: 'a, 'a>(
+        &'a self,
+        ctx: &'c RequestContext,
+    ) -> BasebackupQueryTimeOngoingRecording<'_, '_> {
+        let start = Instant::now();
+        match ctx.micros_spent_throttled.open() {
+            Ok(()) => (),
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!(error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
+                });
+            }
+        }
+        BasebackupQueryTimeOngoingRecording {
+            parent: self,
+            ctx,
+            start,
+        }
+    }
+}
+
+impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
+    pub(crate) fn observe<T, E>(self, res: &Result<T, E>) {
+        let elapsed = self.start.elapsed();
+        let ex_throttled = self
+            .ctx
+            .micros_spent_throttled
+            .close_and_checked_sub_from(elapsed);
+        let ex_throttled = match ex_throttled {
+            Ok(ex_throttled) => ex_throttled,
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!(error, "error deducting time spent throttled; this message is logged at a global rate limit");
+                });
+                elapsed
+            }
+        };
         let label_value = if res.is_ok() { "ok" } else { "error" };
-        let metric = self.0.get_metric_with_label_values(&[label_value]).unwrap();
-        metric.observe(duration.as_secs_f64());
+        let metric = self
+            .parent
+            .0
+            .get_metric_with_label_values(&[label_value])
+            .unwrap();
+        metric.observe(ex_throttled.as_secs_f64());
     }
 }
 
@@ -1908,10 +2017,8 @@ impl TimelineMetrics {
     pub(crate) fn resident_physical_size_get(&self) -> u64 {
         self.resident_physical_size_gauge.get()
     }
-}
 
-impl Drop for TimelineMetrics {
-    fn drop(&mut self) {
+    pub(crate) fn shutdown(&self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
@@ -2566,6 +2673,12 @@ pub fn preinitialize_metrics() {
 
     Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
     Lazy::force(&disk_usage_based_eviction::METRICS);
+
+    for state_name in pageserver_api::models::TenantState::VARIANTS {
+        // initialize the metric for all gauges, otherwise the time series might seemingly show
+        // values from last restart.
+        TENANT_STATE_METRIC.with_label_values(&[state_name]).set(0);
+    }
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]

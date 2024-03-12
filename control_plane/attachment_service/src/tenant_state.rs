@@ -1,7 +1,11 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use crate::{metrics, persistence::TenantShardPersistence};
-use pageserver_api::controller_api::NodeAvailability;
+use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
@@ -25,7 +29,7 @@ use crate::{
         attached_location_conf, secondary_location_conf, ReconcileError, Reconciler, TargetState,
     },
     scheduler::{ScheduleError, Scheduler},
-    service, PlacementPolicy, Sequence,
+    service, Sequence,
 };
 
 /// Serialization helper
@@ -370,7 +374,7 @@ impl TenantState {
     /// [`ObservedState`], even if it violates my [`PlacementPolicy`].  Call [`Self::schedule`] next,
     /// to get an intent state that complies with placement policy.  The overall goal is to do scheduling
     /// in a way that makes use of any configured locations that already exist in the outside world.
-    pub(crate) fn intent_from_observed(&mut self) {
+    pub(crate) fn intent_from_observed(&mut self, scheduler: &mut Scheduler) {
         // Choose an attached location by filtering observed locations, and then sorting to get the highest
         // generation
         let mut attached_locs = self
@@ -395,7 +399,7 @@ impl TenantState {
 
         attached_locs.sort_by_key(|i| i.1);
         if let Some((node_id, _gen)) = attached_locs.into_iter().last() {
-            self.intent.attached = Some(*node_id);
+            self.intent.set_attached(scheduler, Some(*node_id));
         }
 
         // All remaining observed locations generate secondary intents.  This includes None
@@ -406,7 +410,7 @@ impl TenantState {
         // will take care of promoting one of these secondaries to be attached.
         self.observed.locations.keys().for_each(|node_id| {
             if Some(*node_id) != self.intent.attached {
-                self.intent.secondary.push(*node_id);
+                self.intent.push_secondary(scheduler, *node_id);
             }
         });
     }
@@ -564,7 +568,9 @@ impl TenantState {
         }
     }
 
-    fn dirty(&self) -> bool {
+    fn dirty(&self, nodes: &Arc<HashMap<NodeId, Node>>) -> bool {
+        let mut dirty_nodes = HashSet::new();
+
         if let Some(node_id) = self.intent.attached {
             // Maybe panic: it is a severe bug if we try to attach while generation is null.
             let generation = self
@@ -575,7 +581,7 @@ impl TenantState {
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
-                    return true;
+                    dirty_nodes.insert(node_id);
                 }
             }
         }
@@ -585,7 +591,7 @@ impl TenantState {
             match self.observed.locations.get(node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
-                    return true;
+                    dirty_nodes.insert(*node_id);
                 }
             }
         }
@@ -593,24 +599,25 @@ impl TenantState {
         for node_id in self.observed.locations.keys() {
             if self.intent.attached != Some(*node_id) && !self.intent.secondary.contains(node_id) {
                 // We have observed state that isn't part of our intent: need to clean it up.
-                return true;
+                dirty_nodes.insert(*node_id);
             }
         }
 
-        // Even if there is no pageserver work to be done, if we have a pending notification to computes,
-        // wake up a reconciler to send it.
-        if self.pending_compute_notification {
-            return true;
-        }
+        dirty_nodes.retain(|node_id| {
+            nodes
+                .get(node_id)
+                .map(|n| n.is_available())
+                .unwrap_or(false)
+        });
 
-        false
+        !dirty_nodes.is_empty()
     }
 
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn maybe_reconcile(
         &mut self,
-        result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
         compute_hook: &Arc<ComputeHook>,
         service_config: &service::Config,
@@ -625,15 +632,20 @@ impl TenantState {
             let node = pageservers
                 .get(node_id)
                 .expect("Nodes may not be removed while referenced");
-            if observed_loc.conf.is_none()
-                && !matches!(node.availability, NodeAvailability::Offline)
-            {
+            if observed_loc.conf.is_none() && node.is_available() {
                 dirty_observed = true;
                 break;
             }
         }
 
-        if !self.dirty() && !dirty_observed {
+        let active_nodes_dirty = self.dirty(pageservers);
+
+        // Even if there is no pageserver work to be done, if we have a pending notification to computes,
+        // wake up a reconciler to send it.
+        let do_reconcile =
+            active_nodes_dirty || dirty_observed || self.pending_compute_notification;
+
+        if !do_reconcile {
             tracing::info!("Not dirty, no reconciliation needed.");
             return None;
         }
@@ -663,6 +675,21 @@ impl TenantState {
             }
         }
 
+        // Build list of nodes from which the reconciler should detach
+        let mut detach = Vec::new();
+        for node_id in self.observed.locations.keys() {
+            if self.intent.get_attached() != &Some(*node_id)
+                && !self.intent.secondary.contains(node_id)
+            {
+                detach.push(
+                    pageservers
+                        .get(node_id)
+                        .expect("Intent references non-existent pageserver")
+                        .clone(),
+                )
+            }
+        }
+
         // Reconcile in flight for a stale sequence?  Our sequence's task will wait for it before
         // doing our sequence's work.
         let old_handle = self.reconciler.take();
@@ -677,14 +704,15 @@ impl TenantState {
         self.sequence = self.sequence.next();
 
         let reconciler_cancel = cancel.child_token();
+        let reconciler_intent = TargetState::from_intent(pageservers, &self.intent);
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
             generation: self.generation,
-            intent: TargetState::from_intent(&self.intent),
+            intent: reconciler_intent,
+            detach,
             config: self.config.clone(),
             observed: self.observed.clone(),
-            pageservers: pageservers.clone(),
             compute_hook: compute_hook.clone(),
             service_config: service_config.clone(),
             _gate_guard: gate_guard,
@@ -701,6 +729,7 @@ impl TenantState {
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
                                                         shard_id=%reconciler.tenant_shard_id.shard_slug());
         metrics::RECONCILER.spawned.inc();
+        let result_tx = result_tx.clone();
         let join_handle = tokio::task::spawn(
             async move {
                 // Wait for any previous reconcile task to complete before we start
@@ -819,7 +848,10 @@ impl TenantState {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use pageserver_api::{
+        controller_api::NodeAvailability,
+        shard::{ShardCount, ShardNumber},
+    };
     use utils::id::TenantId;
 
     use crate::scheduler::test_utils::make_test_nodes;
@@ -878,7 +910,10 @@ pub(crate) mod tests {
         assert_eq!(tenant_state.intent.secondary.len(), 2);
 
         // Update the scheduler state to indicate the node is offline
-        nodes.get_mut(&attached_node_id).unwrap().availability = NodeAvailability::Offline;
+        nodes
+            .get_mut(&attached_node_id)
+            .unwrap()
+            .set_availability(NodeAvailability::Offline);
         scheduler.node_upsert(nodes.get(&attached_node_id).unwrap());
 
         // Scheduling the node should promote the still-available secondary node to attached
@@ -895,6 +930,56 @@ pub(crate) mod tests {
 
         tenant_state.intent.clear(&mut scheduler);
 
+        Ok(())
+    }
+
+    #[test]
+    fn intent_from_observed() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(3);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+
+        tenant_state.observed.locations.insert(
+            NodeId(3),
+            ObservedStateLocation {
+                conf: Some(LocationConfig {
+                    mode: LocationConfigMode::AttachedMulti,
+                    generation: Some(2),
+                    secondary_conf: None,
+                    shard_number: tenant_state.shard.number.0,
+                    shard_count: tenant_state.shard.count.literal(),
+                    shard_stripe_size: tenant_state.shard.stripe_size.0,
+                    tenant_conf: TenantConfig::default(),
+                }),
+            },
+        );
+
+        tenant_state.observed.locations.insert(
+            NodeId(2),
+            ObservedStateLocation {
+                conf: Some(LocationConfig {
+                    mode: LocationConfigMode::AttachedStale,
+                    generation: Some(1),
+                    secondary_conf: None,
+                    shard_number: tenant_state.shard.number.0,
+                    shard_count: tenant_state.shard.count.literal(),
+                    shard_stripe_size: tenant_state.shard.stripe_size.0,
+                    tenant_conf: TenantConfig::default(),
+                }),
+            },
+        );
+
+        tenant_state.intent_from_observed(&mut scheduler);
+
+        // The highest generationed attached location gets used as attached
+        assert_eq!(tenant_state.intent.attached, Some(NodeId(3)));
+        // Other locations get used as secondary
+        assert_eq!(tenant_state.intent.secondary, vec![NodeId(2)]);
+
+        scheduler.consistency_check(nodes.values(), [&tenant_state].into_iter())?;
+
+        tenant_state.intent.clear(&mut scheduler);
         Ok(())
     }
 }

@@ -15,7 +15,7 @@ use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::{broker, local_env};
 use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeSchedulingPolicy,
+    NodeAvailability, NodeConfigureRequest, NodeSchedulingPolicy, PlacementPolicy,
 };
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
@@ -435,6 +435,11 @@ async fn handle_tenant(
             let shard_stripe_size: Option<u32> =
                 create_match.get_one::<u32>("shard-stripe-size").cloned();
 
+            let placement_policy = match create_match.get_one::<String>("placement-policy") {
+                Some(s) if !s.is_empty() => serde_json::from_str::<PlacementPolicy>(s)?,
+                _ => PlacementPolicy::Single,
+            };
+
             let tenant_conf = PageServerNode::parse_config(tenant_conf)?;
 
             // If tenant ID was not specified, generate one
@@ -456,6 +461,7 @@ async fn handle_tenant(
                             .map(ShardStripeSize)
                             .unwrap_or(ShardParameters::DEFAULT_STRIPE_SIZE),
                     },
+                    placement_policy: Some(placement_policy),
                     config: tenant_conf,
                 })
                 .await?;
@@ -1024,7 +1030,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                         })
                         .collect::<Vec<_>>()
                 };
-            endpoint.reconfigure(pageservers).await?;
+            endpoint.reconfigure(pageservers, None).await?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -1562,6 +1568,7 @@ fn cli() -> Command {
                     .help("Use this tenant in future CLI commands where tenant_id is needed, but not specified"))
                 .arg(Arg::new("shard-count").value_parser(value_parser!(u8)).long("shard-count").action(ArgAction::Set).help("Number of shards in the new tenant (default 1)"))
                 .arg(Arg::new("shard-stripe-size").value_parser(value_parser!(u32)).long("shard-stripe-size").action(ArgAction::Set).help("Sharding stripe size in pages"))
+                .arg(Arg::new("placement-policy").value_parser(value_parser!(String)).long("placement-policy").action(ArgAction::Set).help("Placement policy shards in this tenant"))
                 )
             .subcommand(Command::new("set-default").arg(tenant_id_arg.clone().required(true))
                 .about("Set a particular tenant as default in future CLI commands where tenant_id is needed, but not specified"))

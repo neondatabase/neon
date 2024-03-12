@@ -15,11 +15,11 @@ import threading
 import time
 import uuid
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from fcntl import LOCK_EX, LOCK_UN, flock
-from functools import cached_property
+from functools import cached_property, partial
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
@@ -70,6 +70,8 @@ from fixtures.remote_storage import (
     default_remote_storage,
     remote_storage_to_toml_inline_table,
 )
+from fixtures.safekeeper.http import SafekeeperHttpClient
+from fixtures.safekeeper.utils import are_walreceivers_absent
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -2547,6 +2549,20 @@ class PgBin:
         )
         return base_path
 
+    def get_pg_controldata_checkpoint_lsn(self, pgdata: str) -> Lsn:
+        """
+        Run pg_controldata on given datadir and extract checkpoint lsn.
+        """
+
+        pg_controldata_path = os.path.join(self.pg_bin_path, "pg_controldata")
+        cmd = f"{pg_controldata_path} -D {pgdata}"
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+        checkpoint_lsn = re.findall(
+            "Latest checkpoint location:\\s+([0-9A-F]+/[0-9A-F]+)", result.stdout
+        )[0]
+        log.info(f"last checkpoint at {checkpoint_lsn}")
+        return Lsn(checkpoint_lsn)
+
 
 @pytest.fixture(scope="function")
 def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -> PgBin:
@@ -3565,220 +3581,6 @@ class Safekeeper:
         return segments
 
 
-# Walreceiver as returned by sk's timeline status endpoint.
-@dataclass
-class Walreceiver:
-    conn_id: int
-    state: str
-
-
-@dataclass
-class SafekeeperTimelineStatus:
-    acceptor_epoch: int
-    pg_version: int  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
-    flush_lsn: Lsn
-    commit_lsn: Lsn
-    timeline_start_lsn: Lsn
-    backup_lsn: Lsn
-    peer_horizon_lsn: Lsn
-    remote_consistent_lsn: Lsn
-    walreceivers: List[Walreceiver]
-
-
-@dataclass
-class SafekeeperMetrics:
-    # These are metrics from Prometheus which uses float64 internally.
-    # As a consequence, values may differ from real original int64s.
-    flush_lsn_inexact: Dict[Tuple[TenantId, TimelineId], int] = field(default_factory=dict)
-    commit_lsn_inexact: Dict[Tuple[TenantId, TimelineId], int] = field(default_factory=dict)
-
-
-class SafekeeperHttpClient(requests.Session):
-    HTTPError = requests.HTTPError
-
-    def __init__(self, port: int, auth_token: Optional[str] = None, is_testing_enabled=False):
-        super().__init__()
-        self.port = port
-        self.auth_token = auth_token
-        self.is_testing_enabled = is_testing_enabled
-
-        if auth_token is not None:
-            self.headers["Authorization"] = f"Bearer {auth_token}"
-
-    def check_status(self):
-        self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
-
-    def is_testing_enabled_or_skip(self):
-        if not self.is_testing_enabled:
-            pytest.skip("safekeeper was built without 'testing' feature")
-
-    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
-        self.is_testing_enabled_or_skip()
-
-        if isinstance(config_strings, tuple):
-            pairs = [config_strings]
-        else:
-            pairs = config_strings
-
-        log.info(f"Requesting config failpoints: {repr(pairs)}")
-
-        res = self.put(
-            f"http://localhost:{self.port}/v1/failpoints",
-            json=[{"name": name, "actions": actions} for name, actions in pairs],
-        )
-        log.info(f"Got failpoints request response code {res.status_code}")
-        res.raise_for_status()
-        res_json = res.json()
-        assert res_json is None
-        return res_json
-
-    def debug_dump(self, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        params = params or {}
-        res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
-        res.raise_for_status()
-        res_json = json.loads(res.text)
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def patch_control_file(
-        self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        patch: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        res = self.patch(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/control_file",
-            json={
-                "updates": patch,
-                "apply_fields": list(patch.keys()),
-            },
-        )
-        res.raise_for_status()
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
-        res.raise_for_status()
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def copy_timeline(self, tenant_id: TenantId, timeline_id: TimelineId, body: Dict[str, Any]):
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/copy",
-            json=body,
-        )
-        res.raise_for_status()
-
-    def timeline_digest(
-        self, tenant_id: TenantId, timeline_id: TimelineId, from_lsn: Lsn, until_lsn: Lsn
-    ) -> Dict[str, Any]:
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/digest",
-            params={
-                "from_lsn": str(from_lsn),
-                "until_lsn": str(until_lsn),
-            },
-        )
-        res.raise_for_status()
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def timeline_create(
-        self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        pg_version: int,  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
-        commit_lsn: Lsn,
-    ):
-        body = {
-            "tenant_id": str(tenant_id),
-            "timeline_id": str(timeline_id),
-            "pg_version": pg_version,
-            "commit_lsn": str(commit_lsn),
-        }
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/timeline", json=body)
-        res.raise_for_status()
-
-    def timeline_status(
-        self, tenant_id: TenantId, timeline_id: TimelineId
-    ) -> SafekeeperTimelineStatus:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}")
-        res.raise_for_status()
-        resj = res.json()
-        walreceivers = [Walreceiver(wr["conn_id"], wr["status"]) for wr in resj["walreceivers"]]
-        return SafekeeperTimelineStatus(
-            acceptor_epoch=resj["acceptor_state"]["epoch"],
-            pg_version=resj["pg_info"]["pg_version"],
-            flush_lsn=Lsn(resj["flush_lsn"]),
-            commit_lsn=Lsn(resj["commit_lsn"]),
-            timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
-            backup_lsn=Lsn(resj["backup_lsn"]),
-            peer_horizon_lsn=Lsn(resj["peer_horizon_lsn"]),
-            remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
-            walreceivers=walreceivers,
-        )
-
-    def record_safekeeper_info(self, tenant_id: TenantId, timeline_id: TimelineId, body):
-        res = self.post(
-            f"http://localhost:{self.port}/v1/record_safekeeper_info/{tenant_id}/{timeline_id}",
-            json=body,
-        )
-        res.raise_for_status()
-
-    # only_local doesn't remove segments in the remote storage.
-    def timeline_delete(
-        self, tenant_id: TenantId, timeline_id: TimelineId, only_local: bool = False
-    ) -> Dict[Any, Any]:
-        res = self.delete(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
-            params={
-                "only_local": str(only_local).lower(),
-            },
-        )
-        res.raise_for_status()
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def tenant_delete_force(self, tenant_id: TenantId) -> Dict[Any, Any]:
-        res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
-        res.raise_for_status()
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def get_metrics_str(self) -> str:
-        request_result = self.get(f"http://localhost:{self.port}/metrics")
-        request_result.raise_for_status()
-        return request_result.text
-
-    def get_metrics(self) -> SafekeeperMetrics:
-        all_metrics_text = self.get_metrics_str()
-
-        metrics = SafekeeperMetrics()
-        for match in re.finditer(
-            r'^safekeeper_flush_lsn{tenant_id="([0-9a-f]+)",timeline_id="([0-9a-f]+)"} (\S+)$',
-            all_metrics_text,
-            re.MULTILINE,
-        ):
-            metrics.flush_lsn_inexact[(TenantId(match.group(1)), TimelineId(match.group(2)))] = int(
-                match.group(3)
-            )
-        for match in re.finditer(
-            r'^safekeeper_commit_lsn{tenant_id="([0-9a-f]+)",timeline_id="([0-9a-f]+)"} (\S+)$',
-            all_metrics_text,
-            re.MULTILINE,
-        ):
-            metrics.commit_lsn_inexact[
-                (TenantId(match.group(1)), TimelineId(match.group(2)))
-            ] = int(match.group(3))
-        return metrics
-
-
 class S3Scrubber:
     def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
         self.env = env
@@ -4088,24 +3890,21 @@ def list_files_to_compare(pgdata_dir: Path) -> List[str]:
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
 def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint: Endpoint):
+    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
+
     # Get the timeline ID. We need it for the 'basebackup' command
     timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
-    # many tests already checkpoint, but do it just in case
-    with closing(endpoint.connect()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("CHECKPOINT")
-
-    # wait for pageserver to catch up
-    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
     # stop postgres to ensure that files won't change
     endpoint.stop()
+
+    # Read the shutdown checkpoint's LSN
+    checkpoint_lsn = pg_bin.get_pg_controldata_checkpoint_lsn(endpoint.pg_data_dir_path())
 
     # Take a basebackup from pageserver
     restored_dir_path = env.repo_dir / f"{endpoint.endpoint_id}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
 
-    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
     psql_path = os.path.join(pg_bin.pg_bin_path, "psql")
 
     pageserver_id = env.attachment_service.locate(endpoint.tenant_id)[0]["node_id"]
@@ -4113,7 +3912,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.get_pageserver(pageserver_id).service_port.pg}  \
-            -c 'basebackup {endpoint.tenant_id} {timeline_id}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline_id} {checkpoint_lsn}'  \
          | tar -x -C {restored_dir_path}
     """
 
@@ -4260,6 +4059,49 @@ def wait_for_last_flush_lsn(
 
     # Return the lowest LSN that has been ingested by all shards
     return min(results)
+
+
+def flush_ep_to_pageserver(
+    env: NeonEnv,
+    ep: Endpoint,
+    tenant: TenantId,
+    timeline: TimelineId,
+    pageserver_id: Optional[int] = None,
+) -> Lsn:
+    """
+    Stop endpoint and wait until all committed WAL reaches the pageserver
+    (last_record_lsn). This is for use by tests which want everything written so
+    far to reach pageserver *and* expecting that no more data will arrive until
+    endpoint starts again, so unlike wait_for_last_flush_lsn it polls
+    safekeepers instead of compute to learn LSN.
+
+    Returns the catch up LSN.
+    """
+    ep.stop()
+
+    commit_lsn: Lsn = Lsn(0)
+    # In principle in the absense of failures polling single sk would be enough.
+    for sk in env.safekeepers:
+        cli = sk.http_client()
+        # wait until compute connections are gone
+        wait_until(30, 0.5, partial(are_walreceivers_absent, cli, tenant, timeline))
+        commit_lsn = max(cli.get_commit_lsn(tenant, timeline), commit_lsn)
+
+    # Note: depending on WAL filtering implementation, probably most shards
+    # won't be able to reach commit_lsn (unless gaps are also ack'ed), so this
+    # is broken in sharded case.
+    shards = tenant_get_shards(env, tenant, pageserver_id)
+    for tenant_shard_id, pageserver in shards:
+        log.info(
+            f"flush_ep_to_pageserver: waiting for {commit_lsn} on shard {tenant_shard_id} on pageserver {pageserver.id})"
+        )
+        waited = wait_for_last_record_lsn(
+            pageserver.http_client(), tenant_shard_id, timeline, commit_lsn
+        )
+
+        assert waited >= commit_lsn
+
+    return commit_lsn
 
 
 def wait_for_wal_insert_lsn(

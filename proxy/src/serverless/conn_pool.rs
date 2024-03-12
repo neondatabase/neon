@@ -43,8 +43,13 @@ impl ConnInfo {
         (self.dbname.clone(), self.user_info.user.clone())
     }
 
-    pub fn endpoint_cache_key(&self) -> EndpointCacheKey {
-        self.user_info.endpoint_cache_key()
+    pub fn endpoint_cache_key(&self) -> Option<EndpointCacheKey> {
+        // We don't want to cache http connections for ephemeral endpoints.
+        if self.user_info.options.is_ephemeral() {
+            None
+        } else {
+            Some(self.user_info.endpoint_cache_key())
+        }
     }
 }
 
@@ -360,8 +365,11 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         conn_info: &ConnInfo,
     ) -> Result<Option<Client<C>>, HttpConnError> {
         let mut client: Option<ClientInner<C>> = None;
+        let Some(endpoint) = conn_info.endpoint_cache_key() else {
+            return Ok(None);
+        };
 
-        let endpoint_pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
+        let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
         if let Some(entry) = endpoint_pool
             .write()
             .get_conn_entry(conn_info.db_and_user())
@@ -455,8 +463,10 @@ pub fn poll_client<C: ClientInnerExt>(
     span.in_scope(|| {
         info!(%conn_info, %session_id, "new connection");
     });
-    let pool =
-        Arc::downgrade(&global_pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key()));
+    let pool = match conn_info.endpoint_cache_key() {
+        Some(endpoint) => Arc::downgrade(&global_pool.get_or_create_endpoint_pool(&endpoint)),
+        None => Weak::new(),
+    };
     let pool_clone = pool.clone();
 
     let db_user = conn_info.db_and_user();
@@ -723,8 +733,9 @@ mod tests {
             dbname: "dbname".into(),
             password: "password".as_bytes().into(),
         };
-        let ep_pool =
-            Arc::downgrade(&pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key()));
+        let ep_pool = Arc::downgrade(
+            &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
+        );
         {
             let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
             assert_eq!(0, pool.get_global_connections_count());
@@ -780,8 +791,9 @@ mod tests {
             dbname: "dbname".into(),
             password: "password".as_bytes().into(),
         };
-        let ep_pool =
-            Arc::downgrade(&pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key()));
+        let ep_pool = Arc::downgrade(
+            &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
+        );
         {
             let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
             client.do_drop().unwrap()();

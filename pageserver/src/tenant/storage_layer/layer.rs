@@ -536,6 +536,18 @@ impl Drop for LayerInner {
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
 
+            let Some(timeline) = timeline.upgrade() else {
+                // no need to nag that timeline is gone: under normal situation on
+                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            };
+
+            let Ok(_guard) = timeline.gate.enter() else {
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            };
+
             let removed = match std::fs::remove_file(path) {
                 Ok(()) => true,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -554,32 +566,26 @@ impl Drop for LayerInner {
                 }
             };
 
-            if let Some(timeline) = timeline.upgrade() {
-                if removed {
-                    timeline.metrics.resident_physical_size_sub(file_size);
-                }
-                if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
+            if removed {
+                timeline.metrics.resident_physical_size_sub(file_size);
+            }
+            if let Some(remote_client) = timeline.remote_client.as_ref() {
+                let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
-                    if let Err(e) = res {
-                        // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
-                        // demonstrating this deadlock (without spawn_blocking): stop will drop
-                        // queued items, which will have ResidentLayer's, and those drops would try
-                        // to re-entrantly lock the RemoteTimelineClient inner state.
-                        if !timeline.is_active() {
-                            tracing::info!("scheduling deletion on drop failed: {e:#}");
-                        } else {
-                            tracing::warn!("scheduling deletion on drop failed: {e:#}");
-                        }
-                        LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                if let Err(e) = res {
+                    // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
+                    // demonstrating this deadlock (without spawn_blocking): stop will drop
+                    // queued items, which will have ResidentLayer's, and those drops would try
+                    // to re-entrantly lock the RemoteTimelineClient inner state.
+                    if !timeline.is_active() {
+                        tracing::info!("scheduling deletion on drop failed: {e:#}");
                     } else {
-                        LAYER_IMPL_METRICS.inc_completed_deletes();
+                        tracing::warn!("scheduling deletion on drop failed: {e:#}");
                     }
+                    LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                } else {
+                    LAYER_IMPL_METRICS.inc_completed_deletes();
                 }
-            } else {
-                // no need to nag that timeline is gone: under normal situation on
-                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
             }
         });
     }
@@ -880,23 +886,18 @@ impl LayerInner {
     ) -> Result<heavier_once_cell::InitPermit, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let task_name = format!("download layer {}", self);
-
         let (tx, rx) = tokio::sync::oneshot::channel();
-
-        // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
-        // block tenant::mgr::remove_tenant_from_memory.
 
         let this: Arc<Self> = self.clone();
 
-        crate::task_mgr::spawn(
-            &tokio::runtime::Handle::current(),
-            crate::task_mgr::TaskKind::RemoteDownloadTask,
-            Some(self.desc.tenant_shard_id),
-            Some(self.desc.timeline_id),
-            &task_name,
-            false,
-            async move {
+        let guard = timeline
+            .gate
+            .enter()
+            .map_err(|_| DownloadError::DownloadCancelled)?;
+
+        tokio::task::spawn(async move {
+
+                let _guard = guard;
 
                 let client = timeline
                     .remote_client
@@ -906,7 +907,7 @@ impl LayerInner {
                 let result = client.download_layer_file(
                     &this.desc.filename(),
                     &this.metadata(),
-                    &crate::task_mgr::shutdown_token()
+                    &timeline.cancel
                 )
                 .await;
 
@@ -929,7 +930,6 @@ impl LayerInner {
 
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {},
-                            _ = crate::task_mgr::shutdown_token().cancelled_owned() => {},
                             _ = timeline.cancel.cancelled() => {},
                         };
 
@@ -959,11 +959,10 @@ impl LayerInner {
                         }
                     }
                 }
-
-                Ok(())
             }
             .in_current_span(),
         );
+
         match rx.await {
             Ok((Ok(()), permit)) => {
                 if let Some(reason) = self
@@ -976,7 +975,7 @@ impl LayerInner {
                 }
 
                 self.consecutive_failures.store(0, Ordering::Relaxed);
-                tracing::info!("on-demand download successful");
+                tracing::info!(size=%self.desc.file_size, "on-demand download successful");
 
                 Ok(permit)
             }
@@ -1099,6 +1098,10 @@ impl LayerInner {
     fn evict_blocking(&self, only_version: usize) -> Result<(), EvictionCancelled> {
         // deleted or detached timeline, don't do anything.
         let Some(timeline) = self.timeline.upgrade() else {
+            return Err(EvictionCancelled::TimelineGone);
+        };
+
+        let Ok(_gate) = timeline.gate.enter() else {
             return Err(EvictionCancelled::TimelineGone);
         };
 

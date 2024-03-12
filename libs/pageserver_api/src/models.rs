@@ -22,6 +22,7 @@ use utils::{
     lsn::Lsn,
 };
 
+use crate::controller_api::PlacementPolicy;
 use crate::{
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
@@ -243,6 +244,11 @@ pub struct TenantCreateRequest {
     #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
     pub shard_parameters: ShardParameters,
 
+    // This parameter is only meaningful in requests sent to the storage controller
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement_policy: Option<PlacementPolicy>,
+
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -436,6 +442,8 @@ pub struct TenantShardLocation {
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigResponse {
     pub shards: Vec<TenantShardLocation>,
+    // If the shards' ShardCount count is >1, stripe_size will be set.
+    pub stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
