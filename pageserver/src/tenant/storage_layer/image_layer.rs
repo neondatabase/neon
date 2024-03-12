@@ -668,13 +668,7 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = if self.compression {
-            self.blob_writer.write_compressed_blob(img).await?
-        } else {
-            let (_img, res) = self.blob_writer.write_blob(img).await;
-            // TODO: re-use the buffer for `img` further upstack
-            res?
-        };
+        let off = self.blob_writer.write_compressed_blob(img, self.compression).await?;
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;

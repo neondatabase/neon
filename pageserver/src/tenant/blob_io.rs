@@ -237,7 +237,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         (src_buf, Ok(()))
     }
 
-    pub async fn write_compressed_blob(&mut self, srcbuf: Bytes) -> Result<u64, Error> {
+    pub async fn write_compressed_blob(&mut self, srcbuf: Bytes, compress: bool) -> Result<u64, Error> {
         let offset = self.offset;
 
         let len = srcbuf.len();
@@ -257,7 +257,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     format!("blob too large ({} bytes)", len),
                 ));
             }
-            if len == BLCKSZ as usize {
+            if compress && len == BLCKSZ as usize {
                 let compressed = lz4_flex::block::compress(&srcbuf);
                 if compressed.len() < len {
                     io_buf.put_u8(LZ4_COMPRESSION);

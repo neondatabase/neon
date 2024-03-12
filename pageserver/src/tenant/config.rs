@@ -546,7 +546,7 @@ impl Default for TenantConf {
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
             trace_read_requests: false,
-            compress_image_layer: false,
+            compress_image_layer: true,
             eviction_policy: EvictionPolicy::NoEviction,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
