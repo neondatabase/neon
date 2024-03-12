@@ -1,7 +1,4 @@
-use crate::{
-    background_process,
-    local_env::{LocalEnv, PageServerConf},
-};
+use crate::{background_process, local_env::LocalEnv};
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper::Method;
 use pageserver_api::{
