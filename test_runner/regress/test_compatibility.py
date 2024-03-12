@@ -246,7 +246,7 @@ def test_forward_compatibility(
         # everything else: our test code is written for latest CLI args.
         env.neon_local_binpath = neon_local_binpath
 
-        neon_env_builder.start(register_pageservers=True)
+        neon_env_builder.start()
 
         check_neon_works(
             env,
