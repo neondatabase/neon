@@ -24,7 +24,7 @@ use utils::{
     id::{NodeId, TenantId},
 };
 
-pub struct AttachmentService {
+pub struct StorageController {
     env: LocalEnv,
     listen: String,
     path: Utf8PathBuf,
@@ -36,7 +36,7 @@ pub struct AttachmentService {
 
 const COMMAND: &str = "storage_controller";
 
-const ATTACHMENT_SERVICE_POSTGRES_VERSION: u32 = 16;
+const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
@@ -59,7 +59,7 @@ pub struct InspectResponse {
     pub attachment: Option<(u32, NodeId)>,
 }
 
-impl AttachmentService {
+impl StorageController {
     pub fn from_env(env: &LocalEnv) -> Self {
         let path = Utf8PathBuf::from_path_buf(env.base_data_dir.clone())
             .unwrap()
@@ -136,27 +136,27 @@ impl AttachmentService {
     }
 
     fn pid_file(&self) -> Utf8PathBuf {
-        Utf8PathBuf::from_path_buf(self.env.base_data_dir.join("attachment_service.pid"))
+        Utf8PathBuf::from_path_buf(self.env.base_data_dir.join("storage_controller.pid"))
             .expect("non-Unicode path")
     }
 
-    /// PIDFile for the postgres instance used to store attachment service state
+    /// PIDFile for the postgres instance used to store storage controller state
     fn postgres_pid_file(&self) -> Utf8PathBuf {
         Utf8PathBuf::from_path_buf(
             self.env
                 .base_data_dir
-                .join("attachment_service_postgres.pid"),
+                .join("storage_controller_postgres.pid"),
         )
         .expect("non-Unicode path")
     }
 
     /// Find the directory containing postgres binaries, such as `initdb` and `pg_ctl`
     ///
-    /// This usually uses ATTACHMENT_SERVICE_POSTGRES_VERSION of postgres, but will fall back
+    /// This usually uses STORAGE_CONTROLLER_POSTGRES_VERSION of postgres, but will fall back
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
     pub async fn get_pg_bin_dir(&self) -> anyhow::Result<Utf8PathBuf> {
-        let prefer_versions = [ATTACHMENT_SERVICE_POSTGRES_VERSION, 15, 14];
+        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 15, 14];
 
         for v in prefer_versions {
             let path = Utf8PathBuf::from_path_buf(self.env.pg_bin_dir(v)?).unwrap();
@@ -189,7 +189,7 @@ impl AttachmentService {
     ///
     /// Returns the database url
     pub async fn setup_database(&self) -> anyhow::Result<String> {
-        const DB_NAME: &str = "attachment_service";
+        const DB_NAME: &str = "storage_controller";
         let database_url = format!("postgresql://localhost:{}/{DB_NAME}", self.postgres_port);
 
         let pg_bin_dir = self.get_pg_bin_dir().await?;
@@ -219,10 +219,10 @@ impl AttachmentService {
     }
 
     pub async fn start(&self) -> anyhow::Result<()> {
-        // Start a vanilla Postgres process used by the attachment service for persistence.
+        // Start a vanilla Postgres process used by the storage controller for persistence.
         let pg_data_path = Utf8PathBuf::from_path_buf(self.env.base_data_dir.clone())
             .unwrap()
-            .join("attachment_service_db");
+            .join("storage_controller_db");
         let pg_bin_dir = self.get_pg_bin_dir().await?;
         let pg_log_path = pg_data_path.join("postgres.log");
 
@@ -245,7 +245,7 @@ impl AttachmentService {
             .await?;
         };
 
-        println!("Starting attachment service database...");
+        println!("Starting storage controller database...");
         let db_start_args = [
             "-w",
             "-D",
@@ -256,7 +256,7 @@ impl AttachmentService {
         ];
 
         background_process::start_process(
-            "attachment_service_db",
+            "storage_controller_db",
             &self.env.base_data_dir,
             pg_bin_dir.join("pg_ctl").as_std_path(),
             db_start_args,
@@ -300,7 +300,7 @@ impl AttachmentService {
         background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,
-            &self.env.attachment_service_bin(),
+            &self.env.storage_controller_bin(),
             args,
             [(
                 "NEON_REPO_DIR".to_string(),
@@ -322,10 +322,10 @@ impl AttachmentService {
     pub async fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         background_process::stop_process(immediate, COMMAND, &self.pid_file())?;
 
-        let pg_data_path = self.env.base_data_dir.join("attachment_service_db");
+        let pg_data_path = self.env.base_data_dir.join("storage_controller_db");
         let pg_bin_dir = self.get_pg_bin_dir().await?;
 
-        println!("Stopping attachment service database...");
+        println!("Stopping storage controller database...");
         let pg_stop_args = ["-D", &pg_data_path.to_string_lossy(), "stop"];
         let stop_status = Command::new(pg_bin_dir.join("pg_ctl"))
             .args(pg_stop_args)
@@ -344,10 +344,10 @@ impl AttachmentService {
             // fine that stop failed.  Otherwise it is an error that stop failed.
             const PG_STATUS_NOT_RUNNING: i32 = 3;
             if Some(PG_STATUS_NOT_RUNNING) == status_exitcode.code() {
-                println!("Attachment service data base is already stopped");
+                println!("Storage controller database is already stopped");
                 return Ok(());
             } else {
-                anyhow::bail!("Failed to stop attachment service database: {stop_status}")
+                anyhow::bail!("Failed to stop storage controller database: {stop_status}")
             }
         }
 
@@ -368,7 +368,7 @@ impl AttachmentService {
         }
     }
 
-    /// Simple HTTP request wrapper for calling into attachment service
+    /// Simple HTTP request wrapper for calling into storage controller
     async fn dispatch<RQ, RS>(
         &self,
         method: hyper::Method,

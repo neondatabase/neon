@@ -1011,7 +1011,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
         resp = client.tenant_status(eager_tenant)
         assert resp["state"]["slug"] == "Active"
 
-    gen = env.attachment_service.attach_hook_issue(eager_tenant, env.pageserver.id)
+    gen = env.storage_controller.attach_hook_issue(eager_tenant, env.pageserver.id)
     client.tenant_location_conf(
         eager_tenant,
         {
@@ -1071,7 +1071,7 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
     # attach, it will consume the only permit because logical size calculation
     # is paused.
 
-    gen = env.attachment_service.attach_hook_issue(lazy_tenant, env.pageserver.id)
+    gen = env.storage_controller.attach_hook_issue(lazy_tenant, env.pageserver.id)
     client.tenant_location_conf(
         lazy_tenant,
         {

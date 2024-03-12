@@ -1846,6 +1846,8 @@ impl Tenant {
         // Wait for any in-flight operations to complete
         self.gate.close().await;
 
+        remove_tenant_metrics(&self.tenant_shard_id);
+
         Ok(())
     }
 
@@ -3557,11 +3559,6 @@ async fn run_initdb(
     Ok(())
 }
 
-impl Drop for Tenant {
-    fn drop(&mut self) {
-        remove_tenant_metrics(&self.tenant_shard_id);
-    }
-}
 /// Dump contents of a layer file to stdout.
 pub async fn dump_layerfile_from_path(
     path: &Utf8Path,
@@ -4628,10 +4625,7 @@ mod tests {
         drop(guard);
 
         // Pick a big LSN such that we query over all the changes.
-        // Technically, u64::MAX - 1 is the largest LSN supported by the read path,
-        // but there seems to be a bug on the non-vectored search path which surfaces
-        // in that case.
-        let reads_lsn = Lsn(u64::MAX - 1000);
+        let reads_lsn = Lsn(u64::MAX - 1);
 
         for read in reads {
             info!("Doing vectored read on {:?}", read);
@@ -5145,6 +5139,25 @@ mod tests {
             .conf
             .timeline_uninit_mark_file_path(tenant.tenant_shard_id, TIMELINE_ID)
             .exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_at_max_lsn() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_read_at_max_lsn")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let lsn = Lsn(0x10);
+        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+
+        let test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let read_lsn = Lsn(u64::MAX - 1);
+
+        assert!(tline.get(test_key, read_lsn, &ctx).await.is_ok());
 
         Ok(())
     }

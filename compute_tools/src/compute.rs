@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use nix::unistd::Pid;
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
@@ -722,8 +723,12 @@ impl ComputeNode {
         // Stop it when it's ready
         info!("waiting for postgres");
         wait_for_postgres(&mut pg, Path::new(pgdata))?;
-        pg.kill()?;
-        info!("sent kill signal");
+        // SIGQUIT orders postgres to exit immediately. We don't want to SIGKILL
+        // it to avoid orphaned processes prowling around while datadir is
+        // wiped.
+        let pm_pid = Pid::from_raw(pg.id() as i32);
+        kill(pm_pid, Signal::SIGQUIT)?;
+        info!("sent SIGQUIT signal");
         pg.wait()?;
         info!("done prewarming");
 

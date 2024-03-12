@@ -38,7 +38,6 @@ neon_download_extension_file_http(const char *filename, bool is_library)
 
 	CURLcode	res;
 	char	   *compute_ctl_url;
-	char	   *postdata;
 	bool		ret = false;
 
 	if (handle == NULL)

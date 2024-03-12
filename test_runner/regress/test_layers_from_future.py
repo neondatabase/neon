@@ -1,7 +1,7 @@
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 from fixtures.pageserver.types import (
     DeltaLayerFileName,
     ImageLayerFileName,
@@ -115,8 +115,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
                     )
                     == 0
                 )
-
-    endpoint.stop()
+    last_record_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
 
     wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
@@ -160,7 +159,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     time.sleep(1.1)  # so that we can use change in pre_stat.st_mtime to detect overwrites
 
     def get_generation_number():
-        attachment = env.attachment_service.inspect(tenant_id)
+        attachment = env.storage_controller.inspect(tenant_id)
         assert attachment is not None
         return attachment[0]
 

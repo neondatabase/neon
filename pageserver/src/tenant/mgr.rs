@@ -297,7 +297,7 @@ async fn init_load_generations(
     } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-        match client.re_attach().await {
+        match client.re_attach(conf).await {
             Ok(tenants) => tenants,
             Err(RetryForeverError::ShuttingDown) => {
                 anyhow::bail!("Shut down while waiting for control plane re-attach response")
