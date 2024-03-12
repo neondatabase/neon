@@ -8,6 +8,7 @@ from typing import Any, DefaultDict, Dict, Tuple
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    flush_ep_to_pageserver,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -517,7 +518,7 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
 
         with endpoint.cursor() as cur:
             cur.execute("update a set id = -id")
-        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+        flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)

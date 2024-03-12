@@ -51,7 +51,7 @@ CARGO_BUILD_FLAGS += $(filter -j1,$(MAKEFLAGS))
 CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
 # Force cargo not to print progress bar
 CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
-# Set PQ_LIB_DIR to make sure `attachment_service` get linked with bundled libpq (through diesel)
+# Set PQ_LIB_DIR to make sure `storage_controller` get linked with bundled libpq (through diesel)
 CARGO_CMD_PREFIX += PQ_LIB_DIR=$(POSTGRES_INSTALL_DIR)/v16/lib
 
 #

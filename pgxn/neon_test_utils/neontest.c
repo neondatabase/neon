@@ -182,8 +182,6 @@ test_consume_memory(PG_FUNCTION_ARGS)
 Datum
 test_release_memory(PG_FUNCTION_ARGS)
 {
-	TimestampTz start;
-
 	if (PG_ARGISNULL(0))
 	{
 		if (consume_cxt)

@@ -109,7 +109,7 @@ impl PageServerNode {
                 control_plane_api.as_str()
             ));
 
-            // Attachment service uses the same auth as pageserver: if JWT is enabled
+            // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
             if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
