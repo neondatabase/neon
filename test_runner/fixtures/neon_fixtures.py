@@ -2142,11 +2142,13 @@ class NeonStorageController(MetricsGetter):
         shards: list[dict[str, Any]] = body["shards"]
         return shards
 
-    def tenant_shard_split(self, tenant_id: TenantId, shard_count: int) -> list[TenantShardId]:
+    def tenant_shard_split(
+        self, tenant_id: TenantId, shard_count: int, shard_stripe_size: Optional[int] = None
+    ) -> list[TenantShardId]:
         response = self.request(
             "PUT",
             f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/shard_split",
-            json={"new_shard_count": shard_count},
+            json={"new_shard_count": shard_count, "new_stripe_size": shard_stripe_size},
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()

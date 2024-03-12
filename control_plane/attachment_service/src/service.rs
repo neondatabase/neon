@@ -2222,7 +2222,18 @@ impl Service {
 
         // unwrap safety: we would have returned above if we didn't find at least one shard to split
         let old_shard_count = old_shard_count.unwrap();
-        let shard_ident = shard_ident.unwrap();
+        let shard_ident = if let Some(new_stripe_size) = split_req.new_stripe_size {
+            // This ShardIdentity will be used as the template for all children, so this implicitly
+            // applies the new stripe size to the children.
+            let mut shard_ident = shard_ident.unwrap();
+            if shard_ident.count.count() > 1 && shard_ident.stripe_size != new_stripe_size {
+                return Err(ApiError::BadRequest(anyhow::anyhow!("Attempted to change stripe size ({:?}->{new_stripe_size:?}) on a tenant with multiple shards", shard_ident.stripe_size)));
+            }
+            shard_ident.stripe_size = new_stripe_size;
+            shard_ident
+        } else {
+            shard_ident.unwrap()
+        };
         let policy = policy.unwrap();
 
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
@@ -2314,6 +2325,7 @@ impl Service {
                     *parent_id,
                     TenantShardSplitRequest {
                         new_shard_count: split_req.new_shard_count,
+                        new_stripe_size: split_req.new_stripe_size,
                     },
                 )
                 .await

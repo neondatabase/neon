@@ -1151,7 +1151,12 @@ async fn tenant_shard_split_handler(
 
     let new_shards = state
         .tenant_manager
-        .shard_split(tenant_shard_id, ShardCount::new(req.new_shard_count), &ctx)
+        .shard_split(
+            tenant_shard_id,
+            ShardCount::new(req.new_shard_count),
+            req.new_stripe_size,
+            &ctx,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -2247,7 +2252,7 @@ pub fn make_router(
         .get("/v1/location_config", |r| {
             api_handler(r, list_location_config_handler)
         })
-        .get("/v1/location_config/:tenant_id", |r| {
+        .get("/v1/location_config/:tenant_shard_id", |r| {
             api_handler(r, get_location_config_handler)
         })
         .put(
