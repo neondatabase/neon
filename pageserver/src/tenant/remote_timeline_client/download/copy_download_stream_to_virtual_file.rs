@@ -1,8 +1,8 @@
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
-use tokio_epoll_uring::{BoundedBuf, IoBuf};
+use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
-use crate::{tenant::remote_timeline_client::BUFFER_SIZE, virtual_file::VirtualFile};
+use crate::virtual_file::VirtualFile;
 
 /// Equivalent to `tokio::io::copy_buf` but with an
 /// owned-buffers-style Write API, as required by VirtualFile / tokio-epoll-uring.
@@ -17,7 +17,10 @@ pub async fn copy(
         dst,
         bytes_amount: 0,
     };
-    let mut writer = BypassableBufferedWriter::new(writer);
+    let mut writer = BypassableBufferedWriter::<
+        { crate::tenant::remote_timeline_client::BUFFER_SIZE },
+        _,
+    >::new(writer);
     while let Some(res) = src.next().await {
         let chunk = match res {
             Ok(chunk) => chunk,
@@ -53,12 +56,12 @@ trait Writer {
     ) -> std::io::Result<(usize, B::Buf)>;
 }
 
-struct BypassableBufferedWriter<W> {
+struct BypassableBufferedWriter<const BUFFER_SIZE: usize, W> {
     writer: W,
     buf: Option<BytesMut>,
 }
 
-impl<W> BypassableBufferedWriter<W>
+impl<const BUFFER_SIZE: usize, W> BypassableBufferedWriter<BUFFER_SIZE, W>
 where
     W: Writer,
 {
@@ -124,6 +127,95 @@ where
         assert_eq!(nwritten, buf_len);
         buf.clear();
         self.buf = Some(buf);
+        Ok(())
+    }
+}
+
+impl Writer for Vec<u8> {
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        buf: B,
+    ) -> std::io::Result<(usize, B::Buf)> {
+        let nbytes = buf.bytes_init();
+        if nbytes == 0 {
+            return Ok((0, Slice::into_inner(buf.slice_full())));
+        }
+        let buf = buf.slice(0..nbytes);
+        self.extend_from_slice(&buf[..]);
+        Ok((buf.len(), Slice::into_inner(buf)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct RecorderWriter {
+        writes: Vec<Vec<u8>>,
+    }
+    impl Writer for RecorderWriter {
+        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+            &mut self,
+            buf: B,
+        ) -> std::io::Result<(usize, B::Buf)> {
+            let nbytes = buf.bytes_init();
+            if nbytes == 0 {
+                self.writes.push(vec![]);
+                return Ok((0, Slice::into_inner(buf.slice_full())));
+            }
+            let buf = buf.slice(0..nbytes);
+            self.writes.push(Vec::from(&buf[..]));
+            Ok((buf.len(), Slice::into_inner(buf)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_buffered_writes_only() -> std::io::Result<()> {
+        let recorder = RecorderWriter::default();
+        let mut writer = BypassableBufferedWriter::<2, _>::new(recorder);
+        writer.write_buffered(Bytes::from_static(b"a")).await?;
+        writer.write_buffered(Bytes::from_static(b"b")).await?;
+        writer.write_buffered(Bytes::from_static(b"c")).await?;
+        writer.write_buffered(Bytes::from_static(b"d")).await?;
+        writer.write_buffered(Bytes::from_static(b"e")).await?;
+        let recorder = writer.flush_and_into_inner().await?;
+        assert_eq!(
+            recorder.writes,
+            vec![Vec::from(b"ab"), Vec::from(b"cd"), Vec::from(b"e")]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_writes_only() -> std::io::Result<()> {
+        let recorder = RecorderWriter::default();
+        let mut writer = BypassableBufferedWriter::<2, _>::new(recorder);
+        writer.write_buffered(Bytes::from_static(b"abc")).await?;
+        writer.write_buffered(Bytes::from_static(b"de")).await?;
+        writer.write_buffered(Bytes::from_static(b"")).await?;
+        writer.write_buffered(Bytes::from_static(b"fghijk")).await?;
+        let recorder = writer.flush_and_into_inner().await?;
+        assert_eq!(
+            recorder.writes,
+            vec![Vec::from(b"abc"), Vec::from(b"de"), Vec::from(b"fghijk")]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_write_with_nonempty_buffer() -> std::io::Result<()> {
+        let recorder = RecorderWriter::default();
+        let mut writer = BypassableBufferedWriter::<2, _>::new(recorder);
+        writer.write_buffered(Bytes::from_static(b"a")).await?;
+        writer.write_buffered(Bytes::from_static(b"bc")).await?;
+        writer.write_buffered(Bytes::from_static(b"d")).await?;
+        writer.write_buffered(Bytes::from_static(b"e")).await?;
+        let recorder = writer.flush_and_into_inner().await?;
+        assert_eq!(
+            recorder.writes,
+            vec![Vec::from(b"a"), Vec::from(b"bc"), Vec::from(b"de")]
+        );
         Ok(())
     }
 }
