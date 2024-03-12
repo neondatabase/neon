@@ -13,7 +13,7 @@
 use anyhow::{anyhow, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
-use pageserver_api::key::Key;
+use pageserver_api::key::{replorigin_key, Key};
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
@@ -355,6 +355,7 @@ where
                 .await
                 .map_err(|e| BasebackupError::Server(e.into()))?
             {
+                let header = new_tar_header(&path, content.len() as u64)?;
                 if path.starts_with("pg_replslot") {
                     let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
                     let restart_lsn = Lsn(u64::from_le_bytes(
@@ -362,8 +363,37 @@ where
                     ));
                     info!("Replication slot {} restart LSN={}", path, restart_lsn);
                     min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                } else if path.starts_with("pg_logical/replorigin_checkpoint") {
+                    let n_origins = (content.len() - 4 /* magic */ - 4 /* crc32 */) / 16 /* sizeof(ReplicationStateOnDisk) */;
+                    let mut new_content = Vec::with_capacity(content.len());
+                    new_content.extend_from_slice(&content[0..4]); // magic
+                    for i in 0..n_origins {
+                        let offs = 4 + i * 16;
+                        let origin_id =
+                            u16::from_le_bytes(content[offs..offs + 2].try_into().unwrap());
+                        let origin_lsn =
+                            u64::from_le_bytes(content[offs + 8..offs + 16].try_into().unwrap());
+                        new_content.extend_from_slice(&content[offs..offs + 8]); // aligned origin id
+
+                        // Try to get orgin_lsn for this origin_id at the moment of basebackup
+                        let key = replorigin_key(origin_id);
+                        if let Ok(buf) = self.timeline.get(key, self.lsn, self.ctx).await {
+                            let tx_origin_lsn = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+                            if tx_origin_lsn > origin_lsn {
+                                new_content.extend_from_slice(&buf[0..8]);
+                            } else {
+                                new_content.extend_from_slice(&content[offs + 8..offs + 16]);
+                            }
+                        }
+                    }
+                    let crc32 = crc32c::crc32c(&new_content);
+                    new_content.extend_from_slice(&crc32.to_le_bytes());
+                    self.ar
+                        .append(&header, &*new_content)
+                        .await
+                        .context("could not add aux file to basebackup tarball")?;
+                    continue;
                 }
-                let header = new_tar_header(&path, content.len() as u64)?;
                 self.ar
                     .append(&header, &*content)
                     .await
