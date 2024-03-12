@@ -1,69 +1,43 @@
-use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
+use bytes::BytesMut;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
-use crate::virtual_file::VirtualFile;
-
-/// Equivalent to `tokio::io::copy_buf` but with an
-/// owned-buffers-style Write API, as required by VirtualFile / tokio-epoll-uring.
-pub async fn copy(
-    src: &mut remote_storage::DownloadStream,
-    dst: &mut VirtualFile,
-) -> std::io::Result<u64> {
-    // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
-    // There's chunks_vectored() on the stream.
-
-    let writer = SizeTrackingWriter {
-        dst,
-        bytes_amount: 0,
-    };
-    let mut writer = BypassableBufferedWriter::<
-        { crate::tenant::remote_timeline_client::BUFFER_SIZE },
-        _,
-    >::new(writer);
-    while let Some(res) = src.next().await {
-        let chunk = match res {
-            Ok(chunk) => chunk,
-            Err(e) => return Err(e),
-        };
-        writer.write_buffered(chunk).await?;
-    }
-    let size_tracking = writer.flush_and_into_inner().await?;
-    Ok(size_tracking.bytes_amount)
-}
-
-struct SizeTrackingWriter<'f> {
-    dst: &'f mut VirtualFile,
-    bytes_amount: u64,
-}
-
-impl<'f> Writer for SizeTrackingWriter<'f> {
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
-        &mut self,
-        buf: B,
-    ) -> std::io::Result<(usize, B::Buf)> {
-        let (buf, res) = self.dst.write_all(buf).await;
-        let nwritten = res?;
-        self.bytes_amount += u64::try_from(nwritten).unwrap();
-        Ok((nwritten, buf))
-    }
-}
-
-trait Writer {
+/// A trait for doing owned-buffer write IO.
+/// Think [`tokio::io::AsyncWrite`] but with owned buffers.
+pub trait OwnedAsyncWriter {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)>;
 }
 
-struct BypassableBufferedWriter<const BUFFER_SIZE: usize, W> {
+/// A wrapper aorund an [`OwnedAsyncWriter`] that batches smaller writers
+/// into `BUFFER_SIZE`-sized writes.
+///
+/// # Passthrough Of Large Writers
+///
+/// Buffered writes larger than the `BUFFER_SIZE` cause the internal
+/// buffer to be flushed, even if it is not full yet. Then, the large
+/// buffered write is passed through to the unerlying [`OwnedAsyncWriter`].
+///
+/// This pass-through is generally beneficial for throughput, but if
+/// the storage backend of the [`OwnedAsyncWriter`] is a shared resource,
+/// unlimited large writes may cause latency or fairness issues.
+///
+/// In such cases, a different implementation that always buffers in memory
+/// may be preferable.
+pub struct BufferedWriter<const BUFFER_SIZE: usize, W> {
     writer: W,
+    // invariant: always remains Some(buf)
+    // with buf.capacity() == BUFFER_SIZE except
+    // - while IO is ongoing => goes back to Some() once the IO completed successfully
+    // - after an IO error => stays `None` forever
+    // In these exceptional cases, it's `None`.
     buf: Option<BytesMut>,
 }
 
-impl<const BUFFER_SIZE: usize, W> BypassableBufferedWriter<BUFFER_SIZE, W>
+impl<const BUFFER_SIZE: usize, W> BufferedWriter<BUFFER_SIZE, W>
 where
-    W: Writer,
+    W: OwnedAsyncWriter,
 {
     pub fn new(writer: W) -> Self {
         Self {
@@ -79,7 +53,10 @@ where
         Ok(writer)
     }
 
-    pub async fn write_buffered(&mut self, chunk: Bytes) -> std::io::Result<()> {
+    pub async fn write_buffered<B: IoBuf>(&mut self, chunk: Slice<B>) -> std::io::Result<()>
+    where
+        B: IoBuf + Send,
+    {
         // avoid memcpy for the middle of the chunk
         if chunk.len() >= BUFFER_SIZE {
             self.flush().await?;
@@ -116,6 +93,7 @@ where
         Ok(())
     }
 
+    ///
     async fn flush(&mut self) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
         if buf.is_empty() {
@@ -131,7 +109,7 @@ where
     }
 }
 
-impl Writer for Vec<u8> {
+impl OwnedAsyncWriter for Vec<u8> {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
@@ -154,7 +132,7 @@ mod tests {
     struct RecorderWriter {
         writes: Vec<Vec<u8>>,
     }
-    impl Writer for RecorderWriter {
+    impl OwnedAsyncWriter for RecorderWriter {
         async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
             &mut self,
             buf: B,
@@ -170,15 +148,23 @@ mod tests {
         }
     }
 
+    macro_rules! write {
+        ($writer:ident, $data:literal) => {{
+            $writer
+                .write_buffered(::bytes::Bytes::from_static($data).slice_full())
+                .await?;
+        }};
+    }
+
     #[tokio::test]
     async fn test_buffered_writes_only() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BypassableBufferedWriter::<2, _>::new(recorder);
-        writer.write_buffered(Bytes::from_static(b"a")).await?;
-        writer.write_buffered(Bytes::from_static(b"b")).await?;
-        writer.write_buffered(Bytes::from_static(b"c")).await?;
-        writer.write_buffered(Bytes::from_static(b"d")).await?;
-        writer.write_buffered(Bytes::from_static(b"e")).await?;
+        let mut writer = BufferedWriter::<2, _>::new(recorder);
+        write!(writer, b"a");
+        write!(writer, b"b");
+        write!(writer, b"c");
+        write!(writer, b"d");
+        write!(writer, b"e");
         let recorder = writer.flush_and_into_inner().await?;
         assert_eq!(
             recorder.writes,
@@ -190,11 +176,11 @@ mod tests {
     #[tokio::test]
     async fn test_passthrough_writes_only() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BypassableBufferedWriter::<2, _>::new(recorder);
-        writer.write_buffered(Bytes::from_static(b"abc")).await?;
-        writer.write_buffered(Bytes::from_static(b"de")).await?;
-        writer.write_buffered(Bytes::from_static(b"")).await?;
-        writer.write_buffered(Bytes::from_static(b"fghijk")).await?;
+        let mut writer = BufferedWriter::<2, _>::new(recorder);
+        write!(writer, b"abc");
+        write!(writer, b"de");
+        write!(writer, b"");
+        write!(writer, b"fghijk");
         let recorder = writer.flush_and_into_inner().await?;
         assert_eq!(
             recorder.writes,
@@ -206,11 +192,11 @@ mod tests {
     #[tokio::test]
     async fn test_passthrough_write_with_nonempty_buffer() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BypassableBufferedWriter::<2, _>::new(recorder);
-        writer.write_buffered(Bytes::from_static(b"a")).await?;
-        writer.write_buffered(Bytes::from_static(b"bc")).await?;
-        writer.write_buffered(Bytes::from_static(b"d")).await?;
-        writer.write_buffered(Bytes::from_static(b"e")).await?;
+        let mut writer = BufferedWriter::<2, _>::new(recorder);
+        write!(writer, b"a");
+        write!(writer, b"bc");
+        write!(writer, b"d");
+        write!(writer, b"e");
         let recorder = writer.flush_and_into_inner().await?;
         assert_eq!(
             recorder.writes,

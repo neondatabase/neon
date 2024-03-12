@@ -21,7 +21,8 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::Generation;
-use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
+use crate::virtual_file::{on_fatal_io_error, owned_buffers_io, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode};
 use utils::crashsafe::path_with_suffix_extension;
@@ -33,8 +34,6 @@ use super::{
     remote_initdb_preserved_archive_path, FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES,
     INITDB_PATH,
 };
-
-mod copy_download_stream_to_virtual_file;
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -135,7 +134,7 @@ pub async fn download_layer_file<'a>(
                 #[cfg(target_os = "linux")]
                 crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
                     async {
-                        let mut destination_file = VirtualFile::create(&temp_file_path)
+                        let destination_file = VirtualFile::create(&temp_file_path)
                             .await
                             .with_context(|| {
                                 format!("create a destination file for layer '{temp_file_path}'")
@@ -144,12 +143,31 @@ pub async fn download_layer_file<'a>(
 
                         let mut download = storage.download(&remote_path, cancel).await?;
 
-                        let bytes_amount = copy_download_stream_to_virtual_file::copy(
-                            &mut download.download_stream,
-                            &mut destination_file,
-                        )
+                        // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
+                        // There's chunks_vectored() on the stream.
+                        let (bytes_amount, destination_file) = async {
+                            let size_tracking = size_tracking_writer::Writer::new(destination_file);
+                            let mut buffered = owned_buffers_io::write::BufferedWriter::<
+                                { super::BUFFER_SIZE },
+                                _,
+                            >::new(size_tracking);
+                            while let Some(res) =
+                                futures::StreamExt::next(&mut download.download_stream).await
+                            {
+                                let chunk = match res {
+                                    Ok(chunk) => chunk,
+                                    Err(e) => return Err(e),
+                                };
+                                buffered
+                                    .write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(
+                                        chunk,
+                                    ))
+                                    .await?;
+                            }
+                            let size_tracking = buffered.flush_and_into_inner().await?;
+                            Ok(size_tracking.into_inner())
+                        }
                         .await?;
-                        // NB: the function flushes its internal buffer at end of stream
 
                         // not using sync_data because it can lose file size update
                         destination_file

@@ -34,6 +34,22 @@ pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 
+pub(crate) mod owned_buffers_io {
+    //! Abstractions for IO with owned buffers.
+    //!
+    //! Not actually tied to [`crate::virtual_file`] specifically, but, it's the primary
+    //! reason we need this abstraction.
+    //!
+    //! Over time, this could move into the `tokio-epoll-uring` crate, maybe `uring-common`,
+    //! but for the time being we're proving out the primitives in the neon.git repo
+    //! for faster iteration.
+
+    pub(crate) mod write;
+    pub(crate) mod util {
+        pub(crate) mod size_tracking_writer;
+    }
+}
+
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
 /// the underlying file is closed if the system is low on file descriptors,
