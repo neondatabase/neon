@@ -28,7 +28,7 @@ def platform() -> Optional[str]:
 
 @pytest.fixture(scope="function", autouse=True)
 def pageserver_virtual_file_io_engine() -> Optional[str]:
-    return None
+    return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")
 
 
 def pytest_generate_tests(metafunc: Metafunc):
@@ -48,11 +48,8 @@ def pytest_generate_tests(metafunc: Metafunc):
 
     # A hacky way to parametrize tests only for `pageserver_virtual_file_io_engine=std-fs`
     # And do not change test name for default `pageserver_virtual_file_io_engine=tokio-epoll-uring` to keep tests statistics
-    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in (
-        "",
-        "tokio-epoll-uring",
-    ):
-        metafunc.parametrize("pageserver_virtual_file_io_engine", [io_engine])
+    io_engine = os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "std-fs")
+    metafunc.parametrize("pageserver_virtual_file_io_engine", [io_engine])
 
     # For performance tests, parametrize also by platform
     if (
