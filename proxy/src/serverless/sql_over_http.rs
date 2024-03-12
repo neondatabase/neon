@@ -39,6 +39,7 @@ use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::error::ErrorKind;
 use crate::error::ReportableError;
+use crate::error::UserFacingError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
@@ -124,6 +125,12 @@ pub enum ConnInfoError {
 impl ReportableError for ConnInfoError {
     fn get_error_kind(&self) -> ErrorKind {
         ErrorKind::User
+    }
+}
+
+impl UserFacingError for ConnInfoError {
+    fn to_string_client(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -226,23 +233,32 @@ pub async fn handle(
             ctx.set_success();
             r
         }
-        Err(SqlOverHttpError::Cancelled(reason)) => {
-            ctx.set_error_kind(reason.get_error_kind());
+        Err(e @ SqlOverHttpError::Cancelled(_)) => {
+            let error_kind = e.get_error_kind();
+            ctx.set_error_kind(error_kind);
 
             let message = format!(
                 "Query cancelled, runtime exceeded. SQL queries over HTTP must not exceed {} seconds of runtime. Please consider using our websocket based connections",
                 config.http_config.request_timeout.as_secs_f64()
             );
-            error!(message);
+
+            tracing::info!(
+                kind=error_kind.to_metric_label(),
+                error=%e,
+                msg=message,
+                "forwarding error to user"
+            );
+
             json_response(
                 StatusCode::BAD_REQUEST,
                 json!({ "message": message, "code": SqlState::PROTOCOL_VIOLATION.code() }),
             )?
         }
         Err(e) => {
-            ctx.set_error_kind(e.get_error_kind());
+            let error_kind = e.get_error_kind();
+            ctx.set_error_kind(error_kind);
 
-            let mut message = format!("{:?}", e);
+            let mut message = e.to_string_client();
             let db_error = match &e {
                 SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
                 | SqlOverHttpError::Postgres(e) => e.as_db_error(),
@@ -290,10 +306,13 @@ pub async fn handle(
             let line = get(db_error, |db| db.line().map(|l| l.to_string()));
             let routine = get(db_error, |db| db.routine());
 
-            error!(
-                ?code,
-                "sql-over-http per-client task finished with an error: {e:#}"
+            tracing::info!(
+                kind=error_kind.to_metric_label(),
+                error=%e,
+                msg=message,
+                "forwarding error to user"
             );
+
             // TODO: this shouldn't always be bad request.
             json_response(
                 StatusCode::BAD_REQUEST,
@@ -361,6 +380,22 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::Postgres(p) => p.get_error_kind(),
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
+        }
+    }
+}
+
+impl UserFacingError for SqlOverHttpError {
+    fn to_string_client(&self) -> String {
+        match self {
+            SqlOverHttpError::ReadPayload(p) => p.to_string(),
+            SqlOverHttpError::ConnectCompute(c) => c.to_string_client(),
+            SqlOverHttpError::ConnInfo(c) => c.to_string_client(),
+            SqlOverHttpError::RequestTooLarge => self.to_string(),
+            SqlOverHttpError::ResponseTooLarge => self.to_string(),
+            SqlOverHttpError::InvalidIsolationLevel => self.to_string(),
+            SqlOverHttpError::Postgres(p) => p.to_string(),
+            SqlOverHttpError::JsonConversion(_) => "could not parse postgres response".to_string(),
+            SqlOverHttpError::Cancelled(_) => self.to_string(),
         }
     }
 }
