@@ -90,6 +90,8 @@ impl PageServerNode {
             listen_http_addr,
             pg_auth_type,
             http_auth_type,
+            virtual_file_io_engine,
+            get_vectored_impl,
         } = &self.conf;
 
         let id = format!("id={}", id);
@@ -99,6 +101,8 @@ impl PageServerNode {
 
         let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
         let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
+        let virtual_file_io_engine = format!("virtual_file_io_engine='{virtual_file_io_engine}'");
+        let get_vectored_impl = format!("get_vectored_impl='{get_vectored_impl}'");
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -110,6 +114,8 @@ impl PageServerNode {
             listen_http_addr_param,
             listen_pg_addr_param,
             broker_endpoint_param,
+            virtual_file_io_engine,
+            get_vectored_impl,
         ];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
