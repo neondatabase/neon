@@ -157,7 +157,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                 workload.churn_rows(rng.randint(128, 256), pageserver.id)
                 workload.validate(pageserver.id)
             elif last_state_ps[0].startswith("Attached"):
-                # The `attachment_service` will only re-attach on startup when a pageserver was the
+                # The `storage_controller` will only re-attach on startup when a pageserver was the
                 # holder of the latest generation: otherwise the pageserver will revert to detached
                 # state if it was running attached with a stale generation
                 last_state[pageserver.id] = ("Detached", None)
@@ -182,12 +182,12 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                         generation = last_state_ps[1]
                     else:
                         # Switch generations, while also jumping between attached states
-                        generation = env.attachment_service.attach_hook_issue(
+                        generation = env.storage_controller.attach_hook_issue(
                             tenant_id, pageserver.id
                         )
                         latest_attached = pageserver.id
                 else:
-                    generation = env.attachment_service.attach_hook_issue(tenant_id, pageserver.id)
+                    generation = env.storage_controller.attach_hook_issue(tenant_id, pageserver.id)
                     latest_attached = pageserver.id
             else:
                 generation = None
@@ -273,7 +273,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     # Encourage the new location to download while still in secondary mode
     pageserver_b.http_client().tenant_secondary_download(tenant_id)
 
-    migrated_generation = env.attachment_service.attach_hook_issue(tenant_id, pageserver_b.id)
+    migrated_generation = env.storage_controller.attach_hook_issue(tenant_id, pageserver_b.id)
     log.info(f"Acquired generation {migrated_generation} for destination pageserver")
     assert migrated_generation == initial_generation + 1
 
@@ -436,7 +436,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
-    assert env.attachment_service is not None
+    assert env.storage_controller is not None
     assert isinstance(env.pageserver_remote_storage, S3Storage)  # Satisfy linter
 
     tenant_id = env.initial_tenant

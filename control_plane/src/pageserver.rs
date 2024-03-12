@@ -31,8 +31,8 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::attachment_service::AttachmentService;
 use crate::local_env::PageServerConf;
+use crate::storage_controller::StorageController;
 use crate::{background_process, local_env::LocalEnv};
 
 /// Directory within .neon which will be used by default for LocalFs remote storage.
@@ -111,7 +111,7 @@ impl PageServerNode {
                 control_plane_api.as_str()
             ));
 
-            // Attachment service uses the same auth as pageserver: if JWT is enabled
+            // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
             if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
@@ -214,12 +214,12 @@ impl PageServerNode {
         // Register the node with the storage controller before starting pageserver: pageserver must be registered to
         // successfully call /re-attach and finish starting up.
         if register {
-            let attachment_service = AttachmentService::from_env(&self.env);
+            let storage_controller = StorageController::from_env(&self.env);
             let (pg_host, pg_port) =
                 parse_host_port(&self.conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
             let (http_host, http_port) = parse_host_port(&self.conf.listen_http_addr)
                 .expect("Unable to parse listen_http_addr");
-            attachment_service
+            storage_controller
                 .node_register(NodeRegisterRequest {
                     node_id: self.conf.id,
                     listen_pg_addr: pg_host.to_string(),
