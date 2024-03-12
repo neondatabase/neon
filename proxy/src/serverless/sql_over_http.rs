@@ -49,6 +49,7 @@ use super::backend::PoolingBackend;
 use super::conn_pool::ConnInfo;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
+use super::json::JsonConversionError;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -327,6 +328,12 @@ pub enum SqlOverHttpError {
     ReadPayload(#[from] ReadPayloadError),
     #[error("{0}")]
     ConnectCompute(#[from] HttpConnError),
+    #[error("response is too large (max is {MAX_RESPONSE_SIZE} bytes)")]
+    ResponseTooLarge,
+    #[error("{0}")]
+    Postgres(#[from] tokio_postgres::Error),
+    #[error("{0}")]
+    JsonConversion(#[from] JsonConversionError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -462,7 +469,7 @@ async fn handle_inner(
                 }
                 Either::Left((Err(e), _cancelled)) => {
                     discard.discard();
-                    return Err(e);
+                    return Err(anyhow::Error::from(e));
                 }
                 Either::Right((_cancelled, query)) => {
                     if let Err(err) = cancel_token.cancel_query(NoTls).await {
@@ -474,9 +481,10 @@ async fn handle_inner(
                             results
                         }
                         Ok(Err(error)) => {
-                            let db_error = error
-                                .downcast_ref::<tokio_postgres::Error>()
-                                .and_then(|e| e.as_db_error());
+                            let db_error = match &error {
+                                SqlOverHttpError::Postgres(e) => e.as_db_error(),
+                                _ => None,
+                            };
 
                             // if errored for some other reason, it might not be safe to return
                             if !db_error.is_some_and(|e| *e.code() == SqlState::QUERY_CANCELED) {
@@ -554,7 +562,7 @@ async fn handle_inner(
                         e
                     })?;
                     discard.check_idle(status);
-                    return Err(err);
+                    return Err(anyhow::Error::from(err));
                 }
             };
 
@@ -602,7 +610,7 @@ async fn query_batch(
     total_size: &mut usize,
     raw_output: bool,
     array_mode: bool,
-) -> anyhow::Result<Result<Vec<Value>, Cancelled>> {
+) -> Result<Result<Vec<Value>, Cancelled>, SqlOverHttpError> {
     let mut results = Vec::with_capacity(queries.queries.len());
     let mut current_size = 0;
     for stmt in queries.queries {
@@ -638,7 +646,7 @@ async fn query_to_json<T: GenericClient>(
     current_size: &mut usize,
     raw_output: bool,
     default_array_mode: bool,
-) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
+) -> Result<(ReadyForQueryStatus, Value), SqlOverHttpError> {
     info!("executing query");
     let query_params = data.params;
     let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
@@ -655,9 +663,7 @@ async fn query_to_json<T: GenericClient>(
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
         if *current_size > MAX_RESPONSE_SIZE {
-            return Err(anyhow::anyhow!(
-                "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
-            ));
+            return Err(SqlOverHttpError::ResponseTooLarge);
         }
     }
 
