@@ -240,7 +240,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     pub async fn write_compressed_blob(
         &mut self,
         srcbuf: Bytes,
-        compress: bool,
+        new_format: bool,
     ) -> Result<u64, Error> {
         let offset = self.offset;
 
@@ -251,7 +251,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         let mut is_compressed = false;
         if len < 128 {
             // Short blob. Write a 1-byte length header
-            io_buf.put_u8(NO_COMPRESSION);
+            if new_format {
+                io_buf.put_u8(NO_COMPRESSION);
+            }
             io_buf.put_u8(len as u8);
         } else {
             // Write a 4-byte length header
@@ -261,7 +263,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     format!("blob too large ({} bytes)", len),
                 ));
             }
-            if compress && len == BLCKSZ as usize {
+            if new_format && len == BLCKSZ as usize {
                 let compressed = lz4_flex::block::compress(&srcbuf);
                 if compressed.len() < len {
                     io_buf.put_u8(LZ4_COMPRESSION);
@@ -271,12 +273,14 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     io_buf.extend_from_slice(&compressed[..]);
                     is_compressed = true;
                 }
-                if is_compressed {
+            }
+            if !is_compressed {
+                if new_format {
                     io_buf.put_u8(NO_COMPRESSION);
-                    let mut len_buf = (len as u32).to_be_bytes();
-                    len_buf[0] |= 0x80;
-                    io_buf.extend_from_slice(&len_buf[..]);
                 }
+                let mut len_buf = (len as u32).to_be_bytes();
+                len_buf[0] |= 0x80;
+                io_buf.extend_from_slice(&len_buf[..]);
             }
         }
         let (io_buf, hdr_res) = self.write_all(io_buf).await;

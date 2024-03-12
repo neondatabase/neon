@@ -47,7 +47,7 @@ pub const COMPRESSED_STORAGE_FORMAT_VERSION: u16 = 4;
 
 /// Page image compression algorithm
 pub const NO_COMPRESSION: u8 = 0;
-pub const LZ4_COMPRESSION: u8 = 0;
+pub const LZ4_COMPRESSION: u8 = 1;
 
 pub const DEFAULT_PG_VERSION: u32 = 15;
 
