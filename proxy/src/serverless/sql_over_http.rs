@@ -1,7 +1,6 @@
 use std::pin::pin;
 use std::sync::Arc;
 
-use anyhow::bail;
 use futures::future::select;
 use futures::future::try_join;
 use futures::future::Either;
@@ -223,9 +222,11 @@ pub async fn handle(
             // TODO: ctx.set_error_kind(e.get_error_type());
 
             let mut message = format!("{:?}", e);
-            let db_error = e
-                .downcast_ref::<tokio_postgres::Error>()
-                .and_then(|e| e.as_db_error());
+            let db_error = match &e {
+                SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                | SqlOverHttpError::Postgres(e) => e.as_db_error(),
+                _ => None,
+            };
             fn get<'a, T: serde::Serialize>(
                 db: Option<&'a DbError>,
                 x: impl FnOnce(&'a DbError) -> T,
@@ -328,8 +329,14 @@ pub enum SqlOverHttpError {
     ReadPayload(#[from] ReadPayloadError),
     #[error("{0}")]
     ConnectCompute(#[from] HttpConnError),
+    #[error("{0}")]
+    ConnInfo(#[from] ConnInfoError),
+    #[error("request is too large (max is {MAX_REQUEST_SIZE} bytes)")]
+    RequestTooLarge,
     #[error("response is too large (max is {MAX_RESPONSE_SIZE} bytes)")]
     ResponseTooLarge,
+    #[error("invalid isolation level")]
+    InvalidIsolationLevel,
     #[error("{0}")]
     Postgres(#[from] tokio_postgres::Error),
     #[error("{0}")]
@@ -350,7 +357,7 @@ async fn handle_inner(
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
     backend: Arc<PoolingBackend>,
-) -> Result<Result<Response<Body>, Cancelled>, anyhow::Error> {
+) -> Result<Result<Response<Body>, Cancelled>, SqlOverHttpError> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[ctx.protocol])
         .guard();
@@ -383,7 +390,7 @@ async fn handle_inner(
             b"ReadUncommitted" => IsolationLevel::ReadUncommitted,
             b"ReadCommitted" => IsolationLevel::ReadCommitted,
             b"RepeatableRead" => IsolationLevel::RepeatableRead,
-            _ => bail!("invalid isolation level"),
+            _ => return Err(SqlOverHttpError::InvalidIsolationLevel),
         }),
         None => None,
     };
@@ -401,9 +408,7 @@ async fn handle_inner(
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
     if request_content_length > MAX_REQUEST_SIZE {
-        return Err(anyhow::anyhow!(
-            "request is too large (max is {MAX_REQUEST_SIZE} bytes)"
-        ));
+        return Err(SqlOverHttpError::RequestTooLarge);
     }
 
     let fetch_and_process_request = async {
@@ -469,7 +474,7 @@ async fn handle_inner(
                 }
                 Either::Left((Err(e), _cancelled)) => {
                     discard.discard();
-                    return Err(anyhow::Error::from(e));
+                    return Err(e);
                 }
                 Either::Right((_cancelled, query)) => {
                     if let Err(err) = cancel_token.cancel_query(NoTls).await {
@@ -482,7 +487,10 @@ async fn handle_inner(
                         }
                         Ok(Err(error)) => {
                             let db_error = match &error {
-                                SqlOverHttpError::Postgres(e) => e.as_db_error(),
+                                SqlOverHttpError::ConnectCompute(
+                                    HttpConnError::ConnectionError(e),
+                                )
+                                | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                                 _ => None,
                             };
 
@@ -562,21 +570,15 @@ async fn handle_inner(
                         e
                     })?;
                     discard.check_idle(status);
-                    return Err(anyhow::Error::from(err));
+                    return Err(err);
                 }
             };
 
             if txn_read_only {
-                response = response.header(
-                    TXN_READ_ONLY.clone(),
-                    HeaderValue::try_from(txn_read_only.to_string())?,
-                );
+                response = response.header(TXN_READ_ONLY.clone(), &HEADER_VALUE_TRUE);
             }
             if txn_deferrable {
-                response = response.header(
-                    TXN_DEFERRABLE.clone(),
-                    HeaderValue::try_from(txn_deferrable.to_string())?,
-                );
+                response = response.header(TXN_DEFERRABLE.clone(), &HEADER_VALUE_TRUE);
             }
             if let Some(txn_isolation_level) = txn_isolation_level_raw {
                 response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
