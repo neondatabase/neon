@@ -100,7 +100,12 @@ pub async fn task_main(
     let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
     ws_connections.close(); // allows `ws_connections.wait to complete`
 
-    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming, "http");
+    let tls_listener = TlsListener::new(
+        tls_acceptor,
+        addr_incoming,
+        "http",
+        config.handshake_timeout,
+    );
 
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<

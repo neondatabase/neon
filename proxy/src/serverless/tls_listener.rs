@@ -20,9 +20,6 @@ use crate::{
     protocol2::{WithClientIp, WithConnectionGuard},
 };
 
-/// Default timeout for the TLS handshake.
-const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
 pin_project! {
     /// Wraps a `Stream` of connections (such as a TCP listener) so that each connection is itself
     /// encrypted using TLS.
@@ -38,12 +35,17 @@ pin_project! {
 
 impl<A: Accept> TlsListener<A> {
     /// Create a `TlsListener` with default options.
-    pub(crate) fn new(tls: TlsAcceptor, listener: A, protocol: &'static str) -> Self {
+    pub(crate) fn new(
+        tls: TlsAcceptor,
+        listener: A,
+        protocol: &'static str,
+        timeout: Duration,
+    ) -> Self {
         TlsListener {
             listener,
             tls,
             waiting: JoinSet::new(),
-            timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            timeout,
             protocol,
         }
     }
