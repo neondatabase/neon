@@ -1546,7 +1546,7 @@ pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 [tenant_config]
-trace_read_requests = {trace_read_requests},
+trace_read_requests = {trace_read_requests}
 compress_image_layer = {compress_image_layer}"#,
         );
 
