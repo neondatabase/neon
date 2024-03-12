@@ -84,6 +84,9 @@ where
             info!("Handling request");
         }
 
+        // Take a copy of the path for error logging
+        let path = request.uri().path().to_string();
+
         // No special handling for panics here. There's a `tracing_panic_hook` from another
         // module to do that globally.
         let res = handler(request).await;
@@ -110,7 +113,7 @@ where
                 }
                 Ok(response)
             }
-            Err(err) => Ok(api_error_handler(err)),
+            Err(err) => Ok(api_error_handler(err, Some(&path))),
         }
     }
     .instrument(request_span)

@@ -108,7 +108,7 @@ impl HttpErrorBody {
 
 pub async fn route_error_handler(err: routerify::RouteError) -> Response<Body> {
     match err.downcast::<ApiError>() {
-        Ok(api_error) => api_error_handler(*api_error),
+        Ok(api_error) => api_error_handler(*api_error, None),
         Err(other_error) => {
             // We expect all the request handlers to return an ApiError, so this should
             // not be reached. But just in case.
@@ -121,12 +121,16 @@ pub async fn route_error_handler(err: routerify::RouteError) -> Response<Body> {
     }
 }
 
-pub fn api_error_handler(api_error: ApiError) -> Response<Body> {
+pub fn api_error_handler(api_error: ApiError, path: Option<&str>) -> Response<Body> {
     // Print a stack trace for Internal Server errors
 
     match api_error {
         ApiError::Forbidden(_) | ApiError::Unauthorized(_) => {
-            warn!("Error processing HTTP request: {api_error:#}")
+            warn!(
+                "Error processing HTTP request: {api_error:#} {}{}",
+                path.as_ref().map(|_| "at").unwrap_or(""),
+                path.unwrap_or("")
+            )
         }
         ApiError::ResourceUnavailable(_) => info!("Error processing HTTP request: {api_error:#}"),
         ApiError::NotFound(_) => info!("Error processing HTTP request: {api_error:#}"),
