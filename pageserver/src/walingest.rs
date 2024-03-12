@@ -1368,12 +1368,19 @@ impl WalIngest {
             // Note: The multixact members can wrap around, even within one WAL record.
             offset = offset.wrapping_add(n_this_page as u32);
         }
-        if xlrec.mid >= self.checkpoint.nextMulti {
-            self.checkpoint.nextMulti = xlrec.mid + 1;
+        // Advance `nextMulti` in wraparound-aware way. This should match the MultiXactAdvanceNextMXact()
+        // logic in PostgreSQL's xlog_redo() function.
+        if xlrec.mid.wrapping_sub(self.checkpoint.nextMulti) as i32 >= 0 {
+            let next_mid =
+                std::cmp::max(xlrec.mid.wrapping_add(1), pg_constants::FIRST_MULTIXACT_ID);
+            self.checkpoint.nextMulti = next_mid;
             self.checkpoint_modified = true;
         }
-        if xlrec.moff + xlrec.nmembers > self.checkpoint.nextMultiOffset {
-            self.checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
+        if (xlrec.moff.wrapping_add(xlrec.nmembers)).wrapping_sub(self.checkpoint.nextMultiOffset)
+            as i32
+            >= 0
+        {
+            self.checkpoint.nextMultiOffset = xlrec.moff.wrapping_add(xlrec.nmembers);
             self.checkpoint_modified = true;
         }
         let max_mbr_xid = xlrec.members.iter().fold(None, |acc, mbr| {
