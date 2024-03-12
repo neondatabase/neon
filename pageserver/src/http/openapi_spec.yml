@@ -1444,6 +1444,8 @@ components:
           type: integer
         trace_read_requests:
           type: boolean
+        compress_image_layer:
+          type: boolean
         heatmap_period:
           type: string
     TenantConfigResponse:
