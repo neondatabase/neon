@@ -935,11 +935,37 @@ impl Service {
         }
 
         let new_generation = if let Some(req_node_id) = attach_req.node_id {
-            Some(
-                self.persistence
-                    .increment_generation(attach_req.tenant_shard_id, req_node_id)
-                    .await?,
-            )
+            let maybe_tenant_conf = {
+                let locked = self.inner.write().unwrap();
+                locked
+                    .tenants
+                    .get(&attach_req.tenant_shard_id)
+                    .map(|t| t.config.clone())
+            };
+
+            match maybe_tenant_conf {
+                Some(conf) => {
+                    let new_generation = self
+                        .persistence
+                        .increment_generation(attach_req.tenant_shard_id, req_node_id)
+                        .await?;
+
+                    // Persist the placement policy update. This is required
+                    // when we reattaching a detached tenant.
+                    self.persistence
+                        .update_tenant_shard(
+                            attach_req.tenant_shard_id,
+                            PlacementPolicy::Single,
+                            conf,
+                            None,
+                        )
+                        .await?;
+                    Some(new_generation)
+                }
+                None => {
+                    anyhow::bail!("Attach hook handling raced with tenant removal")
+                }
+            }
         } else {
             self.persistence.detach(attach_req.tenant_shard_id).await?;
             None
@@ -954,6 +980,7 @@ impl Service {
 
         if let Some(new_generation) = new_generation {
             tenant_state.generation = Some(new_generation);
+            tenant_state.policy = PlacementPolicy::Single;
         } else {
             // This is a detach notification.  We must update placement policy to avoid re-attaching
             // during background scheduling/reconciliation, or during storage controller restart.
