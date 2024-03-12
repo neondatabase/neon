@@ -519,9 +519,9 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self):
+    def start(self, register_pageservers=False):
         assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start()
+        self.env.start(register_pageservers=register_pageservers)
 
     def init_start(
         self,
@@ -1112,7 +1112,7 @@ class NeonEnv:
         log.info(f"Config: {cfg}")
         self.neon_cli.init(cfg, force=config.config_init_force)
 
-    def start(self):
+    def start(self, register_pageservers=False):
         # storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.storage_controller.start()
@@ -1123,6 +1123,11 @@ class NeonEnv:
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
         wait_until(30, 1, storage_controller_ready)
+
+        if register_pageservers:
+            # Special case for forward compat tests, this can be removed later.
+            for pageserver in self.pageservers:
+                self.storage_controller.node_register(pageserver)
 
         # Start up broker, pageserver and all safekeepers
         futs = []
@@ -1712,10 +1717,8 @@ class NeonCli(AbstractNeonCli):
         id: int,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
-        register: bool = True,
     ) -> "subprocess.CompletedProcess[str]":
-        register_str = "true" if register else "false"
-        start_args = ["pageserver", "start", f"--id={id}", *overrides, f"--register={register_str}"]
+        start_args = ["pageserver", "start", f"--id={id}", *overrides]
         storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -2066,6 +2069,8 @@ class NeonStorageController(MetricsGetter):
             "node_id": int(node.id),
             "listen_http_addr": "localhost",
             "listen_http_port": node.service_port.http,
+            "listen_pg_addr": "localhost",
+            "listen_pg_port": node.service_port.pg,
         }
         log.info(f"node_register({body})")
         self.request(
@@ -2233,7 +2238,6 @@ class NeonPageserver(PgProtocol):
         self,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
-        register: bool = True,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -2243,7 +2247,7 @@ class NeonPageserver(PgProtocol):
         assert self.running is False
 
         self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars, register=register
+            self.id, overrides=overrides, extra_env_vars=extra_env_vars
         )
         self.running = True
         return self

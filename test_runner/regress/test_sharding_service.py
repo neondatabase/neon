@@ -278,13 +278,12 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     env.pageservers[0].allowed_errors.append(".*Emergency mode!.*")
     env.pageservers[0].start(
         overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
-        register=False,
     )
     origin_ps = env.pageservers[0]
 
     # This is the pageserver managed by the sharding service, where the tenant
     # will be attached after onboarding
-    env.pageservers[1].start(register=True)
+    env.pageservers[1].start()
     dest_ps = env.pageservers[1]
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 

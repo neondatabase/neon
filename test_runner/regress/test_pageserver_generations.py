@@ -205,6 +205,9 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
         sk.start()
     env.storage_controller.start()
 
+    # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
+    env.storage_controller.node_register(env.pageserver)
+
     env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
 
     env.neon_cli.create_tenant(
@@ -511,7 +514,6 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
     env.pageserver.start(
         overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
-        register=False,
     )
 
     # The pageserver should provide service to clients

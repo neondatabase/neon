@@ -922,6 +922,10 @@ impl Service {
         &self,
         reattach_req: ReAttachRequest,
     ) -> Result<ReAttachResponse, ApiError> {
+        if let Some(register_req) = reattach_req.register {
+            self.node_register(register_req).await?;
+        }
+
         // Take a re-attach as indication that the node is available: this is a precursor to proper
         // heartbeating in https://github.com/neondatabase/neon/issues/6844
         self.node_configure(NodeConfigureRequest {

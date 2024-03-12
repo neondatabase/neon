@@ -1100,9 +1100,8 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
-            let register = subcommand_args.get_one::<bool>("register").unwrap_or(&true);
             if let Err(e) = get_pageserver(env, subcommand_args)?
-                .start(&pageserver_config_overrides(subcommand_args), *register)
+                .start(&pageserver_config_overrides(subcommand_args))
                 .await
             {
                 eprintln!("pageserver start failed: {e}");
@@ -1131,7 +1130,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             }
 
             if let Err(e) = pageserver
-                .start(&pageserver_config_overrides(subcommand_args), false)
+                .start(&pageserver_config_overrides(subcommand_args))
                 .await
             {
                 eprintln!("pageserver start failed: {e}");
@@ -1293,7 +1292,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
         if let Err(e) = pageserver
-            .start(&pageserver_config_overrides(sub_match), true)
+            .start(&pageserver_config_overrides(sub_match))
             .await
         {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
@@ -1596,11 +1595,7 @@ fn cli() -> Command {
                 .subcommand(Command::new("status"))
                 .subcommand(Command::new("start")
                     .about("Start local pageserver")
-                    .arg(pageserver_config_args.clone()).arg(Arg::new("register")
-                    .long("register")
-                    .default_value("true").required(false)
-                    .value_parser(value_parser!(bool))
-                    .value_name("register"))
+                    .arg(pageserver_config_args.clone())
                 )
                 .subcommand(Command::new("stop")
                     .about("Stop local pageserver")

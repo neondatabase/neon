@@ -6,11 +6,18 @@
 use serde::{Deserialize, Serialize};
 use utils::id::NodeId;
 
-use crate::shard::TenantShardId;
+use crate::{controller_api::NodeRegisterRequest, shard::TenantShardId};
 
+/// Upcall message sent by the pageserver to the configured `control_plane_api` on
+/// startup.
 #[derive(Serialize, Deserialize)]
 pub struct ReAttachRequest {
     pub node_id: NodeId,
+
+    /// Optional inline self-registration: this is useful with the storage controller,
+    /// if the node already has a node_id set.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub register: Option<NodeRegisterRequest>,
 }
 
 #[derive(Serialize, Deserialize)]
