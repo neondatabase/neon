@@ -37,6 +37,8 @@ use crate::auth::ComputeUserInfoParseError;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
+use crate::error::ErrorKind;
+use crate::error::ReportableError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
@@ -117,6 +119,12 @@ pub enum ConnInfoError {
     InvalidEndpoint(#[from] ComputeUserInfoParseError),
     #[error("malformed endpoint")]
     MalformedEndpoint,
+}
+
+impl ReportableError for ConnInfoError {
+    fn get_error_kind(&self) -> ErrorKind {
+        ErrorKind::User
+    }
 }
 
 fn get_conn_info(
@@ -218,10 +226,8 @@ pub async fn handle(
             ctx.set_success();
             r
         }
-        Err(SqlOverHttpError::Cancelled(_c)) => {
-            // TODO: when http error classification is done, distinguish between
-            // timeout on sql vs timeout in proxy/cplane
-            // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
+        Err(SqlOverHttpError::Cancelled(reason)) => {
+            ctx.set_error_kind(reason.get_error_kind());
 
             let message = format!(
                 "Query cancelled, runtime exceeded. SQL queries over HTTP must not exceed {} seconds of runtime. Please consider using our websocket based connections",
@@ -234,7 +240,7 @@ pub async fn handle(
             )?
         }
         Err(e) => {
-            // TODO: ctx.set_error_kind(e.get_error_type());
+            ctx.set_error_kind(e.get_error_kind());
 
             let mut message = format!("{:?}", e);
             let db_error = match &e {
@@ -343,6 +349,22 @@ pub enum SqlOverHttpError {
     Cancelled(SqlOverHttpCancel),
 }
 
+impl ReportableError for SqlOverHttpError {
+    fn get_error_kind(&self) -> ErrorKind {
+        match self {
+            SqlOverHttpError::ReadPayload(e) => e.get_error_kind(),
+            SqlOverHttpError::ConnectCompute(e) => e.get_error_kind(),
+            SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
+            SqlOverHttpError::RequestTooLarge => ErrorKind::User,
+            SqlOverHttpError::ResponseTooLarge => ErrorKind::User,
+            SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
+            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
+            SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
@@ -351,12 +373,30 @@ pub enum ReadPayloadError {
     Parse(#[from] serde_json::Error),
 }
 
+impl ReportableError for ReadPayloadError {
+    fn get_error_kind(&self) -> ErrorKind {
+        match self {
+            ReadPayloadError::Read(_) => ErrorKind::ClientDisconnect,
+            ReadPayloadError::Parse(_) => ErrorKind::User,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SqlOverHttpCancel {
     #[error("query was cancelled")]
     Postgres,
     #[error("query was cancelled while stuck trying to connect to the database")]
     Connect,
+}
+
+impl ReportableError for SqlOverHttpCancel {
+    fn get_error_kind(&self) -> ErrorKind {
+        match self {
+            SqlOverHttpCancel::Postgres => ErrorKind::RateLimit,
+            SqlOverHttpCancel::Connect => ErrorKind::ServiceRateLimit,
+        }
+    }
 }
 
 async fn handle_inner(
