@@ -214,9 +214,24 @@ pub async fn handle(
     handle.abort();
 
     let mut response = match result {
-        Ok(Ok(r)) => {
+        Ok(r) => {
             ctx.set_success();
             r
+        }
+        Err(SqlOverHttpError::Cancelled(_c)) => {
+            // TODO: when http error classification is done, distinguish between
+            // timeout on sql vs timeout in proxy/cplane
+            // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
+
+            let message = format!(
+                "Query cancelled, runtime exceeded. SQL queries over HTTP must not exceed {} seconds of runtime. Please consider using our websocket based connections",
+                config.http_config.request_timeout.as_secs_f64()
+            );
+            error!(message);
+            json_response(
+                StatusCode::BAD_REQUEST,
+                json!({ "message": message, "code": SqlState::PROTOCOL_VIOLATION.code() }),
+            )?
         }
         Err(e) => {
             // TODO: ctx.set_error_kind(e.get_error_type());
@@ -297,21 +312,6 @@ pub async fn handle(
                 }),
             )?
         }
-        Ok(Err(Cancelled())) => {
-            // TODO: when http error classification is done, distinguish between
-            // timeout on sql vs timeout in proxy/cplane
-            // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
-
-            let message = format!(
-                "Query cancelled, runtime exceeded. SQL queries over HTTP must not exceed {} seconds of runtime. Please consider using our websocket based connections",
-                config.http_config.request_timeout.as_secs_f64()
-            );
-            error!(message);
-            json_response(
-                StatusCode::BAD_REQUEST,
-                json!({ "message": message, "code": SqlState::PROTOCOL_VIOLATION.code() }),
-            )?
-        }
     };
 
     response.headers_mut().insert(
@@ -320,8 +320,6 @@ pub async fn handle(
     );
     Ok(response)
 }
-
-struct Cancelled();
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqlOverHttpError {
@@ -341,6 +339,8 @@ pub enum SqlOverHttpError {
     Postgres(#[from] tokio_postgres::Error),
     #[error("{0}")]
     JsonConversion(#[from] JsonConversionError),
+    #[error("{0}")]
+    Cancelled(SqlOverHttpCancel),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -351,13 +351,21 @@ pub enum ReadPayloadError {
     Parse(#[from] serde_json::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SqlOverHttpCancel {
+    #[error("query was cancelled")]
+    Postgres,
+    #[error("query was cancelled while stuck trying to connect to the database")]
+    Connect,
+}
+
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
     backend: Arc<PoolingBackend>,
-) -> Result<Result<Response<Body>, Cancelled>, SqlOverHttpError> {
+) -> Result<Response<Body>, SqlOverHttpError> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[ctx.protocol])
         .guard();
@@ -442,7 +450,9 @@ async fn handle_inner(
     .await
     {
         Either::Left((result, _cancelled)) => result?,
-        Either::Right((_cancelled, _)) => return Ok(Err(Cancelled())),
+        Either::Right((_cancelled, _)) => {
+            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Connect))
+        }
     };
 
     let mut response = Response::builder()
@@ -499,11 +509,11 @@ async fn handle_inner(
                                 discard.discard();
                             }
 
-                            return Ok(Err(Cancelled()));
+                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                         }
                         Err(_timeout) => {
                             discard.discard();
-                            return Ok(Err(Cancelled()));
+                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                         }
                     }
                 }
@@ -541,7 +551,7 @@ async fn handle_inner(
             )
             .await
             {
-                Ok(Ok(results)) => {
+                Ok(results) => {
                     info!("commit");
                     let status = transaction.commit().await.map_err(|e| {
                         // if we cannot commit - for now don't return connection to pool
@@ -552,14 +562,14 @@ async fn handle_inner(
                     discard.check_idle(status);
                     results
                 }
-                Ok(Err(Cancelled())) => {
+                Err(SqlOverHttpError::Cancelled(_)) => {
                     if let Err(err) = cancel_token.cancel_query(NoTls).await {
                         tracing::error!(?err, "could not cancel query");
                     }
                     // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
                     discard.discard();
 
-                    return Ok(Err(Cancelled()));
+                    return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                 }
                 Err(err) => {
                     info!("rollback");
@@ -602,7 +612,7 @@ async fn handle_inner(
     // moving this later in the stack is going to be a lot of effort and ehhhh
     metrics.record_egress(len as u64);
 
-    Ok(Ok(response))
+    Ok(response)
 }
 
 async fn query_batch(
@@ -612,7 +622,7 @@ async fn query_batch(
     total_size: &mut usize,
     raw_output: bool,
     array_mode: bool,
-) -> Result<Result<Vec<Value>, Cancelled>, SqlOverHttpError> {
+) -> Result<Vec<Value>, SqlOverHttpError> {
     let mut results = Vec::with_capacity(queries.queries.len());
     let mut current_size = 0;
     for stmt in queries.queries {
@@ -634,12 +644,12 @@ async fn query_batch(
                 return Err(e);
             }
             Either::Right((_cancelled, _)) => {
-                return Ok(Err(Cancelled()));
+                return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
             }
         }
     }
     *total_size += current_size;
-    Ok(Ok(results))
+    Ok(results)
 }
 
 async fn query_to_json<T: GenericClient>(
