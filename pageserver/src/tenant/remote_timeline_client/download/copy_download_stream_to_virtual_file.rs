@@ -33,8 +33,9 @@ struct SizeTrackingWriter<'f> {
     dst: &'f mut VirtualFile,
     bytes_amount: u64,
 }
-impl<'f> SizeTrackingWriter<'f> {
-    pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+
+impl<'f> Writer for SizeTrackingWriter<'f> {
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)> {
@@ -45,20 +46,30 @@ impl<'f> SizeTrackingWriter<'f> {
     }
 }
 
-struct BypassableBufferedWriter<'f> {
-    writer: SizeTrackingWriter<'f>,
+trait Writer {
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        buf: B,
+    ) -> std::io::Result<(usize, B::Buf)>;
+}
+
+struct BypassableBufferedWriter<W> {
+    writer: W,
     buf: Option<BytesMut>,
 }
 
-impl<'f> BypassableBufferedWriter<'f> {
-    pub fn new(writer: SizeTrackingWriter<'f>) -> Self {
+impl<W> BypassableBufferedWriter<W>
+where
+    W: Writer,
+{
+    pub fn new(writer: W) -> Self {
         Self {
             writer,
             buf: Some(BytesMut::with_capacity(BUFFER_SIZE)),
         }
     }
 
-    pub async fn flush_and_into_inner(mut self) -> std::io::Result<SizeTrackingWriter<'f>> {
+    pub async fn flush_and_into_inner(mut self) -> std::io::Result<W> {
         self.flush().await?;
         let Self { buf, writer } = self;
         assert!(buf.is_some());
