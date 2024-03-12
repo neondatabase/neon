@@ -2478,7 +2478,7 @@ impl Timeline {
         // 'prev_lsn' tracks the last LSN that we were at in our search. It's used
         // to check that each iteration make some progress, to break infinite
         // looping if something goes wrong.
-        let mut prev_lsn = Lsn(u64::MAX);
+        let mut prev_lsn = None;
 
         let mut result = ValueReconstructResult::Continue;
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
@@ -2498,18 +2498,20 @@ impl Timeline {
                         MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
                         return Ok(traversal_path);
                     }
-                    if prev_lsn <= cont_lsn {
-                        // Didn't make any progress in last iteration. Error out to avoid
-                        // getting stuck in the loop.
-                        return Err(layer_traversal_error(format!(
-                            "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
-                            key,
-                            Lsn(cont_lsn.0 - 1),
-                            request_lsn,
-                            timeline.ancestor_lsn
-                        ), traversal_path));
+                    if let Some(prev) = prev_lsn {
+                        if prev <= cont_lsn {
+                            // Didn't make any progress in last iteration. Error out to avoid
+                            // getting stuck in the loop.
+                            return Err(layer_traversal_error(format!(
+                                "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
+                                key,
+                                Lsn(cont_lsn.0 - 1),
+                                request_lsn,
+                                timeline.ancestor_lsn
+                            ), traversal_path));
+                        }
                     }
-                    prev_lsn = cont_lsn;
+                    prev_lsn = Some(cont_lsn);
                 }
                 ValueReconstructResult::Missing => {
                     return Err(layer_traversal_error(
@@ -2539,7 +2541,7 @@ impl Timeline {
 
                 timeline_owned = timeline.get_ready_ancestor_timeline(ctx).await?;
                 timeline = &*timeline_owned;
-                prev_lsn = Lsn(u64::MAX);
+                prev_lsn = None;
                 continue 'outer;
             }
 
