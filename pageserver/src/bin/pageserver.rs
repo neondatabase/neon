@@ -1,3 +1,5 @@
+#![recursion_limit = "300"]
+
 //! Main entry point for the Page Server executable.
 
 use std::env::{var, VarError};

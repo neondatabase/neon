@@ -646,6 +646,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
+    #[inline(always)]
     pub(crate) async fn get(
         &self,
         key: Key,
