@@ -604,7 +604,8 @@ impl Service {
             let res = self.heartbeater_handler.heartbeat(nodes).await;
             if let Ok(deltas) = res {
                 let mut locked = self.inner.write().unwrap();
-                let mut new_nodes = (*locked.nodes).clone();
+                let (nodes, tenants, scheduler) = locked.parts_mut();
+                let mut new_nodes = (**nodes).clone();
 
                 tracing::info!("new_nodes={new_nodes:?}");
                 for (node_id, state) in deltas.0 {
@@ -625,10 +626,23 @@ impl Service {
                         }
                     }
 
-                    locked.scheduler.node_upsert(node);
+                    scheduler.node_upsert(node);
                 }
 
-                locked.nodes = Arc::new(new_nodes);
+                *nodes = Arc::new(new_nodes);
+
+                for (tenant_shard_id, tenant_state) in tenants {
+                    if tenant_state.should_schedule(nodes) {
+                        tracing::info!(
+                            "Rescheduling {} due to availability changes",
+                            tenant_shard_id
+                        );
+
+                        // Ignore scheduling failures since they will be retried
+                        // on the next heartbeat round. Failures are logged downstream.
+                        let _ = tenant_state.schedule(scheduler);
+                    }
+                }
             }
         }
     }
