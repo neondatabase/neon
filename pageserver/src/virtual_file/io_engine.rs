@@ -64,6 +64,7 @@ pub(super) fn init(engine_kind: IoEngineKind) {
     set(engine_kind);
 }
 
+/// Longer-term, this API should only be used by [`super::VirtualFile`].
 pub(crate) fn get() -> IoEngine {
     let cur = IoEngine::try_from(IO_ENGINE.load(Ordering::Relaxed)).unwrap();
     if cfg!(test) {
@@ -101,7 +102,17 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use super::FileGuard;
+use super::{FileGuard, Metadata};
+
+#[cfg(target_os = "linux")]
+fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
+    match e {
+        tokio_epoll_uring::Error::Op(e) => e,
+        tokio_epoll_uring::Error::System(system) => {
+            std::io::Error::new(std::io::ErrorKind::Other, system)
+        }
+    }
+}
 
 impl IoEngine {
     pub(super) async fn read_at<B>(
@@ -136,15 +147,82 @@ impl IoEngine {
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
                 let (resources, res) = system.read(file_guard, offset, buf).await;
+                (resources, res.map_err(epoll_uring_error_to_std))
+            }
+        }
+    }
+    pub(super) async fn sync_all(&self, file_guard: FileGuard) -> (FileGuard, std::io::Result<()>) {
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                let res = file_guard.with_std_file(|std_file| std_file.sync_all());
+                (file_guard, res)
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.fsync(file_guard).await;
+                (resources, res.map_err(epoll_uring_error_to_std))
+            }
+        }
+    }
+    pub(super) async fn sync_data(
+        &self,
+        file_guard: FileGuard,
+    ) -> (FileGuard, std::io::Result<()>) {
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                let res = file_guard.with_std_file(|std_file| std_file.sync_data());
+                (file_guard, res)
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.fdatasync(file_guard).await;
+                (resources, res.map_err(epoll_uring_error_to_std))
+            }
+        }
+    }
+    pub(super) async fn metadata(
+        &self,
+        file_guard: FileGuard,
+    ) -> (FileGuard, std::io::Result<Metadata>) {
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                let res =
+                    file_guard.with_std_file(|std_file| std_file.metadata().map(Metadata::from));
+                (file_guard, res)
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.statx(file_guard).await;
                 (
                     resources,
-                    res.map_err(|e| match e {
-                        tokio_epoll_uring::Error::Op(e) => e,
-                        tokio_epoll_uring::Error::System(system) => {
-                            std::io::Error::new(std::io::ErrorKind::Other, system)
-                        }
-                    }),
+                    res.map_err(epoll_uring_error_to_std).map(Metadata::from),
                 )
+            }
+        }
+    }
+    pub(super) async fn write_at<B: IoBuf + Send>(
+        &self,
+        file_guard: FileGuard,
+        offset: u64,
+        buf: Slice<B>,
+    ) -> ((FileGuard, Slice<B>), std::io::Result<usize>) {
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                let result = file_guard.with_std_file(|std_file| std_file.write_at(&buf, offset));
+                ((file_guard, buf), result)
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.write(file_guard, offset, buf).await;
+                (resources, res.map_err(epoll_uring_error_to_std))
             }
         }
     }
