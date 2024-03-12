@@ -302,7 +302,7 @@ impl<T> BuilderValue<T> {
 }
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
-// as a separate structure.  This is information neeed by the pageserver
+// as a separate structure.  This information is not neeed by the pageserver
 // itself, it is only used for registering the pageserver with the control
 // plane and/or storage controller.
 //
