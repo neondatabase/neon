@@ -57,8 +57,6 @@ impl PageServerNode {
             listen_http_addr,
             pg_auth_type: _,
             http_auth_type,
-            virtual_file_io_engine: _,
-            get_vectored_impl: _,
         } = conf;
         let (host, port) =
             parse_host_port(&listen_pg_addr).expect("Unable to parse listen_pg_addr");
@@ -99,8 +97,6 @@ impl PageServerNode {
             listen_http_addr,
             pg_auth_type,
             http_auth_type,
-            virtual_file_io_engine,
-            get_vectored_impl,
         } = &self.conf;
 
         let id = format!("id={}", id);

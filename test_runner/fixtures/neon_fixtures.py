@@ -500,7 +500,6 @@ class NeonEnvBuilder:
         self.control_plane_compute_hook_api: Optional[str] = None
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
-        log.info(f"pageserver_virtual_file_io_engine={pageserver_virtual_file_io_engine}")
 
         self.pageserver_get_vectored_impl: Optional[str] = None
         if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
