@@ -114,7 +114,7 @@ impl NeonBroker {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PageServerConf {
     // node id
     pub id: NodeId,
