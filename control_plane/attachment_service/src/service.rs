@@ -2264,6 +2264,9 @@ impl Service {
             // This ShardIdentity will be used as the template for all children, so this implicitly
             // applies the new stripe size to the children.
             let mut shard_ident = shard_ident.unwrap();
+            if shard_ident.count.count() > 1 && shard_ident.stripe_size != new_stripe_size {
+                return Err(ApiError::BadRequest(anyhow::anyhow!("Attempted to change stripe size ({:?}->{new_stripe_size:?}) on a tenant with multiple shards", shard_ident.stripe_size)));
+            }
             shard_ident.stripe_size = new_stripe_size;
             shard_ident
         } else {
