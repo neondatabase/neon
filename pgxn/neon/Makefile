@@ -18,7 +18,7 @@ OBJS = \
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
-SHLIB_LINK = -lcurl
+SHLIB_LINK = -lcurl -llz4
 
 EXTENSION = neon
 DATA = neon--1.0.sql neon--1.0--1.1.sql neon--1.1--1.2.sql neon--1.2--1.3.sql neon--1.3--1.2.sql neon--1.2--1.1.sql neon--1.1--1.0.sql

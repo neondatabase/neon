@@ -44,12 +44,13 @@ use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
+use postgres_ffi::BLCKSZ;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -813,6 +814,12 @@ impl DeltaLayerInner {
                     need_image = false;
                     break;
                 }
+                Value::CompressedImage(img) => {
+                    let decompressed = lz4_flex::block::decompress(&img, BLCKSZ as usize)?;
+                    reconstruct_state.img = Some((entry_lsn, Bytes::from(decompressed)));
+                    need_image = false;
+                    break;
+                }
                 Value::WalRecord(rec) => {
                     let will_init = rec.will_init();
                     reconstruct_state.records.push((entry_lsn, rec));
@@ -1102,6 +1109,9 @@ impl DeltaLayerInner {
                 Value::Image(img) => {
                     format!(" img {} bytes", img.len())
                 }
+                Value::CompressedImage(img) => {
+                    format!(" compressed img {} bytes", img.len())
+                }
                 Value::WalRecord(rec) => {
                     let wal_desc = walrecord::describe_wal_record(&rec)?;
                     format!(
@@ -1136,6 +1146,11 @@ impl DeltaLayerInner {
                 match val {
                     Value::Image(img) => {
                         let checkpoint = CheckPoint::decode(&img)?;
+                        println!("   CHECKPOINT: {:?}", checkpoint);
+                    }
+                    Value::CompressedImage(img) => {
+                        let decompressed = lz4_flex::block::decompress(&img, BLCKSZ as usize)?;
+                        let checkpoint = CheckPoint::decode(&decompressed)?;
                         println!("   CHECKPOINT: {:?}", checkpoint);
                     }
                     Value::WalRecord(_rec) => {

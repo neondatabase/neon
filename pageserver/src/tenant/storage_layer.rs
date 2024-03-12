@@ -20,6 +20,7 @@ use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::models::{
     LayerAccessKind, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use postgres_ffi::BLCKSZ;
 use std::cmp::{Ordering, Reverse};
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
@@ -147,18 +148,34 @@ impl ValuesReconstructState {
         lsn: Lsn,
         value: Value,
     ) -> ValueReconstructSituation {
-        let state = self
+        let mut error: Option<PageReconstructError> = None;
+        let key_state = self
             .keys
             .entry(*key)
             .or_insert(Ok(VectoredValueReconstructState::default()));
 
-        if let Ok(state) = state {
+        let situation = if let Ok(state) = key_state {
             let key_done = match state.situation {
                 ValueReconstructSituation::Complete => unreachable!(),
                 ValueReconstructSituation::Continue => match value {
                     Value::Image(img) => {
                         state.img = Some((lsn, img));
                         true
+                    }
+                    Value::CompressedImage(img) => {
+                        match lz4_flex::block::decompress(&img, BLCKSZ as usize) {
+                            Ok(decompressed) => {
+                                state.img = Some((lsn, Bytes::from(decompressed)));
+                                true
+                            }
+                            Err(e) => {
+                                error = Some(PageReconstructError::from(anyhow::anyhow!(
+                                    "Failed to decompress blobrom virtual file: {}",
+                                    e
+                                )));
+                                true
+                            }
+                        }
                     }
                     Value::WalRecord(rec) => {
                         let reached_cache =
@@ -178,7 +195,11 @@ impl ValuesReconstructState {
             state.situation
         } else {
             ValueReconstructSituation::Complete
+        };
+        if let Some(err) = error {
+            *key_state = Err(err);
         }
+        situation
     }
 
     /// Returns the Lsn at which this key is cached if one exists.

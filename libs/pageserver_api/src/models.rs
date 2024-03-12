@@ -757,6 +757,7 @@ pub enum PagestreamBeMessage {
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
     GetSlruSegment(PagestreamGetSlruSegmentResponse),
+    GetCompressedPage(PagestreamGetPageResponse),
 }
 
 // Keep in sync with `pagestore_client.h`
@@ -996,6 +997,12 @@ impl PagestreamBeMessage {
                 bytes.put(&resp.page[..]);
             }
 
+            Self::GetCompressedPage(resp) => {
+                bytes.put_u8(105); /* tag from pagestore_client.h */
+                bytes.put_u16(resp.page.len() as u16);
+                bytes.put(&resp.page[..]);
+            }
+
             Self::Error(resp) => {
                 bytes.put_u8(Tag::Error as u8);
                 bytes.put(resp.message.as_bytes());
@@ -1078,6 +1085,7 @@ impl PagestreamBeMessage {
             Self::Error(_) => "Error",
             Self::DbSize(_) => "DbSize",
             Self::GetSlruSegment(_) => "GetSlruSegment",
+            Self::GetCompressedPage(_) => "GetCompressedPage",
         }
     }
 }
