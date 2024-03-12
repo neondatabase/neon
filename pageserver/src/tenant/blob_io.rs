@@ -237,7 +237,11 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         (src_buf, Ok(()))
     }
 
-    pub async fn write_compressed_blob(&mut self, srcbuf: Bytes, compress: bool) -> Result<u64, Error> {
+    pub async fn write_compressed_blob(
+        &mut self,
+        srcbuf: Bytes,
+        compress: bool,
+    ) -> Result<u64, Error> {
         let offset = self.offset;
 
         let len = srcbuf.len();

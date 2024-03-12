@@ -40,7 +40,8 @@ use crate::tenant::vectored_blob_io::{
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{
-    COMPRESSED_STORAGE_FORMAT_VERSION, IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX,
+    COMPRESSED_STORAGE_FORMAT_VERSION, IMAGE_FILE_MAGIC, LZ4_COMPRESSION, STORAGE_FORMAT_VERSION,
+    TEMP_FILE_SUFFIX,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
@@ -49,6 +50,7 @@ use hex;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
+use postgres_ffi::BLCKSZ;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -546,9 +548,12 @@ impl ImageLayerInner {
             .into();
 
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let compressed = self.format_version >= COMPRESSED_STORAGE_FORMAT_VERSION;
         for read in reads.into_iter() {
             let buf = BytesMut::with_capacity(max_vectored_read_bytes);
-            let res = vectored_blob_reader.read_blobs(&read, buf).await;
+            let res = vectored_blob_reader
+                .read_blobs(&read, buf, compressed)
+                .await;
 
             match res {
                 Ok(blobs_buf) => {
@@ -556,11 +561,31 @@ impl ImageLayerInner {
 
                     for meta in blobs_buf.blobs.iter() {
                         let img_buf = frozen_buf.slice(meta.start..meta.end);
-                        reconstruct_state.update_key(
-                            &meta.meta.key,
-                            self.lsn,
-                            Value::Image(img_buf),
-                        );
+                        if meta.compression_alg == LZ4_COMPRESSION {
+                            match lz4_flex::block::decompress(&img_buf, BLCKSZ as usize) {
+                                Ok(decompressed) => {
+                                    reconstruct_state.update_key(
+                                        &meta.meta.key,
+                                        self.lsn,
+                                        Value::Image(Bytes::from(decompressed)),
+                                    );
+                                }
+                                Err(err) => reconstruct_state.on_key_error(
+                                    meta.meta.key,
+                                    PageReconstructError::from(anyhow!(
+                                        "Failed to decompress blob from file {}: {}",
+                                        self.file.path,
+                                        err
+                                    )),
+                                ),
+                            }
+                        } else {
+                            reconstruct_state.update_key(
+                                &meta.meta.key,
+                                self.lsn,
+                                Value::Image(img_buf),
+                            );
+                        }
                     }
                 }
                 Err(err) => {
@@ -668,7 +693,10 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_compressed_blob(img, self.compression).await?;
+        let off = self
+            .blob_writer
+            .write_compressed_blob(img, self.compression)
+            .await?;
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;

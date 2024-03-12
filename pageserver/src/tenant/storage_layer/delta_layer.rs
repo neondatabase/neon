@@ -966,7 +966,7 @@ impl DeltaLayerInner {
         // track when a key is done.
         for read in reads.into_iter().rev() {
             let res = vectored_blob_reader
-                .read_blobs(&read, buf.take().expect("Should have a buffer"))
+                .read_blobs(&read, buf.take().expect("Should have a buffer"), false)
                 .await;
 
             let blobs_buf = match res {

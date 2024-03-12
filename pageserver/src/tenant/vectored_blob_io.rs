@@ -15,11 +15,11 @@
 //!
 //! Note that the vectored blob api does *not* go through the page cache.
 
-use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
-
+use crate::NO_COMPRESSION;
 use bytes::BytesMut;
 use pageserver_api::key::Key;
+use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 
@@ -40,6 +40,7 @@ pub struct VectoredBlob {
     pub start: usize,
     pub end: usize,
     pub meta: BlobMeta,
+    pub compression_alg: u8,
 }
 
 /// Return type of [`VectoredBlobReader::read_blobs`]
@@ -274,6 +275,7 @@ impl<'a> VectoredBlobReader<'a> {
         &self,
         read: &VectoredRead,
         buf: BytesMut,
+        new_storage_format: bool,
     ) -> Result<VectoredBlobsBuf, std::io::Error> {
         assert!(read.size() > 0);
         assert!(
@@ -304,35 +306,42 @@ impl<'a> VectoredBlobReader<'a> {
         );
 
         for ((offset, meta), next) in pairs {
-            let offset_in_buf = offset - start_offset;
-            let first_len_byte = buf[offset_in_buf as usize];
+            let mut offset_in_buf = (offset - start_offset) as usize;
+            let compression_alg = if new_storage_format {
+                offset_in_buf += 1;
+                buf[offset_in_buf - 1]
+            } else {
+                NO_COMPRESSION
+            };
+            let first_len_byte = buf[offset_in_buf];
 
             // Each blob is prefixed by a header containing it's size.
             // Extract the size and skip that header to find the start of the data.
             // The size can be 1 or 4 bytes. The most significant bit is 0 in the
             // 1 byte case and 1 in the 4 byte case.
             let (size_length, blob_size) = if first_len_byte < 0x80 {
-                (1, first_len_byte as u64)
+                (1usize, first_len_byte as usize)
             } else {
                 let mut blob_size_buf = [0u8; 4];
-                let offset_in_buf = offset_in_buf as usize;
-
                 blob_size_buf.copy_from_slice(&buf[offset_in_buf..offset_in_buf + 4]);
                 blob_size_buf[0] &= 0x7f;
-                (4, u32::from_be_bytes(blob_size_buf) as u64)
+                (4usize, u32::from_be_bytes(blob_size_buf) as usize)
             };
 
             let start = offset_in_buf + size_length;
             let end = match next {
-                Some((next_blob_start_offset, _)) => next_blob_start_offset - start_offset,
+                Some((next_blob_start_offset, _)) => {
+                    (next_blob_start_offset - start_offset) as usize
+                }
                 None => start + blob_size,
             };
 
             assert_eq!(end - start, blob_size);
 
             metas.push(VectoredBlob {
-                start: start as usize,
-                end: end as usize,
+                start,
+                end,
+                compression_alg,
                 meta: *meta,
             })
         }
