@@ -51,17 +51,24 @@ pub struct PageServerNode {
 
 impl PageServerNode {
     pub fn from_env(env: &LocalEnv, conf: &PageServerConf) -> PageServerNode {
+        let PageServerConf {
+            id: _,
+            listen_pg_addr,
+            listen_http_addr,
+            pg_auth_type: _,
+            http_auth_type,
+        } = conf;
         let (host, port) =
-            parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
+            parse_host_port(&listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
         Self {
             pg_connection_config: PgConnectionConfig::new_host_port(host, port),
             conf: conf.clone(),
             env: env.clone(),
             http_client: mgmt_api::Client::new(
-                format!("http://{}", conf.listen_http_addr),
+                format!("http://{}", listen_http_addr),
                 {
-                    match conf.http_auth_type {
+                    match http_auth_type {
                         AuthType::Trust => None,
                         AuthType::NeonJWT => Some(
                             env.generate_auth_token(&Claims::new(None, Scope::PageServerApi))
@@ -78,18 +85,27 @@ impl PageServerNode {
     ///
     /// These all end up on the command line of the `pageserver` binary.
     fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
-        let id = format!("id={}", self.conf.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let http_auth_type_param = format!("http_auth_type='{}'", self.conf.http_auth_type);
-        let listen_http_addr_param = format!("listen_http_addr='{}'", self.conf.listen_http_addr);
+        let PageServerConf {
+            id,
+            listen_pg_addr,
+            listen_http_addr,
+            pg_auth_type,
+            http_auth_type,
+        } = &self.conf;
 
-        let pg_auth_type_param = format!("pg_auth_type='{}'", self.conf.pg_auth_type);
-        let listen_pg_addr_param = format!("listen_pg_addr='{}'", self.conf.listen_pg_addr);
+        let id = format!("id={}", id);
+
+        let http_auth_type_param = format!("http_auth_type='{}'", http_auth_type);
+        let listen_http_addr_param = format!("listen_http_addr='{}'", listen_http_addr);
+
+        let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
+        let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -111,7 +127,7 @@ impl PageServerNode {
 
             // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
-            if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
+            if matches!(http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
                     .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
@@ -129,8 +145,7 @@ impl PageServerNode {
             ));
         }
 
-        if self.conf.http_auth_type != AuthType::Trust || self.conf.pg_auth_type != AuthType::Trust
-        {
+        if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
