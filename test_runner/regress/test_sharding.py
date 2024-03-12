@@ -1,6 +1,7 @@
 import os
 from typing import Dict, List, Optional, Union
 import time
+from typing import Dict, List, Union
 
 import pytest
 import requests
@@ -859,8 +860,8 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
     pageservers = dict((int(p.id), p) for p in env.pageservers)
     shards = env.storage_controller.locate(tenant_id)
 
-    # todo: take last/random shard
-    pageservers[4].http_client().configure_failpoints(("wal-ingest-record-sleep", "sleep(1)"))
+    # Slow down one of the shards, around ~1MB/s
+    pageservers[4].http_client().configure_failpoints(("wal-ingest-record-sleep", "5%sleep(1)"))
 
     def shards_info():
         infos = []
@@ -885,7 +886,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
         branch_name="main",
         endpoint_opts={
             "config_lines": [
-                "max_replication_write_lag=100kB",
+                "max_replication_write_lag=1MB",
             ],
         },
     )
@@ -915,12 +916,15 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             SELECT
                 pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag,
                 received_lsn,
-                pg_current_wal_flush_lsn() as flush_lsn
+                pg_current_wal_flush_lsn() as flush_lsn,
+                neon.backpressure_throttling_time() as throttling_time
             FROM neon.backpressure_lsns();
             """,
             dbname="postgres",
         )[0]
-        log.info(f"received_lsn_lag = {res[0]}, received_lsn = {res[1]}, flush_lsn = {res[2]}")
+        log.info(
+            f"received_lsn_lag = {res[0]}, received_lsn = {res[1]}, flush_lsn = {res[2]}, throttling_time = {res[3]}"
+        )
 
         lsn = Lsn(res[2])
         now = time.time()
@@ -951,4 +955,8 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
         # approximately 1MB of data
         workload.write_rows(8000, upload=False)
         update_write_lsn()
-        shards_info()
+        infos = shards_info()
+        min_lsn = min(Lsn(info["last_record_lsn"]) for info in infos)
+        max_lsn = max(Lsn(info["last_record_lsn"]) for info in infos)
+        diff = max_lsn - min_lsn
+        assert diff < 2 * 1024 * 1024, f"LSN diff={diff}, expected diff < 2MB due to backpressure"

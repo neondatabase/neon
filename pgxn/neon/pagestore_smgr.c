@@ -960,6 +960,7 @@ page_server_request(void const *req)
 	}
 	shard_no = get_shard_number(&tag);
 
+	neon_log(LOG, "Sending request to shard %d, tag %d", shard_no, (int) ((NeonRequest *) req)->tag);
 
 	/*
 	 * Current sharding model assumes that all metadata is present only at shard 0.
@@ -2109,6 +2110,11 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	};
 
 	CopyNRelFileInfoToBufTag(buftag, rinfo);
+
+	neon_log(LOG, "neon_read_at_lsn: %u/%u/%u.%u blk %u, request_lsn %X/%08X",
+			 RelFileInfoFmt(rinfo),
+			 forkNum, blkno,
+			 (uint32) (request_lsn >> 32), (uint32) request_lsn);
 
 	/*
 	 * The redo process does not lock pages that it needs to replay but are

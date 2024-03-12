@@ -1406,6 +1406,7 @@ RecvAppendResponses(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
 	XLogRecPtr	newCommitLsn;
+	bool		commitLsnUpdated = false;
 	bool		readAnything = false;
 
 	while (true)
@@ -1425,6 +1426,8 @@ RecvAppendResponses(Safekeeper *sk)
 			   LSN_FORMAT_ARGS(sk->appendResponse.commitLsn),
 			   sk->host, sk->port);
 
+		readAnything = true;
+
 		if (sk->appendResponse.term > wp->propTerm)
 		{
 			/*
@@ -1438,35 +1441,44 @@ RecvAppendResponses(Safekeeper *sk)
 				   sk->appendResponse.term, wp->propTerm);
 		}
 
-		readAnything = true;
+		newCommitLsn = GetAcknowledgedByQuorumWALPosition(wp);
+		if (newCommitLsn > wp->commitLsn)
+		{
+			wp->commitLsn = newCommitLsn;
+			commitLsnUpdated = true;
+		}
+
+		// Unlock syncrep waiters, update ps_feedback, etc.
+		wp->api.process_safekeeper_feedback(wp, sk);
 	}
 
 	if (!readAnything)
 		return sk->state == SS_ACTIVE;
 
-	/* update commit_lsn */
-	newCommitLsn = GetAcknowledgedByQuorumWALPosition(wp);
 	/*
 	 * Send the new value to all safekeepers.
 	 */
-	if (newCommitLsn > wp->commitLsn)
-	{
-		wp->commitLsn = newCommitLsn;
+	if (commitLsnUpdated)
 		BroadcastAppendRequest(wp);
-	}
 
 	HandleSafekeeperResponse(wp);
 
 	return sk->state == SS_ACTIVE;
 }
 
+#define psfeedback_log(fmt, key, ...) \
+	wp_log(LOG, "ParsePageserverFeedbackMessage: %s " fmt, key, __VA_ARGS__)
+
 /* Parse a PageserverFeedback message, or the PageserverFeedback part of an AppendResponse */
 static void
-ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, PageserverFeedback *rf)
+ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, PageserverFeedback *ps_feedback)
 {
 	uint8		nkeys;
 	int			i;
-	int32		len;
+
+	// initialize the struct before parsing
+	memset(ps_feedback, 0, sizeof(PageserverFeedback));
+	ps_feedback->present = true;
 
 	/* get number of custom keys */
 	nkeys = pq_getmsgbyte(reply_message);
@@ -1474,66 +1486,60 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 	for (i = 0; i < nkeys; i++)
 	{
 		const char *key = pq_getmsgstring(reply_message);
+		unsigned int value_len = pq_getmsgint(reply_message, sizeof(int32));
 
 		if (strcmp(key, "current_timeline_size") == 0)
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->currentClusterSize = pq_getmsgint64(reply_message);
-			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: current_timeline_size %lu",
-				   rf->currentClusterSize);
+			Assert(value_len == sizeof(int64));
+			ps_feedback->currentClusterSize = pq_getmsgint64(reply_message);
+			psfeedback_log("%lu", key, ps_feedback->currentClusterSize);
 		}
 		else if ((strcmp(key, "ps_writelsn") == 0) || (strcmp(key, "last_received_lsn") == 0))
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->last_received_lsn = pq_getmsgint64(reply_message);
-			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: last_received_lsn %X/%X",
-				   LSN_FORMAT_ARGS(rf->last_received_lsn));
+			Assert(value_len == sizeof(int64));
+			ps_feedback->last_received_lsn = pq_getmsgint64(reply_message);
+			psfeedback_log("%X/%X", key, LSN_FORMAT_ARGS(ps_feedback->last_received_lsn));
 		}
 		else if ((strcmp(key, "ps_flushlsn") == 0) || (strcmp(key, "disk_consistent_lsn") == 0))
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->disk_consistent_lsn = pq_getmsgint64(reply_message);
-			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: disk_consistent_lsn %X/%X",
-				   LSN_FORMAT_ARGS(rf->disk_consistent_lsn));
+			Assert(value_len == sizeof(int64));
+			ps_feedback->disk_consistent_lsn = pq_getmsgint64(reply_message);
+			psfeedback_log("%X/%X", key, LSN_FORMAT_ARGS(ps_feedback->disk_consistent_lsn));
 		}
 		else if ((strcmp(key, "ps_applylsn") == 0) || (strcmp(key, "remote_consistent_lsn") == 0))
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->remote_consistent_lsn = pq_getmsgint64(reply_message);
-			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: remote_consistent_lsn %X/%X",
-				   LSN_FORMAT_ARGS(rf->remote_consistent_lsn));
+			Assert(value_len == sizeof(int64));
+			ps_feedback->remote_consistent_lsn = pq_getmsgint64(reply_message);
+			psfeedback_log("%X/%X", key, LSN_FORMAT_ARGS(ps_feedback->remote_consistent_lsn));
 		}
 		else if ((strcmp(key, "ps_replytime") == 0) || (strcmp(key, "replytime") == 0))
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->replytime = pq_getmsgint64(reply_message);
+			Assert(value_len == sizeof(int64));
+			ps_feedback->replytime = pq_getmsgint64(reply_message);
 			{
 				char	   *replyTimeStr;
 
 				/* Copy because timestamptz_to_str returns a static buffer */
-				replyTimeStr = pstrdup(timestamptz_to_str(rf->replytime));
-				wp_log(DEBUG2, "ParsePageserverFeedbackMessage: replytime %lu reply_time: %s",
-					   rf->replytime, replyTimeStr);
+				replyTimeStr = pstrdup(timestamptz_to_str(ps_feedback->replytime));
+				psfeedback_log("%s", key, replyTimeStr);
 
 				pfree(replyTimeStr);
 			}
 		}
+		else if (strcmp(key, "shard_number") == 0)
+		{
+			Assert(value_len == sizeof(uint32));
+			ps_feedback->shard_number = pq_getmsgint(reply_message, sizeof(uint32));
+			psfeedback_log("%u", key, ps_feedback->shard_number);
+		}
 		else
 		{
-			len = pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-
 			/*
 			 * Skip unknown keys to support backward compatibile protocol
 			 * changes
 			 */
-			wp_log(LOG, "ParsePageserverFeedbackMessage: unknown key: %s len %d", key, len);
-			pq_getmsgbytes(reply_message, len);
+			wp_log(LOG, "ParsePageserverFeedbackMessage: unknown key: %s len %d", key, value_len);
+			pq_getmsgbytes(reply_message, value_len);
 		};
 	}
 }
@@ -1634,8 +1640,6 @@ static void
 HandleSafekeeperResponse(WalProposer *wp)
 {
 	XLogRecPtr	candidateTruncateLsn;
-
-	wp->api.process_safekeeper_feedback(wp);
 
 	/*
 	 * Try to advance truncateLsn -- the last record flushed to all
@@ -1812,7 +1816,9 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 				msg->hs.xmin.value = pq_getmsgint64_le(&s);
 				msg->hs.catalog_xmin.value = pq_getmsgint64_le(&s);
 				if (buf_size > APPENDRESPONSE_FIXEDPART_SIZE)
-					ParsePageserverFeedbackMessage(wp, &s, &msg->rf);
+					ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
+				else
+					msg->ps_feedback.present = false;
 				pq_getmsgend(&s);
 				return true;
 			}

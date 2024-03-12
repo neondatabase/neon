@@ -63,13 +63,16 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 
-static AppendResponse quorumFeedback;
 static WalproposerShmemState *walprop_shared;
 static WalProposerConfig walprop_config;
 static XLogRecPtr sentPtr = InvalidXLogRecPtr;
 static const walproposer_api walprop_pg;
 static volatile sig_atomic_t got_SIGUSR2 = false;
 static bool reported_sigusr2 = false;
+
+static XLogRecPtr standby_flush_lsn = InvalidXLogRecPtr;
+static XLogRecPtr standby_apply_lsn = InvalidXLogRecPtr;
+static HotStandbyFeedback agg_hs_feedback;
 
 static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
@@ -402,21 +405,58 @@ walprop_pg_get_shmem_state(WalProposer *wp)
 	return walprop_shared;
 }
 
-static void
-replication_feedback_set(PageserverFeedback *rf)
+/*
+ * Record new ps_feedback in the array with shards and update min_feedback.
+ */
+static PageserverFeedback
+record_pageserver_feedback(PageserverFeedback *ps_feedback)
 {
+	PageserverFeedback min_feedback;
+
+	Assert(ps_feedback->present);
+	Assert(ps_feedback->shard_number < MAX_SHARDS);
+
 	SpinLockAcquire(&walprop_shared->mutex);
-	memcpy(&walprop_shared->feedback, rf, sizeof(PageserverFeedback));
+
+	/* Update the number of shards */
+	if (ps_feedback->shard_number + 1 > walprop_shared->num_shards)
+		walprop_shared->num_shards = ps_feedback->shard_number + 1;
+
+	/* Update the feedback */
+	memcpy(&walprop_shared->shard_ps_feedback[ps_feedback->shard_number], ps_feedback, sizeof(PageserverFeedback));
+
+	/* Calculate min LSNs */
+	memcpy(&min_feedback, ps_feedback, sizeof(PageserverFeedback));
+	for (int i = 0; i < walprop_shared->num_shards; i++)
+	{
+		PageserverFeedback *feedback = &walprop_shared->shard_ps_feedback[i];
+		if (feedback->present)
+		{
+			if (min_feedback.last_received_lsn == InvalidXLogRecPtr || feedback->last_received_lsn < min_feedback.last_received_lsn)
+				min_feedback.last_received_lsn = feedback->last_received_lsn;
+			
+			if (min_feedback.disk_consistent_lsn == InvalidXLogRecPtr || feedback->disk_consistent_lsn < min_feedback.disk_consistent_lsn)
+				min_feedback.disk_consistent_lsn = feedback->disk_consistent_lsn;
+			
+			if (min_feedback.remote_consistent_lsn == InvalidXLogRecPtr || feedback->remote_consistent_lsn < min_feedback.remote_consistent_lsn)
+				min_feedback.remote_consistent_lsn = feedback->remote_consistent_lsn;
+		}
+	}
+	/* Copy min_feedback back to shmem */
+	memcpy(&walprop_shared->min_ps_feedback, &min_feedback, sizeof(PageserverFeedback));
+
 	SpinLockRelease(&walprop_shared->mutex);
+
+	return min_feedback;
 }
 
 void
 replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn)
 {
 	SpinLockAcquire(&walprop_shared->mutex);
-	*writeLsn = walprop_shared->feedback.last_received_lsn;
-	*flushLsn = walprop_shared->feedback.disk_consistent_lsn;
-	*applyLsn = walprop_shared->feedback.remote_consistent_lsn;
+	*writeLsn = walprop_shared->min_ps_feedback.last_received_lsn;
+	*flushLsn = walprop_shared->min_ps_feedback.disk_consistent_lsn;
+	*applyLsn = walprop_shared->min_ps_feedback.remote_consistent_lsn;
 	SpinLockRelease(&walprop_shared->mutex);
 }
 
@@ -1870,39 +1910,6 @@ CheckGracefulShutdown(WalProposer *wp)
 }
 
 /*
- * Choose most advanced PageserverFeedback and set it to *rf.
- */
-static void
-GetLatestNeonFeedback(PageserverFeedback *rf, WalProposer *wp)
-{
-	int			latest_safekeeper = 0;
-	XLogRecPtr	last_received_lsn = InvalidXLogRecPtr;
-
-	for (int i = 0; i < wp->n_safekeepers; i++)
-	{
-		if (wp->safekeeper[i].appendResponse.rf.last_received_lsn > last_received_lsn)
-		{
-			latest_safekeeper = i;
-			last_received_lsn = wp->safekeeper[i].appendResponse.rf.last_received_lsn;
-		}
-	}
-
-	rf->currentClusterSize = wp->safekeeper[latest_safekeeper].appendResponse.rf.currentClusterSize;
-	rf->last_received_lsn = wp->safekeeper[latest_safekeeper].appendResponse.rf.last_received_lsn;
-	rf->disk_consistent_lsn = wp->safekeeper[latest_safekeeper].appendResponse.rf.disk_consistent_lsn;
-	rf->remote_consistent_lsn = wp->safekeeper[latest_safekeeper].appendResponse.rf.remote_consistent_lsn;
-	rf->replytime = wp->safekeeper[latest_safekeeper].appendResponse.rf.replytime;
-
-	wpg_log(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
-			" last_received_lsn %X/%X, disk_consistent_lsn %X/%X, remote_consistent_lsn %X/%X, replytime %lu",
-			rf->currentClusterSize,
-			LSN_FORMAT_ARGS(rf->last_received_lsn),
-			LSN_FORMAT_ARGS(rf->disk_consistent_lsn),
-			LSN_FORMAT_ARGS(rf->remote_consistent_lsn),
-			rf->replytime);
-}
-
-/*
  * Combine hot standby feedbacks from all safekeepers.
  */
 static void
@@ -1949,26 +1956,37 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
  * None of that is functional in sync-safekeepers.
  */
 static void
-walprop_pg_process_safekeeper_feedback(WalProposer *wp)
+walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 {
-	HotStandbyFeedback hsFeedback;
-	XLogRecPtr	oldDiskConsistentLsn;
+	HotStandbyFeedback	hsFeedback;
+	bool				needToAdvanceSlot = false;
 
 	if (wp->config->syncSafekeepers)
 		return;
 
-	oldDiskConsistentLsn = quorumFeedback.rf.disk_consistent_lsn;
-
-	/* Get PageserverFeedback fields from the most advanced safekeeper */
-	GetLatestNeonFeedback(&quorumFeedback.rf, wp);
-	replication_feedback_set(&quorumFeedback.rf);
-	SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
-
-	if (wp->commitLsn > quorumFeedback.flushLsn || oldDiskConsistentLsn != quorumFeedback.rf.disk_consistent_lsn)
+	/* handle fresh ps_feedback */
+	if (sk->appendResponse.ps_feedback.present)
 	{
-		if (wp->commitLsn > quorumFeedback.flushLsn)
-			quorumFeedback.flushLsn = wp->commitLsn;
+		PageserverFeedback min_feedback = record_pageserver_feedback(&sk->appendResponse.ps_feedback);
 
+		if (sk->appendResponse.ps_feedback.currentClusterSize > 0)
+			SetZenithCurrentClusterSize(sk->appendResponse.ps_feedback.currentClusterSize);
+
+		if (min_feedback.disk_consistent_lsn != standby_apply_lsn)
+		{
+			standby_apply_lsn = min_feedback.disk_consistent_lsn;
+			needToAdvanceSlot = true;
+		}
+	}
+
+	if (wp->commitLsn > standby_flush_lsn)
+	{
+		standby_flush_lsn = wp->commitLsn;
+		needToAdvanceSlot = true;
+	}
+
+	if (needToAdvanceSlot)
+	{
 		/*
 		 * Advance the replication slot to commitLsn. WAL before it is
 		 * hardened and will be fetched from one of safekeepers by
@@ -1977,23 +1995,23 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp)
 		 * Also wakes up syncrep waiters.
 		 */
 		ProcessStandbyReply(
-		/* write_lsn -  This is what durably stored in WAL service. */
-							quorumFeedback.flushLsn,
-		/* flush_lsn - This is what durably stored in WAL service. */
-							quorumFeedback.flushLsn,
+		/* write_lsn -  This is what durably stored in safekeepers quorum. */
+							standby_flush_lsn,
+		/* flush_lsn - This is what durably stored in safekeepers quorum. */
+							standby_flush_lsn,
 
 		/*
 		 * apply_lsn - This is what processed and durably saved at*
 		 * pageserver.
 		 */
-							quorumFeedback.rf.disk_consistent_lsn,
+							standby_apply_lsn,
 							walprop_pg_get_current_timestamp(wp), false);
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback, wp);
-	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &quorumFeedback.hs, sizeof hsFeedback) != 0)
+	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &agg_hs_feedback, sizeof hsFeedback) != 0)
 	{
-		quorumFeedback.hs = hsFeedback;
+		agg_hs_feedback = hsFeedback;
 		ProcessStandbyHSFeedback(hsFeedback.ts,
 								 XidFromFullTransactionId(hsFeedback.xmin),
 								 EpochFromFullTransactionId(hsFeedback.xmin),

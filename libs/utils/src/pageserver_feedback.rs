@@ -29,11 +29,13 @@ pub struct PageserverFeedback {
     // Serialize with RFC3339 format.
     #[serde(with = "serde_systemtime")]
     pub replytime: SystemTime,
+    /// Used to track feedbacks from different shards. Zero for unsharded tenants.
+    pub shard_number: u32,
 }
 
 // NOTE: Do not forget to increment this number when adding new fields to PageserverFeedback.
 // Do not remove previously available fields because this might be backwards incompatible.
-pub const PAGESERVER_FEEDBACK_FIELDS_NUMBER: u8 = 5;
+pub const PAGESERVER_FEEDBACK_FIELDS_NUMBER: u8 = 6;
 
 impl PageserverFeedback {
     pub fn empty() -> PageserverFeedback {
@@ -43,6 +45,7 @@ impl PageserverFeedback {
             remote_consistent_lsn: Lsn::INVALID,
             disk_consistent_lsn: Lsn::INVALID,
             replytime: *PG_EPOCH,
+            shard_number: 0,
         }
     }
 
@@ -83,6 +86,12 @@ impl PageserverFeedback {
         buf.put_slice(b"ps_replytime\0");
         buf.put_i32(8);
         buf.put_i64(timestamp);
+
+        if self.shard_number > 0 {
+            buf.put_slice(b"shard_number\0");
+            buf.put_i32(4);
+            buf.put_u32(self.shard_number);
+        }
     }
 
     // Deserialize PageserverFeedback message
@@ -125,9 +134,8 @@ impl PageserverFeedback {
                 }
                 b"shard_number" => {
                     let len = buf.get_i32();
-                    // TODO: this will be implemented in the next update,
-                    //  for now, we just skip the value.
-                    buf.advance(len as usize);
+                    assert_eq!(len, 4);
+                    rf.shard_number = buf.get_u32();
                 }
                 _ => {
                     let len = buf.get_i32();
