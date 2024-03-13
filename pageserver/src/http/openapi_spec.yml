@@ -567,9 +567,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
-  /v1/tenant/{tenant_id}/location_config:
+  /v1/tenant/{tenant_shard_id}/location_config:
     parameters:
-      - name: tenant_id
+      - name: tenant_shard_id
         in: path
         required: true
         schema:
@@ -1371,7 +1371,7 @@ components:
       properties:
         tenant_id:
           type: string
-          description: Only used for the storage controller.
+          description: Not used, scheduled for removal.
         mode:
           type: string
           enum: ["AttachedSingle", "AttachedMulti", "AttachedStale", "Secondary", "Detached"]

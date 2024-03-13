@@ -1359,14 +1359,16 @@ impl Service {
     /// - Call with mode Detached to switch to PolicyMode::Detached
     pub(crate) async fn tenant_location_config(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         req: TenantLocationConfigRequest,
     ) -> Result<TenantLocationConfigResponse, ApiError> {
-        if !req.tenant_id.map(|id| id.is_unsharded()).unwrap_or(true) {
+        if !tenant_shard_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "This API is for importing single-sharded or unsharded tenants"
             )));
         }
+
+        let tenant_id = tenant_shard_id.tenant_id;
 
         // First check if this is a creation or an update
         let create_or_update = self.tenant_location_config_prepare(tenant_id, req);
