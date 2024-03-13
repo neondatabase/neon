@@ -111,6 +111,10 @@ impl RequestMonitoring {
         )
     }
 
+    pub fn set_cold_start_info(&mut self, info: ColdStartInfo) {
+        self.cold_start_info = Some(info);
+    }
+
     pub fn set_project(&mut self, x: MetricsAuxInfo) {
         self.set_endpoint_id(x.endpoint_id);
         self.branch = Some(x.branch_id);

@@ -519,9 +519,9 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self):
+    def start(self, register_pageservers=False):
         assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start()
+        self.env.start(register_pageservers=register_pageservers)
 
     def init_start(
         self,
@@ -1014,24 +1014,24 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        # Find two adjacent ports for attachment service and its postgres DB.  This
+        # Find two adjacent ports for storage controller and its postgres DB.  This
         # loop would eventually throw from get_port() if we run out of ports (extremely
         # unlikely): usually we find two adjacent free ports on the first iteration.
         while True:
-            self.attachment_service_port = self.port_distributor.get_port()
-            attachment_service_pg_port = self.port_distributor.get_port()
-            if attachment_service_pg_port == self.attachment_service_port + 1:
+            self.storage_controller_port = self.port_distributor.get_port()
+            storage_controller_pg_port = self.port_distributor.get_port()
+            if storage_controller_pg_port == self.storage_controller_port + 1:
                 break
 
         # The URL for the pageserver to use as its control_plane_api config
-        self.control_plane_api: str = f"http://127.0.0.1:{self.attachment_service_port}/upcall/v1"
-        # The base URL of the attachment service
-        self.attachment_service_api: str = f"http://127.0.0.1:{self.attachment_service_port}"
+        self.control_plane_api: str = f"http://127.0.0.1:{self.storage_controller_port}/upcall/v1"
+        # The base URL of the storage controller
+        self.storage_controller_api: str = f"http://127.0.0.1:{self.storage_controller_port}"
 
         # For testing this with a fake HTTP server, enable passing through a URL from config
         self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
 
-        self.attachment_service: NeonAttachmentService = NeonAttachmentService(
+        self.storage_controller: NeonStorageController = NeonStorageController(
             self, config.auth_enabled
         )
 
@@ -1112,17 +1112,22 @@ class NeonEnv:
         log.info(f"Config: {cfg}")
         self.neon_cli.init(cfg, force=config.config_init_force)
 
-    def start(self):
-        # Attachment service starts first, so that pageserver /re-attach calls don't
+    def start(self, register_pageservers=False):
+        # storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
-        self.attachment_service.start()
+        self.storage_controller.start()
 
-        def attachment_service_ready():
-            assert self.attachment_service.ready() is True
+        def storage_controller_ready():
+            assert self.storage_controller.ready() is True
 
-        # Wait for attachment service readiness to prevent unnecessary post start-up
+        # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
-        wait_until(30, 1, attachment_service_ready)
+        wait_until(30, 1, storage_controller_ready)
+
+        if register_pageservers:
+            # Special case for forward compat tests, this can be removed later.
+            for pageserver in self.pageservers:
+                self.storage_controller.node_register(pageserver)
 
         # Start up broker, pageserver and all safekeepers
         futs = []
@@ -1153,7 +1158,7 @@ class NeonEnv:
             if ps_assert_metric_no_errors:
                 pageserver.assert_no_metric_errors()
             pageserver.stop(immediate=immediate)
-        self.attachment_service.stop(immediate=immediate)
+        self.storage_controller.stop(immediate=immediate)
         self.broker.stop(immediate=immediate)
 
     @property
@@ -1188,9 +1193,9 @@ class NeonEnv:
     def get_tenant_pageserver(self, tenant_id: Union[TenantId, TenantShardId]):
         """
         Get the NeonPageserver where this tenant shard is currently attached, according
-        to the attachment service.
+        to the storage controller.
         """
-        meta = self.attachment_service.inspect(tenant_id)
+        meta = self.storage_controller.inspect(tenant_id)
         if meta is None:
             return None
         pageserver_id = meta[1]
@@ -1697,12 +1702,12 @@ class NeonCli(AbstractNeonCli):
             res.check_returncode()
             return res
 
-    def attachment_service_start(self):
-        cmd = ["attachment_service", "start"]
+    def storage_controller_start(self):
+        cmd = ["storage_controller", "start"]
         return self.raw_cli(cmd)
 
-    def attachment_service_stop(self, immediate: bool):
-        cmd = ["attachment_service", "stop"]
+    def storage_controller_stop(self, immediate: bool):
+        cmd = ["storage_controller", "stop"]
         if immediate:
             cmd.extend(["-m", "immediate"])
         return self.raw_cli(cmd)
@@ -1712,10 +1717,8 @@ class NeonCli(AbstractNeonCli):
         id: int,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
-        register: bool = True,
     ) -> "subprocess.CompletedProcess[str]":
-        register_str = "true" if register else "false"
-        start_args = ["pageserver", "start", f"--id={id}", *overrides, f"--register={register_str}"]
+        start_args = ["pageserver", "start", f"--id={id}", *overrides]
         storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -1942,14 +1945,14 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
-class AttachmentServiceApiException(Exception):
+class StorageControllerApiException(Exception):
     def __init__(self, message, status_code: int):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
 
 
-class NeonAttachmentService(MetricsGetter):
+class NeonStorageController(MetricsGetter):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
@@ -1957,13 +1960,13 @@ class NeonAttachmentService(MetricsGetter):
 
     def start(self):
         assert not self.running
-        self.env.neon_cli.attachment_service_start()
+        self.env.neon_cli.storage_controller_start()
         self.running = True
         return self
 
-    def stop(self, immediate: bool = False) -> "NeonAttachmentService":
+    def stop(self, immediate: bool = False) -> "NeonStorageController":
         if self.running:
-            self.env.neon_cli.attachment_service_stop(immediate)
+            self.env.neon_cli.storage_controller_stop(immediate)
             self.running = False
         return self
 
@@ -1976,22 +1979,22 @@ class NeonAttachmentService(MetricsGetter):
                 msg = res.json()["msg"]
             except:  # noqa: E722
                 msg = ""
-            raise AttachmentServiceApiException(msg, res.status_code) from e
+            raise StorageControllerApiException(msg, res.status_code) from e
 
     def pageserver_api(self) -> PageserverHttpClient:
         """
-        The attachment service implements a subset of the pageserver REST API, for mapping
+        The storage controller implements a subset of the pageserver REST API, for mapping
         per-tenant actions into per-shard actions (e.g. timeline creation).  Tests should invoke those
         functions via the HttpClient, as an implicit check that these APIs remain compatible.
         """
         auth_token = None
         if self.auth_enabled:
             auth_token = self.env.auth_keys.generate_token(scope=TokenScope.PAGE_SERVER_API)
-        return PageserverHttpClient(self.env.attachment_service_port, lambda: True, auth_token)
+        return PageserverHttpClient(self.env.storage_controller_port, lambda: True, auth_token)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
         resp = requests.request(method, *args, **kwargs)
-        NeonAttachmentService.raise_api_exception(resp)
+        NeonStorageController.raise_api_exception(resp)
 
         return resp
 
@@ -2004,15 +2007,15 @@ class NeonAttachmentService(MetricsGetter):
         return headers
 
     def get_metrics(self) -> Metrics:
-        res = self.request("GET", f"{self.env.attachment_service_api}/metrics")
+        res = self.request("GET", f"{self.env.storage_controller_api}/metrics")
         return parse_metrics(res.text)
 
     def ready(self) -> bool:
         status = None
         try:
-            resp = self.request("GET", f"{self.env.attachment_service_api}/ready")
+            resp = self.request("GET", f"{self.env.storage_controller_api}/ready")
             status = resp.status_code
-        except AttachmentServiceApiException as e:
+        except StorageControllerApiException as e:
             status = e.status_code
 
         if status == 503:
@@ -2027,7 +2030,7 @@ class NeonAttachmentService(MetricsGetter):
     ) -> int:
         response = self.request(
             "POST",
-            f"{self.env.attachment_service_api}/debug/v1/attach-hook",
+            f"{self.env.storage_controller_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2038,7 +2041,7 @@ class NeonAttachmentService(MetricsGetter):
     def attach_hook_drop(self, tenant_shard_id: Union[TenantId, TenantShardId]):
         self.request(
             "POST",
-            f"{self.env.attachment_service_api}/debug/v1/attach-hook",
+            f"{self.env.storage_controller_api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": None},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2049,7 +2052,7 @@ class NeonAttachmentService(MetricsGetter):
         """
         response = self.request(
             "POST",
-            f"{self.env.attachment_service_api}/debug/v1/inspect",
+            f"{self.env.storage_controller_api}/debug/v1/inspect",
             json={"tenant_shard_id": str(tenant_shard_id)},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2066,11 +2069,13 @@ class NeonAttachmentService(MetricsGetter):
             "node_id": int(node.id),
             "listen_http_addr": "localhost",
             "listen_http_port": node.service_port.http,
+            "listen_pg_addr": "localhost",
+            "listen_pg_port": node.service_port.pg,
         }
         log.info(f"node_register({body})")
         self.request(
             "POST",
-            f"{self.env.attachment_service_api}/control/v1/node",
+            f"{self.env.storage_controller_api}/control/v1/node",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2078,7 +2083,7 @@ class NeonAttachmentService(MetricsGetter):
     def node_list(self):
         response = self.request(
             "GET",
-            f"{self.env.attachment_service_api}/control/v1/node",
+            f"{self.env.storage_controller_api}/control/v1/node",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2088,7 +2093,7 @@ class NeonAttachmentService(MetricsGetter):
         body["node_id"] = node_id
         self.request(
             "PUT",
-            f"{self.env.attachment_service_api}/control/v1/node/{node_id}/config",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/config",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2118,7 +2123,7 @@ class NeonAttachmentService(MetricsGetter):
 
         response = self.request(
             "POST",
-            f"{self.env.attachment_service_api}/v1/tenant",
+            f"{self.env.storage_controller_api}/v1/tenant",
             json=body,
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
@@ -2130,18 +2135,20 @@ class NeonAttachmentService(MetricsGetter):
         """
         response = self.request(
             "GET",
-            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/locate",
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
         return shards
 
-    def tenant_shard_split(self, tenant_id: TenantId, shard_count: int) -> list[TenantShardId]:
+    def tenant_shard_split(
+        self, tenant_id: TenantId, shard_count: int, shard_stripe_size: Optional[int] = None
+    ) -> list[TenantShardId]:
         response = self.request(
             "PUT",
-            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_id}/shard_split",
-            json={"new_shard_count": shard_count},
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/shard_split",
+            json={"new_shard_count": shard_count, "new_stripe_size": shard_stripe_size},
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
@@ -2152,7 +2159,7 @@ class NeonAttachmentService(MetricsGetter):
     def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
         self.request(
             "PUT",
-            f"{self.env.attachment_service_api}/control/v1/tenant/{tenant_shard_id}/migrate",
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_shard_id}/migrate",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2165,10 +2172,10 @@ class NeonAttachmentService(MetricsGetter):
         """
         self.request(
             "POST",
-            f"{self.env.attachment_service_api}/debug/v1/consistency_check",
+            f"{self.env.storage_controller_api}/debug/v1/consistency_check",
             headers=self.headers(TokenScope.ADMIN),
         )
-        log.info("Attachment service passed consistency check")
+        log.info("storage controller passed consistency check")
 
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):
@@ -2180,14 +2187,14 @@ class NeonAttachmentService(MetricsGetter):
 
         res = self.request(
             "PUT",
-            f"{self.env.attachment_service_api}/debug/v1/failpoints",
+            f"{self.env.storage_controller_api}/debug/v1/failpoints",
             json=[{"name": name, "actions": actions} for name, actions in pairs],
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info(f"Got failpoints request response code {res.status_code}")
         res.raise_for_status()
 
-    def __enter__(self) -> "NeonAttachmentService":
+    def __enter__(self) -> "NeonStorageController":
         return self
 
     def __exit__(
@@ -2250,7 +2257,6 @@ class NeonPageserver(PgProtocol):
         self,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
-        register: bool = True,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -2260,7 +2266,7 @@ class NeonPageserver(PgProtocol):
         assert self.running is False
 
         self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars, register=register
+            self.id, overrides=overrides, extra_env_vars=extra_env_vars
         )
         self.running = True
         return self
@@ -2418,7 +2424,7 @@ class NeonPageserver(PgProtocol):
         """
         client = self.http_client()
         if generation is None:
-            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+            generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         return client.tenant_attach(
             tenant_id,
             config,
@@ -2427,14 +2433,14 @@ class NeonPageserver(PgProtocol):
         )
 
     def tenant_detach(self, tenant_id: TenantId):
-        self.env.attachment_service.attach_hook_drop(tenant_id)
+        self.env.storage_controller.attach_hook_drop(tenant_id)
 
         client = self.http_client()
         return client.tenant_detach(tenant_id)
 
     def tenant_location_configure(self, tenant_id: TenantId, config: dict[str, Any], **kwargs):
         if config["mode"].startswith("Attached") and "generation" not in config:
-            config["generation"] = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+            config["generation"] = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
 
         client = self.http_client()
         return client.tenant_location_conf(tenant_id, config, **kwargs)
@@ -2458,14 +2464,14 @@ class NeonPageserver(PgProtocol):
         generation: Optional[int] = None,
     ) -> TenantId:
         if generation is None:
-            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+            generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         client = self.http_client(auth_token=auth_token)
         return client.tenant_create(tenant_id, conf, generation=generation)
 
     def tenant_load(self, tenant_id: TenantId):
         client = self.http_client()
         return client.tenant_load(
-            tenant_id, generation=self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+            tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         )
 
 
@@ -2876,6 +2882,7 @@ class NeonProxy(PgProtocol):
         self.auth_backend = auth_backend
         self.metric_collection_endpoint = metric_collection_endpoint
         self.metric_collection_interval = metric_collection_interval
+        self.http_timeout_seconds = 15
         self._popen: Optional[subprocess.Popen[bytes]] = None
 
     def start(self) -> NeonProxy:
@@ -2914,6 +2921,7 @@ class NeonProxy(PgProtocol):
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--mgmt", f"{self.host}:{self.mgmt_port}"],
             *["--wss", f"{self.host}:{self.external_http_port}"],
+            *["--sql-over-http-timeout", f"{self.http_timeout_seconds}s"],
             *["-c", str(crt_path)],
             *["-k", str(key_path)],
             *self.auth_backend.extra_args(),
@@ -2954,6 +2962,8 @@ class NeonProxy(PgProtocol):
         password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
 
+        log.info(f"Executing http query: {query}")
+
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
         response = requests.post(
             f"https://{self.domain}:{self.external_http_port}/sql",
@@ -2975,6 +2985,8 @@ class NeonProxy(PgProtocol):
         user = kwargs["user"]
         password = kwargs["password"]
         expected_code = kwargs.get("expected_code")
+
+        log.info(f"Executing http2 query: {query}")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
         async with httpx.AsyncClient(
@@ -3924,7 +3936,7 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
 
     psql_path = os.path.join(pg_bin.pg_bin_path, "psql")
 
-    pageserver_id = env.attachment_service.locate(endpoint.tenant_id)[0]["node_id"]
+    pageserver_id = env.storage_controller.locate(endpoint.tenant_id)[0]["node_id"]
     cmd = rf"""
         {psql_path}                                    \
             --no-psqlrc                                \
@@ -4011,7 +4023,7 @@ def tenant_get_shards(
     us to figure out the shards for a tenant.
 
     If the caller provides `pageserver_id`, it will be used for all shards, even
-    if the shard is indicated by attachment service to be on some other pageserver.
+    if the shard is indicated by storage controller to be on some other pageserver.
 
     Caller should over the response to apply their per-pageserver action to
     each shard
@@ -4027,7 +4039,7 @@ def tenant_get_shards(
                 TenantShardId.parse(s["shard_id"]),
                 override_pageserver or env.get_pageserver(s["node_id"]),
             )
-            for s in env.attachment_service.locate(tenant_id)
+            for s in env.storage_controller.locate(tenant_id)
         ]
     else:
         # Assume an unsharded tenant

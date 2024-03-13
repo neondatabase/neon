@@ -32,7 +32,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
 
-use control_plane::attachment_service::{AttachHookRequest, InspectRequest};
+use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
 
 /// State available to HTTP request handlers
 #[derive(Clone)]

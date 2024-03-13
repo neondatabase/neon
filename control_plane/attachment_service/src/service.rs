@@ -9,7 +9,7 @@ use std::{
 
 use crate::{id_lock_map::IdLockMap, persistence::AbortShardSplitStatus};
 use anyhow::Context;
-use control_plane::attachment_service::{
+use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
 use diesel::result::DatabaseErrorKind;
@@ -192,8 +192,9 @@ enum TenantCreateOrUpdate {
 /// might not be available.  We therefore use a queue of abort operations processed in the background.
 struct TenantShardSplitAbort {
     tenant_id: TenantId,
-    /// The target shard count in the request that failed
+    /// The target values from the request that failed
     new_shard_count: ShardCount,
+    new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
     _tenant_lock: tokio::sync::OwnedRwLockWriteGuard<()>,
 }
@@ -984,7 +985,7 @@ impl Service {
             tenant_state.generation = Some(new_generation);
         } else {
             // This is a detach notification.  We must update placement policy to avoid re-attaching
-            // during background scheduling/reconciliation, or during attachment service restart.
+            // during background scheduling/reconciliation, or during storage controller restart.
             assert!(attach_req.node_id.is_none());
             tenant_state.policy = PlacementPolicy::Detached;
         }
@@ -1180,6 +1181,10 @@ impl Service {
         &self,
         reattach_req: ReAttachRequest,
     ) -> Result<ReAttachResponse, ApiError> {
+        if let Some(register_req) = reattach_req.register {
+            self.node_register(register_req).await?;
+        }
+
         // Ordering: we must persist generation number updates before making them visible in the in-memory state
         let incremented_generations = self.persistence.re_attach(reattach_req.node_id).await?;
 
@@ -2412,6 +2417,7 @@ impl Service {
         let TenantShardSplitAbort {
             tenant_id,
             new_shard_count,
+            new_stripe_size,
             ..
         } = op;
 
@@ -2430,7 +2436,11 @@ impl Service {
                 // before seeing the result).
                 //
                 // We must update in-memory state to reflect the successful split.
-                self.tenant_shard_split_commit_inmem(*tenant_id, *new_shard_count);
+                self.tenant_shard_split_commit_inmem(
+                    *tenant_id,
+                    *new_shard_count,
+                    *new_stripe_size,
+                );
                 return Ok(());
             }
         }
@@ -2545,6 +2555,7 @@ impl Service {
         &self,
         tenant_id: TenantId,
         new_shard_count: ShardCount,
+        new_stripe_size: Option<ShardStripeSize>,
     ) -> (
         TenantShardSplitResponse,
         Vec<(TenantShardId, NodeId, ShardStripeSize)>,
@@ -2592,6 +2603,9 @@ impl Service {
                     let mut child_shard = parent_ident;
                     child_shard.number = child.shard_number;
                     child_shard.count = child.shard_count;
+                    if let Some(stripe_size) = new_stripe_size {
+                        child_shard.stripe_size = stripe_size;
+                    }
 
                     let mut child_observed: HashMap<NodeId, ObservedStateLocation> = HashMap::new();
                     child_observed.insert(
@@ -2641,11 +2655,12 @@ impl Service {
         tenant_id: TenantId,
         split_req: TenantShardSplitRequest,
     ) -> Result<TenantShardSplitResponse, ApiError> {
-        // TODO: return immediately if we can't get exclusive lock?  Nicer than timing out.  If we can't get it, it's likely
-        // because of some bogus attempt to retry a previously timed out split, or to split something that is deleting, etc.
+        // TODO: return 503 if we get stuck waiting for this lock
+        // (issue https://github.com/neondatabase/neon/issues/7108)
         let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
 
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
+        let new_stripe_size = split_req.new_stripe_size;
 
         let r = self.do_tenant_shard_split(tenant_id, split_req).await;
 
@@ -2658,11 +2673,12 @@ impl Service {
             }
             Err(e) => {
                 // General case error handling: split might be part-done, we must do work to abort it.
-                tracing::warn!("Enqueuing backround abort of split on {tenant_id}");
+                tracing::warn!("Enqueuing background abort of split on {tenant_id}");
                 self.abort_tx
                     .send(TenantShardSplitAbort {
                         tenant_id,
                         new_shard_count,
+                        new_stripe_size,
                         _tenant_lock,
                     })
                     // Ignore error sending: that just means we're shutting down: aborts are ephemeral so it's fine to drop it.
@@ -2793,7 +2809,20 @@ impl Service {
 
         // unwrap safety: we would have returned above if we didn't find at least one shard to split
         let old_shard_count = old_shard_count.unwrap();
-        let shard_ident = shard_ident.unwrap();
+        let shard_ident = if let Some(new_stripe_size) = split_req.new_stripe_size {
+            // This ShardIdentity will be used as the template for all children, so this implicitly
+            // applies the new stripe size to the children.
+            let mut shard_ident = shard_ident.unwrap();
+            if shard_ident.count.count() > 1 && shard_ident.stripe_size != new_stripe_size {
+                return Err(ApiError::BadRequest(anyhow::anyhow!("Attempted to change stripe size ({:?}->{new_stripe_size:?}) on a tenant with multiple shards", shard_ident.stripe_size)));
+            }
+
+            shard_ident.stripe_size = new_stripe_size;
+            tracing::info!("applied  stripe size {}", shard_ident.stripe_size.0);
+            shard_ident
+        } else {
+            shard_ident.unwrap()
+        };
         let policy = policy.unwrap();
 
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
@@ -2813,6 +2842,11 @@ impl Service {
                 let mut child_shard = shard_ident;
                 child_shard.number = child.shard_number;
                 child_shard.count = child.shard_count;
+
+                tracing::info!(
+                    "Create child shard persistence with stripe size {}",
+                    shard_ident.stripe_size.0
+                );
 
                 this_child_tsps.push(TenantShardPersistence {
                     tenant_id: child.tenant_id.to_string(),
@@ -2889,6 +2923,7 @@ impl Service {
                     *parent_id,
                     TenantShardSplitRequest {
                         new_shard_count: split_req.new_shard_count,
+                        new_stripe_size: split_req.new_stripe_size,
                     },
                 )
                 .await
@@ -2937,8 +2972,11 @@ impl Service {
         ));
 
         // Replace all the shards we just split with their children: this phase is infallible.
-        let (response, child_locations) = self
-            .tenant_shard_split_commit_inmem(tenant_id, ShardCount::new(split_req.new_shard_count));
+        let (response, child_locations) = self.tenant_shard_split_commit_inmem(
+            tenant_id,
+            ShardCount::new(split_req.new_shard_count),
+            split_req.new_stripe_size,
+        );
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();

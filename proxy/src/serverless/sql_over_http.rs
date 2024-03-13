@@ -1,7 +1,11 @@
+use std::pin::pin;
 use std::sync::Arc;
 
-use anyhow::bail;
+use futures::future::select;
+use futures::future::try_join;
+use futures::future::Either;
 use futures::StreamExt;
+use futures::TryFutureExt;
 use hyper::body::HttpBody;
 use hyper::header;
 use hyper::http::HeaderName;
@@ -11,13 +15,16 @@ use hyper::StatusCode;
 use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Value;
-use tokio::try_join;
+use tokio::time;
 use tokio_postgres::error::DbError;
 use tokio_postgres::error::ErrorPosition;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::GenericClient;
 use tokio_postgres::IsolationLevel;
+use tokio_postgres::NoTls;
 use tokio_postgres::ReadyForQueryStatus;
 use tokio_postgres::Transaction;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 use url::Url;
@@ -30,9 +37,13 @@ use crate::auth::ComputeUserInfoParseError;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
+use crate::error::ErrorKind;
+use crate::error::ReportableError;
+use crate::error::UserFacingError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
+use crate::serverless::backend::HttpConnError;
 use crate::DbName;
 use crate::RoleName;
 
@@ -40,6 +51,7 @@ use super::backend::PoolingBackend;
 use super::conn_pool::ConnInfo;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
+use super::json::JsonConversionError;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +120,18 @@ pub enum ConnInfoError {
     InvalidEndpoint(#[from] ComputeUserInfoParseError),
     #[error("malformed endpoint")]
     MalformedEndpoint,
+}
+
+impl ReportableError for ConnInfoError {
+    fn get_error_kind(&self) -> ErrorKind {
+        ErrorKind::User
+    }
+}
+
+impl UserFacingError for ConnInfoError {
+    fn to_string_client(&self) -> String {
+        self.to_string()
+    }
 }
 
 fn get_conn_info(
@@ -194,108 +218,123 @@ pub async fn handle(
     request: Request<Body>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Body>, ApiError> {
-    let result = tokio::time::timeout(
-        config.http_config.request_timeout,
-        handle_inner(config, &mut ctx, request, backend),
-    )
-    .await;
+    let cancel = CancellationToken::new();
+    let cancel2 = cancel.clone();
+    let handle = tokio::spawn(async move {
+        time::sleep(config.http_config.request_timeout).await;
+        cancel2.cancel();
+    });
+
+    let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
+    handle.abort();
+
     let mut response = match result {
-        Ok(r) => match r {
-            Ok(r) => {
-                ctx.set_success();
-                r
-            }
-            Err(e) => {
-                // TODO: ctx.set_error_kind(e.get_error_type());
-
-                let mut message = format!("{:?}", e);
-                let db_error = e
-                    .downcast_ref::<tokio_postgres::Error>()
-                    .and_then(|e| e.as_db_error());
-                fn get<'a, T: serde::Serialize>(
-                    db: Option<&'a DbError>,
-                    x: impl FnOnce(&'a DbError) -> T,
-                ) -> Value {
-                    db.map(x)
-                        .and_then(|t| serde_json::to_value(t).ok())
-                        .unwrap_or_default()
-                }
-
-                if let Some(db_error) = db_error {
-                    db_error.message().clone_into(&mut message);
-                }
-
-                let position = db_error.and_then(|db| db.position());
-                let (position, internal_position, internal_query) = match position {
-                    Some(ErrorPosition::Original(position)) => (
-                        Value::String(position.to_string()),
-                        Value::Null,
-                        Value::Null,
-                    ),
-                    Some(ErrorPosition::Internal { position, query }) => (
-                        Value::Null,
-                        Value::String(position.to_string()),
-                        Value::String(query.clone()),
-                    ),
-                    None => (Value::Null, Value::Null, Value::Null),
-                };
-
-                let code = get(db_error, |db| db.code().code());
-                let severity = get(db_error, |db| db.severity());
-                let detail = get(db_error, |db| db.detail());
-                let hint = get(db_error, |db| db.hint());
-                let where_ = get(db_error, |db| db.where_());
-                let table = get(db_error, |db| db.table());
-                let column = get(db_error, |db| db.column());
-                let schema = get(db_error, |db| db.schema());
-                let datatype = get(db_error, |db| db.datatype());
-                let constraint = get(db_error, |db| db.constraint());
-                let file = get(db_error, |db| db.file());
-                let line = get(db_error, |db| db.line().map(|l| l.to_string()));
-                let routine = get(db_error, |db| db.routine());
-
-                error!(
-                    ?code,
-                    "sql-over-http per-client task finished with an error: {e:#}"
-                );
-                // TODO: this shouldn't always be bad request.
-                json_response(
-                    StatusCode::BAD_REQUEST,
-                    json!({
-                        "message": message,
-                        "code": code,
-                        "detail": detail,
-                        "hint": hint,
-                        "position": position,
-                        "internalPosition": internal_position,
-                        "internalQuery": internal_query,
-                        "severity": severity,
-                        "where": where_,
-                        "table": table,
-                        "column": column,
-                        "schema": schema,
-                        "dataType": datatype,
-                        "constraint": constraint,
-                        "file": file,
-                        "line": line,
-                        "routine": routine,
-                    }),
-                )?
-            }
-        },
-        Err(_) => {
-            // TODO: when http error classification is done, distinguish between
-            // timeout on sql vs timeout in proxy/cplane
-            // ctx.set_error_kind(crate::error::ErrorKind::RateLimit);
+        Ok(r) => {
+            ctx.set_success();
+            r
+        }
+        Err(e @ SqlOverHttpError::Cancelled(_)) => {
+            let error_kind = e.get_error_kind();
+            ctx.set_error_kind(error_kind);
 
             let message = format!(
-                "HTTP-Connection timed out, execution time exceeded {} seconds",
-                config.http_config.request_timeout.as_secs()
+                "Query cancelled, runtime exceeded. SQL queries over HTTP must not exceed {} seconds of runtime. Please consider using our websocket based connections",
+                config.http_config.request_timeout.as_secs_f64()
             );
-            error!(message);
+
+            tracing::info!(
+                kind=error_kind.to_metric_label(),
+                error=%e,
+                msg=message,
+                "forwarding error to user"
+            );
+
             json_response(
-                StatusCode::GATEWAY_TIMEOUT,
-                json!({ "message": message, "code": StatusCode::GATEWAY_TIMEOUT.as_u16() }),
+                StatusCode::BAD_REQUEST,
+                json!({ "message": message, "code": SqlState::PROTOCOL_VIOLATION.code() }),
+            )?
+        }
+        Err(e) => {
+            let error_kind = e.get_error_kind();
+            ctx.set_error_kind(error_kind);
+
+            let mut message = e.to_string_client();
+            let db_error = match &e {
+                SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                | SqlOverHttpError::Postgres(e) => e.as_db_error(),
+                _ => None,
+            };
+            fn get<'a, T: serde::Serialize>(
+                db: Option<&'a DbError>,
+                x: impl FnOnce(&'a DbError) -> T,
+            ) -> Value {
+                db.map(x)
+                    .and_then(|t| serde_json::to_value(t).ok())
+                    .unwrap_or_default()
+            }
+
+            if let Some(db_error) = db_error {
+                db_error.message().clone_into(&mut message);
+            }
+
+            let position = db_error.and_then(|db| db.position());
+            let (position, internal_position, internal_query) = match position {
+                Some(ErrorPosition::Original(position)) => (
+                    Value::String(position.to_string()),
+                    Value::Null,
+                    Value::Null,
+                ),
+                Some(ErrorPosition::Internal { position, query }) => (
+                    Value::Null,
+                    Value::String(position.to_string()),
+                    Value::String(query.clone()),
+                ),
+                None => (Value::Null, Value::Null, Value::Null),
+            };
+
+            let code = get(db_error, |db| db.code().code());
+            let severity = get(db_error, |db| db.severity());
+            let detail = get(db_error, |db| db.detail());
+            let hint = get(db_error, |db| db.hint());
+            let where_ = get(db_error, |db| db.where_());
+            let table = get(db_error, |db| db.table());
+            let column = get(db_error, |db| db.column());
+            let schema = get(db_error, |db| db.schema());
+            let datatype = get(db_error, |db| db.datatype());
+            let constraint = get(db_error, |db| db.constraint());
+            let file = get(db_error, |db| db.file());
+            let line = get(db_error, |db| db.line().map(|l| l.to_string()));
+            let routine = get(db_error, |db| db.routine());
+
+            tracing::info!(
+                kind=error_kind.to_metric_label(),
+                error=%e,
+                msg=message,
+                "forwarding error to user"
+            );
+
+            // TODO: this shouldn't always be bad request.
+            json_response(
+                StatusCode::BAD_REQUEST,
+                json!({
+                    "message": message,
+                    "code": code,
+                    "detail": detail,
+                    "hint": hint,
+                    "position": position,
+                    "internalPosition": internal_position,
+                    "internalQuery": internal_query,
+                    "severity": severity,
+                    "where": where_,
+                    "table": table,
+                    "column": column,
+                    "schema": schema,
+                    "dataType": datatype,
+                    "constraint": constraint,
+                    "file": file,
+                    "line": line,
+                    "routine": routine,
+                }),
             )?
         }
     };
@@ -307,12 +346,101 @@ pub async fn handle(
     Ok(response)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SqlOverHttpError {
+    #[error("{0}")]
+    ReadPayload(#[from] ReadPayloadError),
+    #[error("{0}")]
+    ConnectCompute(#[from] HttpConnError),
+    #[error("{0}")]
+    ConnInfo(#[from] ConnInfoError),
+    #[error("request is too large (max is {MAX_REQUEST_SIZE} bytes)")]
+    RequestTooLarge,
+    #[error("response is too large (max is {MAX_RESPONSE_SIZE} bytes)")]
+    ResponseTooLarge,
+    #[error("invalid isolation level")]
+    InvalidIsolationLevel,
+    #[error("{0}")]
+    Postgres(#[from] tokio_postgres::Error),
+    #[error("{0}")]
+    JsonConversion(#[from] JsonConversionError),
+    #[error("{0}")]
+    Cancelled(SqlOverHttpCancel),
+}
+
+impl ReportableError for SqlOverHttpError {
+    fn get_error_kind(&self) -> ErrorKind {
+        match self {
+            SqlOverHttpError::ReadPayload(e) => e.get_error_kind(),
+            SqlOverHttpError::ConnectCompute(e) => e.get_error_kind(),
+            SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
+            SqlOverHttpError::RequestTooLarge => ErrorKind::User,
+            SqlOverHttpError::ResponseTooLarge => ErrorKind::User,
+            SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
+            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
+            SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
+        }
+    }
+}
+
+impl UserFacingError for SqlOverHttpError {
+    fn to_string_client(&self) -> String {
+        match self {
+            SqlOverHttpError::ReadPayload(p) => p.to_string(),
+            SqlOverHttpError::ConnectCompute(c) => c.to_string_client(),
+            SqlOverHttpError::ConnInfo(c) => c.to_string_client(),
+            SqlOverHttpError::RequestTooLarge => self.to_string(),
+            SqlOverHttpError::ResponseTooLarge => self.to_string(),
+            SqlOverHttpError::InvalidIsolationLevel => self.to_string(),
+            SqlOverHttpError::Postgres(p) => p.to_string(),
+            SqlOverHttpError::JsonConversion(_) => "could not parse postgres response".to_string(),
+            SqlOverHttpError::Cancelled(_) => self.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReadPayloadError {
+    #[error("could not read the HTTP request body: {0}")]
+    Read(#[from] hyper::Error),
+    #[error("could not parse the HTTP request body: {0}")]
+    Parse(#[from] serde_json::Error),
+}
+
+impl ReportableError for ReadPayloadError {
+    fn get_error_kind(&self) -> ErrorKind {
+        match self {
+            ReadPayloadError::Read(_) => ErrorKind::ClientDisconnect,
+            ReadPayloadError::Parse(_) => ErrorKind::User,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SqlOverHttpCancel {
+    #[error("query was cancelled")]
+    Postgres,
+    #[error("query was cancelled while stuck trying to connect to the database")]
+    Connect,
+}
+
+impl ReportableError for SqlOverHttpCancel {
+    fn get_error_kind(&self) -> ErrorKind {
+        match self {
+            SqlOverHttpCancel::Postgres => ErrorKind::RateLimit,
+            SqlOverHttpCancel::Connect => ErrorKind::ServiceRateLimit,
+        }
+    }
+}
+
 async fn handle_inner(
+    cancel: CancellationToken,
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
     backend: Arc<PoolingBackend>,
-) -> anyhow::Result<Response<Body>> {
+) -> Result<Response<Body>, SqlOverHttpError> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[ctx.protocol])
         .guard();
@@ -345,7 +473,7 @@ async fn handle_inner(
             b"ReadUncommitted" => IsolationLevel::ReadUncommitted,
             b"ReadCommitted" => IsolationLevel::ReadCommitted,
             b"RepeatableRead" => IsolationLevel::RepeatableRead,
-            _ => bail!("invalid isolation level"),
+            _ => return Err(SqlOverHttpError::InvalidIsolationLevel),
         }),
         None => None,
     };
@@ -363,19 +491,16 @@ async fn handle_inner(
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
     if request_content_length > MAX_REQUEST_SIZE {
-        return Err(anyhow::anyhow!(
-            "request is too large (max is {MAX_REQUEST_SIZE} bytes)"
-        ));
+        return Err(SqlOverHttpError::RequestTooLarge);
     }
 
     let fetch_and_process_request = async {
-        let body = hyper::body::to_bytes(request.into_body())
-            .await
-            .map_err(anyhow::Error::from)?;
+        let body = hyper::body::to_bytes(request.into_body()).await?;
         info!(length = body.len(), "request payload read");
         let payload: Payload = serde_json::from_slice(&body)?;
-        Ok::<Payload, anyhow::Error>(payload) // Adjust error type accordingly
-    };
+        Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
+    }
+    .map_err(SqlOverHttpError::from);
 
     let authenticate_and_connect = async {
         let keys = backend.authenticate(ctx, &conn_info).await?;
@@ -385,11 +510,25 @@ async fn handle_inner(
         // not strictly necessary to mark success here,
         // but it's just insurance for if we forget it somewhere else
         ctx.latency_timer.success();
-        Ok::<_, anyhow::Error>(client)
-    };
+        Ok::<_, HttpConnError>(client)
+    }
+    .map_err(SqlOverHttpError::from);
 
     // Run both operations in parallel
-    let (payload, mut client) = try_join!(fetch_and_process_request, authenticate_and_connect)?;
+    let (payload, mut client) = match select(
+        try_join(
+            pin!(fetch_and_process_request),
+            pin!(authenticate_and_connect),
+        ),
+        pin!(cancel.cancelled()),
+    )
+    .await
+    {
+        Either::Left((result, _cancelled)) => result?,
+        Either::Right((_cancelled, _)) => {
+            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Connect))
+        }
+    };
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -401,19 +540,64 @@ async fn handle_inner(
     let mut size = 0;
     let result = match payload {
         Payload::Single(stmt) => {
-            let (status, results) =
-                query_to_json(&*client, stmt, &mut 0, raw_output, default_array_mode)
-                    .await
-                    .map_err(|e| {
-                        client.discard();
-                        e
-                    })?;
-            client.check_idle(status);
-            results
+            let mut size = 0;
+            let (inner, mut discard) = client.inner();
+            let cancel_token = inner.cancel_token();
+            let query = pin!(query_to_json(
+                &*inner,
+                stmt,
+                &mut size,
+                raw_output,
+                default_array_mode
+            ));
+            let cancelled = pin!(cancel.cancelled());
+            let res = select(query, cancelled).await;
+            match res {
+                Either::Left((Ok((status, results)), _cancelled)) => {
+                    discard.check_idle(status);
+                    results
+                }
+                Either::Left((Err(e), _cancelled)) => {
+                    discard.discard();
+                    return Err(e);
+                }
+                Either::Right((_cancelled, query)) => {
+                    if let Err(err) = cancel_token.cancel_query(NoTls).await {
+                        tracing::error!(?err, "could not cancel query");
+                    }
+                    match time::timeout(time::Duration::from_millis(100), query).await {
+                        Ok(Ok((status, results))) => {
+                            discard.check_idle(status);
+                            results
+                        }
+                        Ok(Err(error)) => {
+                            let db_error = match &error {
+                                SqlOverHttpError::ConnectCompute(
+                                    HttpConnError::ConnectionError(e),
+                                )
+                                | SqlOverHttpError::Postgres(e) => e.as_db_error(),
+                                _ => None,
+                            };
+
+                            // if errored for some other reason, it might not be safe to return
+                            if !db_error.is_some_and(|e| *e.code() == SqlState::QUERY_CANCELED) {
+                                discard.discard();
+                            }
+
+                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+                        }
+                        Err(_timeout) => {
+                            discard.discard();
+                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+                        }
+                    }
+                }
+            }
         }
         Payload::Batch(statements) => {
             info!("starting transaction");
             let (inner, mut discard) = client.inner();
+            let cancel_token = inner.cancel_token();
             let mut builder = inner.build_transaction();
             if let Some(isolation_level) = txn_isolation_level {
                 builder = builder.isolation_level(isolation_level);
@@ -433,6 +617,7 @@ async fn handle_inner(
             })?;
 
             let results = match query_batch(
+                cancel.child_token(),
                 &transaction,
                 statements,
                 &mut size,
@@ -452,6 +637,15 @@ async fn handle_inner(
                     discard.check_idle(status);
                     results
                 }
+                Err(SqlOverHttpError::Cancelled(_)) => {
+                    if let Err(err) = cancel_token.cancel_query(NoTls).await {
+                        tracing::error!(?err, "could not cancel query");
+                    }
+                    // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
+                    discard.discard();
+
+                    return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+                }
                 Err(err) => {
                     info!("rollback");
                     let status = transaction.rollback().await.map_err(|e| {
@@ -466,16 +660,10 @@ async fn handle_inner(
             };
 
             if txn_read_only {
-                response = response.header(
-                    TXN_READ_ONLY.clone(),
-                    HeaderValue::try_from(txn_read_only.to_string())?,
-                );
+                response = response.header(TXN_READ_ONLY.clone(), &HEADER_VALUE_TRUE);
             }
             if txn_deferrable {
-                response = response.header(
-                    TXN_DEFERRABLE.clone(),
-                    HeaderValue::try_from(txn_deferrable.to_string())?,
-                );
+                response = response.header(TXN_DEFERRABLE.clone(), &HEADER_VALUE_TRUE);
             }
             if let Some(txn_isolation_level) = txn_isolation_level_raw {
                 response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
@@ -503,19 +691,37 @@ async fn handle_inner(
 }
 
 async fn query_batch(
+    cancel: CancellationToken,
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
     total_size: &mut usize,
     raw_output: bool,
     array_mode: bool,
-) -> anyhow::Result<Vec<Value>> {
+) -> Result<Vec<Value>, SqlOverHttpError> {
     let mut results = Vec::with_capacity(queries.queries.len());
     let mut current_size = 0;
     for stmt in queries.queries {
-        // TODO: maybe we should check that the transaction bit is set here
-        let (_, values) =
-            query_to_json(transaction, stmt, &mut current_size, raw_output, array_mode).await?;
-        results.push(values);
+        let query = pin!(query_to_json(
+            transaction,
+            stmt,
+            &mut current_size,
+            raw_output,
+            array_mode
+        ));
+        let cancelled = pin!(cancel.cancelled());
+        let res = select(query, cancelled).await;
+        match res {
+            // TODO: maybe we should check that the transaction bit is set here
+            Either::Left((Ok((_, values)), _cancelled)) => {
+                results.push(values);
+            }
+            Either::Left((Err(e), _cancelled)) => {
+                return Err(e);
+            }
+            Either::Right((_cancelled, _)) => {
+                return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+            }
+        }
     }
     *total_size += current_size;
     Ok(results)
@@ -527,7 +733,7 @@ async fn query_to_json<T: GenericClient>(
     current_size: &mut usize,
     raw_output: bool,
     default_array_mode: bool,
-) -> anyhow::Result<(ReadyForQueryStatus, Value)> {
+) -> Result<(ReadyForQueryStatus, Value), SqlOverHttpError> {
     info!("executing query");
     let query_params = data.params;
     let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
@@ -544,9 +750,7 @@ async fn query_to_json<T: GenericClient>(
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
         if *current_size > MAX_RESPONSE_SIZE {
-            return Err(anyhow::anyhow!(
-                "response is too large (max is {MAX_RESPONSE_SIZE} bytes)"
-            ));
+            return Err(SqlOverHttpError::ResponseTooLarge);
         }
     }
 
