@@ -654,10 +654,10 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         self.timeline_get_throttle.throttle(ctx, 1).await;
-        self.get0(key, lsn, ctx).await
+        self.get_impl(key, lsn, ctx).await
     }
     /// Not subject to [`Self::timeline_get_throttle`].
-    async fn get0(
+    async fn get_impl(
         &self,
         key: Key,
         lsn: Lsn,
@@ -841,7 +841,7 @@ impl Timeline {
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                let block = self.get0(key, lsn, ctx).await;
+                let block = self.get_impl(key, lsn, ctx).await;
 
                 use PageReconstructError::*;
                 match block {
