@@ -174,14 +174,14 @@ async fn handle_tenant_location_config(
     service: Arc<Service>,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
 
     let config_req = json_request::<TenantLocationConfigRequest>(&mut req).await?;
     json_response(
         StatusCode::OK,
         service
-            .tenant_location_config(tenant_id, config_req)
+            .tenant_location_config(tenant_shard_id, config_req)
             .await?,
     )
 }
@@ -587,7 +587,7 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_id/config", |r| {
             tenant_service_handler(r, handle_tenant_config_get)
         })
-        .put("/v1/tenant/:tenant_id/location_config", |r| {
+        .put("/v1/tenant/:tenant_shard_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
         })
         .put("/v1/tenant/:tenant_id/time_travel_remote_storage", |r| {

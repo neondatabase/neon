@@ -1262,6 +1262,7 @@ impl Service {
         let mut updates = Vec::new();
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, _scheduler) = locked.parts_mut();
+        let tenant_shard_id = TenantShardId::unsharded(tenant_id);
 
         // Use location config mode as an indicator of policy.
         let placement_policy = match req.config.mode {
@@ -1326,12 +1327,10 @@ impl Service {
             TenantCreateOrUpdate::Create(
                 // Synthesize a creation request
                 TenantCreateRequest {
-                    new_tenant_id: TenantShardId::unsharded(tenant_id),
+                    new_tenant_id: tenant_shard_id,
                     generation,
                     shard_parameters: ShardParameters {
-                        // Must preserve the incoming shard_count do distinguish unsharded (0)
-                        // from single-sharded (1): this distinction appears in the S3 keys of the tenant.
-                        count: req.tenant_id.shard_count,
+                        count: tenant_shard_id.shard_count,
                         // We only import un-sharded or single-sharded tenants, so stripe
                         // size can be made up arbitrarily here.
                         stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
@@ -1360,14 +1359,16 @@ impl Service {
     /// - Call with mode Detached to switch to PolicyMode::Detached
     pub(crate) async fn tenant_location_config(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         req: TenantLocationConfigRequest,
     ) -> Result<TenantLocationConfigResponse, ApiError> {
-        if !req.tenant_id.is_unsharded() {
+        if !tenant_shard_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "This API is for importing single-sharded or unsharded tenants"
             )));
         }
+
+        let tenant_id = tenant_shard_id.tenant_id;
 
         // First check if this is a creation or an update
         let create_or_update = self.tenant_location_config_prepare(tenant_id, req);
