@@ -196,6 +196,7 @@ pub struct SimulationApi {
     safekeepers: RefCell<Vec<SafekeeperConn>>,
     disk: Arc<DiskWalProposer>,
     redo_start_lsn: Option<Lsn>,
+    last_logged_commit_lsn: u64,
     shmem: UnsafeCell<walproposer::bindings::WalproposerShmemState>,
     config: Config,
     event_set: RefCell<Option<EventSet>>,
@@ -228,6 +229,7 @@ impl SimulationApi {
             safekeepers: RefCell::new(sk_conns),
             disk: args.disk,
             redo_start_lsn: args.redo_start_lsn,
+            last_logged_commit_lsn: 0,
             shmem: UnsafeCell::new(walproposer::bindings::WalproposerShmemState {
                 mutex: 0,
                 feedback: PageserverFeedback {
@@ -596,14 +598,11 @@ impl ApiImpl for SimulationApi {
         }
     }
 
-    fn process_safekeeper_feedback(
-        &self,
-        wp: &mut walproposer::bindings::WalProposer,
-        commit_lsn: u64,
-    ) {
-        debug!("process_safekeeper_feedback, commit_lsn={}", commit_lsn);
-        if commit_lsn > wp.lastSentCommitLsn {
-            self.os.log_event(format!("commit_lsn;{}", commit_lsn));
+    fn process_safekeeper_feedback(&mut self, wp: &mut walproposer::bindings::WalProposer) {
+        debug!("process_safekeeper_feedback, commit_lsn={}", wp.commitLsn);
+        if wp.commitLsn > self.last_logged_commit_lsn {
+            self.os.log_event(format!("commit_lsn;{}", wp.commitLsn));
+            self.last_logged_commit_lsn = wp.commitLsn;
         }
     }
 

@@ -17,7 +17,7 @@ use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use uuid::Uuid;
 
-use crate::{metrics::NUM_CLIENT_CONNECTION_GAUGE, serverless::tls_listener::AsyncAccept};
+use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 
 pub struct ProxyProtocolAccept {
     pub incoming: AddrIncoming,
@@ -331,15 +331,15 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
     }
 }
 
-impl AsyncAccept for ProxyProtocolAccept {
-    type Connection = WithConnectionGuard<WithClientIp<AddrStream>>;
+impl Accept for ProxyProtocolAccept {
+    type Conn = WithConnectionGuard<WithClientIp<AddrStream>>;
 
     type Error = io::Error;
 
     fn poll_accept(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Connection, Self::Error>>> {
+    ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
         let conn = ready!(Pin::new(&mut self.incoming).poll_accept(cx)?);
         tracing::info!(protocol = self.protocol, "accepted new TCP connection");
         let Some(conn) = conn else {

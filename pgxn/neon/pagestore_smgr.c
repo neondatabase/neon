@@ -1888,7 +1888,6 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 				int nblocks, bool skipFsync)
 {
 	const PGAlignedBlock buffer = {0};
-	BlockNumber curblocknum = blocknum;
 	int			remblocks = nblocks;
 	XLogRecPtr	lsn = 0;
 

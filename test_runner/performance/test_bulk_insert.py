@@ -56,12 +56,12 @@ def measure_recovery_time(env: NeonCompare):
     # Delete the Tenant in the pageserver: this will drop local and remote layers, such that
     # when we "create" the Tenant again, we will replay the WAL from the beginning.
     #
-    # This is a "weird" thing to do, and can confuse the attachment service as we're re-using
+    # This is a "weird" thing to do, and can confuse the storage controller as we're re-using
     # the same tenant ID for a tenant that is logically different from the pageserver's point
     # of view, but the same as far as the safekeeper/WAL is concerned.  To work around that,
     # we will explicitly create the tenant in the same generation that it was previously
     # attached in.
-    attach_status = env.env.attachment_service.inspect(tenant_shard_id=env.tenant)
+    attach_status = env.env.storage_controller.inspect(tenant_shard_id=env.tenant)
     assert attach_status is not None
     (attach_gen, _) = attach_status
 

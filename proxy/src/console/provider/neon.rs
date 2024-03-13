@@ -6,7 +6,9 @@ use super::{
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
     NodeInfo,
 };
-use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
+use crate::{
+    auth::backend::ComputeUserInfo, compute, console::messages::ColdStartInfo, http, scram,
+};
 use crate::{
     cache::Cached,
     context::RequestMonitoring,
@@ -72,7 +74,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetRoleSecret>(response).await {
                 Ok(body) => body,
@@ -132,7 +136,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response).await?;
 
@@ -254,6 +260,7 @@ impl super::Api for Api {
         if permit.should_check_cache() {
             if let Some(cached) = self.caches.node_info.get(&key) {
                 info!(key = &*key, "found cached compute node info");
+                ctx.set_cold_start_info(ColdStartInfo::Warm);
                 return Ok(cached);
             }
         }

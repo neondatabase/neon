@@ -1,9 +1,3 @@
-/// The attachment service mimics the aspects of the control plane API
-/// that are required for a pageserver to operate.
-///
-/// This enables running & testing pageservers without a full-blown
-/// deployment of the Neon cloud platform.
-///
 use anyhow::{anyhow, Context};
 use attachment_service::http::make_router;
 use attachment_service::metrics::preinitialize_metrics;

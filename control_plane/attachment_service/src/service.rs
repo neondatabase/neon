@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Context;
-use control_plane::attachment_service::{
+use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
 use diesel::result::DatabaseErrorKind;
@@ -83,16 +83,10 @@ struct ServiceState {
     nodes: Arc<HashMap<NodeId, Node>>,
 
     scheduler: Scheduler,
-
-    compute_hook: Arc<ComputeHook>,
-
-    result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
 }
 
 impl ServiceState {
     fn new(
-        config: Config,
-        result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
         nodes: HashMap<NodeId, Node>,
         tenants: BTreeMap<TenantShardId, TenantState>,
         scheduler: Scheduler,
@@ -101,8 +95,6 @@ impl ServiceState {
             tenants,
             nodes: Arc::new(nodes),
             scheduler,
-            compute_hook: Arc::new(ComputeHook::new(config)),
-            result_tx,
         }
     }
 
@@ -152,6 +144,8 @@ pub struct Service {
     inner: Arc<std::sync::RwLock<ServiceState>>,
     config: Config,
     persistence: Arc<Persistence>,
+    compute_hook: Arc<ComputeHook>,
+    result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
 
     // Process shutdown will fire this token
     cancel: CancellationToken,
@@ -481,8 +475,6 @@ impl Service {
         notifications: Vec<(TenantShardId, NodeId, ShardStripeSize)>,
         deadline: Instant,
     ) -> HashSet<TenantShardId> {
-        let compute_hook = self.inner.read().unwrap().compute_hook.clone();
-
         let attempt_shards = notifications.iter().map(|i| i.0).collect::<HashSet<_>>();
         let mut success_shards = HashSet::new();
 
@@ -490,7 +482,7 @@ impl Service {
         // in order to subsequently use .buffered() on the stream to execute with bounded parallelism.
         let mut stream = futures::stream::iter(notifications.into_iter())
             .map(|(tenant_shard_id, node_id, stripe_size)| {
-                let compute_hook = compute_hook.clone();
+                let compute_hook = self.compute_hook.clone();
                 let cancel = self.cancel.clone();
                 async move {
                     if let Err(e) = compute_hook
@@ -730,14 +722,12 @@ impl Service {
 
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
-                config.clone(),
-                result_tx,
-                nodes,
-                tenants,
-                scheduler,
+                nodes, tenants, scheduler,
             ))),
-            config,
+            config: config.clone(),
             persistence,
+            compute_hook: Arc::new(ComputeHook::new(config)),
+            result_tx,
             startup_complete: startup_complete.clone(),
             cancel: CancellationToken::new(),
             gate: Gate::default(),
@@ -849,7 +839,7 @@ impl Service {
             tenant_state.generation = Some(new_generation);
         } else {
             // This is a detach notification.  We must update placement policy to avoid re-attaching
-            // during background scheduling/reconciliation, or during attachment service restart.
+            // during background scheduling/reconciliation, or during storage controller restart.
             assert!(attach_req.node_id.is_none());
             tenant_state.policy = PlacementPolicy::Detached;
         }
@@ -932,6 +922,10 @@ impl Service {
         &self,
         reattach_req: ReAttachRequest,
     ) -> Result<ReAttachResponse, ApiError> {
+        if let Some(register_req) = reattach_req.register {
+            self.node_register(register_req).await?;
+        }
+
         // Take a re-attach as indication that the node is available: this is a precursor to proper
         // heartbeating in https://github.com/neondatabase/neon/issues/6844
         self.node_configure(NodeConfigureRequest {
@@ -1145,8 +1139,6 @@ impl Service {
 
         let (waiters, response_shards) = {
             let mut locked = self.inner.write().unwrap();
-            let result_tx = locked.result_tx.clone();
-            let compute_hook = locked.compute_hook.clone();
             let (nodes, tenants, scheduler) = locked.parts_mut();
 
             let mut response_shards = Vec::new();
@@ -1231,17 +1223,7 @@ impl Service {
 
             let waiters = tenants
                 .range_mut(TenantShardId::tenant_range(tenant_id))
-                .filter_map(|(_shard_id, shard)| {
-                    shard.maybe_reconcile(
-                        result_tx.clone(),
-                        nodes,
-                        &compute_hook,
-                        &self.config,
-                        &self.persistence,
-                        &self.gate,
-                        &self.cancel,
-                    )
-                })
+                .filter_map(|(_shard_id, shard)| self.maybe_reconcile_shard(shard, nodes))
                 .collect::<Vec<_>>();
             (waiters, response_shards)
         };
@@ -1431,8 +1413,6 @@ impl Service {
                 let mut waiters = Vec::new();
                 {
                     let mut locked = self.inner.write().unwrap();
-                    let result_tx = locked.result_tx.clone();
-                    let compute_hook = locked.compute_hook.clone();
                     let (nodes, tenants, scheduler) = locked.parts_mut();
 
                     for ShardUpdate {
@@ -1460,15 +1440,7 @@ impl Service {
 
                         shard.schedule(scheduler)?;
 
-                        let maybe_waiter = shard.maybe_reconcile(
-                            result_tx.clone(),
-                            nodes,
-                            &compute_hook,
-                            &self.config,
-                            &self.persistence,
-                            &self.gate,
-                            &self.cancel,
-                        );
+                        let maybe_waiter = self.maybe_reconcile_shard(shard, nodes);
                         if let Some(waiter) = maybe_waiter {
                             waiters.push(waiter);
                         }
@@ -1513,20 +1485,10 @@ impl Service {
         let waiters = {
             let mut waiters = Vec::new();
             let mut locked = self.inner.write().unwrap();
-            let result_tx = locked.result_tx.clone();
-            let compute_hook = locked.compute_hook.clone();
             let (nodes, tenants, _scheduler) = locked.parts_mut();
             for (_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
                 shard.config = config.clone();
-                if let Some(waiter) = shard.maybe_reconcile(
-                    result_tx.clone(),
-                    nodes,
-                    &compute_hook,
-                    &self.config,
-                    &self.persistence,
-                    &self.gate,
-                    &self.cancel,
-                ) {
+                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
                     waiters.push(waiter);
                 }
             }
@@ -2158,7 +2120,7 @@ impl Service {
         }
 
         // Validate input, and calculate which shards we will create
-        let (old_shard_count, targets, compute_hook) =
+        let (old_shard_count, targets) =
             {
                 let locked = self.inner.read().unwrap();
 
@@ -2254,12 +2216,23 @@ impl Service {
                     }
                 }
 
-                (old_shard_count, targets, locked.compute_hook.clone())
+                (old_shard_count, targets)
             };
 
         // unwrap safety: we would have returned above if we didn't find at least one shard to split
         let old_shard_count = old_shard_count.unwrap();
-        let shard_ident = shard_ident.unwrap();
+        let shard_ident = if let Some(new_stripe_size) = split_req.new_stripe_size {
+            // This ShardIdentity will be used as the template for all children, so this implicitly
+            // applies the new stripe size to the children.
+            let mut shard_ident = shard_ident.unwrap();
+            if shard_ident.count.count() > 1 && shard_ident.stripe_size != new_stripe_size {
+                return Err(ApiError::BadRequest(anyhow::anyhow!("Attempted to change stripe size ({:?}->{new_stripe_size:?}) on a tenant with multiple shards", shard_ident.stripe_size)));
+            }
+            shard_ident.stripe_size = new_stripe_size;
+            shard_ident
+        } else {
+            shard_ident.unwrap()
+        };
         let policy = policy.unwrap();
 
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
@@ -2351,6 +2324,7 @@ impl Service {
                     *parent_id,
                     TenantShardSplitRequest {
                         new_shard_count: split_req.new_shard_count,
+                        new_stripe_size: split_req.new_stripe_size,
                     },
                 )
                 .await
@@ -2450,7 +2424,8 @@ impl Service {
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
         for (child_id, child_ps, stripe_size) in child_locations {
-            if let Err(e) = compute_hook
+            if let Err(e) = self
+                .compute_hook
                 .notify(child_id, child_ps, stripe_size, &self.cancel)
                 .await
             {
@@ -2480,8 +2455,6 @@ impl Service {
     ) -> Result<TenantShardMigrateResponse, ApiError> {
         let waiter = {
             let mut locked = self.inner.write().unwrap();
-            let result_tx = locked.result_tx.clone();
-            let compute_hook = locked.compute_hook.clone();
             let (nodes, tenants, scheduler) = locked.parts_mut();
 
             let Some(node) = nodes.get(&migrate_req.node_id) else {
@@ -2541,15 +2514,7 @@ impl Service {
                 shard.sequence = shard.sequence.next();
             }
 
-            shard.maybe_reconcile(
-                result_tx,
-                nodes,
-                &compute_hook,
-                &self.config,
-                &self.persistence,
-                &self.gate,
-                &self.cancel,
-            )
+            self.maybe_reconcile_shard(shard, nodes)
         };
 
         if let Some(waiter) = waiter {
@@ -2813,8 +2778,6 @@ impl Service {
         }
 
         let mut locked = self.inner.write().unwrap();
-        let result_tx = locked.result_tx.clone();
-        let compute_hook = locked.compute_hook.clone();
         let (nodes, tenants, scheduler) = locked.parts_mut();
 
         let mut new_nodes = (**nodes).clone();
@@ -2866,16 +2829,8 @@ impl Service {
                                 tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", config_req.node_id);
                             }
                             Ok(()) => {
-                                if tenant_state
-                                    .maybe_reconcile(
-                                        result_tx.clone(),
-                                        &new_nodes,
-                                        &compute_hook,
-                                        &self.config,
-                                        &self.persistence,
-                                        &self.gate,
-                                        &self.cancel,
-                                    )
+                                if self
+                                    .maybe_reconcile_shard(tenant_state, &new_nodes)
                                     .is_some()
                                 {
                                     tenants_affected += 1;
@@ -2899,15 +2854,7 @@ impl Service {
                         tenant_state.observed.locations.get_mut(&config_req.node_id)
                     {
                         if observed_loc.conf.is_none() {
-                            tenant_state.maybe_reconcile(
-                                result_tx.clone(),
-                                &new_nodes,
-                                &compute_hook,
-                                &self.config,
-                                &self.persistence,
-                                &self.gate,
-                                &self.cancel,
-                            );
+                            self.maybe_reconcile_shard(tenant_state, &new_nodes);
                         }
                     }
                 }
@@ -2936,22 +2883,12 @@ impl Service {
         tenant_id: TenantId,
     ) -> Result<Vec<ReconcilerWaiter>, anyhow::Error> {
         let mut waiters = Vec::new();
-        let result_tx = locked.result_tx.clone();
-        let compute_hook = locked.compute_hook.clone();
         let (nodes, tenants, scheduler) = locked.parts_mut();
 
         for (_tenant_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
             shard.schedule(scheduler)?;
 
-            if let Some(waiter) = shard.maybe_reconcile(
-                result_tx.clone(),
-                nodes,
-                &compute_hook,
-                &self.config,
-                &self.persistence,
-                &self.gate,
-                &self.cancel,
-            ) {
+            if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
                 waiters.push(waiter);
             }
         }
@@ -2986,28 +2923,34 @@ impl Service {
         Ok(())
     }
 
+    /// Convenience wrapper around [`TenantState::maybe_reconcile`] that provides
+    /// all the references to parts of Self that are needed
+    fn maybe_reconcile_shard(
+        &self,
+        shard: &mut TenantState,
+        nodes: &Arc<HashMap<NodeId, Node>>,
+    ) -> Option<ReconcilerWaiter> {
+        shard.maybe_reconcile(
+            &self.result_tx,
+            nodes,
+            &self.compute_hook,
+            &self.config,
+            &self.persistence,
+            &self.gate,
+            &self.cancel,
+        )
+    }
+
     /// Check all tenants for pending reconciliation work, and reconcile those in need
     ///
     /// Returns how many reconciliation tasks were started
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
-        let result_tx = locked.result_tx.clone();
-        let compute_hook = locked.compute_hook.clone();
         let pageservers = locked.nodes.clone();
         locked
             .tenants
             .iter_mut()
-            .filter_map(|(_tenant_shard_id, shard)| {
-                shard.maybe_reconcile(
-                    result_tx.clone(),
-                    &pageservers,
-                    &compute_hook,
-                    &self.config,
-                    &self.persistence,
-                    &self.gate,
-                    &self.cancel,
-                )
-            })
+            .filter_map(|(_tenant_shard_id, shard)| self.maybe_reconcile_shard(shard, &pageservers))
             .count()
     }
 

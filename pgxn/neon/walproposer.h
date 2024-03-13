@@ -564,7 +564,7 @@ typedef struct walproposer_api
 	 * backpressure feedback and to confirm WAL persistence (has been commited
 	 * on the quorum of safekeepers).
 	 */
-	void		(*process_safekeeper_feedback) (WalProposer *wp, XLogRecPtr commitLsn);
+	void		(*process_safekeeper_feedback) (WalProposer *wp);
 
 	/*
 	 * Write a log message to the internal log processor. This is used only
@@ -646,8 +646,8 @@ typedef struct WalProposer
 	/* WAL has been generated up to this point */
 	XLogRecPtr	availableLsn;
 
-	/* last commitLsn broadcasted to safekeepers */
-	XLogRecPtr	lastSentCommitLsn;
+	/* cached GetAcknowledgedByQuorumWALPosition result */
+	XLogRecPtr	commitLsn;
 
 	ProposerGreeting greetRequest;
 

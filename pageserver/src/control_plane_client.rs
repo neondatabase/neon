@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use futures::Future;
 use pageserver_api::{
+    controller_api::NodeRegisterRequest,
     shard::TenantShardId,
     upcall_api::{
         ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
@@ -12,7 +13,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use utils::{backoff, generation::Generation, id::NodeId};
 
-use crate::config::PageServerConf;
+use crate::{
+    config::{NodeMetadata, PageServerConf},
+    virtual_file::on_fatal_io_error,
+};
 
 /// The Pageserver's client for using the control plane API: this is a small subset
 /// of the overall control plane API, for dealing with generations (see docs/rfcs/025-generation-numbers.md)
@@ -32,6 +36,7 @@ pub enum RetryForeverError {
 pub trait ControlPlaneGenerationsApi {
     fn re_attach(
         &self,
+        conf: &PageServerConf,
     ) -> impl Future<Output = Result<HashMap<TenantShardId, Generation>, RetryForeverError>> + Send;
     fn validate(
         &self,
@@ -110,13 +115,59 @@ impl ControlPlaneClient {
 
 impl ControlPlaneGenerationsApi for ControlPlaneClient {
     /// Block until we get a successful response, or error out if we are shut down
-    async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
+    async fn re_attach(
+        &self,
+        conf: &PageServerConf,
+    ) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("re-attach")
             .expect("Failed to build re-attach path");
+
+        // Include registration content in the re-attach request if a metadata file is readable
+        let metadata_path = conf.metadata_path();
+        let register = match tokio::fs::read_to_string(&metadata_path).await {
+            Ok(metadata_str) => match serde_json::from_str::<NodeMetadata>(&metadata_str) {
+                Ok(m) => {
+                    // Since we run one time at startup, be generous in our logging and
+                    // dump all metadata.
+                    tracing::info!(
+                        "Loaded node metadata: postgres {}:{}, http {}:{}, other fields: {:?}",
+                        m.postgres_host,
+                        m.postgres_port,
+                        m.http_host,
+                        m.http_port,
+                        m.other
+                    );
+
+                    Some(NodeRegisterRequest {
+                        node_id: conf.id,
+                        listen_pg_addr: m.postgres_host,
+                        listen_pg_port: m.postgres_port,
+                        listen_http_addr: m.http_host,
+                        listen_http_port: m.http_port,
+                    })
+                }
+                Err(e) => {
+                    tracing::error!("Unreadable metadata in {metadata_path}: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    // This is legal: we may have been deployed with some external script
+                    // doing registration for us.
+                    tracing::info!("Metadata file not found at {metadata_path}");
+                } else {
+                    on_fatal_io_error(&e, &format!("Loading metadata at {metadata_path}"))
+                }
+                None
+            }
+        };
+
         let request = ReAttachRequest {
             node_id: self.node_id,
+            register,
         };
 
         fail::fail_point!("control-plane-client-re-attach");

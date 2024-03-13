@@ -1,4 +1,5 @@
 import os
+from typing import Dict, List, Union
 
 import pytest
 from fixtures.log_helper import log
@@ -8,7 +9,11 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.remote_storage import s3_storage
 from fixtures.types import Lsn, TenantShardId, TimelineId
+from fixtures.utils import wait_until
 from fixtures.workload import Workload
+from pytest_httpserver import HTTPServer
+from werkzeug.wrappers.request import Request
+from werkzeug.wrappers.response import Response
 
 
 def test_sharding_smoke(
@@ -43,7 +48,7 @@ def test_sharding_smoke(
     tenant_id = env.initial_tenant
 
     pageservers = dict((int(p.id), p) for p in env.pageservers)
-    shards = env.attachment_service.locate(tenant_id)
+    shards = env.storage_controller.locate(tenant_id)
 
     def get_sizes():
         sizes = {}
@@ -86,7 +91,7 @@ def test_sharding_smoke(
         )
         assert timelines == {env.initial_timeline, timeline_b}
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_split_unsharded(
@@ -102,7 +107,7 @@ def test_sharding_split_unsharded(
 
     # Check that we created with an unsharded TenantShardId: this is the default,
     # but check it in case we change the default in future
-    assert env.attachment_service.inspect(TenantShardId(tenant_id, 0, 0)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 0)) is not None
 
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
@@ -110,15 +115,15 @@ def test_sharding_split_unsharded(
     workload.validate()
 
     # Split one shard into two
-    env.attachment_service.tenant_shard_split(tenant_id, shard_count=2)
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=2)
 
     # Check we got the shard IDs we expected
-    assert env.attachment_service.inspect(TenantShardId(tenant_id, 0, 2)) is not None
-    assert env.attachment_service.inspect(TenantShardId(tenant_id, 1, 2)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 2)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 1, 2)) is not None
 
     workload.validate()
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
 
 def test_sharding_split_smoke(
@@ -161,7 +166,7 @@ def test_sharding_split_smoke(
     workload.write_rows(256)
 
     # Note which pageservers initially hold a shard after tenant creation
-    pre_split_pageserver_ids = [loc["node_id"] for loc in env.attachment_service.locate(tenant_id)]
+    pre_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
 
     # For pageservers holding a shard, validate their ingest statistics
     # reflect a proper splitting of the WAL.
@@ -213,9 +218,9 @@ def test_sharding_split_smoke(
     # Before split, old shards exist
     assert shards_on_disk(old_shard_ids)
 
-    env.attachment_service.tenant_shard_split(tenant_id, shard_count=split_shard_count)
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
-    post_split_pageserver_ids = [loc["node_id"] for loc in env.attachment_service.locate(tenant_id)]
+    post_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
     # We should have split into 8 shards, on the same 4 pageservers we started on.
     assert len(post_split_pageserver_ids) == split_shard_count
     assert len(set(post_split_pageserver_ids)) == shard_count
@@ -261,7 +266,7 @@ def test_sharding_split_smoke(
     # Check that we didn't do any spurious reconciliations.
     # Total number of reconciles should have been one per original shard, plus
     # one for each shard that was migrated.
-    reconcile_ok = env.attachment_service.get_metric_value(
+    reconcile_ok = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
     assert reconcile_ok == shard_count + split_shard_count // 2
@@ -269,19 +274,19 @@ def test_sharding_split_smoke(
     # Check that no cancelled or errored reconciliations occurred: this test does no
     # failure injection and should run clean.
     assert (
-        env.attachment_service.get_metric_value(
+        env.storage_controller.get_metric_value(
             "storage_controller_reconcile_complete_total", filter={"status": "cancel"}
         )
         is None
     )
     assert (
-        env.attachment_service.get_metric_value(
+        env.storage_controller.get_metric_value(
             "storage_controller_reconcile_complete_total", filter={"status": "error"}
         )
         is None
     )
 
-    env.attachment_service.consistency_check()
+    env.storage_controller.consistency_check()
 
     # Validate pageserver state
     shards_exist: list[TenantShardId] = []
@@ -308,6 +313,96 @@ def test_sharding_split_smoke(
     assert len(shards_exist) == split_shard_count
 
     workload.validate()
+
+
+@pytest.mark.parametrize("initial_stripe_size", [None, 65536])
+def test_sharding_split_stripe_size(
+    neon_env_builder: NeonEnvBuilder,
+    httpserver: HTTPServer,
+    httpserver_listen_address,
+    initial_stripe_size: int,
+):
+    """
+    Check that modifying stripe size inline with a shard split works as expected
+    """
+    (host, port) = httpserver_listen_address
+    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+    neon_env_builder.num_pageservers = 1
+
+    # Set up fake HTTP notify endpoint: we will use this to validate that we receive
+    # the correct stripe size after split.
+    notifications = []
+
+    def handler(request: Request):
+        log.info(f"Notify request: {request}")
+        notifications.append(request.json)
+        return Response(status=200)
+
+    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=1, initial_tenant_shard_stripe_size=initial_stripe_size
+    )
+    tenant_id = env.initial_tenant
+
+    assert len(notifications) == 1
+    expect: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+        "tenant_id": str(env.initial_tenant),
+        "stripe_size": None,
+        "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
+    }
+    assert notifications[0] == expect
+
+    new_stripe_size = 2048
+    env.storage_controller.tenant_shard_split(
+        tenant_id, shard_count=2, shard_stripe_size=new_stripe_size
+    )
+
+    # Check that we ended up with the stripe size that we expected, both on the pageserver
+    # and in the notifications to compute
+    assert len(notifications) == 2
+    expect_after: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+        "tenant_id": str(env.initial_tenant),
+        "stripe_size": new_stripe_size,
+        "shards": [
+            {"node_id": int(env.pageservers[0].id), "shard_number": 0},
+            {"node_id": int(env.pageservers[0].id), "shard_number": 1},
+        ],
+    }
+    log.info(f"Got notification: {notifications[1]}")
+    assert notifications[1] == expect_after
+
+    # Inspect the stripe size on the pageserver
+    shard_0_loc = (
+        env.pageservers[0].http_client().tenant_get_location(TenantShardId(tenant_id, 0, 2))
+    )
+    assert shard_0_loc["shard_stripe_size"] == new_stripe_size
+    shard_1_loc = (
+        env.pageservers[0].http_client().tenant_get_location(TenantShardId(tenant_id, 1, 2))
+    )
+    assert shard_1_loc["shard_stripe_size"] == new_stripe_size
+
+    # Ensure stripe size survives a pageserver restart
+    env.pageservers[0].stop()
+    env.pageservers[0].start()
+    shard_0_loc = (
+        env.pageservers[0].http_client().tenant_get_location(TenantShardId(tenant_id, 0, 2))
+    )
+    assert shard_0_loc["shard_stripe_size"] == new_stripe_size
+    shard_1_loc = (
+        env.pageservers[0].http_client().tenant_get_location(TenantShardId(tenant_id, 1, 2))
+    )
+    assert shard_1_loc["shard_stripe_size"] == new_stripe_size
+
+    # Ensure stripe size survives a storage controller restart
+    env.storage_controller.stop()
+    env.storage_controller.start()
+
+    def assert_restart_notification():
+        assert len(notifications) == 3
+        assert notifications[2] == expect_after
+
+    wait_until(10, 1, assert_restart_notification)
 
 
 @pytest.mark.skipif(
@@ -360,7 +455,7 @@ def test_sharding_ingest(
     huge_layer_count = 0
 
     # Inspect the resulting layer map, count how many layers are undersized.
-    for shard in env.attachment_service.locate(tenant_id):
+    for shard in env.storage_controller.locate(tenant_id):
         pageserver = env.get_pageserver(shard["node_id"])
         shard_id = shard["shard_id"]
         layer_map = pageserver.http_client().layer_map_info(shard_id, timeline_id)
