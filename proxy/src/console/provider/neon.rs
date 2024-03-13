@@ -74,7 +74,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetRoleSecret>(response).await {
                 Ok(body) => body,
@@ -134,7 +136,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response).await?;
 
