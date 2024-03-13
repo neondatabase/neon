@@ -809,6 +809,25 @@ class PageserverFailpoint(Failure):
         pageserver.http_client().configure_failpoints((self.failpoint, "off"))
 
 
+def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
+    tenants = env.storage_controller.tenant_list()
+
+    node_to_tenants: dict[int, list[TenantId]] = {}
+    for t in tenants:
+        for node_id, loc_state in t["observed"]["locations"].items():
+            if (
+                loc_state is not None
+                and "conf" in loc_state
+                and loc_state["conf"] is not None
+                and loc_state["conf"]["mode"] == "AttachedSingle"
+            ):
+                crnt = node_to_tenants.get(int(node_id), [])
+                crnt.append(TenantId(t["tenant_shard_id"]))
+                node_to_tenants[int(node_id)] = crnt
+
+    return node_to_tenants
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -821,27 +840,13 @@ def test_sharding_service_heartbeats(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, failure: Failure
 ):
     neon_env_builder.num_pageservers = 2
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_configs()
+    env.start()
 
     # Initially we have two online pageservers
     nodes = env.storage_controller.node_list()
     assert len(nodes) == 2
     assert all([n["availability"] == "Active" for n in nodes])
-
-    # ... then we apply the failure
-    offline_node_id = failure.pageserver_id
-    failure.apply(env)
-
-    # ... then we expect the heartbeats to mark it offline
-    def node_offline():
-        nodes = env.storage_controller.node_list()
-        log.info(f"nodes={nodes}")
-        target = next(n for n in nodes if n["id"] == offline_node_id)
-        assert target["availability"] == "Offline"
-
-    # A node is considered offline if the last successful heartbeat
-    # was more than 10 seconds ago (hardcoded in the storage controller).
-    wait_until(20, 1, node_offline)
 
     # ... then we create two tenants and write some data into them
     def create_tenant(tid: TenantId):
@@ -861,10 +866,53 @@ def test_sharding_service_heartbeats(
     for tid in tenant_ids:
         create_tenant(tid)
 
+    # ... expecting that each tenant will be placed on a different node
+    def tenants_placed():
+        node_to_tenants = build_node_to_tenants_map(env)
+        log.info(f"{node_to_tenants=}")
+
+        # Check that all the tenants have been attached
+        assert sum((len(ts) for ts in node_to_tenants.values())) == len(tenant_ids)
+        # Check that each node got one tenant
+        assert all((len(ts) == 1 for ts in node_to_tenants.values()))
+
+    wait_until(10, 1, tenants_placed)
+
+    # ... then we apply the failure
+    offline_node_id = failure.pageserver_id
+    online_node_id = (set(range(1, len(env.pageservers) + 1)) - {offline_node_id}).pop()
+    env.get_pageserver(offline_node_id).allowed_errors.append(
+        # In the case of the failpoint failure, the impacted pageserver
+        # still believes it has the tenant attached since location
+        # config calls into it will fail due to being marked offline.
+        ".*Dropped remote consistent LSN updates.*",
+    )
+
+    failure.apply(env)
+
+    # ... expecting the heartbeats to mark it offline
+    def node_offline():
+        nodes = env.storage_controller.node_list()
+        log.info(f"{nodes=}")
+        target = next(n for n in nodes if n["id"] == offline_node_id)
+        assert target["availability"] == "Offline"
+
+    # A node is considered offline if the last successful heartbeat
+    # was more than 10 seconds ago (hardcoded in the storage controller).
+    wait_until(20, 1, node_offline)
+
+    # .. expecting the tenant on the offline node to be migrated
+    def tenant_migrated():
+        node_to_tenants = build_node_to_tenants_map(env)
+        log.info(f"{node_to_tenants=}")
+        assert set(node_to_tenants[online_node_id]) == set(tenant_ids)
+
+    wait_until(10, 1, tenant_migrated)
+
     # ... then we clear the failure
     failure.clear(env)
 
-    # ... then we expect it to be marked active
+    # ... expecting the offline node to become active again
     def node_online():
         nodes = env.storage_controller.node_list()
         target = next(n for n in nodes if n["id"] == offline_node_id)
@@ -874,13 +922,19 @@ def test_sharding_service_heartbeats(
 
     time.sleep(5)
 
-    # ... then we create a new tenant and expect it to be placed
-    # on the node that just came back online
+    # ... then we create a new tenant
     tid = TenantId.generate()
     env.storage_controller.tenant_create(tid)
 
+    # ... expecting it to be placed on the node that just came back online
     tenants = env.storage_controller.tenant_list()
     newest_tenant = next(t for t in tenants if t["tenant_shard_id"] == str(tid))
     locations = list(newest_tenant["observed"]["locations"].keys())
     locations = [int(node_id) for node_id in locations]
     assert locations == [offline_node_id]
+
+    # ... expecting the storage controller to reach a consistent state
+    def storage_controller_consistent():
+        env.storage_controller.consistency_check()
+
+    wait_until(10, 1, storage_controller_consistent)
