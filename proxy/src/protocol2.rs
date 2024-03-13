@@ -341,7 +341,14 @@ impl Accept for ProxyProtocolAccept {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
         let conn = ready!(Pin::new(&mut self.incoming).poll_accept(cx)?);
-        tracing::info!(protocol = self.protocol, "accepted new TCP connection");
+
+        let conn_id = uuid::Uuid::new_v4();
+        let span = tracing::info_span!("http_conn", ?conn_id);
+        {
+            let _enter = span.enter();
+            tracing::info!("accepted new TCP connection");
+        }
+
         let Some(conn) = conn else {
             return Poll::Ready(None);
         };
@@ -354,6 +361,7 @@ impl Accept for ProxyProtocolAccept {
                     .with_label_values(&[self.protocol])
                     .guard(),
             )),
+            span,
         })))
     }
 }
@@ -364,6 +372,14 @@ pin_project! {
         pub inner: T,
         pub connection_id: Uuid,
         pub gauge: Mutex<Option<IntCounterPairGuard>>,
+        pub span: tracing::Span,
+    }
+
+    impl<S> PinnedDrop for WithConnectionGuard<S> {
+        fn drop(this: Pin<&mut Self>) {
+            let _enter = this.span.enter();
+            tracing::info!("HTTP connection closed")
+        }
     }
 }
 

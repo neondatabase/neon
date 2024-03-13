@@ -19,6 +19,7 @@ use rand::SeedableRng;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
+use tracing::instrument::Instrumented;
 
 use crate::context::RequestMonitoring;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp, WithConnectionGuard};
@@ -99,12 +100,7 @@ pub async fn task_main(
     let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
     ws_connections.close(); // allows `ws_connections.wait to complete`
 
-    let tls_listener = TlsListener::new(
-        tls_acceptor,
-        addr_incoming,
-        "http",
-        config.handshake_timeout,
-    );
+    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming, config.handshake_timeout);
 
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<
@@ -124,6 +120,7 @@ pub async fn task_main(
             let http_cancellation_token = CancellationToken::new();
             let cancel_connection = http_cancellation_token.clone().drop_guard();
 
+            let span = conn.span.clone();
             let client_addr = conn.inner.client_addr();
             let remote_addr = conn.inner.inner.remote_addr();
             let backend = backend.clone();
@@ -146,32 +143,36 @@ pub async fn task_main(
 
                         // `request_handler` is not cancel safe. It expects to be cancelled only at specific times.
                         // By spawning the future, we ensure it never gets cancelled until it decides to.
-                        ws_connections.spawn(async move {
-                            // Cancel the current inflight HTTP request if the requets stream is closed.
-                            // This is slightly different to `_cancel_connection` in that
-                            // h2 can cancel individual requests with a `RST_STREAM`.
-                            let _cancel_session = http_cancellation_token.clone().drop_guard();
+                        ws_connections.spawn(
+                            async move {
+                                // Cancel the current inflight HTTP request if the requets stream is closed.
+                                // This is slightly different to `_cancel_connection` in that
+                                // h2 can cancel individual requests with a `RST_STREAM`.
+                                let _cancel_session = http_cancellation_token.clone().drop_guard();
 
-                            let res = request_handler(
-                                req,
-                                config,
-                                backend,
-                                ws_connections2,
-                                cancellation_handler,
-                                peer_addr.ip(),
-                                endpoint_rate_limiter,
-                                http_cancellation_token,
-                            )
-                            .await
-                            .map_or_else(|e| e.into_response(), |r| r);
+                                let res = request_handler(
+                                    req,
+                                    config,
+                                    backend,
+                                    ws_connections2,
+                                    cancellation_handler,
+                                    peer_addr.ip(),
+                                    endpoint_rate_limiter,
+                                    http_cancellation_token,
+                                )
+                                .await
+                                .map_or_else(|e| e.into_response(), |r| r);
 
-                            _cancel_session.disarm();
+                                _cancel_session.disarm();
 
-                            res
-                        })
+                                res
+                            }
+                            .in_current_span(),
+                        )
                     }),
                     gauge,
                     cancel_connection,
+                    span,
                 ))
             }
         },
@@ -192,14 +193,21 @@ struct MetricService<S> {
     inner: S,
     _gauge: IntCounterPairGuard,
     _cancel: DropGuard,
+    span: tracing::Span,
 }
 
 impl<S> MetricService<S> {
-    fn new(inner: S, _gauge: IntCounterPairGuard, _cancel: DropGuard) -> MetricService<S> {
+    fn new(
+        inner: S,
+        _gauge: IntCounterPairGuard,
+        _cancel: DropGuard,
+        span: tracing::Span,
+    ) -> MetricService<S> {
         MetricService {
             inner,
             _gauge,
             _cancel,
+            span,
         }
     }
 }
@@ -210,14 +218,16 @@ where
 {
     type Response = S::Response;
     type Error = S::Error;
-    type Future = S::Future;
+    type Future = Instrumented<S::Future>;
 
     fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
-        self.inner.call(req)
+        self.span
+            .in_scope(|| self.inner.call(req))
+            .instrument(self.span.clone())
     }
 }
 
