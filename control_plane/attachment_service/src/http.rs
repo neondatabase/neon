@@ -26,7 +26,7 @@ use utils::{
 };
 
 use pageserver_api::controller_api::{
-    NodeConfigureRequest, NodeRegisterRequest, TenantShardMigrateRequest,
+    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantShardMigrateRequest,
 };
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
 
@@ -387,7 +387,14 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
 
     json_response(
         StatusCode::OK,
-        state.service.node_configure(config_req).await?,
+        state
+            .service
+            .node_configure(
+                config_req.node_id,
+                config_req.availability.map(NodeAvailability::from),
+                config_req.scheduling,
+            )
+            .await?,
     )
 }
 
