@@ -1,7 +1,12 @@
 //! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
 
+use nix::libc::O_DSYNC;
+
 use super::io_engine::IoEngine;
-use std::{os::fd::OwnedFd, path::Path};
+use std::{
+    os::{fd::OwnedFd, unix::fs::OpenOptionsExt},
+    path::Path,
+};
 
 #[derive(Debug, Clone)]
 pub enum OpenOptions {
@@ -94,12 +99,14 @@ impl OpenOptions {
     }
 
     pub(in crate::virtual_file) async fn open(&self, path: &Path) -> std::io::Result<OwnedFd> {
-        match self {
+        let mut options = self.clone();
+        options.custom_flags(O_DSYNC); // disk latency
+        match options {
             OpenOptions::StdFs(x) => x.open(path).map(|file| file.into()),
             #[cfg(target_os = "linux")]
             OpenOptions::TokioEpollUring(x) => {
                 let system = tokio_epoll_uring::thread_local_system().await;
-                system.open(path, x).await.map_err(|e| match e {
+                system.open(path, &x).await.map_err(|e| match e {
                     tokio_epoll_uring::Error::Op(e) => e,
                     tokio_epoll_uring::Error::System(system) => {
                         std::io::Error::new(std::io::ErrorKind::Other, system)
