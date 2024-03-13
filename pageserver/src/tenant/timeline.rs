@@ -634,6 +634,8 @@ impl Timeline {
     /// If a remote layer file is needed, it is downloaded as part of this
     /// call.
     ///
+    /// This method enforces [`Self::timeline_get_throttle`] internally.
+    ///
     /// NOTE: It is considered an error to 'get' a key that doesn't exist. The
     /// abstraction above this needs to store suitable metadata to track what
     /// data exists with what keys, in separate metadata entries. If a
@@ -644,7 +646,18 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
+    #[inline(always)]
     pub(crate) async fn get(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.timeline_get_throttle.throttle(ctx, 1).await;
+        self.get_impl(key, lsn, ctx).await
+    }
+    /// Not subject to [`Self::timeline_get_throttle`].
+    async fn get_impl(
         &self,
         key: Key,
         lsn: Lsn,
@@ -653,8 +666,6 @@ impl Timeline {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
-
-        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
@@ -752,10 +763,6 @@ impl Timeline {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
-        self.timeline_get_throttle
-            .throttle(ctx, key_count as usize)
-            .await;
-
         for range in &keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
@@ -772,11 +779,18 @@ impl Timeline {
             self.conf.get_vectored_impl
         );
 
-        let _timer = crate::metrics::GET_VECTORED_LATENCY
+        let start = crate::metrics::GET_VECTORED_LATENCY
             .for_task_kind(ctx.task_kind())
-            .map(|t| t.start_timer());
+            .map(|metric| (metric, Instant::now()));
 
-        match self.conf.get_vectored_impl {
+        // start counting after throttle so that throttle time
+        // is always less than observation time
+        let throttled = self
+            .timeline_get_throttle
+            .throttle(ctx, key_count as usize)
+            .await;
+
+        let res = match self.conf.get_vectored_impl {
             GetVectoredImpl::Sequential => {
                 self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
             }
@@ -790,9 +804,33 @@ impl Timeline {
 
                 vectored_res
             }
+        };
+
+        if let Some((metric, start)) = start {
+            let elapsed = start.elapsed();
+            let ex_throttled = if let Some(throttled) = throttled {
+                elapsed.checked_sub(throttled)
+            } else {
+                Some(elapsed)
+            };
+
+            if let Some(ex_throttled) = ex_throttled {
+                metric.observe(ex_throttled.as_secs_f64());
+            } else {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!("error deducting time spent throttled; this message is logged at a global rate limit");
+                });
+            }
         }
+
+        res
     }
 
+    /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn get_vectored_sequential_impl(
         &self,
         keyspace: KeySpace,
@@ -803,7 +841,7 @@ impl Timeline {
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                let block = self.get(key, lsn, ctx).await;
+                let block = self.get_impl(key, lsn, ctx).await;
 
                 use PageReconstructError::*;
                 match block {
@@ -853,6 +891,7 @@ impl Timeline {
         Ok(results)
     }
 
+    /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn validate_get_vectored_impl(
         &self,
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
