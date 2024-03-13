@@ -12,6 +12,7 @@ testing = ["fail/failpoints"]
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
@@ -21,7 +22,6 @@ camino.workspace = true
 camino-tempfile.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
-close_fds.workspace = true
 const_format.workspace = true
 consumption_metrics.workspace = true
 crc32c.workspace = true
@@ -36,6 +36,7 @@ humantime.workspace = true
 humantime-serde.workspace = true
 hyper.workspace = true
 itertools.workspace = true
+leaky-bucket.workspace = true
 md5.workspace = true
 nix.workspace = true
 # hack to get the number of worker threads tokio uses
@@ -72,6 +73,7 @@ url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
 pageserver_api.workspace = true
+pageserver_compaction.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true
 pq_proto.workspace = true
@@ -83,7 +85,7 @@ workspace_hack.workspace = true
 reqwest.workspace = true
 rpds.workspace = true
 enum-map.workspace = true
-enumset.workspace = true
+enumset = { workspace = true, features = ["serde"]}
 strum.workspace = true
 strum_macros.workspace = true
 

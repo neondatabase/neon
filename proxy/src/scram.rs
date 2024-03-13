@@ -12,9 +12,6 @@ mod messages;
 mod secret;
 mod signature;
 
-#[cfg(any(test, doc))]
-mod password;
-
 pub use exchange::{exchange, Exchange};
 pub use key::ScramKey;
 pub use secret::ServerSecret;
@@ -59,27 +56,21 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+
     use crate::sasl::{Mechanism, Step};
 
-    use super::{password::SaltedPassword, Exchange, ServerSecret};
+    use super::{Exchange, ServerSecret};
 
     #[test]
-    fn happy_path() {
+    fn snapshot() {
         let iterations = 4096;
-        let salt_base64 = "QSXCR+Q6sek8bf92";
-        let pw = SaltedPassword::new(
-            b"pencil",
-            base64::decode(salt_base64).unwrap().as_slice(),
-            iterations,
-        );
+        let salt = "QSXCR+Q6sek8bf92";
+        let stored_key = "FO+9jBb3MUukt6jJnzjPZOWc5ow/Pu6JtPyju0aqaE8=";
+        let server_key = "qxJ1SbmSAi5EcS0J5Ck/cKAm/+Ixa+Kwp63f4OHDgzo=";
+        let secret = format!("SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}",);
+        let secret = ServerSecret::parse(&secret).unwrap();
 
-        let secret = ServerSecret {
-            iterations,
-            salt_base64: salt_base64.to_owned(),
-            stored_key: pw.client_key().sha256(),
-            server_key: pw.server_key(),
-            doomed: false,
-        };
         const NONCE: [u8; 18] = [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
         ];
@@ -120,5 +111,34 @@ mod tests {
                 27, 125, 170, 232, 35, 171, 167, 166, 41, 70, 228, 182, 112,
             ]
         );
+    }
+
+    fn run_round_trip_test(server_password: &str, client_password: &str) {
+        let scram_secret = ServerSecret::build(server_password).unwrap();
+        let sasl_client =
+            ScramSha256::new(client_password.as_bytes(), ChannelBinding::unsupported());
+
+        let outcome = super::exchange(
+            &scram_secret,
+            sasl_client,
+            crate::config::TlsServerEndPoint::Undefined,
+        )
+        .unwrap();
+
+        match outcome {
+            crate::sasl::Outcome::Success(_) => {}
+            crate::sasl::Outcome::Failure(r) => panic!("{r}"),
+        }
+    }
+
+    #[test]
+    fn round_trip() {
+        run_round_trip_test("pencil", "pencil")
+    }
+
+    #[test]
+    #[should_panic(expected = "password doesn't match")]
+    fn failure() {
+        run_round_trip_test("pencil", "eraser")
     }
 }

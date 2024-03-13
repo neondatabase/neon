@@ -22,11 +22,12 @@ use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
-    PagestreamNblocksRequest, PagestreamNblocksResponse,
+    PagestreamGetSlruSegmentRequest, PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest,
+    PagestreamNblocksResponse,
 };
 use pageserver_api::shard::ShardIndex;
-use pageserver_api::shard::{ShardCount, ShardNumber};
-use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, QueryError};
+use pageserver_api::shard::ShardNumber;
+use postgres_backend::{is_expected_io_error, AuthType, PostgresBackend, QueryError};
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
@@ -43,7 +44,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
-use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::sync::gate::GateGuard;
@@ -62,9 +62,10 @@ use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::pgdatadir_mapping::Version;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
@@ -74,8 +75,8 @@ use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
-
 use pageserver_api::key::rel_block_to_key;
+use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
@@ -89,8 +90,8 @@ const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 /// `tokio_tar` already read the first such block. Read the second all-zeros block,
 /// and check that there is no more data after the EOF marker.
 ///
-/// XXX: Currently, any trailing data after the EOF marker prints a warning.
-/// Perhaps it should be a hard error?
+/// 'tar' command can also write extra blocks of zeros, up to a record
+/// size, controlled by the --record-size argument. Ignore them too.
 async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()> {
     use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 512];
@@ -111,17 +112,24 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
         anyhow::bail!("invalid tar EOF marker");
     }
 
-    // Drain any data after the EOF marker
+    // Drain any extra zero-blocks after the EOF marker
     let mut trailing_bytes = 0;
+    let mut seen_nonzero_bytes = false;
     loop {
         let nbytes = reader.read(&mut buf).await?;
         trailing_bytes += nbytes;
+        if !buf.iter().all(|&x| x == 0) {
+            seen_nonzero_bytes = true;
+        }
         if nbytes == 0 {
             break;
         }
     }
-    if trailing_bytes > 0 {
-        warn!("ignored {trailing_bytes} unexpected bytes after the tar archive");
+    if seen_nonzero_bytes {
+        anyhow::bail!("unexpected non-zero bytes after the tar archive");
+    }
+    if trailing_bytes % 512 != 0 {
+        anyhow::bail!("unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive");
     }
     Ok(())
 }
@@ -368,6 +376,16 @@ impl From<WaitLsnError> for PageStreamError {
     }
 }
 
+impl From<WaitLsnError> for QueryError {
+    fn from(value: WaitLsnError) -> Self {
+        match value {
+            e @ WaitLsnError::Timeout(_) => Self::Other(anyhow::Error::new(e)),
+            WaitLsnError::Shutdown => Self::Shutdown,
+            WaitLsnError::BadState => Self::Reconnect,
+        }
+    }
+}
+
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
@@ -538,7 +556,7 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         let tenant = mgr::get_active_tenant_with_timeout(
             tenant_id,
@@ -620,6 +638,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetPage(req) => {
+                    // shard_id is filled in by the handler
                     let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
                     (
                         self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
@@ -632,6 +651,15 @@ impl PageServerHandler {
                     let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.lsn);
                     (
                         self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
+                }
+                PagestreamFeMessage::GetSlruSegment(req) => {
+                    let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
                             .await,
                         span,
@@ -699,7 +727,7 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         // Create empty timeline
         info!("creating new timeline");
@@ -752,7 +780,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(%start_lsn, %end_lsn))]
+    #[instrument(skip_all, fields(shard_id, %start_lsn, %end_lsn))]
     async fn handle_import_wal<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -765,8 +793,6 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
-
         let timeline = self
             .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
@@ -873,6 +899,7 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_rel_exists_request(
         &mut self,
         tenant_id: TenantId,
@@ -883,7 +910,7 @@ impl PageServerHandler {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelExists);
+            .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -899,6 +926,7 @@ impl PageServerHandler {
         }))
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_nblocks_request(
         &mut self,
         tenant_id: TenantId,
@@ -910,7 +938,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetRelSize);
+            .start_timer(metrics::SmgrQueryType::GetRelSize, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -926,6 +954,7 @@ impl PageServerHandler {
         }))
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_db_size_request(
         &mut self,
         tenant_id: TenantId,
@@ -937,7 +966,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetDbSize);
+            .start_timer(metrics::SmgrQueryType::GetDbSize, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -968,7 +997,7 @@ impl PageServerHandler {
     ) -> Result<&Arc<Timeline>, Key> {
         let key = if let Some((first_idx, first_timeline)) = self.shard_timelines.iter().next() {
             // Fastest path: single sharded case
-            if first_idx.shard_count < ShardCount(2) {
+            if first_idx.shard_count.count() == 1 {
                 return Ok(&first_timeline.timeline);
             }
 
@@ -1076,6 +1105,7 @@ impl PageServerHandler {
         }
     }
 
+    #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_page_at_lsn_request(
         &mut self,
         tenant_id: TenantId,
@@ -1084,7 +1114,10 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = match self.get_cached_timeline_for_page(req) {
-            Ok(tl) => tl,
+            Ok(tl) => {
+                set_tracing_field_shard_id(tl);
+                tl
+            }
             Err(key) => {
                 match self
                     .load_timeline_for_page(tenant_id, timeline_id, key)
@@ -1111,7 +1144,7 @@ impl PageServerHandler {
 
         let _timer = timeline
             .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetPageAtLsn);
+            .start_timer(metrics::SmgrQueryType::GetPageAtLsn, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -1127,8 +1160,36 @@ impl PageServerHandler {
         }))
     }
 
+    #[instrument(skip_all, fields(shard_id))]
+    async fn handle_get_slru_segment_request(
+        &mut self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &PagestreamGetSlruSegmentRequest,
+        ctx: &RequestContext,
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
+        let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+
+        let _timer = timeline
+            .query_metrics
+            .start_timer(metrics::SmgrQueryType::GetSlruSegment, ctx);
+
+        let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
+
+        let kind = SlruKind::from_repr(req.kind)
+            .ok_or(PageStreamError::BadRequest("invalid SLRU kind".into()))?;
+        let segment = timeline.get_slru_segment(kind, req.segno, lsn, ctx).await?;
+
+        Ok(PagestreamBeMessage::GetSlruSegment(
+            PagestreamGetSlruSegmentResponse { segment },
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(?lsn, ?prev_lsn, %full_backup))]
+    #[instrument(skip_all, fields(shard_id, ?lsn, ?prev_lsn, %full_backup))]
     async fn handle_basebackup_request<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -1138,13 +1199,11 @@ impl PageServerHandler {
         prev_lsn: Option<Lsn>,
         full_backup: bool,
         gzip: bool,
-        ctx: RequestContext,
-    ) -> anyhow::Result<()>
+        ctx: &RequestContext,
+    ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_and_timeline_id();
-
         let started = std::time::Instant::now();
 
         // check that the timeline exists
@@ -1155,7 +1214,7 @@ impl PageServerHandler {
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", lsn);
-            timeline.wait_lsn(lsn, &ctx).await?;
+            timeline.wait_lsn(lsn, ctx).await?;
             timeline
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;
@@ -1177,7 +1236,7 @@ impl PageServerHandler {
                 lsn,
                 prev_lsn,
                 full_backup,
-                &ctx,
+                ctx,
             )
             .await?;
         } else {
@@ -1198,7 +1257,7 @@ impl PageServerHandler {
                     lsn,
                     prev_lsn,
                     full_backup,
-                    &ctx,
+                    ctx,
                 )
                 .await?;
                 // shutdown the encoder to ensure the gzip footer is written
@@ -1210,7 +1269,7 @@ impl PageServerHandler {
                     lsn,
                     prev_lsn,
                     full_backup,
-                    &ctx,
+                    ctx,
                 )
                 .await?;
             }
@@ -1266,6 +1325,7 @@ impl PageServerHandler {
         .await
         .map_err(GetActiveTimelineError::Tenant)?;
         let timeline = tenant.get_timeline(timeline_id, true)?;
+        set_tracing_field_shard_id(&timeline);
         Ok(timeline)
     }
 }
@@ -1389,25 +1449,25 @@ where
                 false
             };
 
-            ::metrics::metric_vec_duration::observe_async_block_duration_by_result(
-                &*metrics::BASEBACKUP_QUERY_TIME,
-                async move {
-                    self.handle_basebackup_request(
-                        pgb,
-                        tenant_id,
-                        timeline_id,
-                        lsn,
-                        None,
-                        false,
-                        gzip,
-                        ctx,
-                    )
-                    .await?;
-                    pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-                    anyhow::Ok(())
-                },
-            )
-            .await?;
+            let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
+            let res = async {
+                self.handle_basebackup_request(
+                    pgb,
+                    tenant_id,
+                    timeline_id,
+                    lsn,
+                    None,
+                    false,
+                    gzip,
+                    &ctx,
+                )
+                .await?;
+                pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                Result::<(), QueryError>::Ok(())
+            }
+            .await;
+            metric_recording.observe(&res);
+            res?;
         }
         // return pair of prev_lsn and last_lsn
         else if query_string.starts_with("get_last_record_rlsn ") {
@@ -1430,21 +1490,29 @@ where
                 .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
-            let timeline = self
-                .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
-                .await?;
+            async {
+                let timeline = self
+                    .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
+                    .await?;
 
-            let end_of_timeline = timeline.get_last_record_rlsn();
+                let end_of_timeline = timeline.get_last_record_rlsn();
 
-            pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                RowDescriptor::text_col(b"prev_lsn"),
-                RowDescriptor::text_col(b"last_lsn"),
-            ]))?
-            .write_message_noflush(&BeMessage::DataRow(&[
-                Some(end_of_timeline.prev.to_string().as_bytes()),
-                Some(end_of_timeline.last.to_string().as_bytes()),
-            ]))?
-            .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                pgb.write_message_noflush(&BeMessage::RowDescription(&[
+                    RowDescriptor::text_col(b"prev_lsn"),
+                    RowDescriptor::text_col(b"last_lsn"),
+                ]))?
+                .write_message_noflush(&BeMessage::DataRow(&[
+                    Some(end_of_timeline.prev.to_string().as_bytes()),
+                    Some(end_of_timeline.last.to_string().as_bytes()),
+                ]))?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                anyhow::Ok(())
+            }
+            .instrument(info_span!(
+                "handle_get_last_record_lsn",
+                shard_id = tracing::field::Empty
+            ))
+            .await?;
         }
         // same as basebackup, but result includes relational data as well
         else if query_string.starts_with("fullbackup ") {
@@ -1495,7 +1563,7 @@ where
                 prev_lsn,
                 true,
                 false,
-                ctx,
+                &ctx,
             )
             .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -1678,6 +1746,7 @@ impl From<GetActiveTenantError> for QueryError {
             | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
                 QueryError::Shutdown
             }
+            e @ GetActiveTenantError::NotFound(_) => QueryError::NotFound(format!("{e}").into()),
             e => QueryError::Other(anyhow::anyhow!(e)),
         }
     }
@@ -1699,4 +1768,13 @@ impl From<GetActiveTimelineError> for QueryError {
             GetActiveTimelineError::Timeline(e) => QueryError::NotFound(format!("{e}").into()),
         }
     }
+}
+
+fn set_tracing_field_shard_id(timeline: &Timeline) {
+    debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+    tracing::Span::current().record(
+        "shard_id",
+        tracing::field::display(timeline.tenant_shard_id.shard_slug()),
+    );
+    debug_assert_current_span_has_tenant_and_timeline_id();
 }

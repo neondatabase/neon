@@ -157,10 +157,7 @@ def switch_pg_to_new_pageserver(
     timeline_to_detach_local_path = origin_ps.timeline_dir(tenant_id, timeline_id)
     files_before_detach = os.listdir(timeline_to_detach_local_path)
     assert (
-        "metadata" in files_before_detach
-    ), f"Regular timeline {timeline_to_detach_local_path} should have the metadata file, but got: {files_before_detach}"
-    assert (
-        len(files_before_detach) >= 2
+        len(files_before_detach) >= 1
     ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file, but got {files_before_detach}"
 
     return timeline_to_detach_local_path
@@ -213,8 +210,6 @@ def test_tenant_relocation(
 
     env.pageservers[0].allowed_errors.extend(
         [
-            # FIXME: Is this expected?
-            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
             # Needed for detach polling on the original pageserver
             f".*NotFound: tenant {tenant_id}.*",
             # We will dual-attach in this test, so stale generations are expected
@@ -500,7 +495,7 @@ def test_emergency_relocate_with_branches_slow_replay(
         assert cur.fetchall() == [("before pause",), ("after pause",)]
 
     # Sanity check that the failpoint was reached
-    assert env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
+    env.pageserver.assert_log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
     assert time.time() - before_attach_time > 5
 
     # Clean up
@@ -637,7 +632,7 @@ def test_emergency_relocate_with_branches_createdb(
         assert query_scalar(cur, "SELECT count(*) FROM test_migrate_one") == 200
 
     # Sanity check that the failpoint was reached
-    assert env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
+    env.pageserver.assert_log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
     assert time.time() - before_attach_time > 5
 
     # Clean up

@@ -2,9 +2,13 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
+use futures::stream::StreamExt;
+use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::ShardParameters;
-use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
+use pageserver_api::shard::{
+    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -22,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
-use utils::crashsafe;
+use utils::{completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -30,6 +34,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
+use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
@@ -39,7 +44,7 @@ use crate::tenant::config::{
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
-use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext::PathExt;
@@ -292,7 +297,7 @@ async fn init_load_generations(
     } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-        match client.re_attach().await {
+        match client.re_attach(conf).await {
             Ok(tenants) => tenants,
             Err(RetryForeverError::ShuttingDown) => {
                 anyhow::bail!("Shut down while waiting for control plane re-attach response")
@@ -356,12 +361,6 @@ fn load_tenant_config(
         return Ok(None);
     }
 
-    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-    if tenant_ignore_mark_file.exists() {
-        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-        return Ok(None);
-    }
-
     let tenant_shard_id = match tenant_dir_path
         .file_name()
         .unwrap_or_default()
@@ -373,6 +372,59 @@ fn load_tenant_config(
             return Ok(None);
         }
     };
+
+    // Clean up legacy `metadata` files.
+    // Doing it here because every single tenant directory is visited here.
+    // In any later code, there's different treatment of tenant dirs
+    // ... depending on whether the tenant is in re-attach response or not
+    // ... epending on whether the tenant is ignored or not
+    assert_eq!(
+        &conf.tenant_path(&tenant_shard_id),
+        &tenant_dir_path,
+        "later use of conf....path() methods would be dubious"
+    );
+    let timelines: Vec<TimelineId> = match conf.timelines_path(&tenant_shard_id).read_dir_utf8() {
+        Ok(iter) => {
+            let mut timelines = Vec::new();
+            for res in iter {
+                let p = res?;
+                let Some(timeline_id) = p.file_name().parse::<TimelineId>().ok() else {
+                    // skip any entries that aren't TimelineId, such as
+                    // - *.___temp dirs
+                    // - unfinished initdb uploads (test_non_uploaded_root_timeline_is_deleted_after_restart)
+                    continue;
+                };
+                timelines.push(timeline_id);
+            }
+            timelines
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(anyhow::anyhow!(e)),
+    };
+    for timeline_id in timelines {
+        let timeline_path = &conf.timeline_path(&tenant_shard_id, &timeline_id);
+        let metadata_path = timeline_path.join(METADATA_FILE_NAME);
+        match std::fs::remove_file(&metadata_path) {
+            Ok(()) => {
+                crashsafe::fsync(timeline_path)
+                    .context("fsync timeline dir after removing legacy metadata file")?;
+                info!("removed legacy metadata file at {metadata_path}");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // something removed the file earlier, or it was never there
+                // We don't care, this software version doesn't write it again, so, we're good.
+            }
+            Err(e) => {
+                anyhow::bail!("remove legacy metadata file: {e}: {metadata_path}");
+            }
+        }
+    }
+
+    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+    if tenant_ignore_mark_file.exists() {
+        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+        return Ok(None);
+    }
 
     Ok(Some((
         tenant_shard_id,
@@ -482,7 +534,7 @@ pub async fn init_tenant_mgr(
                             TenantSlot::Secondary(SecondaryTenant::new(
                                 tenant_shard_id,
                                 location_conf.shard,
-                                location_conf.tenant_conf,
+                                location_conf.tenant_conf.clone(),
                                 &SecondaryLocationConfig { warm: false },
                             )),
                         );
@@ -545,7 +597,7 @@ pub async fn init_tenant_mgr(
             shard_identity,
             Some(init_order.clone()),
             &TENANTS,
-            SpawnMode::Normal,
+            SpawnMode::Lazy,
             &ctx,
         ) {
             Ok(tenant) => {
@@ -607,13 +659,6 @@ pub(crate) fn tenant_spawn(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
-    info!(
-        tenant_id = %tenant_shard_id.tenant_id,
-        shard_id = %tenant_shard_id.shard_slug(),
-        generation = ?location_conf.location.generation,
-        attach_mode = ?location_conf.location.attach_mode,
-        "Attaching tenant"
-    );
     let tenant = match Tenant::spawn(
         conf,
         tenant_shard_id,
@@ -651,8 +696,6 @@ pub(crate) async fn shutdown_all_tenants() {
 }
 
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
-    use utils::completion;
-
     let mut join_set = JoinSet::new();
 
     // Atomically, 1. create the shutdown tasks and 2. prevent creation of new tenants.
@@ -691,7 +734,7 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                                     // going to log too many lines
                                     debug!("tenant successfully stopped");
                                 }
-                                .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug())),
+                                .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
                             );
 
                             total_attached += 1;
@@ -801,7 +844,7 @@ pub(crate) async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_shard_id, true)?;
 
-    if tenant.tenant_shard_id().shard_count > ShardCount(0) {
+    if !tenant.tenant_shard_id().shard_count.is_unsharded() {
         // Note that we use ShardParameters::default below.
         return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
             "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
@@ -812,7 +855,7 @@ pub(crate) async fn set_new_tenant_config(
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
     let location_conf = LocationConf::attached_single(
-        new_tenant_conf,
+        new_tenant_conf.clone(),
         tenant.generation,
         &ShardParameters::default(),
     );
@@ -896,6 +939,17 @@ impl TenantManager {
             Some(TenantSlot::Secondary(s)) => Some(s.clone()),
             _ => None,
         }
+    }
+
+    /// Whether the `TenantManager` is responsible for the tenant shard
+    pub(crate) fn manages_tenant_shard(&self, tenant_shard_id: TenantShardId) -> bool {
+        let locked = self.tenants.read().unwrap();
+
+        let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
+            .ok()
+            .flatten();
+
+        peek_slot.is_some()
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
@@ -1054,9 +1108,9 @@ impl TenantManager {
 
                 // Edge case: if we were called with SpawnMode::Create, but a Tenant already existed, then
                 // the caller thinks they're creating but the tenant already existed.  We must switch to
-                // Normal mode so that when starting this Tenant we properly probe remote storage for timelines,
+                // Eager mode so that when starting this Tenant we properly probe remote storage for timelines,
                 // rather than assuming it to be empty.
-                spawn_mode = SpawnMode::Normal;
+                spawn_mode = SpawnMode::Eager;
             }
             Some(TenantSlot::Secondary(state)) => {
                 info!("Shutting down secondary tenant");
@@ -1196,7 +1250,7 @@ impl TenantManager {
         &self,
         tenant_shard_id: TenantShardId,
         drop_cache: bool,
-        ctx: RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
         let Some(old_slot) = slot_guard.get_old_value() else {
@@ -1248,8 +1302,8 @@ impl TenantManager {
             shard_identity,
             None,
             self.tenants,
-            SpawnMode::Normal,
-            &ctx,
+            SpawnMode::Eager,
+            ctx,
         )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
@@ -1306,11 +1360,22 @@ impl TenantManager {
         }
     }
 
+    pub(crate) fn get(&self, tenant_shard_id: TenantShardId) -> Option<TenantSlot> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => None,
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => {
+                map.get(&tenant_shard_id).cloned()
+            }
+        }
+    }
+
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
         activation_timeout: Duration,
     ) -> Result<(), DeleteTenantError> {
+        super::span::debug_assert_current_span_has_tenant_id();
         // We acquire a SlotGuard during this function to protect against concurrent
         // changes while the ::prepare phase of DeleteTenantFlow executes, but then
         // have to return the Tenant to the map while the background deletion runs.
@@ -1369,6 +1434,334 @@ impl TenantManager {
         // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
         slot_guard.revert();
         result
+    }
+
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), new_shard_count=%new_shard_count.literal()))]
+    pub(crate) async fn shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        new_shard_count: ShardCount,
+        new_stripe_size: Option<ShardStripeSize>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<TenantShardId>> {
+        let tenant = get_tenant(tenant_shard_id, true)?;
+
+        // Validate the incoming request
+        if new_shard_count.count() <= tenant_shard_id.shard_count.count() {
+            anyhow::bail!("Requested shard count is not an increase");
+        }
+        let expansion_factor = new_shard_count.count() / tenant_shard_id.shard_count.count();
+        if !expansion_factor.is_power_of_two() {
+            anyhow::bail!("Requested split is not a power of two");
+        }
+
+        if let Some(new_stripe_size) = new_stripe_size {
+            if tenant.get_shard_stripe_size() != new_stripe_size
+                && tenant_shard_id.shard_count.count() > 1
+            {
+                // This tenant already has multiple shards, it is illegal to try and change its stripe size
+                anyhow::bail!(
+                    "Shard stripe size may not be modified once tenant has multiple shards"
+                );
+            }
+        }
+
+        // Plan: identify what the new child shards will be
+        let child_shards = tenant_shard_id.split(new_shard_count);
+        tracing::info!(
+            "Shard {} splits into: {}",
+            tenant_shard_id.to_index(),
+            child_shards
+                .iter()
+                .map(|id| format!("{}", id.to_index()))
+                .join(",")
+        );
+
+        let parent_shard_identity = tenant.shard_identity;
+        let parent_tenant_conf = tenant.get_tenant_conf();
+        let parent_generation = tenant.generation;
+
+        // Phase 1: Write out child shards' remote index files, in the parent tenant's current generation
+        if let Err(e) = tenant.split_prepare(&child_shards).await {
+            // If [`Tenant::split_prepare`] fails, we must reload the tenant, because it might
+            // have been left in a partially-shut-down state.
+            tracing::warn!("Failed to prepare for split: {e}, reloading Tenant before returning");
+            self.reset_tenant(tenant_shard_id, false, ctx).await?;
+            return Err(e);
+        }
+
+        self.resources.deletion_queue_client.flush_advisory();
+
+        // Phase 2: Put the parent shard to InProgress and grab a reference to the parent Tenant
+        drop(tenant);
+        let mut parent_slot_guard =
+            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let parent = match parent_slot_guard.get_old_value() {
+            Some(TenantSlot::Attached(t)) => t,
+            Some(TenantSlot::Secondary(_)) => anyhow::bail!("Tenant location in secondary mode"),
+            Some(TenantSlot::InProgress(_)) => {
+                // tenant_map_acquire_slot never returns InProgress, if a slot was InProgress
+                // it would return an error.
+                unreachable!()
+            }
+            None => {
+                // We don't actually need the parent shard to still be attached to do our work, but it's
+                // a weird enough situation that the caller probably didn't want us to continue working
+                // if they had detached the tenant they requested the split on.
+                anyhow::bail!("Detached parent shard in the middle of split!")
+            }
+        };
+
+        // Optimization: hardlink layers from the parent into the children, so that they don't have to
+        // re-download & duplicate the data referenced in their initial IndexPart
+        self.shard_split_hardlink(parent, child_shards.clone())
+            .await?;
+
+        // Take a snapshot of where the parent's WAL ingest had got to: we will wait for
+        // child shards to reach this point.
+        let mut target_lsns = HashMap::new();
+        for timeline in parent.timelines.lock().unwrap().clone().values() {
+            target_lsns.insert(timeline.timeline_id, timeline.get_last_record_lsn());
+        }
+
+        // TODO: we should have the parent shard stop its WAL ingest here, it's a waste of resources
+        // and could slow down the children trying to catch up.
+
+        // Phase 3: Spawn the child shards
+        for child_shard in &child_shards {
+            let mut child_shard_identity = parent_shard_identity;
+            if let Some(new_stripe_size) = new_stripe_size {
+                child_shard_identity.stripe_size = new_stripe_size;
+            }
+            child_shard_identity.count = child_shard.shard_count;
+            child_shard_identity.number = child_shard.shard_number;
+
+            let child_location_conf = LocationConf {
+                mode: LocationMode::Attached(AttachedLocationConfig {
+                    generation: parent_generation,
+                    attach_mode: AttachmentMode::Single,
+                }),
+                shard: child_shard_identity,
+                tenant_conf: parent_tenant_conf.clone(),
+            };
+
+            self.upsert_location(
+                *child_shard,
+                child_location_conf,
+                None,
+                SpawnMode::Eager,
+                ctx,
+            )
+            .await?;
+        }
+
+        // Phase 4: wait for child chards WAL ingest to catch up to target LSN
+        for child_shard_id in &child_shards {
+            let child_shard_id = *child_shard_id;
+            let child_shard = {
+                let locked = TENANTS.read().unwrap();
+                let peek_slot =
+                    tenant_map_peek_slot(&locked, &child_shard_id, TenantSlotPeekMode::Read)?;
+                peek_slot.and_then(|s| s.get_attached()).cloned()
+            };
+            if let Some(t) = child_shard {
+                // Wait for the child shard to become active: this should be very quick because it only
+                // has to download the index_part that we just uploaded when creating it.
+                if let Err(e) = t.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await {
+                    // This is not fatal: we have durably created the child shard.  It just makes the
+                    // split operation less seamless for clients, as we will may detach the parent
+                    // shard before the child shards are fully ready to serve requests.
+                    tracing::warn!("Failed to wait for shard {child_shard_id} to activate: {e}");
+                    continue;
+                }
+
+                let timelines = t.timelines.lock().unwrap().clone();
+                for timeline in timelines.values() {
+                    let Some(target_lsn) = target_lsns.get(&timeline.timeline_id) else {
+                        continue;
+                    };
+
+                    tracing::info!(
+                        "Waiting for child shard {}/{} to reach target lsn {}...",
+                        child_shard_id,
+                        timeline.timeline_id,
+                        target_lsn
+                    );
+                    if let Err(e) = timeline.wait_lsn(*target_lsn, ctx).await {
+                        // Failure here might mean shutdown, in any case this part is an optimization
+                        // and we shouldn't hold up the split operation.
+                        tracing::warn!(
+                            "Failed to wait for timeline {} to reach lsn {target_lsn}: {e}",
+                            timeline.timeline_id
+                        );
+                    } else {
+                        tracing::info!(
+                            "Child shard {}/{} reached target lsn {}",
+                            child_shard_id,
+                            timeline.timeline_id,
+                            target_lsn
+                        );
+                    }
+                }
+            }
+        }
+
+        // Phase 5: Shut down the parent shard, and erase it from disk
+        let (_guard, progress) = completion::channel();
+        match parent.shutdown(progress, false).await {
+            Ok(()) => {}
+            Err(other) => {
+                other.wait().await;
+            }
+        }
+        let local_tenant_directory = self.conf.tenant_path(&tenant_shard_id);
+        let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
+            .await
+            .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            TaskKind::MgmtRequest,
+            None,
+            None,
+            "tenant_files_delete",
+            false,
+            async move {
+                fs::remove_dir_all(tmp_path.as_path())
+                    .await
+                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
+            },
+        );
+
+        parent_slot_guard.drop_old_value()?;
+
+        // Phase 6: Release the InProgress on the parent shard
+        drop(parent_slot_guard);
+
+        Ok(child_shards)
+    }
+
+    /// Part of [`Self::shard_split`]: hard link parent shard layers into child shards, as an optimization
+    /// to avoid the children downloading them again.
+    ///
+    /// For each resident layer in the parent shard, we will hard link it into all of the child shards.
+    async fn shard_split_hardlink(
+        &self,
+        parent_shard: &Tenant,
+        child_shards: Vec<TenantShardId>,
+    ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
+        let parent_path = self.conf.tenant_path(parent_shard.get_tenant_shard_id());
+        let (parent_timelines, parent_layers) = {
+            let mut parent_layers = Vec::new();
+            let timelines = parent_shard.timelines.lock().unwrap().clone();
+            let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
+            for timeline in timelines.values() {
+                let timeline_layers = timeline
+                    .layers
+                    .read()
+                    .await
+                    .resident_layers()
+                    .collect::<Vec<_>>()
+                    .await;
+                for layer in timeline_layers {
+                    let relative_path = layer
+                        .local_path()
+                        .strip_prefix(&parent_path)
+                        .context("Removing prefix from parent layer path")?;
+                    parent_layers.push(relative_path.to_owned());
+                }
+            }
+            debug_assert!(
+                !parent_layers.is_empty(),
+                "shutdown cannot empty the layermap"
+            );
+            (parent_timelines, parent_layers)
+        };
+
+        let mut child_prefixes = Vec::new();
+        let mut create_dirs = Vec::new();
+
+        for child in child_shards {
+            let child_prefix = self.conf.tenant_path(&child);
+            create_dirs.push(child_prefix.clone());
+            create_dirs.extend(
+                parent_timelines
+                    .iter()
+                    .map(|t| self.conf.timeline_path(&child, t)),
+            );
+
+            child_prefixes.push(child_prefix);
+        }
+
+        // Since we will do a large number of small filesystem metadata operations, batch them into
+        // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
+        let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            for dir in &create_dirs {
+                if let Err(e) = std::fs::create_dir_all(dir) {
+                    // Ignore AlreadyExists errors, drop out on all other errors
+                    match e.kind() {
+                        std::io::ErrorKind::AlreadyExists => {}
+                        _ => {
+                            return Err(anyhow::anyhow!(e).context(format!("Creating {dir}")));
+                        }
+                    }
+                }
+            }
+
+            for child_prefix in child_prefixes {
+                for relative_layer in &parent_layers {
+                    let parent_path = parent_path.join(relative_layer);
+                    let child_path = child_prefix.join(relative_layer);
+                    if let Err(e) = std::fs::hard_link(&parent_path, &child_path) {
+                        match e.kind() {
+                            std::io::ErrorKind::AlreadyExists => {}
+                            std::io::ErrorKind::NotFound => {
+                                tracing::info!(
+                                    "Layer {} not found during hard-linking, evicted during split?",
+                                    relative_layer
+                                );
+                            }
+                            _ => {
+                                return Err(anyhow::anyhow!(e).context(format!(
+                                    "Hard linking {relative_layer} into {child_prefix}"
+                                )))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Durability is not required for correctness, but if we crashed during split and
+            // then came restarted with empty timeline dirs, it would be very inefficient to
+            // re-populate from remote storage.
+            for dir in create_dirs {
+                if let Err(e) = crashsafe::fsync(&dir) {
+                    // Something removed a newly created timeline dir out from underneath us?  Extremely
+                    // unexpected, but not worth panic'ing over as this whole function is just an
+                    // optimization.
+                    tracing::warn!("Failed to fsync directory {dir}: {e}")
+                }
+            }
+
+            Ok(parent_layers.len())
+        });
+
+        match jh.await {
+            Ok(Ok(layer_count)) => {
+                tracing::info!(count = layer_count, "Hard linked layers into child shards");
+            }
+            Ok(Err(e)) => {
+                // This is an optimization, so we tolerate failure.
+                tracing::warn!("Error hard-linking layers, proceeding anyway: {e}")
+            }
+            Err(e) => {
+                // This is something totally unexpected like a panic, so bail out.
+                anyhow::bail!("Error joining hard linking task: {e}");
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1699,7 +2092,7 @@ pub(crate) async fn load_tenant(
         shard_identity,
         None,
         &TENANTS,
-        SpawnMode::Normal,
+        SpawnMode::Eager,
         ctx,
     )
     .with_context(|| format!("Failed to schedule tenant processing in path {tenant_path:?}"))?;
@@ -1715,6 +2108,7 @@ pub(crate) async fn ignore_tenant(
     ignore_tenant0(conf, &TENANTS, tenant_id).await
 }
 
+#[instrument(skip_all, fields(shard_id))]
 async fn ignore_tenant0(
     conf: &'static PageServerConf,
     tenants: &std::sync::RwLock<TenantsMap>,
@@ -1722,6 +2116,10 @@ async fn ignore_tenant0(
 ) -> Result<(), TenantStateError> {
     // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    tracing::Span::current().record(
+        "shard_id",
+        tracing::field::display(tenant_shard_id.shard_slug()),
+    );
 
     remove_tenant_from_memory(tenants, tenant_shard_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
@@ -2117,7 +2515,7 @@ fn tenant_map_acquire_slot_impl(
     METRICS.tenant_slot_writes.inc();
 
     let mut locked = tenants.write().unwrap();
-    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard = %tenant_shard_id.shard_slug());
+    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug());
     let _guard = span.enter();
 
     let m = match &mut *locked {
@@ -2199,8 +2597,6 @@ async fn remove_tenant_from_memory<V, F>(
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
-    use utils::completion;
-
     let mut slot_guard =
         tenant_map_acquire_slot_impl(&tenant_shard_id, tenants, TenantSlotAcquireMode::MustExist)?;
 
@@ -2280,7 +2676,7 @@ pub(crate) async fn immediate_gc(
 
     let tenant = guard
         .get(&tenant_shard_id)
-        .map(Arc::clone)
+        .cloned()
         .with_context(|| format!("tenant {tenant_shard_id}"))
         .map_err(|e| ApiError::NotFound(e.into()))?;
 
@@ -2353,7 +2749,7 @@ pub(crate) async fn immediate_gc(
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use tracing::{info_span, Instrument};
+    use tracing::Instrument;
 
     use crate::tenant::mgr::TenantSlot;
 
@@ -2364,17 +2760,16 @@ mod tests {
         // Test that if an InProgress tenant is in the map during shutdown, the shutdown will gracefully
         // wait for it to complete before proceeding.
 
-        let (t, _ctx) = TenantHarness::create("shutdown_awaits_in_progress_tenant")
-            .unwrap()
-            .load()
-            .await;
+        let h = TenantHarness::create("shutdown_awaits_in_progress_tenant").unwrap();
+        let (t, _ctx) = h.load().await;
 
         // harness loads it to active, which is forced and nothing is running on the tenant
 
         let id = t.tenant_shard_id();
 
         // tenant harness configures the logging and we cannot escape it
-        let _e = info_span!("testing", tenant_id = %id).entered();
+        let span = h.span();
+        let _e = span.enter();
 
         let tenants = BTreeMap::from([(id, TenantSlot::Attached(t.clone()))]);
         let tenants = Arc::new(std::sync::RwLock::new(TenantsMap::Open(tenants)));
@@ -2395,7 +2790,7 @@ mod tests {
                     };
                     super::remove_tenant_from_memory(&tenants, id, cleanup).await
                 }
-                .instrument(info_span!("foobar", tenant_id = %id))
+                .instrument(h.span())
             });
 
             // now the long cleanup should be in place, with the stopping state

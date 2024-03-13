@@ -17,20 +17,21 @@ use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::IoBufMut;
+use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
-use utils::fs_ext;
 
-mod io_engine;
+pub use pageserver_api::models::virtual_file as api;
+pub(crate) mod io_engine;
+mod metadata;
 mod open_options;
-pub use io_engine::IoEngineKind;
+pub(crate) use io_engine::IoEngineKind;
+pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 
 ///
@@ -403,52 +404,57 @@ impl VirtualFile {
         Ok(vfile)
     }
 
-    /// Async & [`VirtualFile`]-enabled version of [`::utils::crashsafe::overwrite`].
-    pub async fn crashsafe_overwrite(
-        final_path: &Utf8Path,
-        tmp_path: &Utf8Path,
-        content: &[u8],
+    /// Async version of [`::utils::crashsafe::overwrite`].
+    ///
+    /// # NB:
+    ///
+    /// Doesn't actually use the [`VirtualFile`] file descriptor cache, but,
+    /// it did at an earlier time.
+    /// And it will use this module's [`io_engine`] in the near future, so, leaving it here.
+    pub async fn crashsafe_overwrite<B: BoundedBuf<Buf = Buf> + Send, Buf: IoBuf + Send>(
+        final_path: Utf8PathBuf,
+        tmp_path: Utf8PathBuf,
+        content: B,
     ) -> std::io::Result<()> {
-        let Some(final_path_parent) = final_path.parent() else {
-            return Err(std::io::Error::from_raw_os_error(
-                nix::errno::Errno::EINVAL as i32,
-            ));
-        };
-        std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
-        let mut file = Self::open_with_options(
-            tmp_path,
-            OpenOptions::new()
-                .write(true)
-                // Use `create_new` so that, if we race with ourselves or something else,
-                // we bail out instead of causing damage.
-                .create_new(true),
-        )
-        .await?;
-        file.write_all(content).await?;
-        file.sync_all().await?;
-        drop(file); // before the rename, that's important!
-                    // renames are atomic
-        std::fs::rename(tmp_path, final_path)?;
-        // Only open final path parent dirfd now, so that this operation only
-        // ever holds one VirtualFile fd at a time.  That's important because
-        // the current `find_victim_slot` impl might pick the same slot for both
-        // VirtualFile., and it eventually does a blocking write lock instead of
-        // try_lock.
-        let final_parent_dirfd =
-            Self::open_with_options(final_path_parent, OpenOptions::new().read(true)).await?;
-        final_parent_dirfd.sync_all().await?;
-        Ok(())
+        // TODO: use tokio_epoll_uring if configured as `io_engine`.
+        // See https://github.com/neondatabase/neon/issues/6663
+
+        tokio::task::spawn_blocking(move || {
+            let slice_storage;
+            let content_len = content.bytes_init();
+            let content = if content.bytes_init() > 0 {
+                slice_storage = Some(content.slice(0..content_len));
+                slice_storage.as_deref().expect("just set it to Some()")
+            } else {
+                &[]
+            };
+            utils::crashsafe::overwrite(&final_path, &tmp_path, content)
+        })
+        .await
+        .expect("blocking task is never aborted")
     }
 
     /// Call File::sync_all() on the underlying File.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        with_file!(self, StorageIoOperation::Fsync, |file_guard| file_guard
-            .with_std_file(|std_file| std_file.sync_all()))
+        with_file!(self, StorageIoOperation::Fsync, |file_guard| {
+            let (_file_guard, res) = io_engine::get().sync_all(file_guard).await;
+            res
+        })
     }
 
-    pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        with_file!(self, StorageIoOperation::Metadata, |file_guard| file_guard
-            .with_std_file(|std_file| std_file.metadata()))
+    /// Call File::sync_data() on the underlying File.
+    pub async fn sync_data(&self) -> Result<(), Error> {
+        with_file!(self, StorageIoOperation::Fsync, |file_guard| {
+            let (_file_guard, res) = io_engine::get().sync_data(file_guard).await;
+            res
+        })
+    }
+
+    pub async fn metadata(&self) -> Result<Metadata, Error> {
+        with_file!(self, StorageIoOperation::Metadata, |file_guard| {
+            let (_file_guard, res) = io_engine::get().metadata(file_guard).await;
+            res
+        })
     }
 
     /// Helper function internal to `VirtualFile` that looks up the underlying File,
@@ -555,7 +561,18 @@ impl VirtualFile {
         B: IoBufMut + Send,
     {
         let (buf, res) =
-            read_exact_at_impl(buf, offset, |buf, offset| self.read_at(buf, offset)).await;
+            read_exact_at_impl(buf, offset, None, |buf, offset| self.read_at(buf, offset)).await;
+        res.map(|()| buf)
+    }
+
+    pub async fn read_exact_at_n<B>(&self, buf: B, offset: u64, count: usize) -> Result<B, Error>
+    where
+        B: IoBufMut + Send,
+    {
+        let (buf, res) = read_exact_at_impl(buf, offset, Some(count), |buf, offset| {
+            self.read_at(buf, offset)
+        })
+        .await;
         res.map(|()| buf)
     }
 
@@ -575,50 +592,88 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
-    pub async fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> Result<(), Error> {
+    pub async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &self,
+        buf: B,
+        mut offset: u64,
+    ) -> (B::Buf, Result<(), Error>) {
+        let buf_len = buf.bytes_init();
+        if buf_len == 0 {
+            return (Slice::into_inner(buf.slice_full()), Ok(()));
+        }
+        let mut buf = buf.slice(0..buf_len);
         while !buf.is_empty() {
-            match self.write_at(buf, offset).await {
+            let res;
+            (buf, res) = self.write_at(buf, offset).await;
+            match res {
                 Ok(0) => {
-                    return Err(Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return (
+                        Slice::into_inner(buf),
+                        Err(Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        )),
+                    );
                 }
                 Ok(n) => {
-                    buf = &buf[n..];
+                    buf = buf.slice(n..);
                     offset += n as u64;
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return (Slice::into_inner(buf), Err(e)),
             }
         }
-        Ok(())
+        (Slice::into_inner(buf), Ok(()))
     }
 
-    pub async fn write_all(&mut self, mut buf: &[u8]) -> Result<(), Error> {
+    /// Writes `buf.slice(0..buf.bytes_init())`.
+    /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
+    /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
+    /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
+    pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        buf: B,
+    ) -> (B::Buf, Result<usize, Error>) {
+        let nbytes = buf.bytes_init();
+        if nbytes == 0 {
+            return (Slice::into_inner(buf.slice_full()), Ok(0));
+        }
+        let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
-            match self.write(buf).await {
+            let res;
+            (buf, res) = self.write(buf).await;
+            match res {
                 Ok(0) => {
-                    return Err(Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return (
+                        Slice::into_inner(buf),
+                        Err(Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        )),
+                    );
                 }
                 Ok(n) => {
-                    buf = &buf[n..];
+                    buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(e) => return (Slice::into_inner(buf), Err(e)),
             }
         }
-        Ok(())
+        (Slice::into_inner(buf), Ok(nbytes))
     }
 
-    async fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+    async fn write<B: IoBuf + Send>(
+        &mut self,
+        buf: Slice<B>,
+    ) -> (Slice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
-        let n = self.write_at(buf, pos).await?;
+        let (buf, res) = self.write_at(buf, pos).await;
+        let n = match res {
+            Ok(n) => n,
+            Err(e) => return (buf, Err(e)),
+        };
         self.pos += n as u64;
-        Ok(n)
+        (buf, Ok(n))
     }
 
     pub(crate) async fn read_at<B>(&self, buf: B, offset: u64) -> (B, Result<usize, Error>)
@@ -646,16 +701,30 @@ impl VirtualFile {
         })
     }
 
-    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, StorageIoOperation::Write, |file_guard| {
-            file_guard.with_std_file(|std_file| std_file.write_at(buf, offset))
-        });
-        if let Ok(size) = result {
-            STORAGE_IO_SIZE
-                .with_label_values(&["write", &self.tenant_id, &self.shard_id, &self.timeline_id])
-                .add(size as i64);
-        }
-        result
+    async fn write_at<B: IoBuf + Send>(
+        &self,
+        buf: Slice<B>,
+        offset: u64,
+    ) -> (Slice<B>, Result<usize, Error>) {
+        let file_guard = match self.lock_file().await {
+            Ok(file_guard) => file_guard,
+            Err(e) => return (buf, Err(e)),
+        };
+        observe_duration!(StorageIoOperation::Write, {
+            let ((_file_guard, buf), result) =
+                io_engine::get().write_at(file_guard, offset, buf).await;
+            if let Ok(size) = result {
+                STORAGE_IO_SIZE
+                    .with_label_values(&[
+                        "write",
+                        &self.tenant_id,
+                        &self.shard_id,
+                        &self.timeline_id,
+                    ])
+                    .add(size as i64);
+            }
+            (buf, result)
+        })
     }
 }
 
@@ -663,6 +732,7 @@ impl VirtualFile {
 pub async fn read_exact_at_impl<B, F, Fut>(
     buf: B,
     mut offset: u64,
+    count: Option<usize>,
     mut read_at: F,
 ) -> (B, std::io::Result<()>)
 where
@@ -670,8 +740,15 @@ where
     F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
     Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
 {
-    use tokio_epoll_uring::BoundedBuf;
-    let mut buf: tokio_epoll_uring::Slice<B> = buf.slice_full(); // includes all the uninitialized memory
+    let mut buf: tokio_epoll_uring::Slice<B> = match count {
+        Some(count) => {
+            assert!(count <= buf.bytes_total());
+            assert!(count > 0);
+            buf.slice(..count) // may include uninitialized memory
+        }
+        None => buf.slice_full(), // includes all the uninitialized memory
+    };
+
     while buf.bytes_total() != 0 {
         let res;
         (buf, res) = read_at(buf, offset).await;
@@ -761,7 +838,7 @@ mod test_read_exact_at_impl {
                 result: Ok(vec![b'a', b'b', b'c', b'd', b'e']),
             }]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -771,12 +848,32 @@ mod test_read_exact_at_impl {
     }
 
     #[tokio::test]
+    async fn test_with_count() {
+        let buf = Vec::with_capacity(5);
+        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
+            expectations: VecDeque::from(vec![Expectation {
+                offset: 0,
+                bytes_total: 3,
+                result: Ok(vec![b'a', b'b', b'c']),
+            }]),
+        }));
+
+        let (buf, res) = read_exact_at_impl(buf, 0, Some(3), |buf, offset| {
+            let mock_read_at = Arc::clone(&mock_read_at);
+            async move { mock_read_at.lock().await.read_at(buf, offset).await }
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(buf, vec![b'a', b'b', b'c']);
+    }
+
+    #[tokio::test]
     async fn test_empty_buf_issues_no_syscall() {
         let buf = Vec::new();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::new(),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -801,7 +898,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -832,7 +929,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -1025,6 +1122,7 @@ mod tests {
     use rand::Rng;
     use std::future::Future;
     use std::io::Write;
+    use std::os::unix::fs::FileExt;
     use std::sync::Arc;
 
     enum MaybeVirtualFile {
@@ -1045,10 +1143,23 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
             }
         }
-        async fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
+        async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+            &self,
+            buf: B,
+            offset: u64,
+        ) -> Result<(), Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.write_all_at(buf, offset).await,
-                MaybeVirtualFile::File(file) => file.write_all_at(buf, offset),
+                MaybeVirtualFile::VirtualFile(file) => {
+                    let (_buf, res) = file.write_all_at(buf, offset).await;
+                    res
+                }
+                MaybeVirtualFile::File(file) => {
+                    let buf_len = buf.bytes_init();
+                    if buf_len == 0 {
+                        return Ok(());
+                    }
+                    file.write_all_at(&buf.slice(0..buf_len), offset)
+                }
             }
         }
         async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
@@ -1057,10 +1168,22 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
+        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+            &mut self,
+            buf: B,
+        ) -> Result<(), Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.write_all(buf).await,
-                MaybeVirtualFile::File(file) => file.write_all(buf),
+                MaybeVirtualFile::VirtualFile(file) => {
+                    let (_buf, res) = file.write_all(buf).await;
+                    res.map(|_| ())
+                }
+                MaybeVirtualFile::File(file) => {
+                    let buf_len = buf.bytes_init();
+                    if buf_len == 0 {
+                        return Ok(());
+                    }
+                    file.write_all(&buf.slice(0..buf_len))
+                }
             }
         }
 
@@ -1135,7 +1258,7 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_a.write_all(b"foobar").await?;
+        file_a.write_all(b"foobar".to_vec()).await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string().await.unwrap_err();
@@ -1144,7 +1267,7 @@ mod tests {
         let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar").await.unwrap_err();
+        let _ = file_a.write_all(b"bar".to_vec()).await.unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string().await?);
@@ -1186,8 +1309,8 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_b.write_all_at(b"BAR", 3).await?;
-        file_b.write_all_at(b"FOO", 0).await?;
+        file_b.write_all_at(b"BAR".to_vec(), 3).await?;
+        file_b.write_all_at(b"FOO".to_vec(), 0).await?;
 
         assert_eq!(file_b.read_string_at(2, 3).await?, "OBA");
 
@@ -1287,7 +1410,7 @@ mod tests {
         let path = testdir.join("myfile");
         let tmp_path = testdir.join("myfile.tmp");
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo")
+        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
@@ -1296,7 +1419,7 @@ mod tests {
         assert!(!tmp_path.exists());
         drop(file);
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"bar")
+        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
@@ -1318,7 +1441,7 @@ mod tests {
         std::fs::write(&tmp_path, "some preexisting junk that should be removed").unwrap();
         assert!(tmp_path.exists());
 
-        VirtualFile::crashsafe_overwrite(&path, &tmp_path, b"foo")
+        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
 

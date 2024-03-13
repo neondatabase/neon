@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use postgres_ffi::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
+use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
@@ -321,7 +321,7 @@ pub struct AppendRequestHeader {
 }
 
 /// Report safekeeper state to proposer
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct AppendResponse {
     // Current term of the safekeeper; if it is higher than proposer's, the
     // compute is out of date.
@@ -334,7 +334,7 @@ pub struct AppendResponse {
     // a criterion for walproposer --sync mode exit
     pub commit_lsn: Lsn,
     pub hs_feedback: HotStandbyFeedback,
-    pub pageserver_feedback: PageserverFeedback,
+    pub pageserver_feedback: Option<PageserverFeedback>,
 }
 
 impl AppendResponse {
@@ -344,7 +344,7 @@ impl AppendResponse {
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
             hs_feedback: HotStandbyFeedback::empty(),
-            pageserver_feedback: PageserverFeedback::empty(),
+            pageserver_feedback: None,
         }
     }
 }
@@ -462,7 +462,11 @@ impl AcceptorProposerMessage {
                 buf.put_u64_le(msg.hs_feedback.xmin);
                 buf.put_u64_le(msg.hs_feedback.catalog_xmin);
 
-                msg.pageserver_feedback.serialize(buf);
+                // AsyncReadMessage in walproposer.c will not try to decode pageserver_feedback
+                // if it is not present.
+                if let Some(ref msg) = msg.pageserver_feedback {
+                    msg.serialize(buf);
+                }
             }
         }
 
@@ -681,7 +685,7 @@ where
             commit_lsn: self.state.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
-            pageserver_feedback: PageserverFeedback::empty(),
+            pageserver_feedback: None,
         };
         trace!("formed AppendResponse {:?}", ar);
         ar
@@ -946,28 +950,12 @@ where
         }
         Ok(())
     }
-
-    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
-    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
-    /// offloading.
-    /// While it is safe to use inmem values for determining horizon,
-    /// we use persistent to make possible normal states less surprising.
-    pub fn get_horizon_segno(&self, wal_backup_enabled: bool) -> XLogSegNo {
-        let mut horizon_lsn = min(
-            self.state.remote_consistent_lsn,
-            self.state.peer_horizon_lsn,
-        );
-        if wal_backup_enabled {
-            horizon_lsn = min(horizon_lsn, self.state.backup_lsn);
-        }
-        horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use futures::future::BoxFuture;
-    use postgres_ffi::WAL_SEGMENT_SIZE;
+    use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
 
     use super::*;
     use crate::{

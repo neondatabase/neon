@@ -316,6 +316,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	static uint64_t delay_us = MIN_RECONNECT_INTERVAL_USEC;
 	TimestampTz now;
 	uint64_t	us_since_last_connect;
+	bool	broke_from_loop = false;
 
 	Assert(page_servers[shard_no].conn == NULL);
 
@@ -328,18 +329,14 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 	now = GetCurrentTimestamp();
 	us_since_last_connect = now - last_connect_time;
-	if (us_since_last_connect < delay_us)
+	if (us_since_last_connect < MAX_RECONNECT_INTERVAL_USEC)
 	{
-		pg_usleep(delay_us - us_since_last_connect);
+		pg_usleep(delay_us);
 		delay_us *= 2;
-		if (delay_us > MAX_RECONNECT_INTERVAL_USEC)
-			delay_us = MAX_RECONNECT_INTERVAL_USEC;
-		last_connect_time = GetCurrentTimestamp();
 	}
 	else
 	{
 		delay_us = MIN_RECONNECT_INTERVAL_USEC;
-		last_connect_time = now;
 	}
 
 	/*
@@ -366,6 +363,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	values[n] = NULL;
 	n++;
 	conn = PQconnectdbParams(keywords, values, 1);
+	last_connect_time = GetCurrentTimestamp();
 
 	if (PQstatus(conn) == CONNECTION_BAD)
 	{
@@ -421,7 +419,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 					neon_shard_log(shard_no, elevel, "could not complete handshake with pageserver: %s",
 								   msg);
-					return false;
+					/* Returning from inside PG_TRY is bad, so we break/return later */
+					broke_from_loop = true;
+					break;
 				}
 			}
 		}
@@ -433,6 +433,11 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	if (broke_from_loop)
+	{
+		return false;
+	}
 
 	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s'", connstr);
 	page_servers[shard_no].conn = conn;

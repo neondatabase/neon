@@ -6,7 +6,9 @@ use super::{
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
     NodeInfo,
 };
-use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
+use crate::{
+    auth::backend::ComputeUserInfo, compute, console::messages::ColdStartInfo, http, scram,
+};
 use crate::{
     cache::Cached,
     context::RequestMonitoring,
@@ -19,7 +21,6 @@ use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
-#[derive(Clone)]
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
@@ -73,7 +74,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetRoleSecret>(response).await {
                 Ok(body) => body,
@@ -133,7 +136,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response).await?;
 
@@ -189,22 +194,23 @@ impl super::Api for Api {
                 ep,
                 Arc::new(auth_info.allowed_ips),
             );
+            ctx.set_project_id(project_id);
         }
         // When we just got a secret, we don't need to invalidate it.
         Ok(Cached::new_uncached(auth_info.secret))
     }
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         let ep = &user_info.endpoint;
         if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(ep) {
             ALLOWED_IPS_BY_CACHE_OUTCOME
                 .with_label_values(&["hit"])
                 .inc();
-            return Ok(allowed_ips);
+            return Ok((allowed_ips, None));
         }
         ALLOWED_IPS_BY_CACHE_OUTCOME
             .with_label_values(&["miss"])
@@ -222,8 +228,12 @@ impl super::Api for Api {
             self.caches
                 .project_info
                 .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
+            ctx.set_project_id(project_id);
         }
-        Ok(Cached::new_uncached(allowed_ips))
+        Ok((
+            Cached::new_uncached(allowed_ips),
+            Some(Cached::new_uncached(auth_info.secret)),
+        ))
     }
 
     #[tracing::instrument(skip_all)]
@@ -250,11 +260,15 @@ impl super::Api for Api {
         if permit.should_check_cache() {
             if let Some(cached) = self.caches.node_info.get(&key) {
                 info!(key = &*key, "found cached compute node info");
+                ctx.set_cold_start_info(ColdStartInfo::Warm);
                 return Ok(cached);
             }
         }
 
         let node = self.do_wake_compute(ctx, user_info).await?;
+        ctx.set_project(node.aux.clone());
+        let cold_start_info = node.aux.cold_start_info.clone().unwrap_or_default();
+        info!(?cold_start_info, "woken up a compute node");
         let (_, cached) = self.caches.node_info.insert(key.clone(), node);
         info!(key = &*key, "created a cache entry for compute node info");
 

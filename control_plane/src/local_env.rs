@@ -72,10 +72,15 @@ pub struct LocalEnv {
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
 
-    // Control plane location: if None, we will not run attachment_service.  If set, this will
+    // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
     #[serde(default)]
     pub control_plane_api: Option<Url>,
+
+    // Control plane upcall API for storage controller.  If set, this will be propagated into the
+    // storage controller's configuration.
+    #[serde(default)]
+    pub control_plane_compute_hook_api: Option<Url>,
 
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     #[serde(default)]
@@ -222,8 +227,12 @@ impl LocalEnv {
         self.neon_distrib_dir.join("pageserver")
     }
 
-    pub fn attachment_service_bin(&self) -> PathBuf {
-        self.neon_distrib_dir.join("attachment_service")
+    pub fn storage_controller_bin(&self) -> PathBuf {
+        // Irrespective of configuration, storage controller binary is always
+        // run from the same location as neon_local.  This means that for compatibility
+        // tests that run old pageserver/safekeeper, they still run latest storage controller.
+        let neon_local_bin_dir = env::current_exe().unwrap().parent().unwrap().to_owned();
+        neon_local_bin_dir.join("storage_controller")
     }
 
     pub fn safekeeper_bin(&self) -> PathBuf {
@@ -403,14 +412,17 @@ impl LocalEnv {
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
-        let private_key_path = if self.private_key_path.is_absolute() {
+        let private_key_path = self.get_private_key_path();
+        let key_data = fs::read(private_key_path)?;
+        encode_from_key_file(claims, &key_data)
+    }
+
+    pub fn get_private_key_path(&self) -> PathBuf {
+        if self.private_key_path.is_absolute() {
             self.private_key_path.to_path_buf()
         } else {
             self.base_data_dir.join(&self.private_key_path)
-        };
-
-        let key_data = fs::read(private_key_path)?;
-        encode_from_key_file(claims, &key_data)
+        }
     }
 
     //

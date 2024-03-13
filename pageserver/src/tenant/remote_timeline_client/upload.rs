@@ -5,19 +5,21 @@ use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
 use std::io::{ErrorKind, SeekFrom};
+use std::time::SystemTime;
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
+use utils::backoff;
 
 use super::Generation;
 use crate::{
     config::PageServerConf,
     tenant::remote_timeline_client::{
         index::IndexPart, remote_index_path, remote_initdb_archive_path,
-        remote_initdb_preserved_archive_path, remote_path, upload_cancellable,
+        remote_initdb_preserved_archive_path, remote_path,
     },
 };
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, TimeTravelError};
 use utils::id::{TenantId, TimelineId};
 
 use super::index::LayerFileMetadata;
@@ -25,7 +27,7 @@ use super::index::LayerFileMetadata;
 use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
-pub(super) async fn upload_index_part<'a>(
+pub(crate) async fn upload_index_part<'a>(
     storage: &'a GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
@@ -47,16 +49,15 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_bytes = bytes::Bytes::from(index_part_bytes);
 
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, generation);
-    upload_cancellable(
-        cancel,
-        storage.upload_storage_object(
+    storage
+        .upload_storage_object(
             futures::stream::once(futures::future::ready(Ok(index_part_bytes))),
             index_part_size,
             &remote_path,
-        ),
-    )
-    .await
-    .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
+            cancel,
+        )
+        .await
+        .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
 }
 
 /// Attempts to upload given layer files.
@@ -113,11 +114,10 @@ pub(super) async fn upload_timeline_layer<'a>(
 
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
-    upload_cancellable(cancel, storage.upload(reader, fs_size, &storage_path, None))
+    storage
+        .upload(reader, fs_size, &storage_path, None, cancel)
         .await
-        .with_context(|| format!("upload layer from local path '{source_path}'"))?;
-
-    Ok(())
+        .with_context(|| format!("upload layer from local path '{source_path}'"))
 }
 
 /// Uploads the given `initdb` data to the remote storage.
@@ -137,12 +137,10 @@ pub(crate) async fn upload_initdb_dir(
     let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, super::BUFFER_SIZE);
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
-    upload_cancellable(
-        cancel,
-        storage.upload_storage_object(file, size as usize, &remote_path),
-    )
-    .await
-    .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
+    storage
+        .upload_storage_object(file, size as usize, &remote_path, cancel)
+        .await
+        .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
 }
 
 pub(crate) async fn preserve_initdb_archive(
@@ -153,7 +151,52 @@ pub(crate) async fn preserve_initdb_archive(
 ) -> anyhow::Result<()> {
     let source_path = remote_initdb_archive_path(tenant_id, timeline_id);
     let dest_path = remote_initdb_preserved_archive_path(tenant_id, timeline_id);
-    upload_cancellable(cancel, storage.copy_object(&source_path, &dest_path))
+    storage
+        .copy_object(&source_path, &dest_path, cancel)
         .await
         .with_context(|| format!("backing up initdb archive for '{tenant_id} / {timeline_id}'"))
+}
+
+pub(crate) async fn time_travel_recover_tenant(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    timestamp: SystemTime,
+    done_if_after: SystemTime,
+    cancel: &CancellationToken,
+) -> Result<(), TimeTravelError> {
+    let warn_after = 3;
+    let max_attempts = 10;
+    let mut prefixes = Vec::with_capacity(2);
+    if tenant_shard_id.is_zero() {
+        // Also recover the unsharded prefix for a shard of zero:
+        // - if the tenant is totally unsharded, the unsharded prefix contains all the data
+        // - if the tenant is sharded, we still want to recover the initdb data, but we only
+        //   want to do it once, so let's do it on the 0 shard
+        let timelines_path_unsharded =
+            super::remote_timelines_path_unsharded(&tenant_shard_id.tenant_id);
+        prefixes.push(timelines_path_unsharded);
+    }
+    if !tenant_shard_id.is_unsharded() {
+        // If the tenant is sharded, we need to recover the sharded prefix
+        let timelines_path = super::remote_timelines_path(tenant_shard_id);
+        prefixes.push(timelines_path);
+    }
+    for prefix in &prefixes {
+        backoff::retry(
+            || async {
+                storage
+                    .time_travel_recover(Some(prefix), timestamp, done_if_after, cancel)
+                    .await
+            },
+            |e| !matches!(e, TimeTravelError::Other(_)),
+            warn_after,
+            max_attempts,
+            "time travel recovery of tenant prefix",
+            cancel,
+        )
+        .await
+        .ok_or_else(|| TimeTravelError::Cancelled)
+        .and_then(|x| x)?;
+    }
+    Ok(())
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::BufRead;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -17,9 +17,9 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use nix::unistd::Pid;
+use postgres::error::SqlState;
 use postgres::{Client, NoTls};
-use tokio;
-use tokio_postgres;
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -27,6 +27,8 @@ use utils::lsn::Lsn;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
+
+use nix::sys::signal::{kill, Signal};
 
 use remote_storage::{DownloadError, RemotePath};
 
@@ -207,6 +209,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
 
 /// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
 /// that we give to customers
+#[instrument(skip_all)]
 fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let roles = spec
         .cluster
@@ -319,11 +322,12 @@ impl ComputeNode {
     // Get basebackup from the libpq connection to pageserver using `connstr` and
     // unarchive it to `pgdata` directory overriding all its previous content.
     #[instrument(skip_all, fields(%lsn))]
-    fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
+    fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Instant::now();
 
-        let mut config = postgres::Config::from_str(&spec.pageserver_connstr)?;
+        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
+        let mut config = postgres::Config::from_str(shard0_connstr)?;
 
         // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.
@@ -388,6 +392,34 @@ impl ComputeNode {
         state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
         state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
         Ok(())
+    }
+
+    // Gets the basebackup in a retry loop
+    #[instrument(skip_all, fields(%lsn))]
+    pub fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
+        let mut retry_period_ms = 500.0;
+        let mut attempts = 0;
+        let max_attempts = 10;
+        loop {
+            let result = self.try_get_basebackup(compute_state, lsn);
+            match result {
+                Ok(_) => {
+                    return result;
+                }
+                Err(ref e) if attempts < max_attempts => {
+                    warn!(
+                        "Failed to get basebackup: {} (attempt {}/{})",
+                        e, attempts, max_attempts
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(retry_period_ms as u64));
+                    retry_period_ms *= 1.5;
+                }
+                Err(_) => {
+                    return result;
+                }
+            }
+            attempts += 1;
+        }
     }
 
     pub async fn check_safekeepers_synced_async(
@@ -605,6 +637,48 @@ impl ComputeNode {
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
 
+        // Place pg_dynshmem under /dev/shm. This allows us to use
+        // 'dynamic_shared_memory_type = mmap' so that the files are placed in
+        // /dev/shm, similar to how 'dynamic_shared_memory_type = posix' works.
+        //
+        // Why on earth don't we just stick to the 'posix' default, you might
+        // ask.  It turns out that making large allocations with 'posix' doesn't
+        // work very well with autoscaling. The behavior we want is that:
+        //
+        // 1. You can make large DSM allocations, larger than the current RAM
+        //    size of the VM, without errors
+        //
+        // 2. If the allocated memory is really used, the VM is scaled up
+        //    automatically to accommodate that
+        //
+        // We try to make that possible by having swap in the VM. But with the
+        // default 'posix' DSM implementation, we fail step 1, even when there's
+        // plenty of swap available. PostgreSQL uses posix_fallocate() to create
+        // the shmem segment, which is really just a file in /dev/shm in Linux,
+        // but posix_fallocate() on tmpfs returns ENOMEM if the size is larger
+        // than available RAM.
+        //
+        // Using 'dynamic_shared_memory_type = mmap' works around that, because
+        // the Postgres 'mmap' DSM implementation doesn't use
+        // posix_fallocate(). Instead, it uses repeated calls to write(2) to
+        // fill the file with zeros. It's weird that that differs between
+        // 'posix' and 'mmap', but we take advantage of it. When the file is
+        // filled slowly with write(2), the kernel allows it to grow larger, as
+        // long as there's swap available.
+        //
+        // In short, using 'dynamic_shared_memory_type = mmap' allows us one DSM
+        // segment to be larger than currently available RAM. But because we
+        // don't want to store it on a real file, which the kernel would try to
+        // flush to disk, so symlink pg_dynshm to /dev/shm.
+        //
+        // We don't set 'dynamic_shared_memory_type = mmap' here, we let the
+        // control plane control that option. If 'mmap' is not used, this
+        // symlink doesn't affect anything.
+        //
+        // See https://github.com/neondatabase/autoscaling/issues/800
+        std::fs::remove_dir(pgdata_path.join("pg_dynshmem"))?;
+        symlink("/dev/shm/", pgdata_path.join("pg_dynshmem"))?;
+
         match spec.mode {
             ComputeMode::Primary => {}
             ComputeMode::Replica | ComputeMode::Static(..) => {
@@ -649,8 +723,12 @@ impl ComputeNode {
         // Stop it when it's ready
         info!("waiting for postgres");
         wait_for_postgres(&mut pg, Path::new(pgdata))?;
-        pg.kill()?;
-        info!("sent kill signal");
+        // SIGQUIT orders postgres to exit immediately. We don't want to SIGKILL
+        // it to avoid orphaned processes prowling around while datadir is
+        // wiped.
+        let pm_pid = Pid::from_raw(pg.id() as i32);
+        kill(pm_pid, Signal::SIGQUIT)?;
+        info!("sent SIGQUIT signal");
         pg.wait()?;
         info!("done prewarming");
 
@@ -691,6 +769,26 @@ impl ComputeNode {
         Ok((pg, logs_handle))
     }
 
+    /// Do post configuration of the already started Postgres. This function spawns a background thread to
+    /// configure the database after applying the compute spec. Currently, it upgrades the neon extension
+    /// version. In the future, it may upgrade all 3rd-party extensions.
+    #[instrument(skip_all)]
+    pub fn post_apply_config(&self) -> Result<()> {
+        let connstr = self.connstr.clone();
+        thread::spawn(move || {
+            let func = || {
+                let mut client = Client::connect(connstr.as_str(), NoTls)?;
+                handle_neon_extension_upgrade(&mut client)
+                    .context("handle_neon_extension_upgrade")?;
+                Ok::<_, anyhow::Error>(())
+            };
+            if let Err(err) = func() {
+                error!("error while post_apply_config: {err:#}");
+            }
+        });
+        Ok(())
+    }
+
     /// Do initial configuration of the already started Postgres.
     #[instrument(skip_all)]
     pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
@@ -702,27 +800,34 @@ impl ComputeNode {
         // but we can create a new one and grant it all privileges.
         let connstr = self.connstr.clone();
         let mut client = match Client::connect(connstr.as_str(), NoTls) {
-            Err(e) => {
-                info!(
-                    "cannot connect to postgres: {}, retrying with `zenith_admin` username",
-                    e
-                );
-                let mut zenith_admin_connstr = connstr.clone();
+            Err(e) => match e.code() {
+                Some(&SqlState::INVALID_PASSWORD)
+                | Some(&SqlState::INVALID_AUTHORIZATION_SPECIFICATION) => {
+                    // connect with zenith_admin if cloud_admin could not authenticate
+                    info!(
+                        "cannot connect to postgres: {}, retrying with `zenith_admin` username",
+                        e
+                    );
+                    let mut zenith_admin_connstr = connstr.clone();
 
-                zenith_admin_connstr
-                    .set_username("zenith_admin")
-                    .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
+                    zenith_admin_connstr
+                        .set_username("zenith_admin")
+                        .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
 
-                let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
-                // Disable forwarding so that users don't get a cloud_admin role
-                client.simple_query("SET neon.forward_ddl = false")?;
-                client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
-                client.simple_query("GRANT zenith_admin TO cloud_admin")?;
-                drop(client);
+                    let mut client =
+                        Client::connect(zenith_admin_connstr.as_str(), NoTls)
+                            .context("broken cloud_admin credential: tried connecting with cloud_admin but could not authenticate, and zenith_admin does not work either")?;
+                    // Disable forwarding so that users don't get a cloud_admin role
+                    client.simple_query("SET neon.forward_ddl = false")?;
+                    client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
+                    client.simple_query("GRANT zenith_admin TO cloud_admin")?;
+                    drop(client);
 
-                // reconnect with connstring with expected name
-                Client::connect(connstr.as_str(), NoTls)?
-            }
+                    // reconnect with connstring with expected name
+                    Client::connect(connstr.as_str(), NoTls)?
+                }
+                _ => return Err(e.into()),
+            },
             Ok(client) => client,
         };
 
@@ -736,7 +841,12 @@ impl ComputeNode {
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, connstr.as_str(), &mut client)?;
-        handle_grants(spec, &mut client, connstr.as_str())?;
+        handle_grants(
+            spec,
+            &mut client,
+            connstr.as_str(),
+            self.has_feature(ComputeFeature::AnonExtension),
+        )?;
         handle_extensions(spec, &mut client)?;
         handle_extension_neon(&mut client)?;
         create_availability_check_data(&mut client)?;
@@ -744,12 +854,11 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
-        if self.has_feature(ComputeFeature::Migrations) {
-            thread::spawn(move || {
-                let mut client = Client::connect(connstr.as_str(), NoTls)?;
-                handle_migrations(&mut client)
-            });
-        }
+        // Run migrations separately to not hold up cold starts
+        thread::spawn(move || {
+            let mut client = Client::connect(connstr.as_str(), NoTls)?;
+            handle_migrations(&mut client)
+        });
         Ok(())
     }
 
@@ -811,7 +920,12 @@ impl ComputeNode {
             handle_roles(&spec, &mut client)?;
             handle_databases(&spec, &mut client)?;
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-            handle_grants(&spec, &mut client, self.connstr.as_str())?;
+            handle_grants(
+                &spec,
+                &mut client,
+                self.connstr.as_str(),
+                self.has_feature(ComputeFeature::AnonExtension),
+            )?;
             handle_extensions(&spec, &mut client)?;
             handle_extension_neon(&mut client)?;
             // We can skip handle_migrations here because a new migration can only appear
@@ -909,18 +1023,21 @@ impl ComputeNode {
         let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
 
         let config_time = Utc::now();
-        if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
-            let pgdata_path = Path::new(&self.pgdata);
-            // temporarily reset max_cluster_size in config
-            // to avoid the possibility of hitting the limit, while we are applying config:
-            // creating new extensions, roles, etc...
-            config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
-            self.pg_reload_conf()?;
+        if pspec.spec.mode == ComputeMode::Primary {
+            if !pspec.spec.skip_pg_catalog_updates {
+                let pgdata_path = Path::new(&self.pgdata);
+                // temporarily reset max_cluster_size in config
+                // to avoid the possibility of hitting the limit, while we are applying config:
+                // creating new extensions, roles, etc...
+                config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
+                self.pg_reload_conf()?;
 
-            self.apply_config(&compute_state)?;
+                self.apply_config(&compute_state)?;
 
-            config::compute_ctl_temp_override_remove(pgdata_path)?;
-            self.pg_reload_conf()?;
+                config::compute_ctl_temp_override_remove(pgdata_path)?;
+                self.pg_reload_conf()?;
+            }
+            self.post_apply_config()?;
         }
 
         let startup_end_time = Utc::now();
@@ -1239,5 +1356,19 @@ LIMIT 100",
             remote_ext_metrics.total_ext_download_size += download_size;
         }
         Ok(remote_ext_metrics)
+    }
+}
+
+pub fn forward_termination_signal() {
+    let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
+    if ss_pid != 0 {
+        let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
+        kill(ss_pid, Signal::SIGTERM).ok();
+    }
+    let pg_pid = PG_PID.load(Ordering::SeqCst);
+    if pg_pid != 0 {
+        let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
+        // use 'immediate' shutdown (SIGQUIT): https://www.postgresql.org/docs/current/server-shutdown.html
+        kill(pg_pid, Signal::SIGQUIT).ok();
     }
 }

@@ -21,7 +21,6 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # Branch at the point where only 100 rows were inserted
     branch_behind_timeline_id = env.neon_cli.create_branch("test_branch_behind")
     endpoint_main = env.endpoints.create_start("test_branch_behind")
-    log.info("postgres is running on 'test_branch_behind' branch")
 
     main_cur = endpoint_main.connect().cursor()
 

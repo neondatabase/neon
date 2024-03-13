@@ -109,12 +109,12 @@ impl PageServerNode {
                 control_plane_api.as_str()
             ));
 
-            // Attachment service uses the same auth as pageserver: if JWT is enabled
+            // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
             if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
-                    .generate_auth_token(&Claims::new(None, Scope::PageServerApi))
+                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
                     .unwrap();
                 overrides.push(format!("control_plane_api_token='{}'", jwt_token));
             }
@@ -200,6 +200,28 @@ impl PageServerNode {
             String::from_utf8_lossy(&init_output.stderr),
         );
 
+        // Write metadata file, used by pageserver on startup to register itself with
+        // the storage controller
+        let metadata_path = datadir.join("metadata.json");
+
+        let (_http_host, http_port) =
+            parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
+        let http_port = http_port.unwrap_or(9898);
+        // Intentionally hand-craft JSON: this acts as an implicit format compat test
+        // in case the pageserver-side structure is edited, and reflects the real life
+        // situation: the metadata is written by some other script.
+        std::fs::write(
+            metadata_path,
+            serde_json::to_vec(&serde_json::json!({
+                "host": "localhost",
+                "port": self.pg_connection_config.port(),
+                "http_host": "localhost",
+                "http_port": http_port,
+            }))
+            .unwrap(),
+        )
+        .expect("Failed to write metadata file");
+
         Ok(())
     }
 
@@ -244,7 +266,9 @@ impl PageServerNode {
                 }
             },
         )
-        .await
+        .await?;
+
+        Ok(())
     }
 
     fn pageserver_basic_args<'a>(
@@ -329,6 +353,11 @@ impl PageServerNode {
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
                 .transpose()?,
+            compaction_algorithm: settings
+                .remove("compaction_algorithm")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Failed to parse 'compaction_algorithm' json")?,
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
@@ -368,12 +397,17 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
-            gc_feedback: settings
-                .remove("gc_feedback")
+            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+            lazy_slru_download: settings
+                .remove("lazy_slru_download")
                 .map(|x| x.parse::<bool>())
                 .transpose()
-                .context("Failed to parse 'gc_feedback' as bool")?,
-            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                .context("Failed to parse 'lazy_slru_download' as bool")?,
+            timeline_get_throttle: settings
+                .remove("timeline_get_throttle")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("parse `timeline_get_throttle` from json")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -395,6 +429,8 @@ impl PageServerNode {
             generation,
             config,
             shard_parameters: ShardParameters::default(),
+            // Placement policy is not meaningful for creations not done via storage controller
+            placement_policy: None,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -427,6 +463,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'compaction_threshold' as an integer")?,
+                compaction_algorithm: settings
+                    .remove("compactin_algorithm")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("Failed to parse 'compaction_algorithm' json")?,
                 gc_horizon: settings
                     .remove("gc_horizon")
                     .map(|x| x.parse::<u64>())
@@ -468,12 +509,17 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-                gc_feedback: settings
-                    .remove("gc_feedback")
+                heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                lazy_slru_download: settings
+                    .remove("lazy_slru_download")
                     .map(|x| x.parse::<bool>())
                     .transpose()
-                    .context("Failed to parse 'gc_feedback' as bool")?,
-                heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                    .context("Failed to parse 'lazy_slru_download' as bool")?,
+                timeline_get_throttle: settings
+                    .remove("timeline_get_throttle")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("parse `timeline_get_throttle` from json")?,
             }
         };
 
@@ -493,10 +539,11 @@ impl PageServerNode {
         tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
+        lazy: bool,
     ) -> anyhow::Result<()> {
         Ok(self
             .http_client
-            .location_config(tenant_shard_id, config, flush_ms)
+            .location_config(tenant_shard_id, config, flush_ms, lazy)
             .await?)
     }
 
@@ -561,7 +608,7 @@ impl PageServerNode {
                 eprintln!("connection error: {}", e);
             }
         });
-        tokio::pin!(client);
+        let client = std::pin::pin!(client);
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;

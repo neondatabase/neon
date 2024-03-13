@@ -1,7 +1,8 @@
 use crate::{
     auth, compute,
     console::{self, provider::NodeInfo},
-    error::UserFacingError,
+    context::RequestMonitoring,
+    error::{ReportableError, UserFacingError},
     stream::PqStream,
     waiters,
 };
@@ -13,10 +14,6 @@ use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
 pub enum LinkAuthError {
-    /// Authentication error reported by the console.
-    #[error("Authentication failed: {0}")]
-    AuthFailed(String),
-
     #[error(transparent)]
     WaiterRegister(#[from] waiters::RegisterError),
 
@@ -29,10 +26,16 @@ pub enum LinkAuthError {
 
 impl UserFacingError for LinkAuthError {
     fn to_string_client(&self) -> String {
-        use LinkAuthError::*;
+        "Internal error".to_string()
+    }
+}
+
+impl ReportableError for LinkAuthError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            AuthFailed(_) => self.to_string(),
-            _ => "Internal error".to_string(),
+            LinkAuthError::WaiterRegister(_) => crate::error::ErrorKind::Service,
+            LinkAuthError::WaiterWait(_) => crate::error::ErrorKind::Service,
+            LinkAuthError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }
@@ -54,9 +57,12 @@ pub fn new_psql_session_id() -> String {
 }
 
 pub(super) async fn authenticate(
+    ctx: &mut RequestMonitoring,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {
+    ctx.set_auth_method(crate::context::AuthMethod::Web);
+
     // registering waiter can fail if we get unlucky with rng.
     // just try again.
     let (psql_session_id, waiter) = loop {
@@ -93,6 +99,11 @@ pub(super) async fn authenticate(
         .port(db_info.port)
         .dbname(&db_info.dbname)
         .user(&db_info.user);
+
+    ctx.set_user(db_info.user.into());
+    ctx.set_project(db_info.aux.clone());
+    let cold_start_info = db_info.aux.cold_start_info.clone().unwrap_or_default();
+    info!(?cold_start_info, "woken up a compute node");
 
     // Backwards compatibility. pg_sni_proxy uses "--" in domain names
     // while direct connections do not. Once we migrate to pg_sni_proxy

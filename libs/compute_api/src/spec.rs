@@ -79,6 +79,12 @@ pub struct ComputeSpec {
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
     pub shard_stripe_size: Option<usize>,
+
+    // When we are starting a new replica in hot standby mode,
+    // we need to know if the primary is running.
+    // This is used to determine if replica should wait for
+    // RUNNING_XACTS from primary or not.
+    pub primary_is_running: Option<bool>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -90,8 +96,8 @@ pub enum ComputeFeature {
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
 
-    /// Enable running migrations
-    Migrations,
+    /// Pre-install and initialize anon extension for every database in the cluster
+    AnonExtension,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test

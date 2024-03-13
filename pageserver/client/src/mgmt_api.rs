@@ -7,7 +7,7 @@ use utils::{
 
 pub mod util;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Client {
     mgmt_api_endpoint: String,
     authorization_header: Option<String>,
@@ -24,6 +24,9 @@ pub enum Error {
 
     #[error("pageserver API: {1}")]
     ApiError(StatusCode, String),
+
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -56,10 +59,18 @@ pub enum ForceAwaitLogicalSize {
 
 impl Client {
     pub fn new(mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
+        Self::from_client(reqwest::Client::new(), mgmt_api_endpoint, jwt)
+    }
+
+    pub fn from_client(
+        client: reqwest::Client,
+        mgmt_api_endpoint: String,
+        jwt: Option<&str>,
+    ) -> Self {
         Self {
             mgmt_api_endpoint,
             authorization_header: jwt.map(|jwt| format!("Bearer {jwt}")),
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -67,6 +78,25 @@ impl Client {
         let uri = format!("{}/v1/tenant", self.mgmt_api_endpoint);
         let resp = self.get(&uri).await?;
         resp.json().await.map_err(Error::ReceiveBody)
+    }
+
+    /// Get an arbitrary path and returning a streaming Response.  This function is suitable
+    /// for pass-through/proxy use cases where we don't care what the response content looks
+    /// like.
+    ///
+    /// Use/add one of the properly typed methods below if you know aren't proxying, and
+    /// know what kind of response you expect.
+    pub async fn get_raw(&self, path: String) -> Result<reqwest::Response> {
+        debug_assert!(path.starts_with('/'));
+        let uri = format!("{}{}", self.mgmt_api_endpoint, path);
+
+        let req = self.client.request(Method::GET, uri);
+        let req = if let Some(value) = &self.authorization_header {
+            req.header(reqwest::header::AUTHORIZATION, value)
+        } else {
+            req
+        };
+        req.send().await.map_err(Error::ReceiveBody)
     }
 
     pub async fn tenant_details(
@@ -171,6 +201,39 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    /// The tenant deletion API can return 202 if deletion is incomplete, or
+    /// 404 if it is complete.  Callers are responsible for checking the status
+    /// code and retrying.  Error codes other than 404 will return Err().
+    pub async fn tenant_delete(&self, tenant_shard_id: TenantShardId) -> Result<StatusCode> {
+        let uri = format!("{}/v1/tenant/{tenant_shard_id}", self.mgmt_api_endpoint);
+
+        match self.request(Method::DELETE, &uri, ()).await {
+            Err(Error::ApiError(status_code, msg)) => {
+                if status_code == StatusCode::NOT_FOUND {
+                    Ok(StatusCode::NOT_FOUND)
+                } else {
+                    Err(Error::ApiError(status_code, msg))
+                }
+            }
+            Err(e) => Err(e),
+            Ok(response) => Ok(response.status()),
+        }
+    }
+
+    pub async fn tenant_time_travel_remote_storage(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timestamp: &str,
+        done_if_after: &str,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/time_travel_remote_storage?travel_to={timestamp}&done_if_after={done_if_after}",
+            self.mgmt_api_endpoint
+        );
+        self.request(Method::PUT, &uri, ()).await?;
+        Ok(())
+    }
+
     pub async fn tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
         self.request(Method::PUT, &uri, req).await?;
@@ -191,26 +254,50 @@ impl Client {
         tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<std::time::Duration>,
+        lazy: bool,
     ) -> Result<()> {
         let req_body = TenantLocationConfigRequest {
             tenant_id: tenant_shard_id,
             config,
         };
-        let path = format!(
+
+        let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/location_config",
             self.mgmt_api_endpoint, tenant_shard_id
-        );
-        let path = if let Some(flush_ms) = flush_ms {
-            format!("{}?flush_ms={}", path, flush_ms.as_millis())
-        } else {
-            path
-        };
-        self.request(Method::PUT, &path, &req_body).await?;
+        ))
+        // Should always work: mgmt_api_endpoint is configuration, not user input.
+        .expect("Cannot build URL");
+
+        if lazy {
+            path.query_pairs_mut().append_pair("lazy", "true");
+        }
+
+        if let Some(flush_ms) = flush_ms {
+            path.query_pairs_mut()
+                .append_pair("flush_ms", &format!("{}", flush_ms.as_millis()));
+        }
+
+        self.request(Method::PUT, path, &req_body).await?;
         Ok(())
     }
 
     pub async fn list_location_config(&self) -> Result<LocationConfigListResponse> {
         let path = format!("{}/v1/location_config", self.mgmt_api_endpoint);
+        self.request(Method::GET, &path, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn get_location_config(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<Option<LocationConfig>> {
+        let path = format!(
+            "{}/v1/location_config/{tenant_shard_id}",
+            self.mgmt_api_endpoint
+        );
         self.request(Method::GET, &path, ())
             .await?
             .json()
@@ -234,12 +321,54 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    /// The timeline deletion API can return 201 if deletion is incomplete, or
+    /// 403 if it is complete.  Callers are responsible for checking the status
+    /// code and retrying.  Error codes other than 403 will return Err().
+    pub async fn timeline_delete(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<StatusCode> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
+            self.mgmt_api_endpoint
+        );
+
+        match self.request(Method::DELETE, &uri, ()).await {
+            Err(Error::ApiError(status_code, msg)) => {
+                if status_code == StatusCode::NOT_FOUND {
+                    Ok(StatusCode::NOT_FOUND)
+                } else {
+                    Err(Error::ApiError(status_code, msg))
+                }
+            }
+            Err(e) => Err(e),
+            Ok(response) => Ok(response.status()),
+        }
+    }
+
     pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {
         let uri = format!(
             "{}/v1/tenant/{}/reset",
             self.mgmt_api_endpoint, tenant_shard_id
         );
         self.request(Method::POST, &uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn tenant_shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        req: TenantShardSplitRequest,
+    ) -> Result<TenantShardSplitResponse> {
+        let uri = format!(
+            "{}/v1/tenant/{}/shard_split",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
+        self.request(Method::PUT, &uri, req)
             .await?
             .json()
             .await
@@ -270,6 +399,18 @@ impl Client {
             self.mgmt_api_endpoint, tenant_shard_id
         );
         self.get(&uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn put_io_engine(
+        &self,
+        engine: &pageserver_api::models::virtual_file::IoEngineKind,
+    ) -> Result<()> {
+        let uri = format!("{}/v1/io_engine", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, engine)
             .await?
             .json()
             .await

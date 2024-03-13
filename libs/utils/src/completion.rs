@@ -4,7 +4,9 @@ use tokio_util::task::{task_tracker::TaskTrackerToken, TaskTracker};
 ///
 /// Can be cloned, moved and kept around in futures as "guard objects".
 #[derive(Clone)]
-pub struct Completion(TaskTrackerToken);
+pub struct Completion {
+    _token: TaskTrackerToken,
+}
 
 /// Barrier will wait until all clones of [`Completion`] have been dropped.
 #[derive(Clone)]
@@ -27,6 +29,11 @@ impl Barrier {
             b.wait().await
         }
     }
+
+    /// Return true if a call to wait() would complete immediately
+    pub fn is_ready(&self) -> bool {
+        futures::future::FutureExt::now_or_never(self.0.wait()).is_some()
+    }
 }
 
 impl PartialEq for Barrier {
@@ -44,5 +51,5 @@ pub fn channel() -> (Completion, Barrier) {
     tracker.close();
 
     let token = tracker.token();
-    (Completion(token), Barrier(tracker))
+    (Completion { _token: token }, Barrier(tracker))
 }

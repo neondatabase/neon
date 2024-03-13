@@ -1,8 +1,9 @@
 use crate::{
-    cancellation::CancelMap,
+    cancellation::CancellationHandler,
     config::ProxyConfig,
     context::RequestMonitoring,
-    error::io_error,
+    error::{io_error, ReportableError},
+    metrics::NUM_CLIENT_CONNECTION_GAUGE,
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
@@ -131,23 +132,46 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    mut ctx: RequestMonitoring,
     websocket: HyperWebsocket,
-    cancel_map: &CancelMap,
+    cancellation_handler: Arc<CancellationHandler>,
     hostname: Option<String>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    handle_client(
+    let conn_gauge = NUM_CLIENT_CONNECTION_GAUGE
+        .with_label_values(&["ws"])
+        .guard();
+
+    let res = handle_client(
         config,
-        ctx,
-        cancel_map,
+        &mut ctx,
+        cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
+        conn_gauge,
     )
-    .await?;
-    Ok(())
+    .await;
+
+    match res {
+        Err(e) => {
+            // todo: log and push to ctx the error kind
+            ctx.set_error_kind(e.get_error_kind());
+            ctx.log();
+            Err(e.into())
+        }
+        Ok(None) => {
+            ctx.set_success();
+            ctx.log();
+            Ok(())
+        }
+        Ok(Some(p)) => {
+            ctx.set_success();
+            ctx.log();
+            p.proxy_pass().await
+        }
+    }
 }
 
 #[cfg(test)]

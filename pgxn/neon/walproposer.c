@@ -688,7 +688,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->greetResponse))
 		return;
 
-	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s", sk->host, sk->port);
+	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s, term=" INT64_FORMAT, sk->host, sk->port, sk->greetResponse.term);
 
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
@@ -922,6 +922,7 @@ static void
 DetermineEpochStartLsn(WalProposer *wp)
 {
 	TermHistory *dth;
+	int          n_ready = 0;
 
 	wp->propEpochStartLsn = InvalidXLogRecPtr;
 	wp->donorEpoch = 0;
@@ -932,6 +933,8 @@ DetermineEpochStartLsn(WalProposer *wp)
 	{
 		if (wp->safekeeper[i].state == SS_IDLE)
 		{
+			n_ready++;
+
 			if (GetEpoch(&wp->safekeeper[i]) > wp->donorEpoch ||
 				(GetEpoch(&wp->safekeeper[i]) == wp->donorEpoch &&
 				 wp->safekeeper[i].voteResponse.flushLsn > wp->propEpochStartLsn))
@@ -956,6 +959,16 @@ DetermineEpochStartLsn(WalProposer *wp)
 				wp->timelineStartLsn = wp->safekeeper[i].voteResponse.timelineStartLsn;
 			}
 		}
+	}
+
+	if (n_ready < wp->quorum)
+	{
+		/*
+		 * This is a rare case that can be triggered if safekeeper has voted and disconnected.
+		 * In this case, its state will not be SS_IDLE and its vote cannot be used, because
+		 * we clean up `voteResponse` in `ShutdownConnection`.
+		 */
+		wp_log(FATAL, "missing majority of votes, collected %d, expected %d, got %d", wp->n_votes, wp->quorum, n_ready);
 	}
 
 	/*
@@ -1207,7 +1220,7 @@ PrepareAppendRequest(WalProposer *wp, AppendRequestHeader *req, XLogRecPtr begin
 	req->epochStartLsn = wp->propEpochStartLsn;
 	req->beginLsn = beginLsn;
 	req->endLsn = endLsn;
-	req->commitLsn = GetAcknowledgedByQuorumWALPosition(wp);
+	req->commitLsn = wp->commitLsn;
 	req->truncateLsn = wp->truncateLsn;
 	req->proposerId = wp->greetRequest.proposerId;
 }
@@ -1392,7 +1405,7 @@ static bool
 RecvAppendResponses(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
-	XLogRecPtr	minQuorumLsn;
+	XLogRecPtr	newCommitLsn;
 	bool		readAnything = false;
 
 	while (true)
@@ -1431,23 +1444,24 @@ RecvAppendResponses(Safekeeper *sk)
 	if (!readAnything)
 		return sk->state == SS_ACTIVE;
 
-	HandleSafekeeperResponse(wp);
-
+	/* update commit_lsn */
+	newCommitLsn = GetAcknowledgedByQuorumWALPosition(wp);
 	/*
-	 * Also send the new commit lsn to all the safekeepers.
+	 * Send the new value to all safekeepers.
 	 */
-	minQuorumLsn = GetAcknowledgedByQuorumWALPosition(wp);
-	if (minQuorumLsn > wp->lastSentCommitLsn)
+	if (newCommitLsn > wp->commitLsn)
 	{
+		wp->commitLsn = newCommitLsn;
 		BroadcastAppendRequest(wp);
-		wp->lastSentCommitLsn = minQuorumLsn;
 	}
+
+	HandleSafekeeperResponse(wp);
 
 	return sk->state == SS_ACTIVE;
 }
 
 /* Parse a PageserverFeedback message, or the PageserverFeedback part of an AppendResponse */
-void
+static void
 ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, PageserverFeedback *rf)
 {
 	uint8		nkeys;
@@ -1577,9 +1591,9 @@ GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
 Safekeeper *
 GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 {
-	*donor_lsn = InvalidXLogRecPtr;
 	Safekeeper *donor = NULL;
 	int			i;
+	*donor_lsn = InvalidXLogRecPtr;
 
 	if (wp->n_votes < wp->quorum)
 	{
@@ -1619,11 +1633,9 @@ GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 static void
 HandleSafekeeperResponse(WalProposer *wp)
 {
-	XLogRecPtr	minQuorumLsn;
 	XLogRecPtr	candidateTruncateLsn;
 
-	minQuorumLsn = GetAcknowledgedByQuorumWALPosition(wp);
-	wp->api.process_safekeeper_feedback(wp, minQuorumLsn);
+	wp->api.process_safekeeper_feedback(wp);
 
 	/*
 	 * Try to advance truncateLsn -- the last record flushed to all
@@ -1636,7 +1648,7 @@ HandleSafekeeperResponse(WalProposer *wp)
 	 * can't commit entries from previous term' in Raft); 2)
 	 */
 	candidateTruncateLsn = CalculateMinFlushLsn(wp);
-	candidateTruncateLsn = Min(candidateTruncateLsn, minQuorumLsn);
+	candidateTruncateLsn = Min(candidateTruncateLsn, wp->commitLsn);
 	if (candidateTruncateLsn > wp->truncateLsn)
 	{
 		wp->truncateLsn = candidateTruncateLsn;

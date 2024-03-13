@@ -1,8 +1,13 @@
 //! User credentials used in authentication.
 
 use crate::{
-    auth::password_hack::parse_endpoint_param, context::RequestMonitoring, error::UserFacingError,
-    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::NeonOptions, EndpointId, RoleName,
+    auth::password_hack::parse_endpoint_param,
+    context::RequestMonitoring,
+    error::{ReportableError, UserFacingError},
+    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI,
+    proxy::NeonOptions,
+    serverless::SERVERLESS_DRIVER_SNI,
+    EndpointId, RoleName,
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -38,6 +43,12 @@ pub enum ComputeUserInfoParseError {
 
 impl UserFacingError for ComputeUserInfoParseError {}
 
+impl ReportableError for ComputeUserInfoParseError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        crate::error::ErrorKind::User
+    }
+}
+
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,10 +65,10 @@ impl ComputeUserInfoMaybeEndpoint {
     }
 }
 
-pub fn endpoint_sni<'a>(
-    sni: &'a str,
+pub fn endpoint_sni(
+    sni: &str,
     common_names: &HashSet<String>,
-) -> Result<&'a str, ComputeUserInfoParseError> {
+) -> Result<Option<EndpointId>, ComputeUserInfoParseError> {
     let Some((subdomain, common_name)) = sni.split_once('.') else {
         return Err(ComputeUserInfoParseError::UnknownCommonName { cn: sni.into() });
     };
@@ -66,7 +77,10 @@ pub fn endpoint_sni<'a>(
             cn: common_name.into(),
         });
     }
-    Ok(subdomain)
+    if subdomain == SERVERLESS_DRIVER_SNI {
+        return Ok(None);
+    }
+    Ok(Some(EndpointId::from(subdomain)))
 }
 
 impl ComputeUserInfoMaybeEndpoint {
@@ -85,7 +99,9 @@ impl ComputeUserInfoMaybeEndpoint {
         // record the values if we have them
         ctx.set_application(params.get("application_name").map(SmolStr::from));
         ctx.set_user(user.clone());
-        ctx.set_endpoint_id(sni.map(EndpointId::from));
+        if let Some(dbname) = params.get("database") {
+            ctx.set_dbname(dbname.into());
+        }
 
         // Project name might be passed via PG's command-line options.
         let endpoint_option = params
@@ -103,7 +119,7 @@ impl ComputeUserInfoMaybeEndpoint {
 
         let endpoint_from_domain = if let Some(sni_str) = sni {
             if let Some(cn) = common_names {
-                Some(EndpointId::from(endpoint_sni(sni_str, cn)?))
+                endpoint_sni(sni_str, cn)?
             } else {
                 None
             }
@@ -117,14 +133,18 @@ impl ComputeUserInfoMaybeEndpoint {
                 Some(Err(InconsistentProjectNames { domain, option }))
             }
             // Invariant: project name may not contain certain characters.
-            (a, b) => a.or(b).map(|name| match project_name_valid(&name) {
+            (a, b) => a.or(b).map(|name| match project_name_valid(name.as_ref()) {
                 false => Err(MalformedProjectName(name)),
                 true => Ok(name),
             }),
         }
         .transpose()?;
 
-        info!(%user, project = endpoint.as_deref(), "credentials");
+        if let Some(ep) = &endpoint {
+            ctx.set_endpoint_id(ep.clone());
+        }
+
+        info!(%user, "credentials");
         if sni.is_some() {
             info!("Connection with sni");
             NUM_CONNECTION_ACCEPTED_BY_SNI
@@ -146,7 +166,7 @@ impl ComputeUserInfoMaybeEndpoint {
 
         Ok(Self {
             user,
-            endpoint_id: endpoint.map(EndpointId::from),
+            endpoint_id: endpoint,
             options,
         })
     }

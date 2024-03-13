@@ -4,6 +4,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import requests
@@ -11,7 +12,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from fixtures.log_helper import log
-from fixtures.metrics import Metrics, parse_metrics
+from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import Fn
@@ -124,7 +125,7 @@ class TenantConfig:
         )
 
 
-class PageserverHttpClient(requests.Session):
+class PageserverHttpClient(requests.Session, MetricsGetter):
     def __init__(
         self,
         port: int,
@@ -285,7 +286,11 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
 
     def tenant_location_conf(
-        self, tenant_id: Union[TenantId, TenantShardId], location_conf=dict[str, Any], flush_ms=None
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        location_conf=dict[str, Any],
+        flush_ms=None,
+        lazy: Optional[bool] = None,
     ):
         body = location_conf.copy()
         body["tenant_id"] = str(tenant_id)
@@ -294,12 +299,31 @@ class PageserverHttpClient(requests.Session):
         if flush_ms is not None:
             params["flush_ms"] = str(flush_ms)
 
+        if lazy is not None:
+            params["lazy"] = "true" if lazy else "false"
+
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/location_config",
             json=body,
             params=params,
         )
         self.verbose_error(res)
+
+    def tenant_list_locations(self):
+        res = self.get(
+            f"http://localhost:{self.port}/v1/location_config",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json["tenant_shards"], list)
+        return res_json
+
+    def tenant_get_location(self, tenant_id: TenantShardId):
+        res = self.get(
+            f"http://localhost:{self.port}/v1/location_config/{tenant_id}",
+        )
+        self.verbose_error(res)
+        return res.json()
 
     def tenant_delete(self, tenant_id: Union[TenantId, TenantShardId]):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
@@ -388,6 +412,28 @@ class PageserverHttpClient(requests.Session):
             headers={"Accept": "text/html"},
         )
         return res.text
+
+    def tenant_time_travel_remote_storage(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timestamp: datetime,
+        done_if_after: datetime,
+        shard_counts: Optional[List[int]] = None,
+    ):
+        """
+        Issues a request to perform time travel operations on the remote storage
+        """
+
+        if shard_counts is None:
+            shard_counts = []
+        body: Dict[str, Any] = {
+            "shard_counts": shard_counts,
+        }
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/time_travel_remote_storage?travel_to={timestamp.isoformat()}Z&done_if_after={done_if_after.isoformat()}Z",
+            json=body,
+        )
+        self.verbose_error(res)
 
     def timeline_list(
         self,
@@ -517,11 +563,14 @@ class PageserverHttpClient(requests.Session):
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
         force_repartition=False,
+        force_image_layer_creation=False,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
         if force_repartition:
             query["force_repartition"] = "true"
+        if force_image_layer_creation:
+            query["force_image_layer_creation"] = "true"
 
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
@@ -548,18 +597,13 @@ class PageserverHttpClient(requests.Session):
         self,
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
-        timestamp,
-        version: Optional[int] = None,
+        timestamp: datetime,
     ):
         log.info(
             f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}"
         )
-        if version is None:
-            version_str = ""
-        else:
-            version_str = f"&version={version}"
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp}{version_str}",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp.isoformat()}Z",
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -581,11 +625,14 @@ class PageserverHttpClient(requests.Session):
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
         force_repartition=False,
+        force_image_layer_creation=False,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
         if force_repartition:
             query["force_repartition"] = "true"
+        if force_image_layer_creation:
+            query["force_image_layer_creation"] = "true"
 
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
@@ -684,71 +731,33 @@ class PageserverHttpClient(requests.Session):
             },
         ).value
 
-    def get_remote_timeline_client_metric(
+    def get_remote_timeline_client_queue_count(
         self,
-        metric_name: str,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         file_kind: str,
         op_kind: str,
-    ) -> Optional[float]:
-        metrics = self.get_metrics()
-        matches = metrics.query_all(
-            name=metric_name,
+    ) -> Optional[int]:
+        metrics = [
+            "pageserver_remote_timeline_client_calls_started_total",
+            "pageserver_remote_timeline_client_calls_finished_total",
+        ]
+        res = self.get_metrics_values(
+            metrics,
             filter={
                 "tenant_id": str(tenant_id),
                 "timeline_id": str(timeline_id),
                 "file_kind": str(file_kind),
                 "op_kind": str(op_kind),
             },
+            absence_ok=True,
         )
-        if len(matches) == 0:
-            value = None
-        elif len(matches) == 1:
-            value = matches[0].value
-            assert value is not None
-        else:
-            assert len(matches) < 2, "above filter should uniquely identify metric"
-        return value
-
-    def get_metric_value(
-        self, name: str, filter: Optional[Dict[str, str]] = None
-    ) -> Optional[float]:
-        metrics = self.get_metrics()
-        results = metrics.query_all(name, filter=filter)
-        if not results:
-            log.info(f'could not find metric "{name}"')
+        if len(res) != 2:
             return None
-        assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
-        return results[0].value
-
-    def get_metrics_values(
-        self, names: list[str], filter: Optional[Dict[str, str]] = None
-    ) -> Dict[str, float]:
-        """
-        When fetching multiple named metrics, it is more efficient to use this
-        than to call `get_metric_value` repeatedly.
-
-        Throws RuntimeError if no metrics matching `names` are found, or if
-        not all of `names` are found: this method is intended for loading sets
-        of metrics whose existence is coupled.
-        """
-        metrics = self.get_metrics()
-        samples = []
-        for name in names:
-            samples.extend(metrics.query_all(name, filter=filter))
-
-        result = {}
-        for sample in samples:
-            if sample.name in result:
-                raise RuntimeError(f"Multiple values found for {sample.name}")
-            result[sample.name] = sample.value
-
-        if len(result) != len(names):
-            log.info(f"Metrics found: {metrics.metrics}")
-            raise RuntimeError(f"could not find all metrics {' '.join(names)}")
-
-        return result
+        inc, dec = [res[metric] for metric in metrics]
+        queue_count = int(inc) - int(dec)
+        assert queue_count >= 0
+        return queue_count
 
     def layer_map_info(
         self,
@@ -821,3 +830,16 @@ class PageserverHttpClient(requests.Session):
         self.put(
             f"http://localhost:{self.port}/v1/deletion_queue/flush?execute={'true' if execute else 'false'}"
         ).raise_for_status()
+
+    def timeline_wait_logical_size(self, tenant_id: TenantId, timeline_id: TimelineId) -> int:
+        detail = self.timeline_detail(
+            tenant_id,
+            timeline_id,
+            include_non_incremental_logical_size=True,
+            force_await_initial_logical_size=True,
+        )
+        current_logical_size = detail["current_logical_size"]
+        non_incremental = detail["current_logical_size_non_incremental"]
+        assert current_logical_size == non_incremental
+        assert isinstance(current_logical_size, int)
+        return current_logical_size

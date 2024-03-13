@@ -2,8 +2,11 @@
 //!
 //! Handles both SQL over HTTP and SQL over Websockets.
 
+mod backend;
 mod conn_pool;
+mod json;
 mod sql_over_http;
+pub mod tls_listener;
 mod websocket;
 
 pub use conn_pool::GlobalConnPoolOptions;
@@ -17,46 +20,46 @@ pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
-use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
-use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
-use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
+use crate::protocol2::{ProxyProtocolAccept, WithClientIp, WithConnectionGuard};
 use crate::rate_limiter::EndpointRateLimiter;
-use crate::{cancellation::CancelMap, config::ProxyConfig};
-use futures::StreamExt;
+use crate::serverless::backend::PoolingBackend;
+use crate::{cancellation::CancellationHandler, config::ProxyConfig};
 use hyper::{
-    server::{
-        accept,
-        conn::{AddrIncoming, AddrStream},
-    },
+    server::conn::{AddrIncoming, AddrStream},
     Body, Method, Request, Response,
 };
 
+use std::convert::Infallible;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::task::Poll;
-use std::{future::ready, sync::Arc};
 use tls_listener::TlsListener;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{error, info, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
+
+pub const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    cancellation_handler: Arc<CancellationHandler>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
     }
 
-    let conn_pool = conn_pool::GlobalConnPool::new(config);
-
-    let conn_pool2 = Arc::clone(&conn_pool);
-    tokio::spawn(async move {
-        conn_pool2.gc_worker(StdRng::from_entropy()).await;
-    });
+    let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
+    {
+        let conn_pool = Arc::clone(&conn_pool);
+        tokio::spawn(async move {
+            conn_pool.gc_worker(StdRng::from_entropy()).await;
+        });
+    }
 
     // shutdown the connection pool
     tokio::spawn({
@@ -70,6 +73,11 @@ pub async fn task_main(
         }
     });
 
+    let backend = Arc::new(PoolingBackend {
+        pool: Arc::clone(&conn_pool),
+        config,
+    });
+
     let tls_config = match config.tls_config.as_ref() {
         Some(config) => config,
         None => {
@@ -77,79 +85,84 @@ pub async fn task_main(
             return Ok(());
         }
     };
-    let tls_acceptor: tokio_rustls::TlsAcceptor = tls_config.to_server_config().into();
+    let mut tls_server_config = rustls::ServerConfig::clone(&tls_config.to_server_config());
+    // prefer http2, but support http/1.1
+    tls_server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let tls_acceptor: tokio_rustls::TlsAcceptor = Arc::new(tls_server_config).into();
 
     let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
     let _ = addr_incoming.set_nodelay(true);
     let addr_incoming = ProxyProtocolAccept {
         incoming: addr_incoming,
+        protocol: "http",
     };
 
     let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
     ws_connections.close(); // allows `ws_connections.wait to complete`
 
-    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
-        if let Err(err) = conn {
-            error!("failed to accept TLS connection for websockets: {err:?}");
-            ready(false)
-        } else {
-            ready(true)
-        }
-    });
+    let tls_listener = TlsListener::new(
+        tls_acceptor,
+        addr_incoming,
+        "http",
+        config.handshake_timeout,
+    );
 
     let make_svc = hyper::service::make_service_fn(
-        |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
-            let (io, tls) = stream.get_ref();
-            let client_addr = io.client_addr();
-            let remote_addr = io.inner.remote_addr();
-            let sni_name = tls.server_name().map(|s| s.to_string());
-            let conn_pool = conn_pool.clone();
+        |stream: &tokio_rustls::server::TlsStream<
+            WithConnectionGuard<WithClientIp<AddrStream>>,
+        >| {
+            let (conn, _) = stream.get_ref();
+
+            // this is jank. should dissapear with hyper 1.0 migration.
+            let gauge = conn
+                .gauge
+                .lock()
+                .expect("lock should not be poisoned")
+                .take()
+                .expect("gauge should be set on connection start");
+
+            let client_addr = conn.inner.client_addr();
+            let remote_addr = conn.inner.inner.remote_addr();
+            let backend = backend.clone();
             let ws_connections = ws_connections.clone();
             let endpoint_rate_limiter = endpoint_rate_limiter.clone();
-
+            let cancellation_handler = cancellation_handler.clone();
             async move {
                 let peer_addr = match client_addr {
                     Some(addr) => addr,
                     None if config.require_client_ip => bail!("missing required client ip"),
                     None => remote_addr,
                 };
-                Ok(MetricService::new(hyper::service::service_fn(
-                    move |req: Request<Body>| {
-                        let sni_name = sni_name.clone();
-                        let conn_pool = conn_pool.clone();
+                Ok(MetricService::new(
+                    hyper::service::service_fn(move |req: Request<Body>| {
+                        let backend = backend.clone();
                         let ws_connections = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
+                        let cancellation_handler = cancellation_handler.clone();
 
                         async move {
-                            let cancel_map = Arc::new(CancelMap::default());
-                            let session_id = uuid::Uuid::new_v4();
-
-                            request_handler(
-                                req,
-                                config,
-                                tls_config,
-                                conn_pool,
-                                ws_connections,
-                                cancel_map,
-                                session_id,
-                                sni_name,
-                                peer_addr.ip(),
-                                endpoint_rate_limiter,
+                            Ok::<_, Infallible>(
+                                request_handler(
+                                    req,
+                                    config,
+                                    backend,
+                                    ws_connections,
+                                    cancellation_handler,
+                                    peer_addr.ip(),
+                                    endpoint_rate_limiter,
+                                )
+                                .await
+                                .map_or_else(|e| e.into_response(), |r| r),
                             )
-                            .instrument(info_span!(
-                                "serverless",
-                                session = %session_id,
-                                %peer_addr,
-                            ))
-                            .await
                         }
-                    },
-                )))
+                    }),
+                    gauge,
+                ))
             }
         },
     );
 
-    hyper::Server::builder(accept::from_stream(tls_listener))
+    hyper::Server::builder(tls_listener)
         .serve(make_svc)
         .with_graceful_shutdown(cancellation_token.cancelled())
         .await?;
@@ -166,13 +179,8 @@ struct MetricService<S> {
 }
 
 impl<S> MetricService<S> {
-    fn new(inner: S) -> MetricService<S> {
-        MetricService {
-            inner,
-            _gauge: NUM_CLIENT_CONNECTION_GAUGE
-                .with_label_values(&["http"])
-                .guard(),
-        }
+    fn new(inner: S, _gauge: IntCounterPairGuard) -> MetricService<S> {
+        MetricService { inner, _gauge }
     }
 }
 
@@ -197,15 +205,14 @@ where
 async fn request_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
-    tls: &'static TlsConfig,
-    conn_pool: Arc<conn_pool::GlobalConnPool>,
+    backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
-    cancel_map: Arc<CancelMap>,
-    session_id: uuid::Uuid,
-    sni_hostname: Option<String>,
+    cancellation_handler: Arc<CancellationHandler>,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Body>, ApiError> {
+    let session_id = uuid::Uuid::new_v4();
+
     let host = request
         .headers()
         .get("host")
@@ -215,45 +222,40 @@ async fn request_handler(
 
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
-        info!(session_id = ?session_id, "performing websocket upgrade");
+        let ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+        let span = ctx.span.clone();
+        info!(parent: &span, "performing websocket upgrade");
 
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         ws_connections.spawn(
             async move {
-                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
-
                 if let Err(e) = websocket::serve_websocket(
                     config,
-                    &mut ctx,
+                    ctx,
                     websocket,
-                    &cancel_map,
+                    cancellation_handler,
                     host,
                     endpoint_rate_limiter,
                 )
                 .await
                 {
-                    error!(session_id = ?session_id, "error in websocket connection: {e:#}");
+                    error!("error in websocket connection: {e:#}");
                 }
             }
-            .in_current_span(),
+            .instrument(span),
         );
 
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let mut ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+        let ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+        let span = ctx.span.clone();
 
-        sql_over_http::handle(
-            tls,
-            &config.http_config,
-            &mut ctx,
-            request,
-            sni_hostname,
-            conn_pool,
-        )
-        .await
+        sql_over_http::handle(config, ctx, request, backend)
+            .instrument(span)
+            .await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")

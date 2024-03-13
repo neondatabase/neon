@@ -16,7 +16,6 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_readonly_node", "empty")
     endpoint_main = env.endpoints.create_start("test_readonly_node")
-    log.info("postgres is running on 'test_readonly_node' branch")
 
     env.pageserver.allowed_errors.append(".*basebackup .* failed: invalid basebackup lsn.*")
 

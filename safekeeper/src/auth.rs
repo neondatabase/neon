@@ -12,8 +12,12 @@ pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<
             }
             Ok(())
         }
-        (Scope::PageServerApi, _) => Err(AuthError(
-            "PageServerApi scope makes no sense for Safekeeper".into(),
+        (Scope::Admin | Scope::PageServerApi | Scope::GenerationsApi, _) => Err(AuthError(
+            format!(
+                "JWT scope '{:?}' is ineligible for Safekeeper auth",
+                claims.scope
+            )
+            .into(),
         )),
         (Scope::SafekeeperData, _) => Ok(()),
     }

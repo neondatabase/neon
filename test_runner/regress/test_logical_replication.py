@@ -1,4 +1,7 @@
 import time
+from functools import partial
+from random import choice
+from string import ascii_lowercase
 
 import pytest
 from fixtures.log_helper import log
@@ -8,7 +11,11 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.types import Lsn
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
+
+
+def random_string(n: int):
+    return "".join([choice(ascii_lowercase) for _ in range(n)])
 
 
 def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
@@ -20,7 +27,6 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
         "test_logical_replication", config_lines=["log_statement=all"]
     )
 
-    log.info("postgres is running on 'test_logical_replication' branch")
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
@@ -152,6 +158,51 @@ COMMIT;
     assert endpoint.safe_psql("select count(*) from pg_replication_slots")[0][0] == 1
 
 
+# Test that neon.logical_replication_max_snap_files works
+def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
+    def slot_removed(ep):
+        assert (
+            endpoint.safe_psql(
+                "select count(*) from pg_replication_slots where slot_name = 'stale_slot'"
+            )[0][0]
+            == 0
+        )
+
+    env = neon_simple_env
+
+    env.neon_cli.create_branch("test_logical_replication", "empty")
+    # set low neon.logical_replication_max_snap_files
+    endpoint = env.endpoints.create_start(
+        "test_logical_replication",
+        config_lines=["log_statement=all", "neon.logical_replication_max_snap_files=1"],
+    )
+
+    pg_conn = endpoint.connect()
+    cur = pg_conn.cursor()
+
+    # create obsolete slot
+    cur.execute("select pg_create_logical_replication_slot('stale_slot', 'pgoutput');")
+    assert (
+        endpoint.safe_psql(
+            "select count(*) from pg_replication_slots where slot_name = 'stale_slot'"
+        )[0][0]
+        == 1
+    )
+
+    # now insert some data and create and start live subscriber to create more .snap files
+    # (in most cases this is not needed as stale_slot snap will have higher LSN than restart_lsn anyway)
+    cur.execute("create table t(pk integer primary key, payload integer)")
+    cur.execute("create publication pub1 for table t")
+
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create table t(pk integer primary key, payload integer)")
+    connstr = endpoint.connstr().replace("'", "''")
+    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
+
+    wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
+
+
 # Test compute start at LSN page of which starts with contrecord
 # https://github.com/neondatabase/neon/issues/5749
 def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
@@ -238,6 +289,57 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
     ) == endpoint.safe_psql("select sum(somedata) from replication_example")
 
 
+# Test that WAL redo works for fairly large records.
+#
+# See https://github.com/neondatabase/neon/pull/6534. That wasn't a
+# logical replication bug as such, but without logical replication,
+# records passed ot the WAL redo process are never large enough to hit
+# the bug.
+def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
+    env = neon_simple_env
+
+    env.neon_cli.create_branch("init")
+    endpoint = env.endpoints.create_start("init")
+
+    cur = endpoint.connect().cursor()
+    cur.execute("CREATE TABLE reptbl(id int, largeval text);")
+    cur.execute("alter table reptbl replica identity full")
+    cur.execute("create publication pub1 for table reptbl")
+
+    # now start subscriber
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("CREATE TABLE reptbl(id int, largeval text);")
+
+    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    connstr = endpoint.connstr().replace("'", "''")
+    vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
+
+    # Test simple insert, update, delete. But with very large values
+    value = random_string(10_000_000)
+    cur.execute(f"INSERT INTO reptbl VALUES (1, '{value}')")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(1, value)]
+
+    # Test delete, and reinsert another value
+    cur.execute("DELETE FROM reptbl WHERE id = 1")
+    cur.execute(f"INSERT INTO reptbl VALUES (2, '{value}')")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
+
+    value = random_string(10_000_000)
+    cur.execute(f"UPDATE reptbl SET largeval='{value}'")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
+
+    endpoint.stop()
+    endpoint.start()
+    cur = endpoint.connect().cursor()
+    value = random_string(10_000_000)
+    cur.execute(f"UPDATE reptbl SET largeval='{value}'")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert vanilla_pg.safe_psql("select id, largeval from reptbl") == [(2, value)]
+
+
 #
 # Check that slots are not inherited in brnach
 #
@@ -258,7 +360,6 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     # Create branch ws.
     env.neon_cli.create_branch("ws", "main", tenant_id=tenant)
     ws_branch = env.endpoints.create_start("ws", tenant_id=tenant)
-    log.info("postgres is running on 'ws' branch")
 
     # Check that we can create slot with the same name
     ws_cur = ws_branch.connect().cursor()

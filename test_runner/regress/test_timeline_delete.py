@@ -89,6 +89,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     assert timeline_path.exists()
 
     # retry deletes when compaction or gc is running in pageserver
+    # TODO: review whether this wait_until is actually necessary, we do an await() internally
     wait_until(
         number_of_iterations=3,
         interval=0.2,
@@ -136,12 +137,9 @@ DELETE_FAILPOINTS = [
     "timeline-delete-before-index-deleted-at",
     "timeline-delete-before-schedule",
     "timeline-delete-before-rm",
-    "timeline-delete-during-rm",
     "timeline-delete-after-rm",
     "timeline-delete-before-index-delete",
     "timeline-delete-after-index-delete",
-    "timeline-delete-after-rm-metadata",
-    "timeline-delete-after-rm-dir",
 ]
 
 
@@ -215,7 +213,9 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             # This happens when timeline remains are cleaned up during loading
             ".*Timeline dir entry become invalid.*",
             # In one of the branches we poll for tenant to become active. Polls can generate this log message:
-            f".*Tenant {env.initial_tenant} is not active*",
+            f".*Tenant {env.initial_tenant} is not active.*",
+            # an on-demand is cancelled by shutdown
+            ".*initial size calculation failed: downloading failed, possibly for shutdown",
         ]
     )
 
@@ -534,7 +534,7 @@ def test_concurrent_timeline_delete_stuck_on(
     try:
 
         def first_call_hit_failpoint():
-            assert env.pageserver.log_contains(
+            env.pageserver.assert_log_contains(
                 f".*{child_timeline_id}.*at failpoint {stuck_failpoint}"
             )
 
@@ -605,7 +605,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     at_failpoint_log_message = f".*{child_timeline_id}.*at failpoint {failpoint_name}.*"
 
     def hit_failpoint():
-        assert env.pageserver.log_contains(at_failpoint_log_message)
+        env.pageserver.assert_log_contains(at_failpoint_log_message)
 
     wait_until(50, 0.1, hit_failpoint)
 
@@ -615,7 +615,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(hangup_log_message)
 
     def got_hangup_log_message():
-        assert env.pageserver.log_contains(hangup_log_message)
+        env.pageserver.assert_log_contains(hangup_log_message)
 
     wait_until(50, 0.1, got_hangup_log_message)
 
@@ -627,7 +627,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     def first_request_finished():
         message = f".*DELETE.*{child_timeline_id}.*Cancelled request finished"
-        assert env.pageserver.log_contains(message)
+        env.pageserver.assert_log_contains(message)
 
     wait_until(50, 0.1, first_request_finished)
 
@@ -651,9 +651,7 @@ def test_timeline_delete_works_for_remote_smoke(
     timeline_ids = [env.initial_timeline]
     for i in range(2):
         branch_timeline_id = env.neon_cli.create_branch(f"new{i}", "main")
-        pg = env.endpoints.create_start(f"new{i}")
-
-        with pg.cursor() as cur:
+        with env.endpoints.create_start(f"new{i}") as pg, pg.cursor() as cur:
             cur.execute("CREATE TABLE f (i integer);")
             cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -764,7 +762,7 @@ def test_delete_orphaned_objects(
 
     for orphan in orphans:
         assert not orphan.exists()
-        assert env.pageserver.log_contains(
+        env.pageserver.assert_log_contains(
             f"deleting a file not referenced from index_part.json name={orphan.stem}"
         )
 
@@ -803,7 +801,7 @@ def test_timeline_delete_resumed_on_attach(
         )
 
     # failpoint before we remove index_part from s3
-    failpoint = "timeline-delete-during-rm"
+    failpoint = "timeline-delete-after-rm"
     ps_http.configure_failpoints((failpoint, "return"))
 
     env.pageserver.allowed_errors.extend(

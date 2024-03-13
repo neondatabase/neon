@@ -10,9 +10,12 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
+use enum_map::Enum;
+use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
@@ -32,6 +35,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
+
+const MAX_AUX_FILE_DELTAS: usize = 1024;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -154,6 +159,7 @@ impl Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            pending_directory_entries: Vec::new(),
             lsn,
         }
     }
@@ -319,6 +325,27 @@ impl Timeline {
             }
             Err(e) => Err(PageReconstructError::from(e)),
         }
+    }
+
+    /// Get the whole SLRU segment
+    pub(crate) async fn get_slru_segment(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        let n_blocks = self
+            .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
+            .await?;
+        let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
+        for blkno in 0..n_blocks {
+            let block = self
+                .get_slru_page_at_lsn(kind, segno, blkno, lsn, ctx)
+                .await?;
+            segment.extend_from_slice(&block[..BLCKSZ as usize]);
+        }
+        Ok(segment.freeze())
     }
 
     /// Look up given SLRU page version.
@@ -678,7 +705,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
@@ -846,6 +873,10 @@ pub struct DatadirModification<'a> {
     pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
+
+    /// For special "directory" keys that store key-value maps, track the size of the map
+    /// if it was updated in this modification.
+    pending_directory_entries: Vec<(DirectoryKind, usize)>,
 }
 
 impl<'a> DatadirModification<'a> {
@@ -877,6 +908,7 @@ impl<'a> DatadirModification<'a> {
         let buf = DbDirectory::ser(&DbDirectory {
             dbdirs: HashMap::new(),
         })?;
+        self.pending_directory_entries.push((DirectoryKind::Db, 0));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
         // Create AuxFilesDirectory
@@ -885,16 +917,24 @@ impl<'a> DatadirModification<'a> {
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, 0));
         self.put(TWOPHASEDIR_KEY, Value::Image(buf.into()));
 
         let buf: Bytes = SlruSegmentDirectory::ser(&SlruSegmentDirectory::default())?.into();
         let empty_dir = Value::Image(buf);
         self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
         self.put(
             slru_dir_to_key(SlruKind::MultiXactMembers),
             empty_dir.clone(),
         );
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
         self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
 
         Ok(())
     }
@@ -995,6 +1035,7 @@ impl<'a> DatadirModification<'a> {
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
             })?;
+            self.pending_directory_entries.push((DirectoryKind::Rel, 0));
             self.put(
                 rel_dir_to_key(spcnode, dbnode),
                 Value::Image(Bytes::from(buf)),
@@ -1017,6 +1058,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.xids.insert(xid) {
             anyhow::bail!("twophase file for xid {} already exists", xid);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, dir.xids.len()));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1052,6 +1095,8 @@ impl<'a> DatadirModification<'a> {
         let mut dir = DbDirectory::des(&buf)?;
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
+            self.pending_directory_entries
+                .push((DirectoryKind::Db, dir.dbdirs.len()));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         } else {
             warn!(
@@ -1089,6 +1134,8 @@ impl<'a> DatadirModification<'a> {
             // Didn't exist. Update dbdir
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
             let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
+            self.pending_directory_entries
+                .push((DirectoryKind::Db, dbdir.dbdirs.len()));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // and create the RelDirectory
@@ -1103,6 +1150,10 @@ impl<'a> DatadirModification<'a> {
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
             return Err(RelationError::AlreadyExists);
         }
+
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, rel_dir.rels.len()));
+
         self.put(
             rel_dir_key,
             Value::Image(Bytes::from(
@@ -1194,6 +1245,9 @@ impl<'a> DatadirModification<'a> {
         let buf = self.get(dir_key, ctx).await?;
         let mut dir = RelDirectory::des(&buf)?;
 
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, dir.rels.len()));
+
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
             self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
         } else {
@@ -1229,6 +1283,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.segments.insert(segno) {
             anyhow::bail!("slru segment {kind:?}/{segno} already exists");
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(kind), dir.segments.len()));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1273,6 +1329,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.segments.remove(&segno) {
             warn!("slru segment {:?}/{} does not exist", kind, segno);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(kind), dir.segments.len()));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1303,6 +1361,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.xids.remove(&xid) {
             warn!("twophase file for xid {} does not exist", xid);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, dir.xids.len()));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1318,6 +1378,8 @@ impl<'a> DatadirModification<'a> {
         let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
             files: HashMap::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFiles, 0));
         self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         Ok(())
     }
@@ -1328,28 +1390,86 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
-            Ok(buf) => AuxFilesDirectory::des(&buf)?,
-            Err(e) => {
-                // This is expected: historical databases do not have the key.
-                debug!("Failed to get info about AUX files: {}", e);
-                AuxFilesDirectory {
-                    files: HashMap::new(),
+        let file_path = path.to_string();
+        let content = if content.is_empty() {
+            None
+        } else {
+            Some(Bytes::copy_from_slice(content))
+        };
+
+        let n_files;
+        let mut aux_files = self.tline.aux_files.lock().await;
+        if let Some(mut dir) = aux_files.dir.take() {
+            // We already updated aux files in `self`: emit a delta and update our latest value
+            dir.upsert(file_path.clone(), content.clone());
+            n_files = dir.files.len();
+            if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::Image(Bytes::from(
+                        AuxFilesDirectory::ser(&dir).context("serialize")?,
+                    )),
+                );
+                aux_files.n_deltas = 0;
+            } else {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                );
+                aux_files.n_deltas += 1;
+            }
+            aux_files.dir = Some(dir);
+        } else {
+            // Check if the AUX_FILES_KEY is initialized
+            match self.get(AUX_FILES_KEY, ctx).await {
+                Ok(dir_bytes) => {
+                    let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
+                    // Key is already set, we may append a delta
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::WalRecord(NeonWalRecord::AuxFile {
+                            file_path: file_path.clone(),
+                            content: content.clone(),
+                        }),
+                    );
+                    dir.upsert(file_path, content);
+                    n_files = dir.files.len();
+                    aux_files.dir = Some(dir);
+                }
+                Err(
+                    e @ (PageReconstructError::AncestorStopping(_)
+                    | PageReconstructError::Cancelled
+                    | PageReconstructError::AncestorLsnTimeout(_)),
+                ) => {
+                    // Important that we do not interpret a shutdown error as "not found" and thereby
+                    // reset the map.
+                    return Err(e.into());
+                }
+                // FIXME: PageReconstructError doesn't have an explicit variant for key-not-found, so
+                // we are assuming that all _other_ possible errors represents a missing key.  If some
+                // other error occurs, we may incorrectly reset the map of aux files.
+                Err(PageReconstructError::Other(_) | PageReconstructError::WalRedo(_)) => {
+                    // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                    let mut dir = AuxFilesDirectory {
+                        files: HashMap::new(),
+                    };
+                    dir.upsert(file_path, content);
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::Image(Bytes::from(
+                            AuxFilesDirectory::ser(&dir).context("serialize")?,
+                        )),
+                    );
+                    n_files = 1;
+                    aux_files.dir = Some(dir);
                 }
             }
-        };
-        let path = path.to_string();
-        if content.is_empty() {
-            dir.files.remove(&path);
-        } else {
-            dir.files.insert(path, Bytes::copy_from_slice(content));
         }
-        self.put(
-            AUX_FILES_KEY,
-            Value::Image(Bytes::from(
-                AuxFilesDirectory::ser(&dir).context("serialize")?,
-            )),
-        );
+
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFiles, n_files));
+
         Ok(())
     }
 
@@ -1379,7 +1499,7 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let writer = self.tline.writer().await;
+        let mut writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
@@ -1405,6 +1525,10 @@ impl<'a> DatadirModification<'a> {
             self.pending_nblocks = 0;
         }
 
+        for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
+            writer.update_directory_entries_count(kind, count as u64);
+        }
+
         Ok(())
     }
 
@@ -1414,14 +1538,22 @@ impl<'a> DatadirModification<'a> {
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let writer = self.tline.writer().await;
+        let mut writer = self.tline.writer().await;
 
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            writer.put_batch(&self.pending_updates, ctx).await?;
-            self.pending_updates.clear();
+            // The put_batch call below expects expects the inputs to be sorted by Lsn,
+            // so we do that first.
+            let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = self
+                .pending_updates
+                .drain()
+                .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (key, lsn, val)))
+                .kmerge_by(|lhs, rhs| lhs.1 .0 < rhs.1 .0)
+                .collect();
+
+            writer.put_batch(lsn_ordered_batch, ctx).await?;
         }
 
         if !self.pending_deletions.is_empty() {
@@ -1440,6 +1572,10 @@ impl<'a> DatadirModification<'a> {
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
+        }
+
+        for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
+            writer.update_directory_entries_count(kind, count as u64);
         }
 
         Ok(())
@@ -1550,9 +1686,19 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct AuxFilesDirectory {
-    files: HashMap<String, Bytes>,
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
+pub(crate) struct AuxFilesDirectory {
+    pub(crate) files: HashMap<String, Bytes>,
+}
+
+impl AuxFilesDirectory {
+    pub(crate) fn upsert(&mut self, key: String, value: Option<Bytes>) {
+        if let Some(value) = value {
+            self.files.insert(key, value);
+        } else {
+            self.files.remove(&key);
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1566,13 +1712,82 @@ struct SlruSegmentDirectory {
     segments: HashSet<u32>,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, enum_map::Enum)]
+#[repr(u8)]
+pub(crate) enum DirectoryKind {
+    Db,
+    TwoPhase,
+    Rel,
+    AuxFiles,
+    SlruSegment(SlruKind),
+}
+
+impl DirectoryKind {
+    pub(crate) const KINDS_NUM: usize = <DirectoryKind as Enum>::LENGTH;
+    pub(crate) fn offset(&self) -> usize {
+        self.into_usize()
+    }
+}
+
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
-    //use super::repo_harness::*;
-    //use super::*;
+    use hex_literal::hex;
+    use utils::id::TimelineId;
+
+    use super::*;
+
+    use crate::{tenant::harness::TenantHarness, DEFAULT_PG_VERSION};
+
+    /// Test a round trip of aux file updates, from DatadirModification to reading back from the Timeline
+    #[tokio::test]
+    async fn aux_files_round_trip() -> anyhow::Result<()> {
+        let name = "aux_files_round_trip";
+        let harness = TenantHarness::create(name)?;
+
+        pub const TIMELINE_ID: TimelineId =
+            TimelineId::from_array(hex!("11223344556677881122334455667788"));
+
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        let tline = tline.raw_timeline().unwrap();
+
+        // First modification: insert two keys
+        let mut modification = tline.begin_modification(Lsn(0x1000));
+        modification.put_file("foo/bar1", b"content1", &ctx).await?;
+        modification.set_lsn(Lsn(0x1008))?;
+        modification.put_file("foo/bar2", b"content2", &ctx).await?;
+        modification.commit(&ctx).await?;
+        let expect_1008 = HashMap::from([
+            ("foo/bar1".to_string(), Bytes::from_static(b"content1")),
+            ("foo/bar2".to_string(), Bytes::from_static(b"content2")),
+        ]);
+
+        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        assert_eq!(readback, expect_1008);
+
+        // Second modification: update one key, remove the other
+        let mut modification = tline.begin_modification(Lsn(0x2000));
+        modification.put_file("foo/bar1", b"content3", &ctx).await?;
+        modification.set_lsn(Lsn(0x2008))?;
+        modification.put_file("foo/bar2", b"", &ctx).await?;
+        modification.commit(&ctx).await?;
+        let expect_2008 =
+            HashMap::from([("foo/bar1".to_string(), Bytes::from_static(b"content3"))]);
+
+        let readback = tline.list_aux_files(Lsn(0x2008), &ctx).await?;
+        assert_eq!(readback, expect_2008);
+
+        // Reading back in time works
+        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        assert_eq!(readback, expect_1008);
+
+        Ok(())
+    }
 
     /*
         fn assert_current_logical_size<R: Repository>(timeline: &DatadirTimeline<R>, lsn: Lsn) {

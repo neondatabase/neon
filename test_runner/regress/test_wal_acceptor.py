@@ -28,7 +28,6 @@ from fixtures.neon_fixtures import (
     PgBin,
     PgProtocol,
     Safekeeper,
-    SafekeeperHttpClient,
     SafekeeperPort,
     last_flush_lsn_upload,
 )
@@ -46,6 +45,8 @@ from fixtures.remote_storage import (
     default_remote_storage,
     s3_storage,
 )
+from fixtures.safekeeper.http import SafekeeperHttpClient
+from fixtures.safekeeper.utils import are_walreceivers_absent
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
@@ -280,11 +281,6 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.neon_cli.create_branch("test_broker", "main")
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     endpoint = env.endpoints.create_start("test_broker")
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
@@ -341,11 +337,6 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
-
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
 
     tenant_id = env.initial_tenant
     timeline_id = env.neon_cli.create_branch("test_safekeepers_wal_removal")
@@ -1107,12 +1098,6 @@ def is_flush_lsn_aligned(sk_http_clis, tenant_id, timeline_id):
     return all([flush_lsns[0] == flsn for flsn in flush_lsns])
 
 
-def are_walreceivers_absent(sk_http_cli, tenant_id: TenantId, timeline_id: TimelineId):
-    status = sk_http_cli.timeline_status(tenant_id, timeline_id)
-    log.info(f"waiting for walreceivers to be gone, currently {status.walreceivers}")
-    return len(status.walreceivers) == 0
-
-
 # Assert by xxd that WAL on given safekeepers is identical. No compute must be
 # running for this to be reliable.
 def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
@@ -1355,6 +1340,36 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
     env.safekeepers[2].stop()
     endpoint = env.endpoints.create_start("test_peer_recovery")
     endpoint.safe_psql("insert into t select generate_series(1,100), 'payload'")
+
+
+# Test that when compute is terminated in fast (or smart) mode, walproposer is
+# allowed to run and self terminate after shutdown checkpoint is written, so it
+# commits it to safekeepers before exiting. This not required for correctness,
+# but needed for tests using check_restored_datadir_content.
+def test_wp_graceful_shutdown(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_wp_graceful_shutdown")
+    ep = env.endpoints.create_start("test_wp_graceful_shutdown")
+    ep.safe_psql("create table t(key int, value text)")
+    ep.stop()
+
+    # figure out checkpoint lsn
+    ckpt_lsn = pg_bin.get_pg_controldata_checkpoint_lsn(ep.pg_data_dir_path())
+
+    sk_http_cli = env.safekeepers[0].http_client()
+    commit_lsn = sk_http_cli.timeline_status(tenant_id, timeline_id).commit_lsn
+    # Note: this is in memory value. Graceful shutdown of walproposer currently
+    # doesn't guarantee persisted value, which is ok as we need it only for
+    # tests. Persisting it without risking too many cf flushes needs a wp -> sk
+    # protocol change. (though in reality shutdown sync-safekeepers does flush
+    # of cf, so most of the time persisted value wouldn't lag)
+    log.info(f"sk commit_lsn {commit_lsn}")
+    # note that ckpt_lsn is the *beginning* of checkpoint record, so commit_lsn
+    # must be actually higher
+    assert commit_lsn > ckpt_lsn, "safekeeper must have checkpoint record"
 
 
 class SafekeeperEnv:
@@ -1946,3 +1961,51 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
             assert orig_digest == new_digest
 
     # TODO: test timelines can start after copy
+
+
+def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+    # initialize safekeeper
+    endpoint.safe_psql("create table t(key int, value text)")
+
+    # update control file
+    res = (
+        env.safekeepers[0]
+        .http_client()
+        .patch_control_file(
+            tenant_id,
+            timeline_id,
+            {
+                "timeline_start_lsn": "0/1",
+            },
+        )
+    )
+
+    timeline_start_lsn_before = res["old_control_file"]["timeline_start_lsn"]
+    timeline_start_lsn_after = res["new_control_file"]["timeline_start_lsn"]
+
+    log.info(f"patch_control_file response: {res}")
+    log.info(
+        f"updated control file timeline_start_lsn, before {timeline_start_lsn_before}, after {timeline_start_lsn_after}"
+    )
+
+    assert timeline_start_lsn_after == "0/1"
+    env.safekeepers[0].stop().start()
+
+    # wait/check that safekeeper is alive
+    endpoint.safe_psql("insert into t values (1, 'payload')")
+
+    # check that timeline_start_lsn is updated
+    res = (
+        env.safekeepers[0]
+        .http_client()
+        .debug_dump({"dump_control_file": "true", "timeline_id": str(timeline_id)})
+    )
+    log.info(f"dump_control_file response: {res}")
+    assert res["timelines"][0]["control_file"]["timeline_start_lsn"] == "0/1"

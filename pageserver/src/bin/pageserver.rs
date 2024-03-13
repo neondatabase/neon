@@ -33,12 +33,10 @@ use pageserver::{
 use postgres_backend::AuthType;
 use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
-use utils::signals::ShutdownSignals;
 use utils::{
     auth::{JwtAuth, SwappableJwtAuth},
     logging, project_build_tag, project_git_version,
     sentry_init::init_sentry,
-    signals::Signal,
     tcp_listener,
 };
 
@@ -274,6 +272,12 @@ fn start_pageserver(
     );
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
     set_launch_timestamp_metric(launch_ts);
+    #[cfg(target_os = "linux")]
+    metrics::register_internal(Box::new(metrics::more_process_metrics::Collector::new())).unwrap();
+    metrics::register_internal(Box::new(
+        pageserver::metrics::tokio_epoll_uring::Collector::new(),
+    ))
+    .unwrap();
     pageserver::preinitialize_metrics();
 
     // If any failpoints were set from FAILPOINTS environment variable,
@@ -656,34 +660,42 @@ fn start_pageserver(
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
     // All started up! Now just sit and wait for shutdown signal.
-    ShutdownSignals::handle(|signal| match signal {
-        Signal::Quit => {
-            info!(
-                "Got {}. Terminating in immediate shutdown mode",
-                signal.name()
-            );
-            std::process::exit(111);
-        }
+    {
+        use signal_hook::consts::*;
+        let signal_handler = BACKGROUND_RUNTIME.spawn_blocking(move || {
+            let mut signals =
+                signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGQUIT]).unwrap();
+            return signals
+                .forever()
+                .next()
+                .expect("forever() never returns None unless explicitly closed");
+        });
+        let signal = BACKGROUND_RUNTIME
+            .block_on(signal_handler)
+            .expect("join error");
+        match signal {
+            SIGQUIT => {
+                info!("Got signal {signal}. Terminating in immediate shutdown mode",);
+                std::process::exit(111);
+            }
+            SIGINT | SIGTERM => {
+                info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
 
-        Signal::Interrupt | Signal::Terminate => {
-            info!(
-                "Got {}. Terminating gracefully in fast shutdown mode",
-                signal.name()
-            );
-
-            // This cancels the `shutdown_pageserver` cancellation tree.
-            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
-            // The plan is to change that over time.
-            shutdown_pageserver.take();
-            let bg_remote_storage = remote_storage.clone();
-            let bg_deletion_queue = deletion_queue.clone();
-            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
-                bg_remote_storage.map(|_| bg_deletion_queue),
-                0,
-            ));
-            unreachable!()
+                // This cancels the `shutdown_pageserver` cancellation tree.
+                // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
+                // The plan is to change that over time.
+                shutdown_pageserver.take();
+                let bg_remote_storage = remote_storage.clone();
+                let bg_deletion_queue = deletion_queue.clone();
+                BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
+                    bg_remote_storage.map(|_| bg_deletion_queue),
+                    0,
+                ));
+                unreachable!()
+            }
+            _ => unreachable!(),
         }
-    })
+    }
 }
 
 fn create_remote_storage_client(

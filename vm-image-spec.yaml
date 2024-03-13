@@ -102,7 +102,7 @@ files:
 
       - metric_name: lfc_used
         type: gauge
-        help: 'lfc_used'
+        help: 'LFC chunks used (chunk = 1MB)'
         key_labels:
         values: [lfc_used]
         query: |
@@ -123,6 +123,69 @@ files:
         values: [lfc_writes]
         query: |
           select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes';
+
+      - metric_name: lfc_cache_size_limit
+        type: gauge
+        help: 'LFC cache size limit in bytes'
+        key_labels:
+        values: [lfc_cache_size_limit]
+        query: |
+          select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
+
+      - metric_name: connection_counts
+        type: gauge
+        help: 'Connection counts'
+        key_labels:
+          - datname
+          - state
+        values: [count]
+        query: |
+          select datname, state, count(*) as count from pg_stat_activity where state <> '' group by datname, state;
+
+      - metric_name: pg_stats_userdb
+        type: gauge
+        help: 'Stats for the oldest non-system db'
+        key_labels:
+          - datname
+        value_label: kind
+        values:
+          - db_size
+          - deadlocks
+          # Rows
+          - inserted
+          - updated
+          - deleted
+        # We export stats for only one non-system database. Without this limit
+        # it is too easy to abuse the system by creating lots of databases.
+        # We can try lifting this limit in the future after we understand the needs better.
+        query: |
+          select pg_database_size(datname) as db_size, deadlocks,
+                 tup_inserted as inserted, tup_updated as updated, tup_deleted as deleted,
+                 datname
+            from pg_stat_database
+           where datname IN (
+             select datname
+               from pg_database
+              where datname <> 'postgres' and not datistemplate
+              order by oid
+              limit 1
+           );
+
+      - metric_name: max_cluster_size
+        type: gauge
+        help: 'neon.max_cluster_size setting'
+        key_labels:
+        values: [max_cluster_size]
+        query: |
+          select setting::int as max_cluster_size from pg_settings where name = 'neon.max_cluster_size';
+
+      - metric_name: db_total_size
+        type: gauge
+        help: 'Size of all databases'
+        key_labels:
+        values: [total]
+        query: |
+          select sum(pg_database_size(datname)) as total from pg_database;
 
 build: |
   # Build cgroup-tools
@@ -158,7 +221,7 @@ build: |
       # actually build the thing...
       && make install
 
-  FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.0 AS postgres-exporter
+  FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
 
   FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
 
@@ -174,11 +237,10 @@ build: |
           libtool \
           pkg-config
 
-  # Note, we use pgbouncer from neondatabase/pgbouncer fork, which could contain extra commits.
   # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
-  ENV PGBOUNCER_TAG pgbouncer_1_21_0-neon-1
+  ENV PGBOUNCER_TAG pgbouncer_1_22_1
   RUN set -e \
-      && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/neondatabase/pgbouncer.git pgbouncer \
+      && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
       && cd pgbouncer \
       && ./autogen.sh \
       && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \

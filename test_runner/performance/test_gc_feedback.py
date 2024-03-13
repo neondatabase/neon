@@ -13,6 +13,11 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     Information about image layers needed to collect old layers should
     be propagated by GC to compaction task which should take in in account
     when make a decision which new image layers needs to be created.
+
+    NB: this test demonstrates the problem. The source tree contained the
+    `gc_feedback` mechanism for about 9 months, but, there were problems
+    with it and it wasn't enabled at runtime.
+    This PR removed the code: https://github.com/neondatabase/neon/pull/6863
     """
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()

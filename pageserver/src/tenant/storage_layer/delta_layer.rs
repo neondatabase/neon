@@ -29,18 +29,25 @@
 //!
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
-use crate::page_cache::PAGE_SZ;
+use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
-use crate::tenant::Timeline;
+use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::vectored_blob_io::{
+    BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+};
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
+use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
@@ -59,7 +66,9 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer};
+use super::{
+    AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -208,8 +217,10 @@ pub struct DeltaLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
-    /// Reader object for reading blocks from the file.
-    file: FileBlockReader,
+    file: VirtualFile,
+    file_id: FileId,
+
+    max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
 }
 
 impl std::fmt::Debug for DeltaLayerInner {
@@ -291,7 +302,7 @@ impl DeltaLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
-        let loaded = DeltaLayerInner::load(&path, None, ctx)
+        let loaded = DeltaLayerInner::load(&path, None, None, ctx)
             .await
             .and_then(|res| res)?;
 
@@ -416,27 +427,31 @@ impl DeltaLayerWriterInner {
     /// The values must be appended in key, lsn order.
     ///
     async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init())
-            .await
+        let (_, res) = self
+            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init())
+            .await;
+        res
     }
 
     async fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: &[u8],
+        val: Vec<u8>,
         will_init: bool,
-    ) -> anyhow::Result<()> {
+    ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-
-        let off = self.blob_writer.write_blob(val).await?;
+        let (val, res) = self.blob_writer.write_blob(val).await;
+        let off = match res {
+            Ok(off) => off,
+            Err(e) => return (val, Err(anyhow::anyhow!(e))),
+        };
 
         let blob_ref = BlobRef::new(off, will_init);
 
         let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        self.tree.append(&delta_key.0, blob_ref.0)?;
-
-        Ok(())
+        let res = self.tree.append(&delta_key.0, blob_ref.0);
+        (val, res.map_err(|e| anyhow::anyhow!(e)))
     }
 
     fn size(&self) -> u64 {
@@ -457,7 +472,8 @@ impl DeltaLayerWriterInner {
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref()).await?;
+            let (_buf, res) = file.write_all(buf).await;
+            res?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -472,17 +488,12 @@ impl DeltaLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
-        if buf.spilled() {
-            // This is bad as we only have one free block for the summary
-            warn!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            );
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(buf).await;
+        res?;
 
         let metadata = file
             .metadata()
@@ -587,9 +598,9 @@ impl DeltaLayerWriter {
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: &[u8],
+        val: Vec<u8>,
         will_init: bool,
-    ) -> anyhow::Result<()> {
+    ) -> (Vec<u8>, anyhow::Result<()>) {
         self.inner
             .as_mut()
             .unwrap()
@@ -609,7 +620,19 @@ impl DeltaLayerWriter {
         key_end: Key,
         timeline: &Arc<Timeline>,
     ) -> anyhow::Result<ResidentLayer> {
-        self.inner.take().unwrap().finish(key_end, timeline).await
+        let inner = self.inner.take().unwrap();
+        let temp_path = inner.path.clone();
+        let result = inner.finish(key_end, timeline).await;
+        // The delta layer files can sometimes be really large. Clean them up.
+        if result.is_err() {
+            tracing::warn!(
+                "Cleaning up temporary delta file {temp_path} after error during writing"
+            );
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                tracing::warn!("Error cleaning up temporary delta layer file {temp_path}: {e:?}")
+            }
+        }
+        result
     }
 }
 
@@ -647,34 +670,28 @@ impl DeltaLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let file = VirtualFile::open_with_options(
+        let mut file = VirtualFile::open_with_options(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
         )
         .await
         .with_context(|| format!("Failed to open file '{}'", path))?;
-        let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0, ctx).await?;
+        let file_id = page_cache::next_file_id();
+        let block_reader = FileBlockReader::new(&file, file_id);
+        let summary_blk = block_reader.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
-        let mut file = file.file;
         if actual_summary.magic != DELTA_FILE_MAGIC {
             return Err(RewriteSummaryError::MagicMismatch);
         }
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here, but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        if buf.spilled() {
-            // The code in DeltaLayerWriterInner just warn!()s for this.
-            // It should probably error out as well.
-            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            )));
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(buf).await;
+        res?;
         Ok(())
     }
 }
@@ -686,15 +703,18 @@ impl DeltaLayerInner {
     pub(super) async fn load(
         path: &Utf8Path,
         summary: Option<Summary>,
+        max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
         let file = match VirtualFile::open(path).await {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };
-        let file = FileBlockReader::new(file);
+        let file_id = page_cache::next_file_id();
 
-        let summary_blk = match file.read_blk(0, ctx).await {
+        let block_reader = FileBlockReader::new(&file, file_id);
+
+        let summary_blk = match block_reader.read_blk(0, ctx).await {
             Ok(blk) => blk,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
         };
@@ -718,8 +738,10 @@ impl DeltaLayerInner {
 
         Ok(Ok(DeltaLayerInner {
             file,
+            file_id,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
+            max_vectored_read_bytes,
         }))
     }
 
@@ -732,11 +754,11 @@ impl DeltaLayerInner {
     ) -> anyhow::Result<ValueReconstructResult> {
         let mut need_image = true;
         // Scan the page versions backwards, starting from `lsn`.
-        let file = &self.file;
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
-            file,
+            &block_reader,
         );
         let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
 
@@ -770,19 +792,19 @@ impl DeltaLayerInner {
             .build();
 
         // Ok, 'offsets' now contains the offsets of all the entries we need to read
-        let cursor = file.block_cursor();
+        let cursor = block_reader.block_cursor();
         let mut buf = Vec::new();
         for (entry_lsn, pos) in offsets {
             cursor
                 .read_blob_into_buf(pos, &mut buf, ctx)
                 .await
                 .with_context(|| {
-                    format!("Failed to read blob from virtual file {}", file.file.path)
+                    format!("Failed to read blob from virtual file {}", self.file.path)
                 })?;
             let val = Value::des(&buf).with_context(|| {
                 format!(
                     "Failed to deserialize file blob from virtual file {}",
-                    file.file.path
+                    self.file.path
                 )
             })?;
             match val {
@@ -812,16 +834,205 @@ impl DeltaLayerInner {
         }
     }
 
+    // Look up the keys in the provided keyspace and update
+    // the reconstruct state with whatever is found.
+    //
+    // If the key is cached, go no further than the cached Lsn.
+    //
+    // Currently, the index is visited for each range, but this
+    // can be further optimised to visit the index only once.
+    pub(super) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let index_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            block_reader,
+        );
+
+        let planner = VectoredReadPlanner::new(
+            self.max_vectored_read_bytes
+                .expect("Layer is loaded with max vectored bytes config")
+                .0
+                .into(),
+        );
+
+        let data_end_offset = self.index_start_blk as u64 * PAGE_SZ as u64;
+
+        let reads = Self::plan_reads(
+            keyspace,
+            lsn_range,
+            data_end_offset,
+            index_reader,
+            planner,
+            reconstruct_state,
+            ctx,
+        )
+        .await
+        .map_err(GetVectoredError::Other)?;
+
+        self.do_reads_and_update_state(reads, reconstruct_state)
+            .await;
+
+        Ok(())
+    }
+
+    async fn plan_reads<Reader>(
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+        data_end_offset: u64,
+        index_reader: DiskBtreeReader<Reader, DELTA_KEY_SIZE>,
+        mut planner: VectoredReadPlanner,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<VectoredRead>>
+    where
+        Reader: BlockReader,
+    {
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+            .build();
+
+        for range in keyspace.ranges.iter() {
+            let mut range_end_handled = false;
+
+            let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
+            let index_stream = index_reader.get_stream_from(&start_key.0, &ctx);
+            let mut index_stream = std::pin::pin!(index_stream);
+
+            while let Some(index_entry) = index_stream.next().await {
+                let (raw_key, value) = index_entry?;
+                let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
+                let blob_ref = BlobRef(value);
+
+                // Lsns are not monotonically increasing across keys, so we don't assert on them.
+                assert!(key >= range.start);
+
+                let outside_lsn_range = !lsn_range.contains(&lsn);
+                let below_cached_lsn = reconstruct_state.get_cached_lsn(&key) >= Some(lsn);
+
+                let flag = {
+                    if outside_lsn_range || below_cached_lsn {
+                        BlobFlag::Ignore
+                    } else if blob_ref.will_init() {
+                        BlobFlag::ReplaceAll
+                    } else {
+                        // Usual path: add blob to the read
+                        BlobFlag::None
+                    }
+                };
+
+                if key >= range.end || (key.next() == range.end && lsn >= lsn_range.end) {
+                    planner.handle_range_end(blob_ref.pos());
+                    range_end_handled = true;
+                    break;
+                } else {
+                    planner.handle(key, lsn, blob_ref.pos(), flag);
+                }
+            }
+
+            if !range_end_handled {
+                tracing::info!("Handling range end fallback at {}", data_end_offset);
+                planner.handle_range_end(data_end_offset);
+            }
+        }
+
+        Ok(planner.finish())
+    }
+
+    async fn do_reads_and_update_state(
+        &self,
+        reads: Vec<VectoredRead>,
+        reconstruct_state: &mut ValuesReconstructState,
+    ) {
+        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let mut ignore_key_with_err = None;
+
+        let max_vectored_read_bytes = self
+            .max_vectored_read_bytes
+            .expect("Layer is loaded with max vectored bytes config")
+            .0
+            .into();
+        let mut buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
+
+        // Note that reads are processed in reverse order (from highest key+lsn).
+        // This is the order that `ReconstructState` requires such that it can
+        // track when a key is done.
+        for read in reads.into_iter().rev() {
+            let res = vectored_blob_reader
+                .read_blobs(&read, buf.take().expect("Should have a buffer"))
+                .await;
+
+            let blobs_buf = match res {
+                Ok(blobs_buf) => blobs_buf,
+                Err(err) => {
+                    let kind = err.kind();
+                    for (_, blob_meta) in read.blobs_at.as_slice() {
+                        reconstruct_state.on_key_error(
+                            blob_meta.key,
+                            PageReconstructError::from(anyhow!(
+                                "Failed to read blobs from virtual file {}: {}",
+                                self.file.path,
+                                kind
+                            )),
+                        );
+                    }
+
+                    // We have "lost" the buffer since the lower level IO api
+                    // doesn't return the buffer on error. Allocate a new one.
+                    buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
+
+                    continue;
+                }
+            };
+
+            for meta in blobs_buf.blobs.iter().rev() {
+                if Some(meta.meta.key) == ignore_key_with_err {
+                    continue;
+                }
+
+                let value = Value::des(&blobs_buf.buf[meta.start..meta.end]);
+                let value = match value {
+                    Ok(v) => v,
+                    Err(e) => {
+                        reconstruct_state.on_key_error(
+                            meta.meta.key,
+                            PageReconstructError::from(anyhow!(e).context(format!(
+                                "Failed to deserialize blob from virtual file {}",
+                                self.file.path,
+                            ))),
+                        );
+
+                        ignore_key_with_err = Some(meta.meta.key);
+                        continue;
+                    }
+                };
+
+                // Invariant: once a key reaches [`ValueReconstructSituation::Complete`]
+                // state, no further updates shall be made to it. The call below will
+                // panic if the invariant is violated.
+                reconstruct_state.update_key(&meta.meta.key, meta.meta.lsn, value);
+            }
+
+            buf = Some(blobs_buf.buf);
+        }
+    }
+
     pub(super) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,
     ) -> Result<Vec<DeltaEntry<'a>>> {
-        let file = &self.file;
-
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
-            file,
+            block_reader,
         );
 
         let mut all_keys: Vec<DeltaEntry<'_>> = Vec::new();
@@ -873,18 +1084,18 @@ impl DeltaLayerInner {
             self.index_start_blk, self.index_root_blk
         );
 
-        let file = &self.file;
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
-            file,
+            block_reader,
         );
 
         tree_reader.dump().await?;
 
         let keys = self.load_keys(ctx).await?;
 
-        async fn dump_blob(val: ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
+        async fn dump_blob(val: &ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
             let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
             let val = Value::des(&buf)?;
             let desc = match val {
@@ -906,13 +1117,32 @@ impl DeltaLayerInner {
 
         for entry in keys {
             let DeltaEntry { key, lsn, val, .. } = entry;
-            let desc = match dump_blob(val, ctx).await {
+            let desc = match dump_blob(&val, ctx).await {
                 Ok(desc) => desc,
                 Err(err) => {
                     format!("ERROR: {err}")
                 }
             };
             println!("  key {key} at {lsn}: {desc}");
+
+            // Print more details about CHECKPOINT records. Would be nice to print details
+            // of many other record types too, but these are particularly interesting, as
+            // have a lot of special processing for them in walingest.rs.
+            use pageserver_api::key::CHECKPOINT_KEY;
+            use postgres_ffi::CheckPoint;
+            if key == CHECKPOINT_KEY {
+                let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
+                let val = Value::des(&buf)?;
+                match val {
+                    Value::Image(img) => {
+                        let checkpoint = CheckPoint::decode(&img)?;
+                        println!("   CHECKPOINT: {:?}", checkpoint);
+                    }
+                    Value::WalRecord(_rec) => {
+                        println!("   unexpected walrecord value for checkpoint key");
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -953,12 +1183,153 @@ impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
         blknum: u32,
         ctx: &RequestContext,
     ) -> Result<BlockLease, std::io::Error> {
-        self.0.as_ref().file.read_blk(blknum, ctx).await
+        let block_reader = FileBlockReader::new(&self.0.as_ref().file, self.0.as_ref().file_id);
+        block_reader.read_blk(blknum, ctx).await
     }
 }
 
 impl AsRef<DeltaLayerInner> for DeltaLayerInner {
     fn as_ref(&self) -> &DeltaLayerInner {
         self
+    }
+}
+
+impl<'a> pageserver_compaction::interface::CompactionDeltaEntry<'a, Key> for DeltaEntry<'a> {
+    fn key(&self) -> Key {
+        self.key
+    }
+    fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::{
+        context::DownloadBehavior, task_mgr::TaskKind, tenant::disk_btree::tests::TestDisk,
+    };
+
+    /// Construct an index for a fictional delta layer and and then
+    /// traverse in order to plan vectored reads for a query. Finally,
+    /// verify that the traversal fed the right index key and value
+    /// pairs into the planner.
+    #[tokio::test]
+    async fn test_delta_layer_index_traversal() {
+        let base_key = Key {
+            field1: 0,
+            field2: 1663,
+            field3: 12972,
+            field4: 16396,
+            field5: 0,
+            field6: 246080,
+        };
+
+        // Populate the index with some entries
+        let entries: BTreeMap<Key, Vec<Lsn>> = BTreeMap::from([
+            (base_key, vec![Lsn(1), Lsn(5), Lsn(25), Lsn(26), Lsn(28)]),
+            (base_key.add(1), vec![Lsn(2), Lsn(5), Lsn(10), Lsn(50)]),
+            (base_key.add(2), vec![Lsn(2), Lsn(5), Lsn(10), Lsn(50)]),
+            (base_key.add(5), vec![Lsn(10), Lsn(15), Lsn(16), Lsn(20)]),
+        ]);
+
+        let mut disk = TestDisk::default();
+        let mut writer = DiskBtreeBuilder::<_, DELTA_KEY_SIZE>::new(&mut disk);
+
+        let mut disk_offset = 0;
+        for (key, lsns) in &entries {
+            for lsn in lsns {
+                let index_key = DeltaKey::from_key_lsn(key, *lsn);
+                let blob_ref = BlobRef::new(disk_offset, false);
+                writer
+                    .append(&index_key.0, blob_ref.0)
+                    .expect("In memory disk append should never fail");
+
+                disk_offset += 1;
+            }
+        }
+
+        // Prepare all the arguments for the call into `plan_reads` below
+        let (root_offset, _writer) = writer
+            .finish()
+            .expect("In memory disk finish should never fail");
+        let reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, root_offset, disk);
+        let planner = VectoredReadPlanner::new(100);
+        let mut reconstruct_state = ValuesReconstructState::new();
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+
+        let keyspace = KeySpace {
+            ranges: vec![
+                base_key..base_key.add(3),
+                base_key.add(3)..base_key.add(100),
+            ],
+        };
+        let lsn_range = Lsn(2)..Lsn(40);
+
+        // Plan and validate
+        let vectored_reads = DeltaLayerInner::plan_reads(
+            keyspace.clone(),
+            lsn_range.clone(),
+            disk_offset,
+            reader,
+            planner,
+            &mut reconstruct_state,
+            &ctx,
+        )
+        .await
+        .expect("Read planning should not fail");
+
+        validate(keyspace, lsn_range, vectored_reads, entries);
+    }
+
+    fn validate(
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+        vectored_reads: Vec<VectoredRead>,
+        index_entries: BTreeMap<Key, Vec<Lsn>>,
+    ) {
+        #[derive(Debug, PartialEq, Eq)]
+        struct BlobSpec {
+            key: Key,
+            lsn: Lsn,
+            at: u64,
+        }
+
+        let mut planned_blobs = Vec::new();
+        for read in vectored_reads {
+            for (at, meta) in read.blobs_at.as_slice() {
+                planned_blobs.push(BlobSpec {
+                    key: meta.key,
+                    lsn: meta.lsn,
+                    at: *at,
+                });
+            }
+        }
+
+        let mut expected_blobs = Vec::new();
+        let mut disk_offset = 0;
+        for (key, lsns) in index_entries {
+            for lsn in lsns {
+                let key_included = keyspace.ranges.iter().any(|range| range.contains(&key));
+                let lsn_included = lsn_range.contains(&lsn);
+
+                if key_included && lsn_included {
+                    expected_blobs.push(BlobSpec {
+                        key,
+                        lsn,
+                        at: disk_offset,
+                    });
+                }
+
+                disk_offset += 1;
+            }
+        }
+
+        assert_eq!(planned_blobs, expected_blobs);
     }
 }

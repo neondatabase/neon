@@ -1,5 +1,6 @@
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
@@ -7,7 +8,7 @@ use pageserver_api::shard::ShardIndex;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tracing::Instrument;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
@@ -15,16 +16,21 @@ use utils::sync::heavier_once_cell;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
 use super::image_layer;
 use super::{
     AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerFileName, PersistentLayerDesc,
-    ValueReconstructResult, ValueReconstructState,
+    ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
 };
 
 use utils::generation::Generation;
+
+#[cfg(test)]
+mod tests;
 
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
@@ -189,6 +195,7 @@ impl Layer {
         let downloaded = resident.expect("just initialized");
 
         // if the rename works, the path is as expected
+        // TODO: sync system call
         std::fs::rename(temp_path, owner.local_path())
             .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
@@ -202,10 +209,15 @@ impl Layer {
     /// If for a bad luck or blocking of the executor, we miss the actual eviction and the layer is
     /// re-downloaded, [`EvictionError::Downloaded`] is returned.
     ///
+    /// Timeout is mandatory, because waiting for eviction is only needed for our tests; eviction
+    /// will happen regardless the future returned by this method completing unless there is a
+    /// read access (currently including [`Layer::keep_resident`]) before eviction gets to
+    /// complete.
+    ///
     /// Technically cancellation safe, but cancelling might shift the viewpoint of what generation
     /// of download-evict cycle on retry.
-    pub(crate) async fn evict_and_wait(&self) -> Result<(), EvictionError> {
-        self.0.evict_and_wait().await
+    pub(crate) async fn evict_and_wait(&self, timeout: Duration) -> Result<(), EvictionError> {
+        self.0.evict_and_wait(timeout).await
     }
 
     /// Delete the layer file when the `self` gets dropped, also try to schedule a remote index upload
@@ -259,6 +271,29 @@ impl Layer {
             .instrument(tracing::debug_span!("get_value_reconstruct_data", layer=%self))
             .await
             .with_context(|| format!("get_value_reconstruct_data for layer {self}"))
+    }
+
+    pub(crate) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        let layer = self
+            .0
+            .get_or_maybe_download(true, Some(ctx))
+            .await
+            .map_err(|err| GetVectoredError::Other(anyhow::anyhow!(err)))?;
+
+        self.0
+            .access_stats
+            .record_access(LayerAccessKind::GetValueReconstructData, ctx);
+
+        layer
+            .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
+            .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
+            .await
     }
 
     /// Download the layer if evicted.
@@ -334,7 +369,7 @@ impl Layer {
     ///
     /// Does not start local deletion, use [`Self::delete_on_drop`] for that
     /// separatedly.
-    #[cfg(feature = "testing")]
+    #[cfg(any(feature = "testing", test))]
     pub(crate) fn wait_drop(&self) -> impl std::future::Future<Output = ()> + 'static {
         let mut rx = self.0.status.subscribe();
 
@@ -501,6 +536,18 @@ impl Drop for LayerInner {
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
 
+            let Some(timeline) = timeline.upgrade() else {
+                // no need to nag that timeline is gone: under normal situation on
+                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            };
+
+            let Ok(_guard) = timeline.gate.enter() else {
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            };
+
             let removed = match std::fs::remove_file(path) {
                 Ok(()) => true,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -519,32 +566,26 @@ impl Drop for LayerInner {
                 }
             };
 
-            if let Some(timeline) = timeline.upgrade() {
-                if removed {
-                    timeline.metrics.resident_physical_size_sub(file_size);
-                }
-                if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
+            if removed {
+                timeline.metrics.resident_physical_size_sub(file_size);
+            }
+            if let Some(remote_client) = timeline.remote_client.as_ref() {
+                let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
-                    if let Err(e) = res {
-                        // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
-                        // demonstrating this deadlock (without spawn_blocking): stop will drop
-                        // queued items, which will have ResidentLayer's, and those drops would try
-                        // to re-entrantly lock the RemoteTimelineClient inner state.
-                        if !timeline.is_active() {
-                            tracing::info!("scheduling deletion on drop failed: {e:#}");
-                        } else {
-                            tracing::warn!("scheduling deletion on drop failed: {e:#}");
-                        }
-                        LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                if let Err(e) = res {
+                    // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
+                    // demonstrating this deadlock (without spawn_blocking): stop will drop
+                    // queued items, which will have ResidentLayer's, and those drops would try
+                    // to re-entrantly lock the RemoteTimelineClient inner state.
+                    if !timeline.is_active() {
+                        tracing::info!("scheduling deletion on drop failed: {e:#}");
                     } else {
-                        LAYER_IMPL_METRICS.inc_completed_deletes();
+                        tracing::warn!("scheduling deletion on drop failed: {e:#}");
                     }
+                    LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                } else {
+                    LAYER_IMPL_METRICS.inc_completed_deletes();
                 }
-            } else {
-                // no need to nag that timeline is gone: under normal situation on
-                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
             }
         });
     }
@@ -603,7 +644,7 @@ impl LayerInner {
 
     /// Cancellation safe, however dropping the future and calling this method again might result
     /// in a new attempt to evict OR join the previously started attempt.
-    pub(crate) async fn evict_and_wait(&self) -> Result<(), EvictionError> {
+    pub(crate) async fn evict_and_wait(&self, timeout: Duration) -> Result<(), EvictionError> {
         use tokio::sync::broadcast::error::RecvError;
 
         assert!(self.have_remote_client);
@@ -623,16 +664,22 @@ impl LayerInner {
         if strong.is_some() {
             // drop the DownloadedLayer outside of the holding the guard
             drop(strong);
+
+            // idea here is that only one evicter should ever get to witness a strong reference,
+            // which means whenever get_or_maybe_download upgrades a weak, it must mark up a
+            // cancelled eviction and signal us, like it currently does.
+            //
+            // a second concurrent evict_and_wait will not see a strong reference.
             LAYER_IMPL_METRICS.inc_started_evictions();
         }
 
-        match rx.recv().await {
-            Ok(Status::Evicted) => Ok(()),
-            Ok(Status::Downloaded) => Err(EvictionError::Downloaded),
-            Err(RecvError::Closed) => {
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(Ok(Status::Evicted)) => Ok(()),
+            Ok(Ok(Status::Downloaded)) => Err(EvictionError::Downloaded),
+            Ok(Err(RecvError::Closed)) => {
                 unreachable!("sender cannot be dropped while we are in &self method")
             }
-            Err(RecvError::Lagged(_)) => {
+            Ok(Err(RecvError::Lagged(_))) => {
                 // this is quite unlikely, but we are blocking a lot in the async context, so
                 // we might be missing this because we are stuck on a LIFO slot on a thread
                 // which is busy blocking for a 1TB database create_image_layers.
@@ -645,6 +692,7 @@ impl LayerInner {
                     None => Ok(()),
                 }
             }
+            Err(_timeout) => Err(EvictionError::Timeout),
         }
     }
 
@@ -836,23 +884,20 @@ impl LayerInner {
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
     ) -> Result<heavier_once_cell::InitPermit, DownloadError> {
-        let task_name = format!("download layer {}", self);
+        debug_assert_current_span_has_tenant_and_timeline_id();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
-        // block tenant::mgr::remove_tenant_from_memory.
-
         let this: Arc<Self> = self.clone();
 
-        crate::task_mgr::spawn(
-            &tokio::runtime::Handle::current(),
-            crate::task_mgr::TaskKind::RemoteDownloadTask,
-            Some(self.desc.tenant_shard_id),
-            Some(self.desc.timeline_id),
-            &task_name,
-            false,
-            async move {
+        let guard = timeline
+            .gate
+            .enter()
+            .map_err(|_| DownloadError::DownloadCancelled)?;
+
+        tokio::task::spawn(async move {
+
+                let _guard = guard;
 
                 let client = timeline
                     .remote_client
@@ -862,7 +907,7 @@ impl LayerInner {
                 let result = client.download_layer_file(
                     &this.desc.filename(),
                     &this.metadata(),
-                    &crate::task_mgr::shutdown_token()
+                    &timeline.cancel
                 )
                 .await;
 
@@ -885,7 +930,6 @@ impl LayerInner {
 
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {},
-                            _ = crate::task_mgr::shutdown_token().cancelled_owned() => {},
                             _ = timeline.cancel.cancelled() => {},
                         };
 
@@ -915,11 +959,10 @@ impl LayerInner {
                         }
                     }
                 }
-
-                Ok(())
             }
             .in_current_span(),
         );
+
         match rx.await {
             Ok((Ok(()), permit)) => {
                 if let Some(reason) = self
@@ -932,7 +975,7 @@ impl LayerInner {
                 }
 
                 self.consecutive_failures.store(0, Ordering::Relaxed);
-                tracing::info!("on-demand download successful");
+                tracing::info!(size=%self.desc.file_size, "on-demand download successful");
 
                 Ok(permit)
             }
@@ -1021,16 +1064,10 @@ impl LayerInner {
 
     /// `DownloadedLayer` is being dropped, so it calls this method.
     fn on_downloaded_layer_drop(self: Arc<LayerInner>, version: usize) {
-        let delete = self.wanted_deleted.load(Ordering::Acquire);
         let evict = self.wanted_evicted.load(Ordering::Acquire);
         let can_evict = self.have_remote_client;
 
-        if delete {
-            // do nothing now, only in LayerInner::drop -- this was originally implemented because
-            // we could had already scheduled the deletion at the time.
-            //
-            // FIXME: this is not true anymore, we can safely evict wanted deleted files.
-        } else if can_evict && evict {
+        if can_evict && evict {
             let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, %version);
 
             // downgrade for queueing, in case there's a tear down already ongoing we should not
@@ -1061,6 +1098,10 @@ impl LayerInner {
     fn evict_blocking(&self, only_version: usize) -> Result<(), EvictionCancelled> {
         // deleted or detached timeline, don't do anything.
         let Some(timeline) = self.timeline.upgrade() else {
+            return Err(EvictionCancelled::TimelineGone);
+        };
+
+        let Ok(_gate) = timeline.gate.enter() else {
             return Err(EvictionCancelled::TimelineGone);
         };
 
@@ -1170,11 +1211,14 @@ pub(crate) enum EvictionError {
     /// Evictions must always lose to downloads in races, and this time it happened.
     #[error("layer was downloaded instead")]
     Downloaded,
+
+    #[error("eviction did not happen within timeout")]
+    Timeout,
 }
 
 /// Error internal to the [`LayerInner::get_or_maybe_download`]
 #[derive(Debug, thiserror::Error)]
-enum DownloadError {
+pub(crate) enum DownloadError {
     #[error("timeline has already shutdown")]
     TimelineShutdown,
     #[error("no remote storage configured")]
@@ -1271,9 +1315,14 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     owner.desc.lsn_range.clone(),
                 ));
-                delta_layer::DeltaLayerInner::load(&owner.path, summary, ctx)
-                    .await
-                    .map(|res| res.map(LayerKind::Delta))
+                delta_layer::DeltaLayerInner::load(
+                    &owner.path,
+                    summary,
+                    Some(owner.conf.max_vectored_read_bytes),
+                    ctx,
+                )
+                .await
+                .map(|res| res.map(LayerKind::Delta))
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
@@ -1282,9 +1331,15 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     lsn,
                 ));
-                image_layer::ImageLayerInner::load(&owner.path, lsn, summary, ctx)
-                    .await
-                    .map(|res| res.map(LayerKind::Image))
+                image_layer::ImageLayerInner::load(
+                    &owner.path,
+                    lsn,
+                    summary,
+                    Some(owner.conf.max_vectored_read_bytes),
+                    ctx,
+                )
+                .await
+                .map(|res| res.map(LayerKind::Image))
             };
 
             match res {
@@ -1329,6 +1384,28 @@ impl DownloadedLayer {
             }
             Image(i) => {
                 i.get_value_reconstruct_data(key, reconstruct_data, ctx)
+                    .await
+            }
+        }
+    }
+
+    async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValuesReconstructState,
+        owner: &Arc<LayerInner>,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        use LayerKind::*;
+
+        match self.get(owner, ctx).await.map_err(GetVectoredError::from)? {
+            Delta(d) => {
+                d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
+                    .await
+            }
+            Image(i) => {
+                i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
                     .await
             }
         }
@@ -1408,10 +1485,6 @@ impl ResidentLayer {
 
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.owner.0.path
-    }
-
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        self.owner.access_stats()
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {

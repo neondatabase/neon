@@ -16,7 +16,8 @@ use crate::{
         config::SecondaryLocationConfig,
         debug_assert_current_span_has_tenant_and_timeline_id,
         remote_timeline_client::{
-            index::LayerFileMetadata, FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES,
+            index::LayerFileMetadata, is_temp_download_file, FAILED_DOWNLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
         },
         span::debug_assert_current_span_has_tenant_id,
         storage_layer::LayerFileName,
@@ -37,6 +38,7 @@ use crate::tenant::{
     remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
 };
 
+use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
 use pageserver_api::shard::TenantShardId;
@@ -44,7 +46,7 @@ use rand::Rng;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, instrument, Instrument};
+use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, fs_ext, id::TimelineId,
 };
@@ -146,14 +148,15 @@ impl SecondaryDetail {
         }
     }
 
+    /// Additionally returns the total number of layers, used for more stable relative access time
+    /// based eviction.
     pub(super) fn get_layers_for_eviction(
         &self,
         parent: &Arc<SecondaryTenant>,
-    ) -> DiskUsageEvictionInfo {
-        let mut result = DiskUsageEvictionInfo {
-            max_layer_size: None,
-            resident_layers: Vec::new(),
-        };
+    ) -> (DiskUsageEvictionInfo, usize) {
+        let mut result = DiskUsageEvictionInfo::default();
+        let mut total_layers = 0;
+
         for (timeline_id, timeline_detail) in &self.timelines {
             result
                 .resident_layers
@@ -169,6 +172,10 @@ impl SecondaryDetail {
                         relative_last_activity: finite_f32::FiniteF32::ZERO,
                     }
                 }));
+
+            // total might be missing currently downloading layers, but as a lower than actual
+            // value it is good enough approximation.
+            total_layers += timeline_detail.on_disk_layers.len() + timeline_detail.evicted_at.len();
         }
         result.max_layer_size = result
             .resident_layers
@@ -183,7 +190,7 @@ impl SecondaryDetail {
             result.resident_layers.len()
         );
 
-        result
+        (result, total_layers)
     }
 }
 
@@ -312,9 +319,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             .tenant_manager
             .get_secondary_tenant_shard(*tenant_shard_id);
         let Some(tenant) = tenant else {
-            {
-                return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
-            }
+            return Err(anyhow::anyhow!("Not found or not in Secondary mode"));
         };
 
         Ok(PendingDownload {
@@ -389,9 +394,9 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             }
 
             CompleteDownload {
-                    secondary_state,
-                    completed_at: Instant::now(),
-                }
+                secondary_state,
+                completed_at: Instant::now(),
+            }
         }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 }
@@ -435,8 +440,14 @@ impl From<std::io::Error> for UpdateError {
     fn from(value: std::io::Error) -> Self {
         if let Some(nix::errno::Errno::ENOSPC) = value.raw_os_error().map(nix::errno::from_i32) {
             UpdateError::NoSpace
+        } else if value
+            .get_ref()
+            .and_then(|x| x.downcast_ref::<DownloadError>())
+            .is_some()
+        {
+            UpdateError::from(DownloadError::from(value))
         } else {
-            // An I/O error from e.g. tokio::io::copy is most likely a remote storage issue
+            // An I/O error from e.g. tokio::io::copy_buf is most likely a remote storage issue
             UpdateError::Other(anyhow::anyhow!(value))
         }
     }
@@ -481,14 +492,9 @@ impl<'a> TenantDownloader<'a> {
         let temp_path = path_with_suffix_extension(&heatmap_path, TEMP_FILE_SUFFIX);
         let context_msg = format!("write tenant {tenant_shard_id} heatmap to {heatmap_path}");
         let heatmap_path_bg = heatmap_path.clone();
-        tokio::task::spawn_blocking(move || {
-            tokio::runtime::Handle::current().block_on(async move {
-                VirtualFile::crashsafe_overwrite(&heatmap_path_bg, &temp_path, &heatmap_bytes).await
-            })
-        })
-        .await
-        .expect("Blocking task is never aborted")
-        .maybe_fatal_err(&context_msg)?;
+        VirtualFile::crashsafe_overwrite(heatmap_path_bg, temp_path, heatmap_bytes)
+            .await
+            .maybe_fatal_err(&context_msg)?;
 
         tracing::debug!("Wrote local heatmap to {}", heatmap_path);
 
@@ -520,28 +526,29 @@ impl<'a> TenantDownloader<'a> {
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
+        let cancel = &self.secondary_state.cancel;
 
         let heatmap_bytes = backoff::retry(
             || async {
                 let download = self
                     .remote_storage
-                    .download(&heatmap_path)
+                    .download(&heatmap_path, cancel)
                     .await
                     .map_err(UpdateError::from)?;
                 let mut heatmap_bytes = Vec::new();
                 let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-                let _size = tokio::io::copy(&mut body, &mut heatmap_bytes).await?;
+                let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
                 Ok(heatmap_bytes)
             },
             |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "download heatmap",
-            backoff::Cancel::new(self.secondary_state.cancel.clone(), || {
-                UpdateError::Cancelled
-            }),
+            cancel,
         )
-        .await?;
+        .await
+        .ok_or_else(|| UpdateError::Cancelled)
+        .and_then(|x| x)?;
 
         SECONDARY_MODE.download_heatmap.inc();
 
@@ -668,20 +675,17 @@ impl<'a> TenantDownloader<'a> {
             .await
             {
                 Ok(bytes) => bytes,
-                Err(e) => {
-                    if let DownloadError::NotFound = e {
-                        // A heatmap might be out of date and refer to a layer that doesn't exist any more.
-                        // This is harmless: continue to download the next layer. It is expected during compaction
-                        // GC.
-                        tracing::debug!(
-                            "Skipped downloading missing layer {}, raced with compaction/gc?",
-                            layer.name
-                        );
-                        continue;
-                    } else {
-                        return Err(e.into());
-                    }
+                Err(DownloadError::NotFound) => {
+                    // A heatmap might be out of date and refer to a layer that doesn't exist any more.
+                    // This is harmless: continue to download the next layer. It is expected during compaction
+                    // GC.
+                    tracing::debug!(
+                        "Skipped downloading missing layer {}, raced with compaction/gc?",
+                        layer.name
+                    );
+                    continue;
                 }
+                Err(e) => return Err(e.into()),
             };
 
             if downloaded_bytes != layer.metadata.file_size {
@@ -771,19 +775,33 @@ async fn init_timeline_state(
         .await
         .fatal_err(&format!("Listing {timeline_path}"))
     {
-        let dentry_file_name = dentry.file_name();
-        let file_name = dentry_file_name.to_string_lossy();
-        let local_meta = dentry.metadata().await.fatal_err(&format!(
-            "Read metadata on {}",
-            dentry.path().to_string_lossy()
-        ));
+        let Ok(file_path) = Utf8PathBuf::from_path_buf(dentry.path()) else {
+            tracing::warn!("Malformed filename at {}", dentry.path().to_string_lossy());
+            continue;
+        };
+        let local_meta = dentry
+            .metadata()
+            .await
+            .fatal_err(&format!("Read metadata on {}", file_path));
 
-        // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
+        let file_name = file_path.file_name().expect("created it from the dentry");
         if file_name == METADATA_FILE_NAME {
+            // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
+            warn!(path=?dentry.path(), "found legacy metadata file, these should have been removed in load_tenant_config");
+            continue;
+        } else if crate::is_temporary(&file_path) || is_temp_download_file(&file_path) {
+            // Temporary files are frequently left behind from restarting during downloads
+            tracing::info!("Cleaning up temporary file {file_path}");
+            if let Err(e) = tokio::fs::remove_file(&file_path)
+                .await
+                .or_else(fs_ext::ignore_not_found)
+            {
+                tracing::error!("Failed to remove temporary file {file_path}: {e}");
+            }
             continue;
         }
 
-        match LayerFileName::from_str(&file_name) {
+        match LayerFileName::from_str(file_name) {
             Ok(name) => {
                 let remote_meta = heatmap_metadata.get(&name);
                 match remote_meta {

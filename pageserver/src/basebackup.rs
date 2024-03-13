@@ -143,6 +143,7 @@ where
     ar: &'a mut Builder<&'b mut W>,
     buf: Vec<u8>,
     current_segment: Option<(SlruKind, u32)>,
+    total_blocks: usize,
 }
 
 impl<'a, 'b, W> SlruSegmentsBuilder<'a, 'b, W>
@@ -154,6 +155,7 @@ where
             ar,
             buf: Vec::new(),
             current_segment: None,
+            total_blocks: 0,
         }
     }
 
@@ -199,7 +201,8 @@ where
         let header = new_tar_header(&segname, self.buf.len() as u64)?;
         self.ar.append(&header, self.buf.as_slice()).await?;
 
-        trace!("Added to basebackup slru {} relsize {}", segname, nblocks);
+        self.total_blocks += nblocks;
+        debug!("Added to basebackup slru {} relsize {}", segname, nblocks);
 
         self.buf.clear();
 
@@ -207,11 +210,15 @@ where
     }
 
     async fn finish(mut self) -> anyhow::Result<()> {
-        if self.current_segment.is_none() || self.buf.is_empty() {
-            return Ok(());
-        }
+        let res = if self.current_segment.is_none() || self.buf.is_empty() {
+            Ok(())
+        } else {
+            self.flush().await
+        };
 
-        self.flush().await
+        info!("Collected {} SLRU blocks", self.total_blocks);
+
+        res
     }
 }
 
@@ -221,6 +228,8 @@ where
 {
     async fn send_tarball(mut self) -> anyhow::Result<()> {
         // TODO include checksum
+
+        let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
@@ -248,28 +257,25 @@ where
                     .context("could not add config file to basebackup tarball")?;
             }
         }
-
-        // Gather non-relational files from object storage pages.
-        let slru_partitions = self
-            .timeline
-            .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
-            .await?
-            .partition(Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64);
-
-        let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
-
-        for part in slru_partitions.parts {
-            let blocks = self
+        if !lazy_slru_download {
+            // Gather non-relational files from object storage pages.
+            let slru_partitions = self
                 .timeline
-                .get_vectored(&part.ranges, self.lsn, self.ctx)
-                .await?;
+                .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
+                .await?
+                .partition(Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64);
 
-            for (key, block) in blocks {
-                slru_builder.add_block(&key, block?).await?;
+            let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
+
+            for part in slru_partitions.parts {
+                let blocks = self.timeline.get_vectored(part, self.lsn, self.ctx).await?;
+
+                for (key, block) in blocks {
+                    slru_builder.add_block(&key, block?).await?;
+                }
             }
+            slru_builder.finish().await?;
         }
-
-        slru_builder.finish().await?;
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
         // Create tablespace directories

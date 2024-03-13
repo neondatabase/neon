@@ -112,11 +112,6 @@ def test_create_snapshot(
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
     pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
     pg_bin.run_capture(
@@ -138,6 +133,7 @@ def test_create_snapshot(
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
+    env.storage_controller.stop()
 
     # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
     compatibility_snapshot_dir = (
@@ -145,7 +141,12 @@ def test_create_snapshot(
     )
     if compatibility_snapshot_dir.exists():
         shutil.rmtree(compatibility_snapshot_dir)
-    shutil.copytree(test_output_dir, compatibility_snapshot_dir)
+
+    shutil.copytree(
+        test_output_dir,
+        compatibility_snapshot_dir,
+        ignore=shutil.ignore_patterns("pg_dynshmem"),
+    )
 
 
 @check_ondisk_data_compatibility_if_enabled
@@ -225,13 +226,23 @@ def test_forward_compatibility(
     )
 
     try:
+        # TODO: remove this once the previous pageserrver version understands
+        # the 'get_vectored_impl' config
+        neon_env_builder.pageserver_get_vectored_impl = None
+
         neon_env_builder.num_safekeepers = 3
+        neon_local_binpath = neon_env_builder.neon_binpath
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
             neon_binpath=compatibility_neon_bin,
             pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
-        neon_env_builder.start()
+
+        # Use current neon_local even though we're using old binaries for
+        # everything else: our test code is written for latest CLI args.
+        env.neon_local_binpath = neon_local_binpath
+
+        neon_env_builder.start(register_pageservers=True)
 
         check_neon_works(
             env,

@@ -286,6 +286,29 @@ impl SharedState {
             .cloned()
             .collect()
     }
+
+    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
+    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
+    /// offloading.
+    /// While it is safe to use inmem values for determining horizon,
+    /// we use persistent to make possible normal states less surprising.
+    fn get_horizon_segno(
+        &self,
+        wal_backup_enabled: bool,
+        extra_horizon_lsn: Option<Lsn>,
+    ) -> XLogSegNo {
+        let state = &self.sk.state;
+
+        use std::cmp::min;
+        let mut horizon_lsn = min(state.remote_consistent_lsn, state.peer_horizon_lsn);
+        if wal_backup_enabled {
+            horizon_lsn = min(horizon_lsn, state.backup_lsn);
+        }
+        if let Some(extra_horizon_lsn) = extra_horizon_lsn {
+            horizon_lsn = min(horizon_lsn, extra_horizon_lsn);
+        }
+        horizon_lsn.segment_number(state.server.wal_seg_size as usize)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -353,6 +376,12 @@ pub struct Timeline {
 
     /// Directory where timeline state is stored.
     pub timeline_dir: Utf8PathBuf,
+
+    /// Should we keep WAL on disk for active replication connections.
+    /// Especially useful for sharding, when different shards process WAL
+    /// with different speed.
+    // TODO: add `Arc<SafeKeeperConf>` here instead of adding each field separately.
+    walsenders_keep_horizon: bool,
 }
 
 impl Timeline {
@@ -373,6 +402,7 @@ impl Timeline {
         )));
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
+        let walreceivers = WalReceivers::new();
         Ok(Timeline {
             ttid,
             wal_backup_launcher_tx,
@@ -381,11 +411,12 @@ impl Timeline {
             term_flush_lsn_watch_tx,
             term_flush_lsn_watch_rx,
             mutex: Mutex::new(shared_state),
-            walsenders: WalSenders::new(),
-            walreceivers: WalReceivers::new(),
+            walsenders: WalSenders::new(walreceivers.clone()),
+            walreceivers,
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
+            walsenders_keep_horizon: conf.walsenders_keep_horizon,
         })
     }
 
@@ -405,6 +436,7 @@ impl Timeline {
         let state =
             TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
+        let walreceivers = WalReceivers::new();
         Ok(Timeline {
             ttid,
             wal_backup_launcher_tx,
@@ -413,11 +445,12 @@ impl Timeline {
             term_flush_lsn_watch_tx,
             term_flush_lsn_watch_rx,
             mutex: Mutex::new(SharedState::create_new(conf, &ttid, state)?),
-            walsenders: WalSenders::new(),
-            walreceivers: WalReceivers::new(),
+            walsenders: WalSenders::new(walreceivers.clone()),
+            walreceivers,
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
+            walsenders_keep_horizon: conf.walsenders_keep_horizon,
         })
     }
 
@@ -625,12 +658,9 @@ impl Timeline {
             let mut shared_state = self.write_shared_state().await;
             rmsg = shared_state.sk.process_msg(msg).await?;
 
-            // if this is AppendResponse, fill in proper pageserver and hot
-            // standby feedback.
+            // if this is AppendResponse, fill in proper hot standby feedback.
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
-                let (ps_feedback, hs_feedback) = self.walsenders.get_feedbacks();
-                resp.hs_feedback = hs_feedback;
-                resp.pageserver_feedback = ps_feedback;
+                resp.hs_feedback = self.walsenders.get_hotstandby();
             }
 
             commit_lsn = shared_state.sk.state.inmem.commit_lsn;
@@ -817,10 +847,20 @@ impl Timeline {
             bail!(TimelineError::Cancelled(self.ttid));
         }
 
+        // If enabled, we use LSN of the most lagging walsender as a WAL removal horizon.
+        // This allows to get better read speed for pageservers that are lagging behind,
+        // at the cost of keeping more WAL on disk.
+        let replication_horizon_lsn = if self.walsenders_keep_horizon {
+            self.walsenders.laggard_lsn()
+        } else {
+            None
+        };
+
         let horizon_segno: XLogSegNo;
         let remover = {
             let shared_state = self.write_shared_state().await;
-            horizon_segno = shared_state.sk.get_horizon_segno(wal_backup_enabled);
+            horizon_segno =
+                shared_state.get_horizon_segno(wal_backup_enabled, replication_horizon_lsn);
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(()); // nothing to do
             }
@@ -857,12 +897,13 @@ impl Timeline {
             return None;
         }
 
-        let ps_feedback = self.walsenders.get_ps_feedback();
+        let (ps_feedback_count, last_ps_feedback) = self.walsenders.get_ps_feedback_stats();
         let state = self.write_shared_state().await;
         if state.active {
             Some(FullTimelineInfo {
                 ttid: self.ttid,
-                ps_feedback,
+                ps_feedback_count,
+                last_ps_feedback,
                 wal_backup_active: state.wal_backup_active,
                 timeline_is_active: state.active,
                 num_computes: self.walreceivers.get_num() as u32,
@@ -900,6 +941,20 @@ impl Timeline {
             flush_lsn,
             file_open,
         }
+    }
+
+    /// Apply a function to the control file state and persist it.
+    pub async fn map_control_file<T>(
+        &self,
+        f: impl FnOnce(&mut TimelinePersistentState) -> Result<T>,
+    ) -> Result<T> {
+        let mut state = self.write_shared_state().await;
+        let mut persistent_state = state.sk.state.start_change();
+        // If f returns error, we abort the change and don't persist anything.
+        let res = f(&mut persistent_state)?;
+        // If persisting fails, we abort the change and return error.
+        state.sk.state.finish_change(&persistent_state).await?;
+        Ok(res)
     }
 }
 

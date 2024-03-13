@@ -18,20 +18,18 @@ use crate::{
 };
 
 use futures::Future;
-use md5;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};
 
 use super::{
+    heatmap::HeatMapTenant,
     scheduler::{self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs},
-    CommandRequest,
+    CommandRequest, UploadCommand,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
 use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
-
-use super::{heatmap::HeatMapTenant, UploadCommand};
 
 pub(super) async fn heatmap_uploader_task(
     tenant_manager: Arc<TenantManager>,
@@ -371,17 +369,12 @@ async fn upload_tenant_heatmap(
     };
     let timelines = tenant.timelines.lock().unwrap().clone();
 
-    let tenant_cancel = tenant.cancel.clone();
-
     // Ensure that Tenant::shutdown waits for any upload in flight: this is needed because otherwise
     // when we delete a tenant, we might race with an upload in flight and end up leaving a heatmap behind
     // in remote storage.
-    let _guard = match tenant.gate.enter() {
-        Ok(g) => g,
-        Err(_) => {
-            tracing::info!("Skipping heatmap upload for tenant which is shutting down");
-            return Err(UploadHeatmapError::Cancelled);
-        }
+    let Ok(_guard) = tenant.gate.enter() else {
+        tracing::info!("Skipping heatmap upload for tenant which is shutting down");
+        return Err(UploadHeatmapError::Cancelled);
     };
 
     for (timeline_id, timeline) in timelines {
@@ -401,6 +394,7 @@ async fn upload_tenant_heatmap(
 
     // Serialize the heatmap
     let bytes = serde_json::to_vec(&heatmap).map_err(|e| anyhow::anyhow!(e))?;
+    let bytes = bytes::Bytes::from(bytes);
     let size = bytes.len();
 
     // Drop out early if nothing changed since our last upload
@@ -411,26 +405,27 @@ async fn upload_tenant_heatmap(
 
     let path = remote_heatmap_path(tenant.get_tenant_shard_id());
 
-    // Write the heatmap.
+    let cancel = &tenant.cancel;
+
     tracing::debug!("Uploading {size} byte heatmap to {path}");
     if let Err(e) = backoff::retry(
         || async {
-            let bytes = futures::stream::once(futures::future::ready(Ok(bytes::Bytes::from(
-                bytes.clone(),
-            ))));
+            let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
             remote_storage
-                .upload_storage_object(bytes, size, &path)
+                .upload_storage_object(bytes, size, &path, cancel)
                 .await
         },
-        |_| false,
+        TimeoutOrCancel::caused_by_cancel,
         3,
         u32::MAX,
         "Uploading heatmap",
-        backoff::Cancel::new(tenant_cancel.clone(), || anyhow::anyhow!("Shutting down")),
+        cancel,
     )
     .await
+    .ok_or_else(|| anyhow::anyhow!("Shutting down"))
+    .and_then(|x| x)
     {
-        if tenant_cancel.is_cancelled() {
+        if cancel.is_cancelled() {
             return Err(UploadHeatmapError::Cancelled);
         } else {
             return Err(e.into());

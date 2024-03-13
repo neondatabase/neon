@@ -33,22 +33,27 @@ psutil = "^5.9.4"
 types-psutil = "^5.9.5.12"
 types-toml = "^0.10.8.6"
 pytest-httpserver = "^1.0.8"
-aiohttp = "3.9.0"
+aiohttp = "3.9.2"
 pytest-rerunfailures = "^13.0"
 types-pytest-lazy-fixture = "^0.6.3.3"
 pytest-split = "^0.8.1"
 zstandard = "^0.21.0"
+httpx = {extras = ["http2"], version = "^0.26.0"}
+pytest-repeat = "^0.9.3"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.3.0"
-ruff = "^0.1.11"
+ruff = "^0.2.2"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.mypy]
-exclude = "^vendor/"
+exclude = [
+    "^vendor/",
+    "^target/",
+]
 check_untyped_defs = true
 # Help mypy find imports when running against list of individual files.
 # Without this line it would behave differently when executed on the entire project.
@@ -72,7 +77,13 @@ ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py39"
-extend-exclude = ["vendor/"]
+extend-exclude = [
+    "vendor/",
+    "target/",
+]
+line-length = 100 # this setting is rather guidance, it won't fail if it can't make the shorter
+
+[tool.ruff.lint]
 ignore = [
     "E501", # Line too long, we don't want to be too strict about it
 ]
@@ -83,4 +94,3 @@ select = [
     "W", # pycodestyle
     "B", # bugbear
 ]
-line-length = 100 # this setting is rather guidance, it won't fail if it can't make the shorter

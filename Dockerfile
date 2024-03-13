@@ -47,12 +47,13 @@ COPY --chown=nonroot . .
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
-    && mold -run cargo build  \
+    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build  \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
       --bin safekeeper  \
       --bin storage_broker  \
+      --bin storage_controller  \
       --bin proxy  \
       --bin neon_local \
       --locked --release \
@@ -80,6 +81,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver     
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl             /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
 
@@ -97,6 +99,11 @@ RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
        -c "pg_distrib_dir='/usr/local/'" \
        -c "listen_pg_addr='0.0.0.0:6400'" \
        -c "listen_http_addr='0.0.0.0:9898'"
+
+# When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
+# that want a particular postgres version will select it explicitly: this is just a default.
+ENV LD_LIBRARY_PATH /usr/local/v16/lib
+
 
 VOLUME ["/data"]
 USER neon

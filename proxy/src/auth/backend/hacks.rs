@@ -4,7 +4,7 @@ use super::{
 use crate::{
     auth::{self, AuthFlow},
     console::AuthSecret,
-    metrics::LatencyTimer,
+    context::RequestMonitoring,
     sasl,
     stream::{self, Stream},
 };
@@ -16,21 +16,25 @@ use tracing::{info, warn};
 /// These properties are benefical for serverless JS workers, so we
 /// use this mechanism for websocket connections.
 pub async fn authenticate_cleartext(
+    ctx: &mut RequestMonitoring,
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
-    latency_timer: &mut LatencyTimer,
     secret: AuthSecret,
-) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
+) -> auth::Result<ComputeCredentials> {
     warn!("cleartext auth flow override is enabled, proceeding");
+    ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     // pause the timer while we communicate with the client
-    let _paused = latency_timer.pause();
+    let paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
 
-    let auth_outcome = AuthFlow::new(client)
+    let auth_flow = AuthFlow::new(client)
         .begin(auth::CleartextPassword(secret))
-        .await?
-        .authenticate()
         .await?;
+    drop(paused);
+    // cleartext auth is only allowed to the ws/http protocol.
+    // If we're here, we already received the password in the first message.
+    // Scram protocol will be executed on the proxy side.
+    let auth_outcome = auth_flow.authenticate().await?;
 
     let keys = match auth_outcome {
         sasl::Outcome::Success(key) => key,
@@ -47,14 +51,15 @@ pub async fn authenticate_cleartext(
 /// Similar to [`authenticate_cleartext`], but there's a specific password format,
 /// and passwords are not yet validated (we don't know how to validate them!)
 pub async fn password_hack_no_authentication(
+    ctx: &mut RequestMonitoring,
     info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
-    latency_timer: &mut LatencyTimer,
-) -> auth::Result<ComputeCredentials<Vec<u8>>> {
+) -> auth::Result<ComputeCredentials> {
     warn!("project not specified, resorting to the password hack auth flow");
+    ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     // pause the timer while we communicate with the client
-    let _paused = latency_timer.pause();
+    let _paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
 
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)
@@ -71,6 +76,6 @@ pub async fn password_hack_no_authentication(
             options: info.options,
             endpoint: payload.endpoint,
         },
-        keys: payload.password,
+        keys: ComputeCredentialKeys::Password(payload.password),
     })
 }

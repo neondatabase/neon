@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::auth::IpPattern;
@@ -98,31 +98,17 @@ pub struct MetricsAuxInfo {
     pub endpoint_id: EndpointId,
     pub project_id: ProjectId,
     pub branch_id: BranchId,
+    pub cold_start_info: Option<ColdStartInfo>,
 }
 
-impl MetricsAuxInfo {
-    /// Definitions of labels for traffic metric.
-    pub const TRAFFIC_LABELS: &'static [&'static str] = &[
-        // Received (rx) / sent (tx).
-        "direction",
-        // ID of a project.
-        "project_id",
-        // ID of an endpoint within a project.
-        "endpoint_id",
-        // ID of a branch within a project (snapshot).
-        "branch_id",
-    ];
-
-    /// Values of labels for traffic metric.
-    // TODO: add more type safety (validate arity & positions).
-    pub fn traffic_labels(&self, direction: &'static str) -> [&str; 4] {
-        [
-            direction,
-            &self.project_id,
-            &self.endpoint_id,
-            &self.branch_id,
-        ]
-    }
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ColdStartInfo {
+    #[default]
+    Unknown = 0,
+    Warm = 1,
+    PoolHit = 2,
+    PoolMiss = 3,
 }
 
 #[cfg(test)]
@@ -135,6 +121,7 @@ mod tests {
             "endpoint_id": "endpoint",
             "project_id": "project",
             "branch_id": "branch",
+            "cold_start_info": "unknown",
         })
     }
 

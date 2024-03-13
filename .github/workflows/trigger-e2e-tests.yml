@@ -1,0 +1,119 @@
+name: Trigger E2E Tests
+
+on:
+  pull_request:
+    types:
+      - ready_for_review
+  workflow_call:
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+env:
+  # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
+  E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+jobs:
+  cancel-previous-e2e-tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cancel previous e2e-tests runs for this PR
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          gh workflow --repo neondatabase/cloud \
+            run cancel-previous-in-concurrency-group.yml \
+              --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
+
+  tag:
+    runs-on: [ ubuntu-latest ]
+    outputs:
+      build-tag: ${{ steps.build-tag.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get build tag
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          CURRENT_BRANCH: ${{ github.head_ref || github.ref_name }}
+          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
+            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
+            echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
+          fi
+        id: build-tag
+
+  trigger-e2e-tests:
+    needs: [ tag ]
+    runs-on: [ self-hosted, gen3, small ]
+    env:
+      TAG: ${{ needs.tag.outputs.build-tag }}
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+      options: --init
+    steps:
+      - name: check if ecr image are present
+        run: |
+          for REPO in neon compute-tools compute-node-v14 vm-compute-node-v14 compute-node-v15 vm-compute-node-v15 compute-node-v16 vm-compute-node-v16; do
+            OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
+            if [ "$OUTPUT" == "" ]; then
+              echo "$REPO with image tag $TAG not found" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          done
+
+      - name: Set PR's status to pending and request a remote CI test
+        run: |
+          # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
+          # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
+          # to place a job run status update later.
+          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+          # For non-PR kinds of runs, the above will produce an empty variable, pick the original sha value for those
+          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+
+          REMOTE_REPO="${{ github.repository_owner }}/cloud"
+
+          curl -f -X POST \
+          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"state\": \"pending\",
+              \"context\": \"neon-cloud-e2e\",
+              \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
+            }"
+
+          curl -f -X POST \
+          https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"ref\": \"main\",
+              \"inputs\": {
+                \"ci_job_name\": \"neon-cloud-e2e\",
+                \"commit_hash\": \"$COMMIT_SHA\",
+                \"remote_repo\": \"${{ github.repository }}\",
+                \"storage_image_tag\": \"${TAG}\",
+                \"compute_image_tag\": \"${TAG}\",
+                \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
+              }
+            }"

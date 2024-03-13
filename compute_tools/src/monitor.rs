@@ -138,6 +138,34 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     }
                 }
                 //
+                // Don't suspend compute if there is an active logical replication subscription
+                //
+                // `where pid is not null` – to filter out read only computes and subscription on branches
+                //
+                let logical_subscriptions_query =
+                    "select count(*) from pg_stat_subscription where pid is not null;";
+                match cli.query_one(logical_subscriptions_query, &[]) {
+                    Ok(row) => match row.try_get::<&str, i64>("count") {
+                        Ok(num_subscribers) => {
+                            if num_subscribers > 0 {
+                                compute.update_last_active(Some(Utc::now()));
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("failed to parse `pg_stat_subscription` count: {:?}", e);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            "failed to get list of active logical replication subscriptions: {:?}",
+                            e
+                        );
+                        continue;
+                    }
+                }
+                //
                 // Do not suspend compute if autovacuum is running
                 //
                 let autovacuum_count_query = "select count(*) from pg_stat_activity where backend_type = 'autovacuum worker'";

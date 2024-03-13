@@ -5,6 +5,7 @@ members = [
     "control_plane",
     "control_plane/attachment_service",
     "pageserver",
+    "pageserver/compaction",
     "pageserver/ctl",
     "pageserver/client",
     "pageserver/pagebench",
@@ -18,6 +19,7 @@ members = [
     "libs/pageserver_api",
     "libs/postgres_ffi",
     "libs/safekeeper_api",
+    "libs/desim",
     "libs/utils",
     "libs/consumption_metrics",
     "libs/postgres_backend",
@@ -48,11 +50,12 @@ azure_storage_blobs = "0.18"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
-aws-config = { version = "1.0", default-features = false, features=["rustls"] }
-aws-sdk-s3 = "1.0"
-aws-smithy-async = { version = "1.0", default-features = false, features=["rt-tokio"] }
-aws-smithy-types = "1.0"
-aws-credential-types = "1.0"
+aws-config = { version = "1.1.4", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "1.14"
+aws-sdk-secretsmanager = { version = "1.14.0" }
+aws-smithy-async = { version = "1.1.4", default-features = false, features=["rt-tokio"] }
+aws-smithy-types = "1.1.4"
+aws-credential-types = "1.1.4"
 axum = { version = "0.6.20", features = ["ws"] }
 base64 = "0.13.0"
 bincode = "1.3"
@@ -64,7 +67,6 @@ camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive"] }
-close_fds = "0.3.2"
 comfy-table = "6.1"
 const_format = "0.2"
 crc32c = "0.6"
@@ -80,7 +82,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 git-version = "0.3"
 hashbrown = "0.13"
-hashlink = "0.8.1"
+hashlink = "0.8.4"
 hdrhistogram = "7.5.2"
 hex = "0.4"
 hex-literal = "0.4"
@@ -95,6 +97,8 @@ inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
 jsonwebtoken = "9"
+lasso = "0.7"
+leaky-bucket = "1.0.1"
 libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"
@@ -112,6 +116,7 @@ parquet = { version = "49.0.0", default-features = false, features = ["zstd"] }
 parquet_derive = "49.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
+procfs = "0.14"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
@@ -124,8 +129,8 @@ reqwest-retry = "0.2.2"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"
-rustls = "0.21"
-rustls-pemfile = "1"
+rustls = "0.22"
+rustls-pemfile = "2"
 rustls-split = "0.3"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
@@ -149,12 +154,13 @@ tar = "0.4"
 task-local-extensions = "0.1.4"
 test-context = "0.1"
 thiserror = "1.0"
-tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
+tikv-jemallocator = "0.5"
+tikv-jemalloc-ctl = "0.5"
 tokio = { version = "1.17", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
-tokio-postgres-rustls = "0.10.0"
-tokio-rustls = "0.24"
+tokio-postgres-rustls = "0.11.0"
+tokio-rustls = "0.25"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
 tokio-test = "0.4.3"
@@ -166,7 +172,9 @@ tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.20.0"
 tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+twox-hash = { version = "1.6.3", default-features = false }
 url = "2.2"
+urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 webpki-roots = "0.25"
@@ -192,12 +200,14 @@ consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }
 remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
+desim = { version = "0.1", path = "./libs/desim" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
@@ -210,7 +220,7 @@ workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
 criterion = "0.5.1"
-rcgen = "0.11"
+rcgen = "0.12"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
 tonic-build = "0.9"

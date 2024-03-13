@@ -1,5 +1,8 @@
 use futures::future::Either;
 use proxy::auth;
+use proxy::auth::backend::MaybeOwned;
+use proxy::cancellation::CancelMap;
+use proxy::cancellation::CancellationHandler;
 use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
@@ -11,16 +14,18 @@ use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
 use proxy::redis::notifications;
+use proxy::redis::publisher::RedisPublisherClient;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
 
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
 use proxy::serverless;
+use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
-use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -31,6 +36,9 @@ project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
 use clap::{Parser, ValueEnum};
+
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackend {
@@ -84,6 +92,9 @@ struct ProxyCliArgs {
     /// path to directory with TLS certificates for client postgres connections
     #[clap(long)]
     certs_dir: Option<String>,
+    /// timeout for the TLS handshake
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    handshake_timeout: tokio::time::Duration,
     /// http endpoint to receive periodic metric updates
     #[clap(long)]
     metric_collection_endpoint: Option<String>,
@@ -122,6 +133,9 @@ struct ProxyCliArgs {
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
+    /// Redis rate limiter max number of requests per second.
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    redis_rps_limit: Vec<RateBucketInfo>,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
     #[clap(long, default_value_t = 100)]
     initial_limit: usize,
@@ -161,6 +175,10 @@ struct SqlOverHttpArgs {
     #[clap(long, default_value_t = 20)]
     sql_over_http_pool_max_conns_per_endpoint: usize,
 
+    /// How many connections to pool for each endpoint. Excess connections are discarded
+    #[clap(long, default_value_t = 20000)]
+    sql_over_http_pool_max_total_conns: usize,
+
     /// How long pooled connections should remain idle for before closing
     #[clap(long, default_value = "5m", value_parser = humantime::parse_duration)]
     sql_over_http_idle_timeout: tokio::time::Duration,
@@ -187,6 +205,13 @@ async fn main() -> anyhow::Result<()> {
     info!("Build_tag: {BUILD_TAG}");
     ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
+    match proxy::jemalloc::MetricRecorder::new(prometheus::default_registry()) {
+        Ok(t) => {
+            t.start();
+        }
+        Err(e) => tracing::error!(error = ?e, "could not start jemalloc metrics loop"),
+    }
+
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
 
@@ -207,6 +232,19 @@ async fn main() -> anyhow::Result<()> {
     let cancellation_token = CancellationToken::new();
 
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
+    let cancel_map = CancelMap::default();
+    let redis_publisher = match &args.redis_notifications {
+        Some(url) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
+            url,
+            args.region.clone(),
+            &config.redis_rps_limit,
+        )?))),
+        None => None,
+    };
+    let cancellation_handler = Arc::new(CancellationHandler::new(
+        cancel_map.clone(),
+        redis_publisher,
+    ));
 
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
@@ -216,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         proxy_listener,
         cancellation_token.clone(),
         endpoint_rate_limiter.clone(),
+        cancellation_handler.clone(),
     ));
 
     // TODO: rename the argument to something like serverless.
@@ -230,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
             serverless_listener,
             cancellation_token.clone(),
             endpoint_rate_limiter.clone(),
+            cancellation_handler.clone(),
         ));
     }
 
@@ -249,18 +289,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
-        match &**api {
-            proxy::console::provider::ConsoleBackend::Console(api) => {
-                let cache = api.caches.project_info.clone();
-                if let Some(url) = args.redis_notifications {
-                    info!("Starting redis notifications listener ({url})");
-                    maintenance_tasks
-                        .spawn(notifications::task_main(url.to_owned(), cache.clone()));
-                }
-                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+        if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
+            let cache = api.caches.project_info.clone();
+            if let Some(url) = args.redis_notifications {
+                info!("Starting redis notifications listener ({url})");
+                maintenance_tasks.spawn(notifications::task_main(
+                    url.to_owned(),
+                    cache.clone(),
+                    cancel_map.clone(),
+                    args.region.clone(),
+                ));
             }
-            #[cfg(feature = "testing")]
-            proxy::console::provider::ConsoleBackend::Postgres(_) => {}
+            maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
         }
     }
 
@@ -359,18 +399,18 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             let api = console::provider::ConsoleBackend::Console(api);
-            auth::BackendType::Console(Cow::Owned(api), ())
+            auth::BackendType::Console(MaybeOwned::Owned(api), ())
         }
         #[cfg(feature = "testing")]
         AuthBackend::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = console::provider::mock::Api::new(url);
             let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::BackendType::Console(Cow::Owned(api), ())
+            auth::BackendType::Console(MaybeOwned::Owned(api), ())
         }
         AuthBackend::Link => {
             let url = args.uri.parse()?;
-            auth::BackendType::Link(Cow::Owned(url))
+            auth::BackendType::Link(MaybeOwned::Owned(url), ())
         }
     };
     let http_config = HttpConfig {
@@ -381,6 +421,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             pool_shards: args.sql_over_http.sql_over_http_pool_shards,
             idle_timeout: args.sql_over_http.sql_over_http_idle_timeout,
             opt_in: args.sql_over_http.sql_over_http_pool_opt_in,
+            max_total_conns: args.sql_over_http.sql_over_http_pool_max_total_conns,
         },
     };
     let authentication_config = AuthenticationConfig {
@@ -389,6 +430,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
     RateBucketInfo::validate(&mut endpoint_rps_limit)?;
+    let mut redis_rps_limit = args.redis_rps_limit.clone();
+    RateBucketInfo::validate(&mut redis_rps_limit)?;
 
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
@@ -400,6 +443,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
+        redis_rps_limit,
+        handshake_timeout: args.handshake_timeout,
         // TODO: add this argument
         region: args.region.clone(),
     }));

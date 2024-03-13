@@ -4,7 +4,7 @@ Created on 08.03.23
 
 ## Motivation
 
-Currently we dont delete pageserver part of the data from s3 when project is deleted. (The same is true for safekeepers, but this outside of the scope of this RFC).
+Currently we don't delete pageserver part of the data from s3 when project is deleted. (The same is true for safekeepers, but this outside of the scope of this RFC).
 
 This RFC aims to spin a discussion to come to a robust deletion solution that wont put us in into a corner for features like postponed deletion (when we keep data for user to be able to restore a project if it was deleted by accident)
 
@@ -75,9 +75,9 @@ Remote one is needed for cases when pageserver is lost during deletion so other 
 
 Why local mark file is needed?
 
-If we dont have one, we have two choices, delete local data before deleting the remote part or do that after.
+If we don't have one, we have two choices, delete local data before deleting the remote part or do that after.
 
-If we delete local data before remote then during restart pageserver wont pick up remote tenant at all because nothing is available locally (pageserver looks for remote conuterparts of locally available tenants).
+If we delete local data before remote then during restart pageserver wont pick up remote tenant at all because nothing is available locally (pageserver looks for remote counterparts of locally available tenants).
 
 If we delete local data after remote then at the end of the sequence when remote mark file is deleted if pageserver restart happens then the state is the same to situation when pageserver just missing data on remote without knowing the fact that this data is intended to be deleted. In this case the current behavior is upload everything local-only to remote.
 
@@ -145,7 +145,7 @@ sequenceDiagram
         CP->>PS: Retry delete tenant
         PS->>CP: Not modified
     else Mark is missing
-        note over PS: Continue to operate the tenant as if deletion didnt happen
+        note over PS: Continue to operate the tenant as if deletion didn't happen
 
         note over CP: Eventually console should <br> retry delete request
 
@@ -168,7 +168,7 @@ sequenceDiagram
     PS->>CP: True
 ```
 
-Similar sequence applies when both local and remote marks were persisted but Control Plane still didnt receive a response.
+Similar sequence applies when both local and remote marks were persisted but Control Plane still didn't receive a response.
 
 If pageserver crashes after both mark files were deleted then it will reply to control plane status poll request with 404 which should be treated by control plane as success.
 
@@ -187,7 +187,7 @@ If pageseserver is lost then the deleted tenant should be attached to different 
 
 ##### Restrictions for tenant that is in progress of being deleted
 
-I propose to add another state to tenant/timeline - PendingDelete. This state shouldnt allow executing any operations aside from polling the deletion status.
+I propose to add another state to tenant/timeline - PendingDelete. This state shouldn't allow executing any operations aside from polling the deletion status.
 
 #### Summary
 
@@ -237,7 +237,7 @@ New branch gets created
 PS1 starts up (is it possible or we just recycle it?)
 PS1 is unaware of the new branch. It can either fall back to s3 ls, or ask control plane.
 
-So here comes the dependency of storage on control plane. During restart storage needs to know which timelines are valid for operation. If there is nothing on s3 that can answer that question storage neeeds to ask control plane.
+So here comes the dependency of storage on control plane. During restart storage needs to know which timelines are valid for operation. If there is nothing on s3 that can answer that question storage needs to ask control plane.
 
 ### Summary
 
@@ -250,7 +250,7 @@ Cons:
 
 Pros:
 
-- Easier to reason about if you dont have to account for pageserver restarts
+- Easier to reason about if you don't have to account for pageserver restarts
 
 ### Extra notes
 
@@ -262,7 +262,7 @@ Delayed deletion can be done with both approaches. As discussed with Anna (@step
 
 After discussion in comments I see that we settled on two options (though a bit different from ones described in rfc). First one is the same - pageserver owns as much as possible. The second option is that pageserver owns markers thing, but actual deletion happens in control plane by repeatedly calling ls + delete.
 
-To my mind the only benefit of the latter approach is possible code reuse between safekeepers and pageservers. Otherwise poking around integrating s3 library into control plane, configuring shared knowledge abouth paths in s3 - are the downsides. Another downside of relying on control plane is the testing process. Control plane resides in different repository so it is quite hard to test pageserver related changes there. e2e test suite there doesnt support shutting down pageservers, which are separate docker containers there instead of just processes.
+To my mind the only benefit of the latter approach is possible code reuse between safekeepers and pageservers. Otherwise poking around integrating s3 library into control plane, configuring shared knowledge about paths in s3 - are the downsides. Another downside of relying on control plane is the testing process. Control plane resides in different repository so it is quite hard to test pageserver related changes there. e2e test suite there doesn't support shutting down pageservers, which are separate docker containers there instead of just processes.
 
 With pageserver owning everything we still give the retry logic to control plane but its easier to duplicate if needed compared to sharing inner s3 workings. We will have needed tests for retry logic in neon repo.
 
