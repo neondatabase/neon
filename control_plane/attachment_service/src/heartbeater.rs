@@ -13,7 +13,7 @@ use utils::id::NodeId;
 
 use crate::node::Node;
 
-pub struct Heartbeater {
+struct Heartbeater {
     receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest>,
     cancel: CancellationToken,
 
@@ -24,7 +24,7 @@ pub struct Heartbeater {
 }
 
 #[derive(Debug, Clone)]
-pub enum PageserverState {
+pub(crate) enum PageserverState {
     Available {
         last_seen_at: Instant,
         utilization: PageserverUtilization,
@@ -33,24 +33,25 @@ pub enum PageserverState {
 }
 
 #[derive(Debug)]
-pub struct AvailablityDeltas(pub Vec<(NodeId, PageserverState)>);
+pub(crate) struct AvailablityDeltas(pub Vec<(NodeId, PageserverState)>);
 
 #[derive(Debug, Error)]
-pub enum HeartbeaterError {
+pub(crate) enum HeartbeaterError {
     #[error("Cancelled")]
     Cancel,
 }
 
-pub struct HeartbeatRequest {
+struct HeartbeatRequest {
     pageservers: Arc<HashMap<NodeId, Node>>,
     reply: tokio::sync::oneshot::Sender<Result<AvailablityDeltas, HeartbeaterError>>,
 }
-pub struct HeartbeaterHandler {
+
+pub(crate) struct HeartbeaterHandler {
     sender: tokio::sync::mpsc::UnboundedSender<HeartbeatRequest>,
 }
 
 impl HeartbeaterHandler {
-    pub fn new(
+    pub(crate) fn new(
         jwt_token: Option<String>,
         max_unavailable_interval: Duration,
         cancel: CancellationToken,
@@ -63,7 +64,7 @@ impl HeartbeaterHandler {
         Self { sender }
     }
 
-    pub async fn heartbeat(
+    pub(crate) async fn heartbeat(
         &self,
         pageservers: Arc<HashMap<NodeId, Node>>,
     ) -> Result<AvailablityDeltas, HeartbeaterError> {
@@ -80,7 +81,7 @@ impl HeartbeaterHandler {
 }
 
 impl Heartbeater {
-    pub fn new(
+    fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest>,
         jwt_token: Option<String>,
         max_unavailable_interval: Duration,
