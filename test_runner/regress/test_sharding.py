@@ -886,6 +886,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
         branch_name="main",
         endpoint_opts={
             "config_lines": [
+                # Tip: set to 100MB to make the test fail
                 "max_replication_write_lag=1MB",
             ],
         },

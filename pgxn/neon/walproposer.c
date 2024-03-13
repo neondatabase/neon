@@ -1467,7 +1467,7 @@ RecvAppendResponses(Safekeeper *sk)
 }
 
 #define psfeedback_log(fmt, key, ...) \
-	wp_log(LOG, "ParsePageserverFeedbackMessage: %s " fmt, key, __VA_ARGS__)
+	wp_log(DEBUG2, "ParsePageserverFeedbackMessage: %s " fmt, key, __VA_ARGS__)
 
 /* Parse a PageserverFeedback message, or the PageserverFeedback part of an AppendResponse */
 static void

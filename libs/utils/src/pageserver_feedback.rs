@@ -29,7 +29,7 @@ pub struct PageserverFeedback {
     // Serialize with RFC3339 format.
     #[serde(with = "serde_systemtime")]
     pub replytime: SystemTime,
-    /// Used to track feedbacks from different shards. Zero for unsharded tenants.
+    /// Used to track feedbacks from different shards. Always zero for unsharded tenants.
     pub shard_number: u32,
 }
 
@@ -216,7 +216,7 @@ mod tests {
         rf.serialize(&mut data);
 
         // Add an extra field to the buffer and adjust number of keys
-        data[0] = data[0] + 1;
+        data[0] += 1;
         data.put_slice(b"new_field_one\0");
         data.put_i32(8);
         data.put_u64(42);
