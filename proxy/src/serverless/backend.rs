@@ -9,6 +9,7 @@ use crate::{
     config::ProxyConfig,
     console::{
         errors::{GetAuthInfoError, WakeComputeError},
+        messages::ColdStartInfo,
         CachedNodeInfo,
     },
     context::RequestMonitoring,
@@ -83,6 +84,7 @@ impl PoolingBackend {
         };
 
         if let Some(client) = maybe_client {
+            ctx.set_cold_start_info(ColdStartInfo::Warm);
             return Ok(client);
         }
         let conn_id = uuid::Uuid::new_v4();
