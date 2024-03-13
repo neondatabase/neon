@@ -12,6 +12,7 @@ use crate::{
         CachedNodeInfo,
     },
     context::RequestMonitoring,
+    error::{ErrorKind, ReportableError, UserFacingError},
     proxy::connect_compute::ConnectMechanism,
 };
 
@@ -115,6 +116,30 @@ pub enum HttpConnError {
     AuthError(#[from] AuthError),
     #[error("wake_compute returned error")]
     WakeCompute(#[from] WakeComputeError),
+}
+
+impl ReportableError for HttpConnError {
+    fn get_error_kind(&self) -> ErrorKind {
+        match self {
+            HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
+            HttpConnError::ConnectionError(p) => p.get_error_kind(),
+            HttpConnError::GetAuthInfo(a) => a.get_error_kind(),
+            HttpConnError::AuthError(a) => a.get_error_kind(),
+            HttpConnError::WakeCompute(w) => w.get_error_kind(),
+        }
+    }
+}
+
+impl UserFacingError for HttpConnError {
+    fn to_string_client(&self) -> String {
+        match self {
+            HttpConnError::ConnectionClosedAbruptly(_) => self.to_string(),
+            HttpConnError::ConnectionError(p) => p.to_string(),
+            HttpConnError::GetAuthInfo(c) => c.to_string_client(),
+            HttpConnError::AuthError(c) => c.to_string_client(),
+            HttpConnError::WakeCompute(c) => c.to_string_client(),
+        }
+    }
 }
 
 struct TokioMechanism {
