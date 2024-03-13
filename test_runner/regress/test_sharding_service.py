@@ -771,7 +771,55 @@ def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_heartbeats(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+class Failure:
+    pageserver_id: int
+
+    def apply(self, env: NeonEnv):
+        raise NotImplementedError()
+
+    def clear(self, env: NeonEnv):
+        raise NotImplementedError()
+
+
+class NodeStop(Failure):
+    def __init__(self, pageserver_id, immediate):
+        self.pageserver_id = pageserver_id
+        self.immediate = immediate
+
+    def apply(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.stop(immediate=self.immediate)
+
+    def clear(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.start()
+
+
+class PageserverFailpoint(Failure):
+    def __init__(self, failpoint, pageserver_id):
+        self.failpoint = failpoint
+        self.pageserver_id = pageserver_id
+
+    def apply(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.http_client().configure_failpoints((self.failpoint, "return(1)"))
+
+    def clear(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.http_client().configure_failpoints((self.failpoint, "off"))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        NodeStop(pageserver_id=1, immediate=False),
+        NodeStop(pageserver_id=1, immediate=True),
+        PageserverFailpoint(pageserver_id=1, failpoint="get-utilization-http-handler"),
+    ],
+)
+def test_sharding_service_heartbeats(
+    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, failure: Failure
+):
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_start()
 
@@ -780,9 +828,9 @@ def test_sharding_service_heartbeats(neon_env_builder: NeonEnvBuilder, pg_bin: P
     assert len(nodes) == 2
     assert all([n["availability"] == "Active" for n in nodes])
 
-    # ... then we stop one of the pageservers
-    offline_node_id = env.pageservers[1].id
-    env.pageservers[1].stop()
+    # ... then we apply the failure
+    offline_node_id = failure.pageserver_id
+    failure.apply(env)
 
     # ... then we expect the heartbeats to mark it offline
     def node_offline():
@@ -813,8 +861,8 @@ def test_sharding_service_heartbeats(neon_env_builder: NeonEnvBuilder, pg_bin: P
     for tid in tenant_ids:
         create_tenant(tid)
 
-    # ... then we bring the pageserver back up
-    env.pageservers[1].start()
+    # ... then we clear the failure
+    failure.clear(env)
 
     # ... then we expect it to be marked active
     def node_online():
