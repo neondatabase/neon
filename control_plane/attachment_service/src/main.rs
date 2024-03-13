@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context};
 use attachment_service::http::make_router;
 use attachment_service::metrics::preinitialize_metrics;
 use attachment_service::persistence::Persistence;
-use attachment_service::service::{Config, Service};
+use attachment_service::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
 use aws_config::{BehaviorVersion, Region};
 use camino::Utf8PathBuf;
 use clap::Parser;
@@ -54,6 +54,10 @@ struct Cli {
     /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
     #[arg(long)]
     database_url: Option<String>,
+
+    /// Grace period before marking unresponsive pageserver offline
+    #[arg(long)]
+    max_unavailable_interval: Option<humantime::Duration>,
 }
 
 /// Secrets may either be provided on the command line (for testing), or loaded from AWS SecretManager: this
@@ -243,6 +247,10 @@ async fn async_main() -> anyhow::Result<()> {
         jwt_token: secrets.jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
+        max_unavailable_interval: args
+            .max_unavailable_interval
+            .map(humantime::Duration::into)
+            .unwrap_or(MAX_UNAVAILABLE_INTERVAL_DEFAULT),
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations

@@ -1344,6 +1344,7 @@ dependencies = [
  "futures",
  "git-version",
  "hex",
+ "humantime",
  "hyper",
  "nix 0.27.1",
  "once_cell",

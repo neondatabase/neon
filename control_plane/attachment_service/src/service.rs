@@ -79,6 +79,8 @@ const INITIAL_GENERATION: Generation = Generation::new(0);
 /// up on unresponsive pageservers and proceed.
 pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
+
 // Top level state available to all HTTP handlers
 struct ServiceState {
     tenants: BTreeMap<TenantShardId, TenantState>,
@@ -126,6 +128,11 @@ pub struct Config {
     /// (this URL points to the control plane in prod). If this is None, the compute hook will
     /// assume it is running in a test environment and try to update neon_local.
     pub compute_hook_url: Option<String>,
+
+    /// Grace period within which a pageserver does not respond to heartbeats, but is still
+    /// considered active. Once the grace period elapses, the next heartbeat failure will
+    /// mark the pagseserver offline.
+    pub max_unavailable_interval: Duration,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -622,13 +629,14 @@ impl Service {
             let res = self.heartbeater_handler.heartbeat(nodes).await;
             if let Ok(deltas) = res {
                 for (node_id, state) in deltas.0 {
+                    tracing::info!("HB: {node_id} -> {state:?}");
+
                     let new_availability = match state {
                         PageserverState::Available { utilization, .. } => NodeAvailability::Active(
                             UtilizationScore(utilization.utilization_score),
                         ),
                         PageserverState::Offline => NodeAvailability::Offline,
                     };
-
                     let res = self
                         .node_configure(node_id, Some(new_availability), None)
                         .await;
@@ -824,7 +832,7 @@ impl Service {
         let cancel = CancellationToken::new();
         let heartbeater_handler = Heartbeater::new(
             config.jwt_token.clone(),
-            Duration::from_secs(10),
+            config.max_unavailable_interval,
             cancel.clone(),
         );
         let this = Arc::new(Self {
