@@ -1265,9 +1265,9 @@ impl Service {
         if let Some(node) = nodes.get(&reattach_req.node_id) {
             if !node.is_available() {
                 let mut new_nodes = (**nodes).clone();
-                new_nodes
-                    .get_mut(&reattach_req.node_id)
-                    .map(|n| n.set_availability(NodeAvailability::Active));
+                if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
+                    node.set_availability(NodeAvailability::Active);
+                }
                 let new_nodes = Arc::new(new_nodes);
                 *nodes = new_nodes;
             }
