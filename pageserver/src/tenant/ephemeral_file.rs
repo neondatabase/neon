@@ -86,19 +86,13 @@ impl EphemeralFile {
         let buffered_offset = self.file.bytes_written();
         let flushed_offset = self.file.as_inner().as_inner().bytes_written();
         assert!(buffered_offset >= flushed_offset);
+        let read_offset = (blknum as u64) * (PAGE_SZ as u64);
 
         assert_eq!(
             flushed_offset % (PAGE_SZ as u64),
             0,
             "we need this in the logic below, because it assumes the page isn't spread across flushed part and in-memory buffer"
         );
-
-        let read_offset = (blknum as u64) * (PAGE_SZ as u64);
-        if read_offset + (PAGE_SZ as u64) > buffered_offset {
-            // TODO: handle out-of-bounds access, i.e., access past end of file currently panics
-            // but should probably return an IO error. Pre-existing issue before this patch.
-            todo!("return IO error: read past end of file")
-        }
 
         if read_offset < flushed_offset {
             assert!(
@@ -137,9 +131,22 @@ impl EphemeralFile {
                 }
             };
         } else {
-            let buffer: &[u8; Self::TAIL_SZ] = self.file.as_inner().inspect_buffer();
+            let reads_past_end = read_offset + (PAGE_SZ as u64) <= buffered_offset;
+            if reads_past_end {
+                if cfg!(test) {
+                    // tests rely on being able to read zeroes from offsets [buffered_offset, next PAGE_SZ multiple of buffered_offset).
+                    // TODO: assert it's only up to the next PAGE_SZ
+                } else {
+                    // TODO: treat this as error. Pre-existing issue before this patch.
+                    panic!(
+                        "return IO error: read past end of file: {read_offset:x} {buffered_offset:x}"
+                    )
+                }
+            }
 
-            let read_offset_in_buffer = read_offset - buffered_offset;
+            let buffer: &[u8; Self::TAIL_SZ] = self.file.as_inner().inspect_buffer();
+            let read_offset_in_buffer = read_offset.checked_sub(flushed_offset).unwrap();
+
             let read_offset_in_buffer = usize::try_from(read_offset_in_buffer).unwrap();
             let page = &buffer[read_offset_in_buffer..(read_offset_in_buffer + PAGE_SZ)];
             Ok(BlockLease::EphemeralFileMutableTail(

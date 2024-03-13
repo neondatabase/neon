@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 /// A trait for doing owned-buffer write IO.
@@ -33,8 +32,10 @@ pub struct BufferedWriter<const BUFFER_SIZE: usize, W> {
     // - while IO is ongoing => goes back to Some() once the IO completed successfully
     // - after an IO error => stays `None` forever
     // In these exceptional cases, it's `None`.
-    buf: Option<BytesMut>,
+    buf: Option<zero_initialized_buffer::Buf<BUFFER_SIZE>>,
 }
+
+mod zero_initialized_buffer;
 
 impl<const BUFFER_SIZE: usize, W> BufferedWriter<BUFFER_SIZE, W>
 where
@@ -43,7 +44,7 @@ where
     pub fn new(writer: W) -> Self {
         Self {
             writer,
-            buf: Some(BytesMut::with_capacity(BUFFER_SIZE)),
+            buf: Some(zero_initialized_buffer::Buf::default()),
         }
     }
 
@@ -54,10 +55,10 @@ where
     /// panics if used after an error
     pub fn inspect_buffer(&self) -> &[u8; BUFFER_SIZE] {
         self.buf
-            .as_deref()
-            .expect("must not use after an error on the write path")
-            .try_into()
-            .unwrap()
+            .as_ref()
+            // TODO: can this happen on the EphemeralFile read path?
+            .expect("must not use after an error")
+            .as_zero_padded_slice()
     }
 
     pub async fn flush_and_into_inner(mut self) -> std::io::Result<W> {
