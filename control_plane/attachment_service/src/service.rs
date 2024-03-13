@@ -223,6 +223,9 @@ impl Service {
         let mut cleanup = Vec::new();
 
         let node_listings = self.scan_node_locations(node_scan_deadline).await;
+        // Send initial heartbeat requests to nodes that replied to the location listing above.
+        let nodes_online = self.initial_heartbeat_round(node_listings.keys()).await;
+
         for (node_id, list_response) in node_listings {
             let tenant_shards = list_response.tenant_shards;
             tracing::info!(
@@ -241,8 +244,6 @@ impl Service {
         let mut compute_notifications = Vec::new();
 
         // Populate intent and observed states for all tenants, based on reported state on pageservers
-        let nodes_online = self.initial_heartbeat_round().await;
-
         let shard_count = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
@@ -342,15 +343,33 @@ impl Service {
         tracing::info!("Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)");
     }
 
-    async fn initial_heartbeat_round(&self) -> HashMap<NodeId, PageserverUtilization> {
+    async fn initial_heartbeat_round<'a>(
+        &self,
+        node_ids: impl Iterator<Item = &'a NodeId>,
+    ) -> HashMap<NodeId, PageserverUtilization> {
         assert!(!self.startup_complete.is_ready());
 
-        let nodes = {
+        let all_nodes = {
             let locked = self.inner.read().unwrap();
             locked.nodes.clone()
         };
 
-        let res = self.heartbeater_handler.heartbeat(nodes).await;
+        let mut nodes_to_heartbeat = HashMap::new();
+        for node_id in node_ids {
+            match all_nodes.get(node_id) {
+                Some(node) => {
+                    nodes_to_heartbeat.insert(*node_id, node.clone());
+                }
+                None => {
+                    tracing::warn!("Node {node_id} was removed during start-up");
+                }
+            }
+        }
+
+        let res = self
+            .heartbeater_handler
+            .heartbeat(Arc::new(nodes_to_heartbeat))
+            .await;
 
         let mut online_nodes = HashMap::new();
         if let Ok(deltas) = res {
