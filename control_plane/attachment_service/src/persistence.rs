@@ -591,7 +591,7 @@ impl Persistence {
     ) -> DatabaseResult<AbortShardSplitStatus> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_conn(move |conn| -> DatabaseResult<AbortShardSplitStatus> {
-            let aborted = conn.transaction(|conn| -> QueryResult<AbortShardSplitStatus> {
+            let aborted = conn.transaction(|conn| -> DatabaseResult<AbortShardSplitStatus> {
                 // Clear the splitting state on parent shards
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(split_tenant_id.to_string()))
@@ -602,6 +602,15 @@ impl Persistence {
                 // Parent shards are already gone: we cannot abort.
                 if updated == 0 {
                     return Ok(AbortShardSplitStatus::Complete);
+                }
+
+                // Sanity check: if parent shards were present, their cardinality should
+                // be less than the number of child shards.
+                if updated >= new_shard_count.count() as usize {
+                    return Err(DatabaseError::Logical(format!(
+                        "Unexpected parent shard count {updated} while aborting split to \
+                            count {new_shard_count:?} on tenant {split_tenant_id}"
+                    )));
                 }
 
                 // Erase child shards
