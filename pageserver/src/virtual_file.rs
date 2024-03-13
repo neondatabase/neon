@@ -34,6 +34,8 @@ pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 
+use self::io_engine::IoEngine;
+
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
 /// the underlying file is closed if the system is low on file descriptors,
@@ -596,6 +598,7 @@ impl VirtualFile {
         &self,
         buf: B,
         mut offset: u64,
+        engine: IoEngine,
     ) -> (B::Buf, Result<(), Error>) {
         let buf_len = buf.bytes_init();
         if buf_len == 0 {
@@ -604,7 +607,7 @@ impl VirtualFile {
         let mut buf = buf.slice(0..buf_len);
         while !buf.is_empty() {
             let res;
-            (buf, res) = self.write_at(buf, offset).await;
+            (buf, res) = self.write_at(buf, offset, engine).await;
             match res {
                 Ok(0) => {
                     return (
@@ -667,7 +670,7 @@ impl VirtualFile {
         buf: Slice<B>,
     ) -> (Slice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
-        let (buf, res) = self.write_at(buf, pos).await;
+        let (buf, res) = self.write_at(buf, pos, io_engine::get()).await;
         let n = match res {
             Ok(n) => n,
             Err(e) => return (buf, Err(e)),
@@ -705,14 +708,14 @@ impl VirtualFile {
         &self,
         buf: Slice<B>,
         offset: u64,
+        engine: IoEngine,
     ) -> (Slice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
             Err(e) => return (buf, Err(e)),
         };
         observe_duration!(StorageIoOperation::Write, {
-            let ((_file_guard, buf), result) =
-                io_engine::get().write_at(file_guard, offset, buf).await;
+            let ((_file_guard, buf), result) = engine.write_at(file_guard, offset, buf).await;
             if let Ok(size) = result {
                 STORAGE_IO_SIZE
                     .with_label_values(&[
@@ -1150,7 +1153,7 @@ mod tests {
         ) -> Result<(), Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
-                    let (_buf, res) = file.write_all_at(buf, offset).await;
+                    let (_buf, res) = file.write_all_at(buf, offset, io_engine::get()).await;
                     res
                 }
                 MaybeVirtualFile::File(file) => {
