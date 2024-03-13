@@ -629,8 +629,6 @@ impl Service {
             let res = self.heartbeater.heartbeat(nodes).await;
             if let Ok(deltas) = res {
                 for (node_id, state) in deltas.0 {
-                    tracing::info!("HB: {node_id} -> {state:?}");
-
                     let new_availability = match state {
                         PageserverState::Available { utilization, .. } => NodeAvailability::Active(
                             UtilizationScore(utilization.utilization_score),
