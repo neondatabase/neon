@@ -791,7 +791,9 @@ def test_sharding_service_heartbeats(neon_env_builder: NeonEnvBuilder, pg_bin: P
         target = next(n for n in nodes if n["id"] == offline_node_id)
         assert target["availability"] == "Offline"
 
-    wait_until(10, 1, node_offline)
+    # A node is considered offline if the last successful heartbeat
+    # was more than 10 seconds ago (hardcoded in the storage controller).
+    wait_until(20, 1, node_offline)
 
     # ... then we create two tenants and write some data into them
     def create_tenant(tid: TenantId):
