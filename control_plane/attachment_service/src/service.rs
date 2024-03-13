@@ -157,7 +157,7 @@ pub struct Service {
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
 
-    heartbeater_handler: Heartbeater,
+    heartbeater: Heartbeater,
 
     // Process shutdown will fire this token
     cancel: CancellationToken,
@@ -374,7 +374,7 @@ impl Service {
         }
 
         let res = self
-            .heartbeater_handler
+            .heartbeater
             .heartbeat(Arc::new(nodes_to_heartbeat))
             .await;
 
@@ -626,7 +626,7 @@ impl Service {
                 locked.nodes.clone()
             };
 
-            let res = self.heartbeater_handler.heartbeat(nodes).await;
+            let res = self.heartbeater.heartbeat(nodes).await;
             if let Ok(deltas) = res {
                 for (node_id, state) in deltas.0 {
                     tracing::info!("HB: {node_id} -> {state:?}");
@@ -830,7 +830,7 @@ impl Service {
         let (startup_completion, startup_complete) = utils::completion::channel();
 
         let cancel = CancellationToken::new();
-        let heartbeater_handler = Heartbeater::new(
+        let heartbeater = Heartbeater::new(
             config.jwt_token.clone(),
             config.max_unavailable_interval,
             cancel.clone(),
@@ -843,7 +843,7 @@ impl Service {
             persistence,
             compute_hook: Arc::new(ComputeHook::new(config)),
             result_tx,
-            heartbeater_handler,
+            heartbeater,
             startup_complete: startup_complete.clone(),
             cancel,
             gate: Gate::default(),
