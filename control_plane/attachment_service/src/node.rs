@@ -83,29 +83,38 @@ impl Node {
         }
     }
 
-    pub(crate) fn set_availability(
-        &mut self,
-        availability: NodeAvailability,
-    ) -> AvailabilityTransition {
-        use NodeAvailability::*;
-        let transition = match (self.availability, availability) {
-            (Offline, Active) => {
+    pub(crate) fn set_availability(&mut self, availability: NodeAvailability) {
+        match self.get_availability_transition(availability) {
+            AvailabilityTransition::ToActive => {
                 // Give the node a new cancellation token, effectively resetting it to un-cancelled.  Any
                 // users of previously-cloned copies of the node will still see the old cancellation
                 // state.  For example, Reconcilers in flight will have to complete and be spawned
                 // again to realize that the node has become available.
                 self.cancel = CancellationToken::new();
-                AvailabilityTransition::ToActive
             }
-            (Active, Offline) => {
+            AvailabilityTransition::ToOffline => {
                 // Fire the node's cancellation token to cancel any in-flight API requests to it
                 self.cancel.cancel();
-                AvailabilityTransition::ToOffline
             }
-            _ => AvailabilityTransition::Unchanged,
-        };
+            AvailabilityTransition::Unchanged => {}
+        }
         self.availability = availability;
-        transition
+    }
+
+    /// Without modifying the availability of the node, convert the intended availability
+    /// into a description of the transition.
+    pub(crate) fn get_availability_transition(
+        &self,
+        availability: NodeAvailability,
+    ) -> AvailabilityTransition {
+        use AvailabilityTransition::*;
+        use NodeAvailability::*;
+
+        match (self.availability, availability) {
+            (Offline, Active) => ToActive,
+            (Active, Offline) => ToOffline,
+            _ => Unchanged,
+        }
     }
 
     /// Whether we may send API requests to this node.

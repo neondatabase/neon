@@ -3292,27 +3292,6 @@ impl Service {
     ) -> Result<(), ApiError> {
         let _node_lock = self.node_op_locks.exclusive(config_req.node_id).await;
 
-        let activate = {
-            let locked = self.inner.read().unwrap();
-            let Some(node) = locked.nodes.get(&config_req.node_id) else {
-                return Err(ApiError::NotFound(
-                    anyhow::anyhow!("Node {} not registered", config_req.node_id).into(),
-                ));
-            };
-
-            if !node.is_available()
-                && matches!(config_req.availability, Some(NodeAvailability::Active))
-            {
-                Some(node.clone())
-            } else {
-                None
-            }
-        };
-
-        if let Some(node) = activate {
-            self.node_activate_reconcile(node, &_node_lock).await?;
-        }
-
         if let Some(scheduling) = config_req.scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
             // applying them in memory
@@ -3321,6 +3300,34 @@ impl Service {
                 .await?;
         }
 
+        // If we're activating a node, then before setting it active we must reconcile any shard locations
+        // on that node, in case it is out of sync, e.g. due to being unavailable during controller startup,
+        // by calling [`Self::node_activate_reconcile`]
+        let availability_transition = if let Some(input_availability) = config_req.availability {
+            let (activate_node, availability_transition) = {
+                let locked = self.inner.read().unwrap();
+                let Some(node) = locked.nodes.get(&config_req.node_id) else {
+                    return Err(ApiError::NotFound(
+                        anyhow::anyhow!("Node {} not registered", config_req.node_id).into(),
+                    ));
+                };
+
+                (
+                    node.clone(),
+                    node.get_availability_transition(input_availability),
+                )
+            };
+
+            if matches!(availability_transition, AvailabilityTransition::ToActive) {
+                self.node_activate_reconcile(activate_node, &_node_lock)
+                    .await?;
+            }
+            availability_transition
+        } else {
+            AvailabilityTransition::Unchanged
+        };
+
+        // Apply changes from the request to our in-memory state for the Node
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, scheduler) = locked.parts_mut();
 
@@ -3332,11 +3339,9 @@ impl Service {
             ));
         };
 
-        let availability_transition = if let Some(availability) = &config_req.availability {
-            node.set_availability(*availability)
-        } else {
-            AvailabilityTransition::Unchanged
-        };
+        if let Some(availability) = &config_req.availability {
+            node.set_availability(*availability);
+        }
 
         if let Some(scheduling) = config_req.scheduling {
             node.set_scheduling(scheduling);
@@ -3350,6 +3355,7 @@ impl Service {
 
         let new_nodes = Arc::new(new_nodes);
 
+        // Modify scheduling state for any Tenants that are affected by a change in the node's availability state.
         match availability_transition {
             AvailabilityTransition::ToOffline => {
                 tracing::info!("Node {} transition to offline", config_req.node_id);
