@@ -4,7 +4,7 @@ use std::str::FromStr;
 /// API (`/control/v1` prefix).  Implemented by the server
 /// in [`attachment_service::http`]
 use serde::{Deserialize, Serialize};
-use utils::id::NodeId;
+use utils::id::{NodeId, TenantId};
 
 use crate::{
     models::{ShardParameters, TenantConfig},
@@ -48,6 +48,46 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
+impl FromStr for PlacementPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "detached" => Ok(Self::Detached),
+            "secondary" => Ok(Self::Secondary),
+            _ if s.starts_with("attached:") => {
+                let mut splitter = s.split(':');
+                let _prefix = splitter.next().unwrap();
+                match splitter.next().and_then(|s| s.parse::<usize>().ok()) {
+                    Some(n) => Ok(Self::Attached(n)),
+                    None => Err(anyhow::anyhow!(
+                        "Invalid format '{s}', a valid example is 'attached:1'"
+                    )),
+                }
+            }
+            _ => Err(anyhow::anyhow!(
+                "Unknown placement policy '{s}', try detached,secondary,attached:<n>"
+            )),
+        }
+    }
+}
+
+impl FromStr for ShardSchedulingPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "essential" => Ok(Self::Essential),
+            "pause" => Ok(Self::Pause),
+            "stop" => Ok(Self::Stop),
+            _ => Err(anyhow::anyhow!(
+                "Unknown scheduling policy '{s}', try active,essential,pause,stop"
+            )),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantLocateResponseShard {
     pub shard_id: TenantShardId,
@@ -68,6 +108,7 @@ pub struct TenantLocateResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantDescribeResponse {
+    pub tenant_id: TenantId,
     pub shards: Vec<TenantDescribeResponseShard>,
     pub stripe_size: ShardStripeSize,
     pub policy: PlacementPolicy,
@@ -103,6 +144,8 @@ pub struct TenantDescribeResponseShard {
     pub is_pending_compute_notification: bool,
     /// A shard split is currently underway
     pub is_splitting: bool,
+
+    pub scheduling_policy: ShardSchedulingPolicy,
 }
 
 /// Explicitly migrating a particular shard is a low level operation
@@ -117,7 +160,7 @@ pub struct TenantShardMigrateRequest {
 /// Utilisation score indicating how good a candidate a pageserver
 /// is for scheduling the next tenant. See [`crate::models::PageserverUtilization`].
 /// Lower values are better.
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Debug)]
 pub struct UtilizationScore(pub u64);
 
 impl UtilizationScore {
@@ -126,7 +169,7 @@ impl UtilizationScore {
     }
 }
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 #[serde(into = "NodeAvailabilityWrapper")]
 pub enum NodeAvailability {
     // Normal, happy state
@@ -149,7 +192,7 @@ impl Eq for NodeAvailability {}
 // This wrapper provides serde functionality and it should only be used to
 // communicate with external callers which don't know or care about the
 // utilisation score of the pageserver it is targeting.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum NodeAvailabilityWrapper {
     Active,
     Offline,
@@ -175,15 +218,12 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
     }
 }
 
-impl FromStr for NodeAvailability {
+impl FromStr for NodeAvailabilityWrapper {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            // This is used when parsing node configuration requests from neon-local.
-            // Assume the worst possible utilisation score
-            // and let it get updated via the heartbeats.
-            "active" => Ok(Self::Active(UtilizationScore::worst())),
+            "active" => Ok(Self::Active),
             "offline" => Ok(Self::Offline),
             _ => Err(anyhow::anyhow!("Unknown availability state '{s}'")),
         }
@@ -216,7 +256,7 @@ impl Default for ShardSchedulingPolicy {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum NodeSchedulingPolicy {
     Active,
     Filling,
