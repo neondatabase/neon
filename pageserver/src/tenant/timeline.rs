@@ -2967,7 +2967,6 @@ impl Timeline {
             }
 
             trace!("waking up");
-            let timer = self.metrics.flush_time_histo.start_timer();
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
                 if self.cancel.is_cancelled() {
@@ -2977,6 +2976,8 @@ impl Timeline {
                     // waiting at the same time we as drop out of this loop.
                     return;
                 }
+
+                let timer = self.metrics.flush_time_histo.start_timer();
 
                 let layer_to_flush = {
                     let guard = self.layers.read().await;
@@ -2999,13 +3000,12 @@ impl Timeline {
                         break err;
                     }
                 }
+                timer.stop_and_record();
             };
             // Notify any listeners that we're done
             let _ = self
                 .layer_flush_done_tx
                 .send_replace((flush_counter, result));
-
-            timer.stop_and_record();
         }
     }
 
@@ -3073,6 +3073,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<(), FlushLayerError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
+
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
