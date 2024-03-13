@@ -40,6 +40,7 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
 };
 use crate::tenant::{PageReconstructError, Timeline};
+use crate::virtual_file::io_engine::{self, IoEngine};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
@@ -441,7 +442,7 @@ impl DeltaLayerWriterInner {
         will_init: bool,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-        let (val, res) = self.blob_writer.write_blob(val).await;
+        let (val, res) = self.blob_writer.write_blob(val, IoEngine::StdFs).await;
         let off = match res {
             Ok(off) => off,
             Err(e) => return (val, Err(anyhow::anyhow!(e))),
@@ -465,14 +466,14 @@ impl DeltaLayerWriterInner {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
-        let mut file = self.blob_writer.into_inner().await?;
+        let mut file = self.blob_writer.into_inner(IoEngine::StdFs).await?;
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf).await;
+            let (_buf, res) = file.write_all(buf, IoEngine::StdFs).await;
             res?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
@@ -492,7 +493,7 @@ impl DeltaLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, IoEngine::StdFs).await;
         res?;
 
         let metadata = file
@@ -690,7 +691,7 @@ impl DeltaLayer {
         // TODO: could use smallvec here, but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, io_engine::get()).await;
         res?;
         Ok(())
     }

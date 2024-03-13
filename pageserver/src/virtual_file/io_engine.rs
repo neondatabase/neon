@@ -13,7 +13,7 @@ use tracing::Instrument;
 pub(crate) use super::api::IoEngineKind;
 #[derive(Clone, Copy)]
 #[repr(u8)]
-pub(crate) enum IoEngine {
+pub enum IoEngine {
     NotSet,
     StdFs,
     #[cfg(target_os = "linux")]
