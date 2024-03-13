@@ -322,7 +322,7 @@ typedef struct AppendResponse
 
 /*  PageserverFeedback is extensible part of the message that is parsed separately */
 /*  Other fields are fixed part */
-#define APPENDRESPONSE_FIXEDPART_SIZE offsetof(AppendResponse, ps_feedback)
+#define APPENDRESPONSE_FIXEDPART_SIZE 56
 
 struct WalProposer;
 typedef struct WalProposer WalProposer;

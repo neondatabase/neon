@@ -58,8 +58,9 @@ impl PageserverFeedback {
     //
     // TODO: change serialized fields names once all computes migrate to rename.
     pub fn serialize(&self, buf: &mut BytesMut) {
-        let mut nkeys = 0;
+        let buf_ptr = buf.len();
         buf.put_u8(0); // # of keys, will be filled later
+        let mut nkeys = 0;
 
         nkeys += 1;
         buf.put_slice(b"current_timeline_size\0");
@@ -99,7 +100,7 @@ impl PageserverFeedback {
             buf.put_u32(self.shard_number);
         }
 
-        buf[0] = nkeys;
+        buf[buf_ptr] = nkeys;
     }
 
     // Deserialize PageserverFeedback message
