@@ -1451,8 +1451,11 @@ impl TenantManager {
             if self.get(tenant_shard_id).is_some() {
                 tracing::warn!("Resetting {tenant_shard_id} after shard split failure");
                 if let Err(e) = self.reset_tenant(tenant_shard_id, false, ctx).await {
-                    // Log this error because our return value will still be the original error, not this one.
-                    tracing::warn!("Failed to reset {tenant_shard_id}: {e}");
+                    // Log this error because our return value will still be the original error, not this one.  This is
+                    // a severe error: if this happens, we might be leaving behind a tenant that is not fully functional
+                    // (e.g. has uploads disabled).  We can't do anything else: if reset fails then shutting the tenant down or
+                    // setting it broken probably won't help either.
+                    tracing::error!("Failed to reset {tenant_shard_id}: {e}");
                 }
             }
         }
