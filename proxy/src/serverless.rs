@@ -30,7 +30,6 @@ use hyper::{
     Body, Method, Request, Response,
 };
 
-use std::convert::Infallible;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::task::Poll;
@@ -136,25 +135,25 @@ pub async fn task_main(
                 Ok(MetricService::new(
                     hyper::service::service_fn(move |req: Request<Body>| {
                         let backend = backend.clone();
-                        let ws_connections = ws_connections.clone();
+                        let ws_connections2 = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
                         let cancellation_handler = cancellation_handler.clone();
 
-                        async move {
-                            Ok::<_, Infallible>(
-                                request_handler(
-                                    req,
-                                    config,
-                                    backend,
-                                    ws_connections,
-                                    cancellation_handler,
-                                    peer_addr.ip(),
-                                    endpoint_rate_limiter,
-                                )
-                                .await
-                                .map_or_else(|e| e.into_response(), |r| r),
+                        // `request_handler` is not cancel safe. It expects to be cancelled only at specific times.
+                        // By spawning the future, we ensure it never gets cancelled until it decides to.
+                        ws_connections.spawn(async move {
+                            request_handler(
+                                req,
+                                config,
+                                backend,
+                                ws_connections2,
+                                cancellation_handler,
+                                peer_addr.ip(),
+                                endpoint_rate_limiter,
                             )
-                        }
+                            .await
+                            .map_or_else(|e| e.into_response(), |r| r)
+                        })
                     }),
                     gauge,
                 ))
