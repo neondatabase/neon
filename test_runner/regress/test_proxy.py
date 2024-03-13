@@ -616,7 +616,7 @@ def test_sql_over_http_connection_cancel(static_proxy: NeonProxy):
             [static_proxy.http_timeout_seconds - 1, 1],
             user="http",
             password="http",
-            timeout = 2,
+            timeout=2,
         )
     except requests.exceptions.ReadTimeout:
         pass
