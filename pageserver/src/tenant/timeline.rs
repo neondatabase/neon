@@ -3256,48 +3256,44 @@ impl Timeline {
         frozen_layer: &Arc<InMemoryLayer>,
         ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
-        let self_clone = Arc::clone(self);
-        let frozen_layer = Arc::clone(frozen_layer);
-        let ctx = ctx.attached_child();
-        let work = async move {
-            let new_delta = frozen_layer.write_to_disk(&self_clone, &ctx).await?;
-            // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
-            // We just need to fsync the directory in which these inodes are linked,
-            // which we know to be the timeline directory.
-            //
-            // We use fatal_err() below because the after write_to_disk returns with success,
-            // the in-memory state of the filesystem already has the layer file in its final place,
-            // and subsequent pageserver code could think it's durable while it really isn't.
-            let timeline_dir = VirtualFile::open(
-                &self_clone
-                    .conf
-                    .timeline_path(&self_clone.tenant_shard_id, &self_clone.timeline_id),
-            )
-            .await
-            .fatal_err("VirtualFile::open for timeline dir fsync");
-            timeline_dir
-                .sync_all()
-                .await
-                .fatal_err("VirtualFile::sync_all timeline dir");
-            anyhow::Ok(new_delta)
-        };
-        // Before tokio-epoll-uring, we ran write_to_disk & the sync_all inside spawn_blocking.
-        // Preserve that behavior to maintain the same behavior for `virtual_file_io_engine=std-fs`.
-        use crate::virtual_file::io_engine::IoEngine;
-        match crate::virtual_file::io_engine::get() {
-            IoEngine::NotSet => panic!("io engine not set"),
-            IoEngine::StdFs => {
-                let span = tracing::info_span!("blocking");
-                tokio::task::spawn_blocking({
-                    move || Handle::current().block_on(work.instrument(span))
-                })
-                .await
-                .context("spawn_blocking")
-                .and_then(|x| x)
+        let span = tracing::info_span!("blocking");
+        let new_delta: ResidentLayer = tokio::task::spawn_blocking({
+            let self_clone = Arc::clone(self);
+            let frozen_layer = Arc::clone(frozen_layer);
+            let ctx = ctx.attached_child();
+            move || {
+                Handle::current().block_on(
+                    async move {
+                        let new_delta = frozen_layer.write_to_disk(&self_clone, &ctx).await?;
+                        // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
+                        // We just need to fsync the directory in which these inodes are linked,
+                        // which we know to be the timeline directory.
+                        //
+                        // We use fatal_err() below because the after write_to_disk returns with success,
+                        // the in-memory state of the filesystem already has the layer file in its final place,
+                        // and subsequent pageserver code could think it's durable while it really isn't.
+                        let timeline_dir =
+                            VirtualFile::open(&self_clone.conf.timeline_path(
+                                &self_clone.tenant_shard_id,
+                                &self_clone.timeline_id,
+                            ))
+                            .await
+                            .fatal_err("VirtualFile::open for timeline dir fsync");
+                        timeline_dir
+                            .sync_all()
+                            .await
+                            .fatal_err("VirtualFile::sync_all timeline dir");
+                        anyhow::Ok(new_delta)
+                    }
+                    .instrument(span),
+                )
             }
-            #[cfg(target_os = "linux")]
-            IoEngine::TokioEpollUring => work.await,
-        }
+        })
+        .await
+        .context("spawn_blocking")
+        .and_then(|x| x)?;
+
+        Ok(new_delta)
     }
 
     async fn repartition(
