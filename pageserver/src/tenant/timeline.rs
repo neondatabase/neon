@@ -2963,7 +2963,6 @@ impl Timeline {
             }
 
             trace!("waking up");
-            let timer = self.metrics.flush_time_histo.start_timer();
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
                 if self.cancel.is_cancelled() {
@@ -3000,8 +2999,6 @@ impl Timeline {
             let _ = self
                 .layer_flush_done_tx
                 .send_replace((flush_counter, result));
-
-            timer.stop_and_record();
         }
     }
 
@@ -3069,6 +3066,8 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<(), FlushLayerError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
+        let timer = self.metrics.flush_time_histo.start_timer();
+
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
@@ -3164,6 +3163,8 @@ impl Timeline {
             }
             // release lock on 'layers'
         };
+
+        timer.stop_and_record();
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
