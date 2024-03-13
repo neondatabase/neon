@@ -15,11 +15,12 @@ use crate::{
     BranchId, DbName, EndpointId, ProjectId, RoleName,
 };
 
+use self::parquet::RequestData;
+
 pub mod parquet;
 
-static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestMonitoring>> = OnceCell::new();
+static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::new();
 
-#[derive(Clone)]
 /// Context data for a single request to connect to a database.
 ///
 /// This data should **not** be used for connection logic, only for observability and limiting purposes.
@@ -46,7 +47,7 @@ pub struct RequestMonitoring {
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
-    sender: Option<mpsc::UnboundedSender<RequestMonitoring>>,
+    sender: Option<mpsc::UnboundedSender<RequestData>>,
     pub latency_timer: LatencyTimer,
 }
 
@@ -172,7 +173,7 @@ impl RequestMonitoring {
 impl Drop for RequestMonitoring {
     fn drop(&mut self) {
         if let Some(tx) = self.sender.take() {
-            let _: Result<(), _> = tx.send(self.clone());
+            let _: Result<(), _> = tx.send(RequestData::from(&*self));
         }
     }
 }

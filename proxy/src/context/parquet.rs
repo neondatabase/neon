@@ -74,7 +74,7 @@ pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 // * after each rowgroup write, we check the length of the file and upload to s3 if large enough
 
 #[derive(parquet_derive::ParquetRecordWriter)]
-struct RequestData {
+pub struct RequestData {
     region: &'static str,
     protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
@@ -99,8 +99,8 @@ struct RequestData {
     duration_us: u64,
 }
 
-impl From<RequestMonitoring> for RequestData {
-    fn from(value: RequestMonitoring) -> Self {
+impl From<&RequestMonitoring> for RequestData {
+    fn from(value: &RequestMonitoring) -> Self {
         Self {
             session_id: value.session_id,
             peer_addr: value.peer_addr.to_string(),
