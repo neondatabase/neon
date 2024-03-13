@@ -639,6 +639,45 @@ class NodeKill(Failure):
         env.storage_controller.node_configure(self.pageserver_id, {"availability": "Offline"})
 
 
+class CompositeFailure(Failure):
+    """
+    Wrapper for failures in multiple components (e.g. a failpoint in the storage controller, *and*
+    stop a pageserver to interfere with rollback)
+    """
+
+    def __init__(self, failures: list[Failure]):
+        self.failures = failures
+
+        self.pageserver_id = None
+        for f in failures:
+            if f.pageserver_id is not None:
+                self.pageserver_id = f.pageserver_id
+                break
+
+    def apply(self, env: NeonEnv):
+        for f in self.failures:
+            f.apply(env)
+
+    def clear(self, env):
+        for f in self.failures:
+            f.clear(env)
+
+    def expect_available(self):
+        return all(f.expect_available() for f in self.failures)
+
+    def mitigate(self, env):
+        for f in self.failures:
+            f.mitigate(env)
+
+    def expect_exception(self):
+        expect = set(f.expect_exception() for f in self.failures)
+
+        # We can't give a sensible response if our failures have different expectations
+        assert len(expect) == 1
+
+        return list(expect)[0]
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -661,6 +700,12 @@ class NodeKill(Failure):
         StorageControllerFailpoint("shard-split-post-begin", "panic(failpoint)"),
         StorageControllerFailpoint("shard-split-post-remote", "panic(failpoint)"),
         StorageControllerFailpoint("shard-split-post-complete", "panic(failpoint)"),
+        CompositeFailure(
+            [NodeKill(1, True), StorageControllerFailpoint("shard-split-post-begin", "return(1)")]
+        ),
+        CompositeFailure(
+            [NodeKill(1, False), StorageControllerFailpoint("shard-split-post-begin", "return(1)")]
+        ),
     ],
 )
 def test_sharding_split_failures(
