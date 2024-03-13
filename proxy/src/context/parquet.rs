@@ -460,7 +460,7 @@ mod tests {
             region: "us-east-1",
             error: None,
             success: rng.gen(),
-            cold_start_info: Some("no".into()),
+            cold_start_info: Some("no"),
             duration_us: rng.gen_range(0..30_000_000),
         }
     }
