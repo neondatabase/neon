@@ -355,7 +355,6 @@ impl Service {
         let mut online_nodes = HashMap::new();
         if let Ok(deltas) = res {
             for (node_id, status) in deltas.0 {
-                tracing::info!("HB: {node_id} -> {status:?}");
                 match status {
                     PageserverState::Available { utilization, .. } => {
                         online_nodes.insert(node_id, utilization);
@@ -607,9 +606,7 @@ impl Service {
                 let (nodes, tenants, scheduler) = locked.parts_mut();
                 let mut new_nodes = (**nodes).clone();
 
-                tracing::info!("new_nodes={new_nodes:?}");
                 for (node_id, state) in deltas.0 {
-                    tracing::info!("HB: {node_id} -> {state:?}");
                     let node = match new_nodes.get_mut(&node_id) {
                         Some(node) => node,
                         None => continue,
