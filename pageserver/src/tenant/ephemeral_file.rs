@@ -5,8 +5,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
-use crate::virtual_file::io_engine::IoEngine;
-use crate::virtual_file::{self, VirtualFile};
+use crate::virtual_file::{self, io_engine, VirtualFile};
 use bytes::BytesMut;
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
@@ -161,11 +160,7 @@ impl EphemeralFile {
                         let (mutable_tail, res) = self
                             .ephemeral_file
                             .file
-                            .write_all_at(
-                                mutable_tail,
-                                self.blknum as u64 * PAGE_SZ as u64,
-                                IoEngine::StdFs,
-                            )
+                            .write_all_at(mutable_tail, self.blknum as u64 * PAGE_SZ as u64, io_engine::get() /* TODO: experiment with StdFs here, did it in an earlier commit in this branch */)
                             .await;
                         // TODO: If we panic before we can put the mutable_tail back, subsequent calls will fail.
                         // I.e., the IO isn't retryable if we panic.
