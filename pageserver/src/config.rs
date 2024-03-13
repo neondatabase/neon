@@ -1538,7 +1538,7 @@ broker_endpoint = '{broker_endpoint}'
 
         let broker_endpoint = "http://127.0.0.1:7777";
         let trace_read_requests = true;
-        let compress_image_layer = true;
+        let image_layer_compression = pageserver_api::models::CompressionAlgorithm::LZ4;
 
         let config_string = format!(
             r#"{ALL_BASE_VALUES_TOML}
@@ -1547,7 +1547,7 @@ broker_endpoint = '{broker_endpoint}'
 
 [tenant_config]
 trace_read_requests = {trace_read_requests}
-compress_image_layer = {compress_image_layer}"#,
+image_layer_compression = 'LZ4'"#,
         );
 
         let toml = config_string.parse()?;
@@ -1558,7 +1558,7 @@ compress_image_layer = {compress_image_layer}"#,
             "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
         );
         assert_eq!(
-            conf.default_tenant_conf.compress_image_layer, compress_image_layer,
+            conf.default_tenant_conf.image_layer_compression, image_layer_compression,
             "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
         );
 

@@ -15,9 +15,9 @@
 //!
 //! Note that the vectored blob api does *not* go through the page cache.
 
-use crate::NO_COMPRESSION;
 use bytes::BytesMut;
 use pageserver_api::key::Key;
+use pageserver_api::models::CompressionAlgorithm;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use utils::lsn::Lsn;
@@ -40,7 +40,7 @@ pub struct VectoredBlob {
     pub start: usize,
     pub end: usize,
     pub meta: BlobMeta,
-    pub compression_alg: u8,
+    pub compression_alg: CompressionAlgorithm,
 }
 
 /// Return type of [`VectoredBlobReader::read_blobs`]
@@ -275,7 +275,7 @@ impl<'a> VectoredBlobReader<'a> {
         &self,
         read: &VectoredRead,
         buf: BytesMut,
-        new_storage_format: bool,
+        compressed_storage_format: bool,
     ) -> Result<VectoredBlobsBuf, std::io::Error> {
         assert!(read.size() > 0);
         assert!(
@@ -307,11 +307,11 @@ impl<'a> VectoredBlobReader<'a> {
 
         for ((offset, meta), next) in pairs {
             let mut offset_in_buf = (offset - start_offset) as usize;
-            let compression_alg = if new_storage_format {
+            let compression_alg = if compressed_storage_format {
                 offset_in_buf += 1;
-                buf[offset_in_buf - 1]
+                CompressionAlgorithm::from_repr(buf[offset_in_buf - 1]).unwrap()
             } else {
-                NO_COMPRESSION
+                CompressionAlgorithm::NoCompression
             };
             let first_len_byte = buf[offset_in_buf];
 

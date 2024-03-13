@@ -18,8 +18,8 @@ use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::VirtualFile;
-use crate::{LZ4_COMPRESSION, NO_COMPRESSION};
 use lz4_flex;
+use pageserver_api::models::CompressionAlgorithm;
 use postgres_ffi::BLCKSZ;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
@@ -46,14 +46,14 @@ impl<'a> BlockCursor<'a> {
         let off = (offset % PAGE_SZ as u64) as usize;
 
         let buf = self.read_blk(blknum, ctx).await?;
-        let compression_alg = buf[off];
+        let compression_alg = CompressionAlgorithm::from_repr(buf[off]).unwrap();
         let res = self.read_blob(offset + 1, ctx).await?;
-        if compression_alg == LZ4_COMPRESSION {
+        if compression_alg == CompressionAlgorithm::LZ4 {
             lz4_flex::block::decompress(&res, BLCKSZ as usize).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "decompress error")
             })
         } else {
-            assert_eq!(compression_alg, NO_COMPRESSION);
+            assert_eq!(compression_alg, CompressionAlgorithm::NoCompression);
             Ok(res)
         }
     }
@@ -240,10 +240,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     pub async fn write_compressed_blob(
         &mut self,
         srcbuf: Bytes,
-        new_format: bool,
+        compression: CompressionAlgorithm,
     ) -> Result<u64, Error> {
         let offset = self.offset;
-
         let len = srcbuf.len();
 
         let mut io_buf = self.io_buf.take().expect("we always put it back below");
@@ -251,9 +250,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         let mut is_compressed = false;
         if len < 128 {
             // Short blob. Write a 1-byte length header
-            if new_format {
-                io_buf.put_u8(NO_COMPRESSION);
-            }
+            io_buf.put_u8(CompressionAlgorithm::NoCompression as u8);
             io_buf.put_u8(len as u8);
         } else {
             // Write a 4-byte length header
@@ -263,10 +260,10 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     format!("blob too large ({} bytes)", len),
                 ));
             }
-            if new_format && len == BLCKSZ as usize {
+            if compression == CompressionAlgorithm::LZ4 && len == BLCKSZ as usize {
                 let compressed = lz4_flex::block::compress(&srcbuf);
                 if compressed.len() < len {
-                    io_buf.put_u8(LZ4_COMPRESSION);
+                    io_buf.put_u8(compression as u8);
                     let mut len_buf = (compressed.len() as u32).to_be_bytes();
                     len_buf[0] |= 0x80;
                     io_buf.extend_from_slice(&len_buf[..]);
@@ -275,9 +272,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 }
             }
             if !is_compressed {
-                if new_format {
-                    io_buf.put_u8(NO_COMPRESSION);
-                }
+                io_buf.put_u8(CompressionAlgorithm::NoCompression as u8);
                 let mut len_buf = (len as u32).to_be_bytes();
                 len_buf[0] |= 0x80;
                 io_buf.extend_from_slice(&len_buf[..]);

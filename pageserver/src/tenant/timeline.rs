@@ -19,8 +19,8 @@ use pageserver_api::{
     key::AUX_FILES_KEY,
     keyspace::KeySpaceAccum,
     models::{
-        CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-        EvictionPolicy, LayerMapInfo, TimelineState,
+        CompactionAlgorithm, CompressionAlgorithm, DownloadRemoteLayersTaskInfo,
+        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, LayerMapInfo, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, TenantShardId},
@@ -1515,11 +1515,11 @@ impl Timeline {
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
     }
 
-    pub fn get_image_layer_compression(&self) -> bool {
+    pub fn get_image_layer_compression(&self) -> CompressionAlgorithm {
         let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
         tenant_conf
-            .compress_image_layer
-            .unwrap_or(self.conf.default_tenant_conf.compress_image_layer)
+            .image_layer_compression
+            .unwrap_or(self.conf.default_tenant_conf.image_layer_compression)
     }
 
     pub(super) fn tenant_conf_updated(&self) {

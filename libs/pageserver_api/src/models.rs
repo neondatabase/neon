@@ -294,7 +294,7 @@ pub struct TenantConfig {
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub trace_read_requests: Option<bool>,
-    pub compress_image_layer: Option<bool>,
+    pub image_layer_compression: Option<CompressionAlgorithm>,
     pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
@@ -326,6 +326,23 @@ impl EvictionPolicy {
 pub enum CompactionAlgorithm {
     Legacy,
     Tiered,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum_macros::FromRepr,
+    enum_map::Enum,
+)]
+#[repr(u8)]
+pub enum CompressionAlgorithm {
+    NoCompression,
+    LZ4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -40,15 +40,14 @@ use crate::tenant::vectored_blob_io::{
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{
-    COMPRESSED_STORAGE_FORMAT_VERSION, IMAGE_FILE_MAGIC, LZ4_COMPRESSION, STORAGE_FORMAT_VERSION,
-    TEMP_FILE_SUFFIX,
+    COMPRESSED_STORAGE_FORMAT_VERSION, IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX,
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::LayerAccessKind;
+use pageserver_api::models::{CompressionAlgorithm, LayerAccessKind};
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::BLCKSZ;
 use rand::{distributions::Alphanumeric, Rng};
@@ -548,11 +547,11 @@ impl ImageLayerInner {
             .into();
 
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
-        let compressed = self.format_version >= COMPRESSED_STORAGE_FORMAT_VERSION;
+        let compressed_storage_format = self.format_version >= COMPRESSED_STORAGE_FORMAT_VERSION;
         for read in reads.into_iter() {
             let buf = BytesMut::with_capacity(max_vectored_read_bytes);
             let res = vectored_blob_reader
-                .read_blobs(&read, buf, compressed)
+                .read_blobs(&read, buf, compressed_storage_format)
                 .await;
 
             match res {
@@ -561,7 +560,7 @@ impl ImageLayerInner {
 
                     for meta in blobs_buf.blobs.iter() {
                         let img_buf = frozen_buf.slice(meta.start..meta.end);
-                        if meta.compression_alg == LZ4_COMPRESSION {
+                        if meta.compression_alg == CompressionAlgorithm::LZ4 {
                             match lz4_flex::block::decompress(&img_buf, BLCKSZ as usize) {
                                 Ok(decompressed) => {
                                     reconstruct_state.update_key(
@@ -623,7 +622,7 @@ struct ImageLayerWriterInner {
     timeline_id: TimelineId,
     tenant_shard_id: TenantShardId,
     key_range: Range<Key>,
-    compression: bool,
+    compression: CompressionAlgorithm,
     lsn: Lsn,
 
     blob_writer: BlobWriter<false>,

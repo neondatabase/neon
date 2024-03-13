@@ -9,9 +9,9 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
-use pageserver_api::models::CompactionAlgorithm;
-use pageserver_api::models::EvictionPolicy;
-use pageserver_api::models::{self, ThrottleConfig};
+use pageserver_api::models::{
+    self, CompactionAlgorithm, CompressionAlgorithm, EvictionPolicy, ThrottleConfig,
+};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,9 @@ pub mod defaults {
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
     pub const DEFAULT_COMPACTION_ALGORITHM: super::CompactionAlgorithm =
         super::CompactionAlgorithm::Legacy;
+
+    pub const DEFAULT_COMPRESSION_ALGORITHM: super::CompressionAlgorithm =
+        super::CompressionAlgorithm::LZ4;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
@@ -345,7 +348,7 @@ pub struct TenantConf {
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
     pub trace_read_requests: bool,
-    pub compress_image_layer: bool,
+    pub image_layer_compression: CompressionAlgorithm,
     pub eviction_policy: EvictionPolicy,
     pub min_resident_size_override: Option<u64>,
     // See the corresponding metric's help string.
@@ -432,7 +435,7 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub compress_image_layer: Option<bool>,
+    pub image_layer_compression: Option<CompressionAlgorithm>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -497,9 +500,9 @@ impl TenantConfOpt {
             trace_read_requests: self
                 .trace_read_requests
                 .unwrap_or(global_conf.trace_read_requests),
-            compress_image_layer: self
-                .compress_image_layer
-                .unwrap_or(global_conf.compress_image_layer),
+            image_layer_compression: self
+                .image_layer_compression
+                .unwrap_or(global_conf.image_layer_compression),
             eviction_policy: self.eviction_policy.unwrap_or(global_conf.eviction_policy),
             min_resident_size_override: self
                 .min_resident_size_override
@@ -546,7 +549,7 @@ impl Default for TenantConf {
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
             trace_read_requests: false,
-            compress_image_layer: true,
+            image_layer_compression: DEFAULT_COMPRESSION_ALGORITHM,
             eviction_policy: EvictionPolicy::NoEviction,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
@@ -621,7 +624,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             lagging_wal_timeout: value.lagging_wal_timeout.map(humantime),
             max_lsn_wal_lag: value.max_lsn_wal_lag,
             trace_read_requests: value.trace_read_requests,
-            compress_image_layer: value.compress_image_layer,
+            image_layer_compression: value.image_layer_compression,
             eviction_policy: value.eviction_policy,
             min_resident_size_override: value.min_resident_size_override,
             evictions_low_residence_duration_metric_threshold: value

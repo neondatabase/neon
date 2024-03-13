@@ -384,11 +384,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'trace_read_requests' as bool")?,
-            compress_image_layer: settings
-                .remove("compress_image_layer")
-                .map(|x| x.parse::<bool>())
+            image_layer_compression: settings
+                .remove("image_layer_compression")
+                .map(serde_json::from_str)
                 .transpose()
-                .context("Failed to parse 'compress_image_layer' as bool")?,
+                .context("Failed to parse 'image_layer_compression' as bool")?,
             eviction_policy: settings
                 .remove("eviction_policy")
                 .map(serde_json::from_str)
@@ -501,11 +501,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'trace_read_requests' as bool")?,
-                compress_image_layer: settings
-                    .remove("compress_image_layer")
-                    .map(|x| x.parse::<bool>())
+                image_layer_compression: settings
+                    .remove("image_layer_compression")
+                    .map(serde_json::from_str)
                     .transpose()
-                    .context("Failed to parse 'compress_image_layer' as bool")?,
+                    .context("Failed to parse 'image_layer_compression' json")?,
                 eviction_policy: settings
                     .remove("eviction_policy")
                     .map(serde_json::from_str)
