@@ -649,19 +649,6 @@ impl Service {
                         }
                     }
                 }
-
-                // for (tenant_shard_id, tenant_state) in tenants {
-                //     if tenant_state.should_schedule(nodes) {
-                //         tracing::info!(
-                //             "Rescheduling {} due to availability changes",
-                //             tenant_shard_id
-                //         );
-
-                //         // Ignore scheduling failures since they will be retried
-                //         // on the next heartbeat round. Failures are logged downstream.
-                //         let _ = tenant_state.schedule(scheduler);
-                //     }
-                // }
             }
         }
     }
@@ -3089,17 +3076,28 @@ impl Service {
         )
     }
 
-    /// Check all tenants for pending reconciliation work, and reconcile those in need
+    /// Check all tenants for pending reconciliation work, and reconcile those in need.
+    /// Additionally, reschedule tenants that require it.
     ///
     /// Returns how many reconciliation tasks were started
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
-        let pageservers = locked.nodes.clone();
-        locked
-            .tenants
-            .iter_mut()
-            .filter_map(|(_tenant_shard_id, shard)| self.maybe_reconcile_shard(shard, &pageservers))
-            .count()
+        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let pageservers = nodes.clone();
+
+        let mut reconciles_spawned = 0;
+        for (tenant_shard_id, shard) in tenants.iter_mut() {
+            if let Err(err) = shard.maybe_reschedule(&pageservers, scheduler) {
+                // The cluster may be overloaded so this is legitimate.
+                tracing::info!("Background scheduling failed for {tenant_shard_id}: {err}");
+            }
+
+            if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
+                reconciles_spawned += 1;
+            }
+        }
+
+        reconciles_spawned
     }
 
     pub async fn shutdown(&self) {

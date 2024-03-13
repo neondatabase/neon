@@ -654,6 +654,19 @@ impl TenantState {
         !dirty_nodes.is_empty()
     }
 
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
+    pub(crate) fn maybe_reschedule(
+        &mut self,
+        pageservers: &Arc<HashMap<NodeId, Node>>,
+        scheduler: &mut Scheduler,
+    ) -> Result<(), ScheduleError> {
+        if self.should_schedule(pageservers) {
+            return self.schedule(scheduler);
+        }
+
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn maybe_reconcile(
