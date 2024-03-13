@@ -33,10 +33,6 @@ pub struct PageserverFeedback {
     pub shard_number: u32,
 }
 
-// NOTE: Do not forget to increment this number when adding new fields to PageserverFeedback.
-// Do not remove previously available fields because this might be backwards incompatible.
-pub const PAGESERVER_FEEDBACK_FIELDS_NUMBER: u8 = 6;
-
 impl PageserverFeedback {
     pub fn empty() -> PageserverFeedback {
         PageserverFeedback {
@@ -62,17 +58,25 @@ impl PageserverFeedback {
     //
     // TODO: change serialized fields names once all computes migrate to rename.
     pub fn serialize(&self, buf: &mut BytesMut) {
-        buf.put_u8(PAGESERVER_FEEDBACK_FIELDS_NUMBER); // # of keys
+        let mut nkeys = 0;
+        buf.put_u8(0); // # of keys, will be filled later
+
+        nkeys += 1;
         buf.put_slice(b"current_timeline_size\0");
         buf.put_i32(8);
         buf.put_u64(self.current_timeline_size);
 
+        nkeys += 1;
         buf.put_slice(b"ps_writelsn\0");
         buf.put_i32(8);
         buf.put_u64(self.last_received_lsn.0);
+
+        nkeys += 1;
         buf.put_slice(b"ps_flushlsn\0");
         buf.put_i32(8);
         buf.put_u64(self.disk_consistent_lsn.0);
+
+        nkeys += 1;
         buf.put_slice(b"ps_applylsn\0");
         buf.put_i32(8);
         buf.put_u64(self.remote_consistent_lsn.0);
@@ -83,15 +87,19 @@ impl PageserverFeedback {
             .expect("failed to serialize pg_replytime earlier than PG_EPOCH")
             .as_micros() as i64;
 
+        nkeys += 1;
         buf.put_slice(b"ps_replytime\0");
         buf.put_i32(8);
         buf.put_i64(timestamp);
 
         if self.shard_number > 0 {
+            nkeys += 1;
             buf.put_slice(b"shard_number\0");
             buf.put_i32(4);
             buf.put_u32(self.shard_number);
         }
+
+        buf[0] = nkeys;
     }
 
     // Deserialize PageserverFeedback message
@@ -208,10 +216,7 @@ mod tests {
         rf.serialize(&mut data);
 
         // Add an extra field to the buffer and adjust number of keys
-        if let Some(first) = data.first_mut() {
-            *first = PAGESERVER_FEEDBACK_FIELDS_NUMBER + 1;
-        }
-
+        data[0] = data[0] + 1;
         data.put_slice(b"new_field_one\0");
         data.put_i32(8);
         data.put_u64(42);
