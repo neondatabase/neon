@@ -20,7 +20,7 @@ struct HeartbeaterTask {
     receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest>,
     cancel: CancellationToken,
 
-    state: Arc<HashMap<NodeId, PageserverState>>,
+    state: HashMap<NodeId, PageserverState>,
 
     max_unavailable_interval: Duration,
     jwt_token: Option<String>,
@@ -93,7 +93,7 @@ impl HeartbeaterTask {
         Self {
             receiver,
             cancel,
-            state: Arc::new(HashMap::new()),
+            state: HashMap::new(),
             max_unavailable_interval,
             jwt_token,
         }
@@ -120,7 +120,6 @@ impl HeartbeaterTask {
         &mut self,
         pageservers: Arc<HashMap<NodeId, Node>>,
     ) -> Result<AvailablityDeltas, HeartbeaterError> {
-        let current_state = (*self.state).clone();
         let mut new_state = HashMap::new();
 
         let mut heartbeat_futs = FuturesUnordered::new();
@@ -188,26 +187,40 @@ impl HeartbeaterTask {
 
         let mut deltas = Vec::new();
         let now = Instant::now();
-        for (node_id, ps_state) in &new_state {
-            match current_state.get(node_id) {
-                Some(current_ps_state) => match (current_ps_state, ps_state) {
+        for (node_id, ps_state) in new_state {
+            use std::collections::hash_map::Entry::*;
+            let entry = self.state.entry(node_id);
+
+            let mut needs_update = false;
+            match entry {
+                Occupied(ref occ) => match (occ.get(), &ps_state) {
                     (PageserverState::Offline, PageserverState::Offline) => {}
                     (PageserverState::Available { last_seen_at, .. }, PageserverState::Offline) => {
                         if now - *last_seen_at >= self.max_unavailable_interval {
-                            deltas.push((*node_id, ps_state.clone()));
+                            deltas.push((node_id, ps_state.clone()));
+                            needs_update = true;
                         }
                     }
                     _ => {
-                        deltas.push((*node_id, ps_state.clone()));
+                        deltas.push((node_id, ps_state.clone()));
+                        needs_update = true;
                     }
                 },
-                None => {
-                    deltas.push((*node_id, ps_state.clone()));
+                Vacant(_) => {
+                    deltas.push((node_id, ps_state.clone()));
                 }
             }
-        }
 
-        self.state = Arc::new(new_state);
+            match entry {
+                Occupied(mut occ) if needs_update => {
+                    (*occ.get_mut()) = ps_state;
+                }
+                Vacant(vac) => {
+                    vac.insert(ps_state);
+                }
+                _ => {}
+            }
+        }
 
         Ok(AvailablityDeltas(deltas))
     }
