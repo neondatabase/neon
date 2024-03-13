@@ -53,6 +53,10 @@ struct Cli {
     /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
     #[arg(long)]
     database_url: Option<String>,
+
+    /// Flag to enable dev mode, which permits running without auth
+    #[arg(long, default_value = "false")]
+    dev: bool,
 }
 
 enum StrictMode {
@@ -90,7 +94,7 @@ impl Secrets {
     /// - CLI args if database URL is provided on the CLI
     /// - Environment variables if DATABASE_URL is set.
     /// - AWS Secrets Manager secrets
-    async fn load(args: &Cli) -> anyhow::Result<Self> {
+    async fn load(args: &Cli, mode: StrictMode) -> anyhow::Result<Self> {
         let Some(database_url) =
             Self::load_secret(&args.database_url, Self::DATABASE_URL_ENV).await
         else {
@@ -104,7 +108,7 @@ impl Secrets {
             None => None,
         };
 
-        Ok(Self {
+        let this = Self {
             database_url,
             public_key,
             jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV).await,
@@ -113,7 +117,19 @@ impl Secrets {
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
             )
             .await,
-        })
+        };
+
+        if matches!(mode, StrictMode::Strict)
+            && (this.public_key.is_none()
+                || this.jwt_token.is_none()
+                || this.control_plane_jwt_token.is_none())
+        {
+            anyhow::bail!(
+                    "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
+                );
+        }
+
+        Ok(this)
     }
 
     async fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
@@ -173,7 +189,13 @@ async fn async_main() -> anyhow::Result<()> {
         args.listen
     );
 
-    let secrets = Secrets::load(&args).await?;
+    let strict_mode = if args.dev {
+        StrictMode::Dev
+    } else {
+        StrictMode::Strict
+    };
+
+    let secrets = Secrets::load(&args, strict_mode).await?;
 
     let config = Config {
         jwt_token: secrets.jwt_token,

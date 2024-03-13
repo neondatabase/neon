@@ -274,6 +274,7 @@ impl StorageController {
             &self.listen,
             "-p",
             self.path.as_ref(),
+            "--dev",
             "--database-url",
             &database_url,
         ]
