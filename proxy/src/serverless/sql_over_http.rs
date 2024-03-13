@@ -217,8 +217,8 @@ pub async fn handle(
     mut ctx: RequestMonitoring,
     request: Request<Body>,
     backend: Arc<PoolingBackend>,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     let handle = tokio::spawn(async move {
         time::sleep(config.http_config.request_timeout).await;

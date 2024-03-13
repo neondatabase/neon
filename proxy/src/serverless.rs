@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::task::Poll;
 use tls_listener::TlsListener;
 use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{error, info, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
 
@@ -120,6 +120,10 @@ pub async fn task_main(
                 .take()
                 .expect("gauge should be set on connection start");
 
+            // Cancel all current inflight HTTP requests if the HTTP connection is closed.
+            let http_cancellation_token = CancellationToken::new();
+            let cancel_connection = http_cancellation_token.clone().drop_guard();
+
             let client_addr = conn.inner.client_addr();
             let remote_addr = conn.inner.inner.remote_addr();
             let backend = backend.clone();
@@ -138,11 +142,17 @@ pub async fn task_main(
                         let ws_connections2 = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
                         let cancellation_handler = cancellation_handler.clone();
+                        let http_cancellation_token = http_cancellation_token.child_token();
 
                         // `request_handler` is not cancel safe. It expects to be cancelled only at specific times.
                         // By spawning the future, we ensure it never gets cancelled until it decides to.
                         ws_connections.spawn(async move {
-                            request_handler(
+                            // Cancel the current inflight HTTP request if the requets stream is closed.
+                            // This is slightly different to `_cancel_connection` in that
+                            // h2 can cancel individual requests with a `RST_STREAM`.
+                            let _cancel_session = http_cancellation_token.clone().drop_guard();
+
+                            let res = request_handler(
                                 req,
                                 config,
                                 backend,
@@ -150,12 +160,18 @@ pub async fn task_main(
                                 cancellation_handler,
                                 peer_addr.ip(),
                                 endpoint_rate_limiter,
+                                http_cancellation_token,
                             )
                             .await
-                            .map_or_else(|e| e.into_response(), |r| r)
+                            .map_or_else(|e| e.into_response(), |r| r);
+
+                            _cancel_session.disarm();
+
+                            res
                         })
                     }),
                     gauge,
+                    cancel_connection,
                 ))
             }
         },
@@ -175,11 +191,16 @@ pub async fn task_main(
 struct MetricService<S> {
     inner: S,
     _gauge: IntCounterPairGuard,
+    _cancel: DropGuard,
 }
 
 impl<S> MetricService<S> {
-    fn new(inner: S, _gauge: IntCounterPairGuard) -> MetricService<S> {
-        MetricService { inner, _gauge }
+    fn new(inner: S, _gauge: IntCounterPairGuard, _cancel: DropGuard) -> MetricService<S> {
+        MetricService {
+            inner,
+            _gauge,
+            _cancel,
+        }
     }
 }
 
@@ -209,6 +230,8 @@ async fn request_handler(
     cancellation_handler: Arc<CancellationHandler>,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    // used to cancel in-flight HTTP requests. not used to cancel websockets
+    http_cancellation_token: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let session_id = uuid::Uuid::new_v4();
 
@@ -252,7 +275,7 @@ async fn request_handler(
         let ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
         let span = ctx.span.clone();
 
-        sql_over_http::handle(config, ctx, request, backend)
+        sql_over_http::handle(config, ctx, request, backend, http_cancellation_token)
             .instrument(span)
             .await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
