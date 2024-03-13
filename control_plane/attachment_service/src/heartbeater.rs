@@ -13,7 +13,7 @@ use utils::id::NodeId;
 
 use crate::node::Node;
 
-struct Heartbeater {
+struct HeartbeaterTask {
     receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest>,
     cancel: CancellationToken,
 
@@ -46,11 +46,11 @@ struct HeartbeatRequest {
     reply: tokio::sync::oneshot::Sender<Result<AvailablityDeltas, HeartbeaterError>>,
 }
 
-pub(crate) struct HeartbeaterHandler {
+pub(crate) struct Heartbeater {
     sender: tokio::sync::mpsc::UnboundedSender<HeartbeatRequest>,
 }
 
-impl HeartbeaterHandler {
+impl Heartbeater {
     pub(crate) fn new(
         jwt_token: Option<String>,
         max_unavailable_interval: Duration,
@@ -58,7 +58,7 @@ impl HeartbeaterHandler {
     ) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<HeartbeatRequest>();
         let mut heartbeater =
-            Heartbeater::new(receiver, jwt_token, max_unavailable_interval, cancel);
+            HeartbeaterTask::new(receiver, jwt_token, max_unavailable_interval, cancel);
         tokio::task::spawn(async move { heartbeater.run().await });
 
         Self { sender }
@@ -80,7 +80,7 @@ impl HeartbeaterHandler {
     }
 }
 
-impl Heartbeater {
+impl HeartbeaterTask {
     fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest>,
         jwt_token: Option<String>,

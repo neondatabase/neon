@@ -51,7 +51,7 @@ use utils::{
 
 use crate::{
     compute_hook::{self, ComputeHook},
-    heartbeater::{HeartbeaterHandler, PageserverState},
+    heartbeater::{Heartbeater, PageserverState},
     node::{AvailabilityTransition, Node},
     persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
@@ -150,7 +150,7 @@ pub struct Service {
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
 
-    heartbeater_handler: HeartbeaterHandler,
+    heartbeater_handler: Heartbeater,
 
     // Process shutdown will fire this token
     cancel: CancellationToken,
@@ -832,7 +832,7 @@ impl Service {
         let (startup_completion, startup_complete) = utils::completion::channel();
 
         let cancel = CancellationToken::new();
-        let heartbeater_handler = HeartbeaterHandler::new(
+        let heartbeater_handler = Heartbeater::new(
             config.jwt_token.clone(),
             Duration::from_secs(10),
             cancel.clone(),
