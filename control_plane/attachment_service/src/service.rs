@@ -3341,6 +3341,9 @@ impl Service {
         // If we're activating a node, then before setting it active we must reconcile any shard locations
         // on that node, in case it is out of sync, e.g. due to being unavailable during controller startup,
         // by calling [`Self::node_activate_reconcile`]
+        //
+        // The transition we calculate here remains valid later in the function because we hold the op lock on the node:
+        // nothing else can mutate its availability while we run.
         let availability_transition = if let Some(input_availability) = config_req.availability {
             let (activate_node, availability_transition) = {
                 let locked = self.inner.read().unwrap();
