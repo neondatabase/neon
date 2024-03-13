@@ -11,7 +11,6 @@ use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
-use crate::tenant::timeline::OrderedBatchUpdates;
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
@@ -34,6 +33,7 @@ use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
+use utils::vec_map::VecMap;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
 const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -1546,13 +1546,13 @@ impl<'a> DatadirModification<'a> {
         if !self.pending_updates.is_empty() {
             // The put_batch call below expects expects the inputs to be sorted by Lsn,
             // so we do that first.
-            let lsn_ordered_batch: OrderedBatchUpdates = self
+            let lsn_ordered_batch: VecMap<Lsn, (Key, Value)> = self
                 .pending_updates
                 .drain()
                 .flat_map(|(key, values)| {
                     values
                         .into_iter()
-                        .map(move |(lsn, value)| ((lsn, key), value))
+                        .map(move |(lsn, value)| (lsn, (key, value)))
                 })
                 .collect();
 

@@ -24,6 +24,10 @@ impl<K: Ord, V> VecMap<K, V> {
         self.0.as_slice()
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     /// This function may panic if given a range where the lower bound is
     /// greater than the upper bound.
     pub fn slice_range<R: RangeBounds<K>>(&self, range: R) -> &[(K, V)] {
@@ -144,6 +148,25 @@ impl<K: Ord, V> VecMap<K, V> {
             Ordering::Equal => 0,
             Ordering::Greater => panic!("VecMap capacity shouldn't ever decrease"),
         }
+    }
+}
+
+impl<K: Ord, V> IntoIterator for VecMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::vec::IntoIter<(K, V)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<K: Ord, V> FromIterator<(K, V)> for VecMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut vec_map = VecMap::default();
+        vec_map.0 = iter.into_iter().collect();
+        vec_map.0.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+
+        vec_map
     }
 }
 

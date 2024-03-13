@@ -37,6 +37,7 @@ use tracing::*;
 use utils::{
     bin_ser::BeSer,
     sync::gate::{Gate, GateGuard},
+    vec_map::VecMap,
 };
 
 use std::ops::{Deref, Range};
@@ -4375,9 +4376,6 @@ enum OpenLayerAction {
     None,
 }
 
-/// Order of updates in a batch are forced using this structure
-pub type OrderedBatchUpdates = BTreeMap<(Lsn, Key), Value>;
-
 impl<'a> TimelineWriter<'a> {
     /// Put a new page version that can be constructed from a WAL record
     ///
@@ -4576,10 +4574,10 @@ impl<'a> TimelineWriter<'a> {
 
     pub(crate) async fn put_batch(
         &mut self,
-        batch: OrderedBatchUpdates,
+        batch: VecMap<Lsn, (Key, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for ((lsn, key), val) in batch {
+        for (lsn, (key, val)) in batch.into_iter() {
             self.put(key, lsn, &val, ctx).await?
         }
 
