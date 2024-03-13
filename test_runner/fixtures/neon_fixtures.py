@@ -2944,6 +2944,7 @@ class NeonProxy(PgProtocol):
         user = quote(kwargs["user"])
         password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
+        timeout = kwargs.get("timeout")
 
         log.info(f"Executing http query: {query}")
 
@@ -2957,6 +2958,7 @@ class NeonProxy(PgProtocol):
                 "Neon-Pool-Opt-In": "true",
             },
             verify=str(self.test_output_dir / "proxy.crt"),
+            timeout=timeout,
         )
 
         if expected_code is not None:
