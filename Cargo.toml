@@ -52,7 +52,6 @@ async-stream = "0.3"
 async-trait = "0.1"
 aws-config = { version = "1.1.4", default-features = false, features=["rustls"] }
 aws-sdk-s3 = "1.14"
-aws-sdk-secretsmanager = { version = "1.14.0" }
 aws-smithy-async = { version = "1.1.4", default-features = false, features=["rt-tokio"] }
 aws-smithy-types = "1.1.4"
 aws-credential-types = "1.1.4"

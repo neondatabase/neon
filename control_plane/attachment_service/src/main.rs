@@ -3,7 +3,6 @@ use attachment_service::http::make_router;
 use attachment_service::metrics::preinitialize_metrics;
 use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
-use aws_config::{BehaviorVersion, Region};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use diesel::Connection;
@@ -56,6 +55,22 @@ struct Cli {
     database_url: Option<String>,
 }
 
+enum StrictMode {
+    /// In strict mode, we will require that all secrets are loaded, i.e. security features
+    /// may not be implicitly turned off by omitting secrets in the environment.
+    Strict,
+    /// In dev mode, secrets are optional, and omitting a particular secret will implicitly
+    /// disable the auth related to it (e.g. no pageserver jwt key -> send unauthenticated
+    /// requests, no public key -> don't authenticate incoming requests).
+    Dev,
+}
+
+impl Default for StrictMode {
+    fn default() -> Self {
+        Self::Strict
+    }
+}
+
 /// Secrets may either be provided on the command line (for testing), or loaded from AWS SecretManager: this
 /// type encapsulates the logic to decide which and do the loading.
 struct Secrets {
@@ -66,13 +81,6 @@ struct Secrets {
 }
 
 impl Secrets {
-    const DATABASE_URL_SECRET: &'static str = "rds-neon-storage-controller-url";
-    const PAGESERVER_JWT_TOKEN_SECRET: &'static str =
-        "neon-storage-controller-pageserver-jwt-token";
-    const CONTROL_PLANE_JWT_TOKEN_SECRET: &'static str =
-        "neon-storage-controller-control-plane-jwt-token";
-    const PUBLIC_KEY_SECRET: &'static str = "neon-storage-controller-public-key";
-
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
     const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
     const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
@@ -83,111 +91,39 @@ impl Secrets {
     /// - Environment variables if DATABASE_URL is set.
     /// - AWS Secrets Manager secrets
     async fn load(args: &Cli) -> anyhow::Result<Self> {
-        match &args.database_url {
-            Some(url) => Self::load_cli(url, args),
-            None => match std::env::var(Self::DATABASE_URL_ENV) {
-                Ok(database_url) => Self::load_env(database_url),
-                Err(_) => Self::load_aws_sm().await,
-            },
-        }
-    }
-
-    fn load_env(database_url: String) -> anyhow::Result<Self> {
-        let public_key = match std::env::var(Self::PUBLIC_KEY_ENV) {
-            Ok(public_key) => Some(JwtAuth::from_key(public_key).context("Loading public key")?),
-            Err(_) => None,
-        };
-        Ok(Self {
-            database_url,
-            public_key,
-            jwt_token: std::env::var(Self::PAGESERVER_JWT_TOKEN_ENV).ok(),
-            control_plane_jwt_token: std::env::var(Self::CONTROL_PLANE_JWT_TOKEN_ENV).ok(),
-        })
-    }
-
-    async fn load_aws_sm() -> anyhow::Result<Self> {
-        let Ok(region) = std::env::var("AWS_REGION") else {
-            anyhow::bail!("AWS_REGION is not set, cannot load secrets automatically: either set this, or use CLI args to supply secrets");
-        };
-        let config = aws_config::defaults(BehaviorVersion::v2023_11_09())
-            .region(Region::new(region.clone()))
-            .load()
-            .await;
-
-        let asm = aws_sdk_secretsmanager::Client::new(&config);
-
-        let Some(database_url) = asm
-            .get_secret_value()
-            .secret_id(Self::DATABASE_URL_SECRET)
-            .send()
-            .await?
-            .secret_string()
-            .map(str::to_string)
+        let Some(database_url) =
+            Self::load_secret(&args.database_url, Self::DATABASE_URL_ENV).await
         else {
             anyhow::bail!(
-                "Database URL secret not found at {region}/{}",
-                Self::DATABASE_URL_SECRET
+                "Database URL is not set (set `--database-url`, or `DATABASE_URL` environment)"
             )
         };
 
-        let jwt_token = asm
-            .get_secret_value()
-            .secret_id(Self::PAGESERVER_JWT_TOKEN_SECRET)
-            .send()
-            .await?
-            .secret_string()
-            .map(str::to_string);
-        if jwt_token.is_none() {
-            tracing::warn!("No pageserver JWT token set: this will only work if authentication is disabled on the pageserver");
-        }
-
-        let control_plane_jwt_token = asm
-            .get_secret_value()
-            .secret_id(Self::CONTROL_PLANE_JWT_TOKEN_SECRET)
-            .send()
-            .await?
-            .secret_string()
-            .map(str::to_string);
-        if jwt_token.is_none() {
-            tracing::warn!("No control plane JWT token set: this will only work if authentication is disabled on the pageserver");
-        }
-
-        let public_key = asm
-            .get_secret_value()
-            .secret_id(Self::PUBLIC_KEY_SECRET)
-            .send()
-            .await?
-            .secret_string()
-            .map(str::to_string);
-        let public_key = match public_key {
-            Some(key) => Some(JwtAuth::from_key(key)?),
-            None => {
-                tracing::warn!(
-                    "No public key set: inccoming HTTP requests will not be authenticated"
-                );
-                None
-            }
+        let public_key = match Self::load_secret(&args.public_key, Self::PUBLIC_KEY_ENV).await {
+            Some(v) => Some(JwtAuth::from_key(v).context("Loading public key")?),
+            None => None,
         };
 
         Ok(Self {
             database_url,
             public_key,
-            jwt_token,
-            control_plane_jwt_token,
+            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV).await,
+            control_plane_jwt_token: Self::load_secret(
+                &args.control_plane_jwt_token,
+                Self::CONTROL_PLANE_JWT_TOKEN_ENV,
+            )
+            .await,
         })
     }
 
-    fn load_cli(database_url: &str, args: &Cli) -> anyhow::Result<Self> {
-        let public_key = match &args.public_key {
-            None => None,
-            Some(key) => Some(JwtAuth::from_key(key.clone()).context("Loading public key")?),
-        };
-        Ok(Self {
-            database_url: database_url.to_owned(),
-            public_key,
-            jwt_token: args.jwt_token.clone(),
-            control_plane_jwt_token: args.control_plane_jwt_token.clone(),
-        })
+    async fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
+        if let Some(v) = cli {
+            Some(v.clone())
+        } else if let Ok(v) = std::env::var(env_name) {
+            Some(v)
+        } else {
+            None
+        }
     }
 }
 
