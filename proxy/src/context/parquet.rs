@@ -93,7 +93,7 @@ struct RequestData {
     /// Or if we make it to proxy_pass
     success: bool,
     /// Indicates if the cplane started the new compute node for this request.
-    cold_start_info: Option<String>,
+    cold_start_info: Option<&'static str>,
     /// Tracks time from session start (HTTP request/libpq TCP handshake)
     /// Through to success/failure
     duration_us: u64,
@@ -121,10 +121,12 @@ impl From<RequestMonitoring> for RequestData {
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
-            cold_start_info: value
-                .cold_start_info
-                .as_ref()
-                .map(|x| serde_json::to_string(x).unwrap_or_default()),
+            cold_start_info: value.cold_start_info.as_ref().map(|x| match x {
+                crate::console::messages::ColdStartInfo::Unknown => "unknown",
+                crate::console::messages::ColdStartInfo::Warm => "warm",
+                crate::console::messages::ColdStartInfo::PoolHit => "pool_hit",
+                crate::console::messages::ColdStartInfo::PoolMiss => "pool_miss",
+            }),
             duration_us: SystemTime::from(value.first_packet)
                 .elapsed()
                 .unwrap_or_default()

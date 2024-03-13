@@ -6,7 +6,9 @@ use super::{
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
     NodeInfo,
 };
-use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
+use crate::{
+    auth::backend::ComputeUserInfo, compute, console::messages::ColdStartInfo, http, scram,
+};
 use crate::{
     cache::Cached,
     context::RequestMonitoring,
@@ -254,6 +256,7 @@ impl super::Api for Api {
         if permit.should_check_cache() {
             if let Some(cached) = self.caches.node_info.get(&key) {
                 info!(key = &*key, "found cached compute node info");
+                ctx.set_cold_start_info(ColdStartInfo::Warm);
                 return Ok(cached);
             }
         }
