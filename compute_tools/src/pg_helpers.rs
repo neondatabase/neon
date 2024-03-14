@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -8,6 +7,7 @@ use std::path::Path;
 use std::process::Child;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use std::{fs, io};
 
 use anyhow::{bail, Result};
 use ini::Ini;
@@ -363,6 +363,25 @@ pub fn create_pgdata(pgdata: &str) -> Result<()> {
     fs::create_dir(pgdata)?;
     fs::set_permissions(pgdata, fs::Permissions::from_mode(0o700))?;
 
+    Ok(())
+}
+
+/// Remove contents of the given directory. It must exist.
+fn remove_dir_contents<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        fs::remove_file(entry?.path())?;
+    }
+    Ok(())
+}
+
+/// Logical replication slots and snapshot files are currently stored on
+/// pageserver via logical replication messages, so standby can't write them. So
+/// we remove them from the basebackup prepared for the standby. In particular
+/// this removes noise from ls_monitor failing to drop them.
+pub fn remove_logrep_files<P: AsRef<Path>>(pgdata: P) -> Result<()> {
+    remove_dir_contents(pgdata.as_ref().join("pg_replslot"))?;
+    remove_dir_contents(pgdata.as_ref().join("pg_logical/snapshots"))?;
+    remove_dir_contents(pgdata.as_ref().join("pg_logical/mappings"))?;
     Ok(())
 }
 
