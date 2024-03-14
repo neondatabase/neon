@@ -1987,13 +1987,42 @@ async fn secondary_download_handler(
 ) -> Result<Response<Body>, ApiError> {
     let state = get_state(&request);
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
-    state
-        .secondary_controller
-        .download_tenant(tenant_shard_id)
-        .await
-        .map_err(ApiError::InternalServerError)?;
+    let wait = parse_query_param(&request, "wait_ms")?.map(Duration::from_millis);
 
-    json_response(StatusCode::OK, ())
+    // We don't need this to issue the download request, but:
+    // - it enables us to cleanly return 404 if we get a request for an absent shard
+    // - we will use this to provide status feedback in the response
+    let Some(secondary_tenant) = state
+        .tenant_manager
+        .get_secondary_tenant_shard(tenant_shard_id)
+    else {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Shard {} not found", tenant_shard_id).into(),
+        ));
+    };
+
+    let timeout = wait.unwrap_or(Duration::MAX);
+
+    let status = match tokio::time::timeout(
+        timeout,
+        state.secondary_controller.download_tenant(tenant_shard_id),
+    )
+    .await
+    {
+        // Download job ran to completion.
+        Ok(Ok(())) => StatusCode::OK,
+        // Edge case: downloads aren't usually fallible: things like a missing heatmap are considered
+        // okay.  We could get an error here in the unlikely edge case that the tenant
+        // was detached between our check above and executing the download job.
+        Ok(Err(e)) => return Err(ApiError::InternalServerError(e)),
+        // A timeout is not an error: we have started the download, we're just not done
+        // yet.  The caller will get a response body indicating status.
+        Err(_) => StatusCode::ACCEPTED,
+    };
+
+    let progress = secondary_tenant.progress.lock().unwrap().clone();
+
+    json_response(status, progress)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
