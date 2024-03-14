@@ -3453,6 +3453,30 @@ impl Service {
             }
         }
 
+        // We do not require that a node is actually online when registered (it will start life
+        // with it's  availability set to Offline), but we _do_ require that its DNS record exists. We're
+        // therefore not immune to asymmetric L3 connectivity issues, but we are protected against nodes
+        // that register themselves with a broken DNS config.  We check only the HTTP hostname, because
+        // the postgres hostname might only be resolvable to clients (e.g. if we're on a different VPC than clients).
+        if tokio::net::lookup_host(format!(
+            "{}:{}",
+            register_req.listen_http_addr, register_req.listen_http_port
+        ))
+        .await
+        .is_err()
+        {
+            // If we have a transient DNS issue, it's up to the caller to retry their registration.  Because
+            // we can't robustly distinguish between an intermittent issue and a totally bogus DNS situation,
+            // we return a soft 503 error, to encourage callers to retry past transient issues.
+            return Err(ApiError::ResourceUnavailable(
+                format!(
+                    "Node {} tried to register with unknown DNS name '{}'",
+                    register_req.node_id, register_req.listen_http_addr
+                )
+                .into(),
+            ));
+        }
+
         // Ordering: we must persist the new node _before_ adding it to in-memory state.
         // This ensures that before we use it for anything or expose it via any external
         // API, it is guaranteed to be available after a restart.
