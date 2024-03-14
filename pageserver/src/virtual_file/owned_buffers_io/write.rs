@@ -73,6 +73,7 @@ where
             .as_zero_padded_slice()
     }
 
+    #[allow(dead_code)]
     pub async fn flush_and_into_inner(mut self, ctx: &RequestContext) -> std::io::Result<W> {
         self.flush(ctx).await?;
         let Self { buf, writer } = self;
@@ -215,7 +216,7 @@ impl OwnedAsyncWriter for Vec<u8> {
         buf: &[u8],
         _ctx: &RequestContext,
     ) -> std::io::Result<usize> {
-        self.extend_from_slice(&buf[..]);
+        self.extend_from_slice(buf);
         Ok(buf.len())
     }
 }
@@ -341,7 +342,7 @@ mod tests {
                 let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o"];
                 expect
             }
-            .into_iter()
+            .iter()
             .map(|v| v[..].to_vec())
             .collect::<Vec<_>>()
         );

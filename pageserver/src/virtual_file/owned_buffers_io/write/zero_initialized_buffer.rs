@@ -54,6 +54,7 @@ impl<const N: usize> Buf<N> {
     }
 }
 
+/// SAFETY: the Box<> has a stable location in memory.
 unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buf<N> {
     fn stable_ptr(&self) -> *const u8 {
         self.allocation.as_ptr()

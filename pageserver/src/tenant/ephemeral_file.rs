@@ -202,7 +202,7 @@ impl EphemeralFile {
         }
 
         // Write the payload
-        self.file.write_all_borrowed(&srcbuf, ctx).await?;
+        self.file.write_all_borrowed(srcbuf, ctx).await?;
 
         Ok(pos)
     }
