@@ -388,7 +388,7 @@ impl PageServerNode {
                 .remove("image_layer_compression")
                 .map(serde_json::from_str)
                 .transpose()
-                .context("Failed to parse 'image_layer_compression' as bool")?,
+                .context("Failed to parse 'image_layer_compression' json")?,
             eviction_policy: settings
                 .remove("eviction_policy")
                 .map(serde_json::from_str)
