@@ -131,21 +131,25 @@ impl EphemeralFile {
                 }
             };
         } else {
-            let reads_past_end = read_offset + (PAGE_SZ as u64) <= buffered_offset;
-            if reads_past_end {
-                if cfg!(test) {
-                    // tests rely on being able to read zeroes from offsets [buffered_offset, next PAGE_SZ multiple of buffered_offset).
-                    // TODO: assert it's only up to the next PAGE_SZ
-                } else {
+            let read_until_offset = read_offset + (PAGE_SZ as u64);
+            if !(0..buffered_offset).contains(&read_until_offset) {
+                // The blob_io code relies on the reader allowing reads past
+                // the end of what was written, up to end of the current PAGE_SZ chunk.
+                // This is a relict of the past where we would get a pre-zeroed page from the page cache.
+                //
+                // DeltaLayer probably has the same issue, not sure why it needs no special treatment.
+                let nbytes_past_end = read_until_offset.checked_sub(buffered_offset).unwrap();
+                if nbytes_past_end >= (PAGE_SZ as u64) {
                     // TODO: treat this as error. Pre-existing issue before this patch.
                     panic!(
-                        "return IO error: read past end of file: {read_offset:x} {buffered_offset:x}"
+                        "return IO error: read past end of file: read=0x{read_offset:x} buffered=0x{buffered_offset:x} flushed=0x{flushed_offset}"
                     )
                 }
             }
-
             let buffer: &[u8; Self::TAIL_SZ] = self.file.as_inner().inspect_buffer();
-            let read_offset_in_buffer = read_offset.checked_sub(flushed_offset).unwrap();
+            let read_offset_in_buffer = read_offset
+                .checked_sub(flushed_offset)
+                .expect("would have taken `if` branch instead of this one");
 
             let read_offset_in_buffer = usize::try_from(read_offset_in_buffer).unwrap();
             let page = &buffer[read_offset_in_buffer..(read_offset_in_buffer + PAGE_SZ)];
