@@ -38,6 +38,7 @@ async def test_websockets(static_proxy: NeonProxy):
         await websocket.send([length, startup_message])
 
         startup_response = await websocket.recv()
+        assert isinstance(startup_response, bytes)
         assert startup_response[0:1] == b"R", "should be authentication message"
         assert startup_response[1:5] == b"\x00\x00\x00\x08", "should be 8 bytes long message"
         assert startup_response[5:9] == b"\x00\x00\x00\x03", "should be cleartext"
@@ -47,6 +48,7 @@ async def test_websockets(static_proxy: NeonProxy):
         await websocket.send([b"p", length, auth_message])
 
         auth_response = await websocket.recv()
+        assert isinstance(auth_response, bytes)
         assert auth_response[0:1] == b"R", "should be authentication message"
         assert auth_response[1:5] == b"\x00\x00\x00\x08", "should be 8 bytes long message"
         assert auth_response[5:9] == b"\x00\x00\x00\x00", "should be authenticated"
@@ -56,6 +58,7 @@ async def test_websockets(static_proxy: NeonProxy):
         await websocket.send([b"Q", length, query_message])
 
         query_response = await websocket.recv()
+        assert isinstance(query_response, bytes)
         # 'T\x00\x00\x00!\x00\x01?column?\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\xff\xff\xff\xff\x00\x00'
         # 'D\x00\x00\x00\x0b\x00\x01\x00\x00\x00\x011'
         # 'C\x00\x00\x00\rSELECT 1\x00'
@@ -136,16 +139,19 @@ async def test_websockets_pipelined(static_proxy: NeonProxy):
         )
 
         startup_response = await websocket.recv()
+        assert isinstance(startup_response, bytes)
         assert startup_response[0:1] == b"R", "should be authentication message"
         assert startup_response[1:5] == b"\x00\x00\x00\x08", "should be 8 bytes long message"
         assert startup_response[5:9] == b"\x00\x00\x00\x03", "should be cleartext"
 
         auth_response = await websocket.recv()
+        assert isinstance(auth_response, bytes)
         assert auth_response[0:1] == b"R", "should be authentication message"
         assert auth_response[1:5] == b"\x00\x00\x00\x08", "should be 8 bytes long message"
         assert auth_response[5:9] == b"\x00\x00\x00\x00", "should be authenticated"
 
         query_response = await websocket.recv()
+        assert isinstance(query_response, bytes)
         # 'T\x00\x00\x00!\x00\x01?column?\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\xff\xff\xff\xff\x00\x00'
         # 'D\x00\x00\x00\x0b\x00\x01\x00\x00\x00\x011'
         # 'C\x00\x00\x00\rSELECT 1\x00'
