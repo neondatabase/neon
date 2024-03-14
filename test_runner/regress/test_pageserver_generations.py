@@ -18,7 +18,6 @@ from typing import Optional
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
     NeonPageserver,
@@ -210,30 +209,11 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.node_register(env.pageserver)
 
     env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
+    env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
-    try:
-        env.neon_cli.create_tenant(tenant_id=env.initial_tenant, conf=TENANT_CONF)
-    except Exception:
-        # The initial tenant creation will likely fail because the external node registration
-        # above does not mark the node as available. Hence, we need to wait for the heartbeats
-        # to mark the node available, reschedule the tenant and, finally, for reconciliation
-        # to kick in.
-        def wait_for_tenant_activation():
-            client = env.storage_controller.pageserver_api()
-            status = client.tenant_status(env.initial_tenant)
-            log.info(f"status={status}")
-            assert TenantId(status["id"]) == env.initial_tenant
-            assert status["state"]["slug"] == "Active"
-
-        wait_until(12, 5, wait_for_tenant_activation)
-
-        # Create the timeline separately because if tenant creation fails, the timeline will
-        # not be created either.
-        env.neon_cli.create_timeline(
-            tenant_id=env.initial_tenant,
-            timeline_id=env.initial_timeline,
-            new_branch_name=DEFAULT_BRANCH_NAME,
-        )
+    env.neon_cli.create_tenant(
+        tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
+    )
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver)
 
