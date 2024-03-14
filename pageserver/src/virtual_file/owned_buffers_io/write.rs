@@ -1,9 +1,15 @@
+use std::ops::Range;
+
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 pub trait OwnedAsyncWriter {
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<
+        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
+        Buf: IoBuf + Send,
+        Bounds: std::ops::RangeBounds<usize>,
+    >(
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)>;
@@ -145,7 +151,11 @@ impl<const BUFFER_SIZE: usize, W: OwnedAsyncWriter> OwnedAsyncWriter
     for BufferedWriter<BUFFER_SIZE, W>
 {
     #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<
+        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
+        Buf: IoBuf + Send,
+        Bounds: std::ops::RangeBounds<usize>,
+    >(
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)> {
@@ -163,7 +173,11 @@ impl<const BUFFER_SIZE: usize, W: OwnedAsyncWriter> OwnedAsyncWriter
 }
 
 impl OwnedAsyncWriter for Vec<u8> {
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<
+        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
+        Buf: IoBuf + Send,
+        Bounds: std::ops::RangeBounds<usize>,
+    >(
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)> {
@@ -191,7 +205,11 @@ mod tests {
         writes: Vec<Vec<u8>>,
     }
     impl OwnedAsyncWriter for RecorderWriter {
-        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all<
+            B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
+            Buf: IoBuf + Send,
+            Bounds: std::ops::RangeBounds<usize>,
+        >(
             &mut self,
             buf: B,
         ) -> std::io::Result<(usize, B::Buf)> {

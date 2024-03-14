@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter;
 use tokio_epoll_uring::{BoundedBuf, IoBuf};
 
@@ -31,7 +33,11 @@ where
     W: OwnedAsyncWriter,
 {
     #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<
+        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
+        Buf: IoBuf + Send,
+        Bounds: std::ops::RangeBounds<usize>,
+    >(
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)> {

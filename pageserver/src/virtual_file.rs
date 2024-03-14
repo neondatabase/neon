@@ -48,6 +48,7 @@ pub(crate) mod owned_buffers_io {
 
     pub(crate) mod write;
     pub(crate) mod util {
+        pub(crate) mod page_cache_priming_writer;
         pub(crate) mod size_tracking_writer;
     }
 }
@@ -1084,7 +1085,11 @@ impl Drop for VirtualFile {
 
 impl OwnedAsyncWriter for VirtualFile {
     #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<
+        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
+        Buf: IoBuf + Send,
+        Bounds: std::ops::RangeBounds<usize>,
+    >(
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)> {
