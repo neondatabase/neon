@@ -298,13 +298,13 @@ pub enum BuilderValue<T> {
 }
 
 impl<T: Clone> BuilderValue<T> {
-    pub fn ok_or(self, default: BuilderValue<T>) -> T {
+    pub fn ok_or(&self, field_name: &'static str, default: BuilderValue<T>) -> anyhow::Result<T> {
         match self {
-            Self::Set(v) => v.clone(),
+            Self::Set(v) => Ok(v.clone()),
             Self::NotSet => match default {
-                BuilderValue::Set(v) => v.clone(),
+                BuilderValue::Set(v) => Ok(v.clone()),
                 BuilderValue::NotSet => {
-                    panic!("default_values() impl must use Set() in all places")
+                    anyhow::bail!("missing config value {field_name:?}")
                 }
             },
         }
@@ -657,107 +657,94 @@ impl PageServerConfigBuilder {
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
-        let concurrent_tenant_warmup = self
-            .concurrent_tenant_warmup
-            .ok_or(default.concurrent_tenant_warmup);
-        let concurrent_tenant_size_logical_size_queries = self
-            .concurrent_tenant_size_logical_size_queries
-            .ok_or(default.concurrent_tenant_size_logical_size_queries);
-        Ok(PageServerConf {
-            listen_pg_addr: self.listen_pg_addr.ok_or(default.listen_pg_addr),
-            listen_http_addr: self.listen_http_addr.ok_or(default.listen_http_addr),
-            availability_zone: self.availability_zone.ok_or(default.availability_zone),
-            wait_lsn_timeout: self.wait_lsn_timeout.ok_or(default.wait_lsn_timeout),
-            wal_redo_timeout: self.wal_redo_timeout.ok_or(default.wal_redo_timeout),
-            superuser: self.superuser.ok_or(default.superuser),
-            page_cache_size: self.page_cache_size.ok_or(default.page_cache_size),
-            max_file_descriptors: self
-                .max_file_descriptors
-                .ok_or(default.max_file_descriptors),
-            workdir: self.workdir.ok_or(default.workdir),
-            pg_distrib_dir: self.pg_distrib_dir.ok_or(default.pg_distrib_dir),
-            http_auth_type: self.http_auth_type.ok_or(default.http_auth_type),
-            pg_auth_type: self.pg_auth_type.ok_or(default.pg_auth_type),
-            auth_validation_public_key_path: self
-                .auth_validation_public_key_path
-                .ok_or(default.auth_validation_public_key_path),
-            remote_storage_config: self
-                .remote_storage_config
-                .ok_or(default.remote_storage_config),
-            id: self.id.ok_or(default.id),
-            // TenantConf is handled separately
-            default_tenant_conf: TenantConf::default(),
-            broker_endpoint: self.broker_endpoint.ok_or(default.broker_endpoint),
-            broker_keepalive_interval: self
-                .broker_keepalive_interval
-                .ok_or(default.broker_keepalive_interval),
-            log_format: self.log_format.ok_or(default.log_format),
-            concurrent_tenant_warmup: ConfigurableSemaphore::new(concurrent_tenant_warmup),
-            concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
-                concurrent_tenant_size_logical_size_queries,
-            ),
-            eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
-                concurrent_tenant_size_logical_size_queries,
-            ),
-            metric_collection_interval: self
-                .metric_collection_interval
-                .ok_or(default.metric_collection_interval),
-            cached_metric_collection_interval: self
-                .cached_metric_collection_interval
-                .ok_or(default.cached_metric_collection_interval),
-            metric_collection_endpoint: self
-                .metric_collection_endpoint
-                .ok_or(default.metric_collection_endpoint),
-            synthetic_size_calculation_interval: self
-                .synthetic_size_calculation_interval
-                .ok_or(default.synthetic_size_calculation_interval),
-            disk_usage_based_eviction: self
-                .disk_usage_based_eviction
-                .ok_or(default.disk_usage_based_eviction),
-            test_remote_failures: self
-                .test_remote_failures
-                .ok_or(default.test_remote_failures),
-            ondemand_download_behavior_treat_error_as_warn: self
-                .ondemand_download_behavior_treat_error_as_warn
-                .ok_or(default.ondemand_download_behavior_treat_error_as_warn),
-            background_task_maximum_delay: self
-                .background_task_maximum_delay
-                .ok_or(default.background_task_maximum_delay),
-            control_plane_api: self.control_plane_api.ok_or(default.control_plane_api),
-            control_plane_api_token: self
-                .control_plane_api_token
-                .ok_or(default.control_plane_api_token),
-            control_plane_emergency_mode: self
-                .control_plane_emergency_mode
-                .ok_or(default.control_plane_emergency_mode),
-            heatmap_upload_concurrency: self
-                .heatmap_upload_concurrency
-                .ok_or(default.heatmap_upload_concurrency),
-            secondary_download_concurrency: self
-                .secondary_download_concurrency
-                .ok_or(default.secondary_download_concurrency),
-            ingest_batch_size: self.ingest_batch_size.ok_or(default.ingest_batch_size),
-            virtual_file_io_engine: match self.virtual_file_io_engine {
-                BuilderValue::Set(v) => v,
-                BuilderValue::NotSet => match crate::virtual_file::io_engine_feature_test()
-                    .context("auto-detect virtual_file_io_engine")?
-                {
-                    io_engine::FeatureTestResult::PlatformPreferred(v) => v, // make no noise
-                    io_engine::FeatureTestResult::Worse { engine, remark } => {
-                        // TODO: bubble this up to the caller so we can tracing::warn! it.
-                        eprintln!("auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}");
-                        engine
-                    }
+        macro_rules! conf {
+            (USING DEFAULT { $($field:ident,)* } CUSTOM LOGIC { $($custom_field:ident : $custom_value:expr,)* } ) => {
+                PageServerConf {
+                    $(
+                        $field: self.$field.ok_or(stringify!($field), default.$field)?,
+                    )*
+                    $(
+                        $custom_field: $custom_value,
+                    )*
+                }
+            };
+        }
+
+        Ok(conf!(
+            USING DEFAULT
+            {
+                listen_pg_addr,
+                listen_http_addr,
+                availability_zone,
+                wait_lsn_timeout,
+                wal_redo_timeout,
+                superuser,
+                page_cache_size,
+                max_file_descriptors,
+                workdir,
+                pg_distrib_dir,
+                http_auth_type,
+                pg_auth_type,
+                auth_validation_public_key_path,
+                remote_storage_config,
+                id,
+                broker_endpoint,
+                broker_keepalive_interval,
+                log_format,
+                metric_collection_interval,
+                cached_metric_collection_interval,
+                metric_collection_endpoint,
+                synthetic_size_calculation_interval,
+                disk_usage_based_eviction,
+                test_remote_failures,
+                ondemand_download_behavior_treat_error_as_warn,
+                background_task_maximum_delay,
+                control_plane_api,
+                control_plane_api_token,
+                control_plane_emergency_mode,
+                heatmap_upload_concurrency,
+                secondary_download_concurrency,
+                ingest_batch_size,
+                get_vectored_impl,
+                max_vectored_read_bytes,
+                validate_vectored_get,
+            }
+            CUSTOM LOGIC
+            {
+                // TenantConf is handled separately
+                default_tenant_conf: TenantConf::default(),
+                concurrent_tenant_warmup: ConfigurableSemaphore::new({
+                    self
+                        .concurrent_tenant_warmup
+                        .ok_or("concurrent_tenant_warmpup",
+                               default.concurrent_tenant_warmup)?
+                }),
+                concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
+                    self
+                        .concurrent_tenant_size_logical_size_queries
+                        .ok_or("concurrent_tenant_size_logical_size_queries",
+                               default.concurrent_tenant_size_logical_size_queries.clone())?
+                ),
+                eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
+                    // re-use `concurrent_tenant_size_logical_size_queries`
+                    self
+                        .concurrent_tenant_size_logical_size_queries
+                        .ok_or("eviction_task_immitated_concurrent_logical_size_queries",
+                               default.concurrent_tenant_size_logical_size_queries.clone())?,
+                ),
+                virtual_file_io_engine: match self.virtual_file_io_engine {
+                    BuilderValue::Set(v) => v,
+                    BuilderValue::NotSet => match crate::virtual_file::io_engine_feature_test().context("auto-detect virtual_file_io_engine")? {
+                        io_engine::FeatureTestResult::PlatformPreferred(v) => v, // make no noise
+                        io_engine::FeatureTestResult::Worse { engine, remark } => {
+                            // TODO: bubble this up to the caller so we can tracing::warn! it.
+                            eprintln!("auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}");
+                            engine
+                        }
+                    },
                 },
-            },
-            get_vectored_impl: self.get_vectored_impl.ok_or(default.get_vectored_impl),
-            max_vectored_read_bytes: self
-                .max_vectored_read_bytes
-                .ok_or(default.max_vectored_read_bytes),
-            validate_vectored_get: self
-                .validate_vectored_get
-                .ok_or(default.validate_vectored_get),
-        })
+            }
+        ))
     }
 }
 
