@@ -11,6 +11,9 @@ use diesel::prelude::*;
 use diesel::Connection;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
+use pageserver_api::shard::ShardConfigError;
+use pageserver_api::shard::ShardIdentity;
+use pageserver_api::shard::ShardStripeSize;
 use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
@@ -70,6 +73,14 @@ pub(crate) enum DatabaseError {
     ConnectionPool(#[from] r2d2::Error),
     #[error("Logical error: {0}")]
     Logical(String),
+}
+
+#[must_use]
+pub(crate) enum AbortShardSplitStatus {
+    /// We aborted the split in the database by reverting to the parent shards
+    Aborted,
+    /// The split had already been persisted.
+    Complete,
 }
 
 pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
@@ -570,6 +581,51 @@ impl Persistence {
         })
         .await
     }
+
+    /// Used when the remote part of a shard split failed: we will revert the database state to have only
+    /// the parent shards, with SplitState::Idle.
+    pub(crate) async fn abort_shard_split(
+        &self,
+        split_tenant_id: TenantId,
+        new_shard_count: ShardCount,
+    ) -> DatabaseResult<AbortShardSplitStatus> {
+        use crate::schema::tenant_shards::dsl::*;
+        self.with_conn(move |conn| -> DatabaseResult<AbortShardSplitStatus> {
+            let aborted = conn.transaction(|conn| -> DatabaseResult<AbortShardSplitStatus> {
+                // Clear the splitting state on parent shards
+                let updated = diesel::update(tenant_shards)
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.ne(new_shard_count.literal() as i32))
+                    .set((splitting.eq(0),))
+                    .execute(conn)?;
+
+                // Parent shards are already gone: we cannot abort.
+                if updated == 0 {
+                    return Ok(AbortShardSplitStatus::Complete);
+                }
+
+                // Sanity check: if parent shards were present, their cardinality should
+                // be less than the number of child shards.
+                if updated >= new_shard_count.count() as usize {
+                    return Err(DatabaseError::Logical(format!(
+                        "Unexpected parent shard count {updated} while aborting split to \
+                            count {new_shard_count:?} on tenant {split_tenant_id}"
+                    )));
+                }
+
+                // Erase child shards
+                diesel::delete(tenant_shards)
+                    .filter(tenant_id.eq(split_tenant_id.to_string()))
+                    .filter(shard_count.eq(new_shard_count.literal() as i32))
+                    .execute(conn)?;
+
+                Ok(AbortShardSplitStatus::Aborted)
+            })?;
+
+            Ok(aborted)
+        })
+        .await
+    }
 }
 
 /// Parts of [`crate::tenant_state::TenantState`] that are stored durably
@@ -602,6 +658,28 @@ pub(crate) struct TenantShardPersistence {
     pub(crate) splitting: SplitState,
     #[serde(default)]
     pub(crate) config: String,
+}
+
+impl TenantShardPersistence {
+    pub(crate) fn get_shard_identity(&self) -> Result<ShardIdentity, ShardConfigError> {
+        if self.shard_count == 0 {
+            Ok(ShardIdentity::unsharded())
+        } else {
+            Ok(ShardIdentity::new(
+                ShardNumber(self.shard_number as u8),
+                ShardCount::new(self.shard_count as u8),
+                ShardStripeSize(self.shard_stripe_size as u32),
+            )?)
+        }
+    }
+
+    pub(crate) fn get_tenant_shard_id(&self) -> Result<TenantShardId, hex::FromHexError> {
+        Ok(TenantShardId {
+            tenant_id: TenantId::from_str(self.tenant_id.as_str())?,
+            shard_number: ShardNumber(self.shard_number as u8),
+            shard_count: ShardCount::new(self.shard_count as u8),
+        })
+    }
 }
 
 /// Parts of [`crate::node::Node`] that are stored durably

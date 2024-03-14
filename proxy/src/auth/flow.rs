@@ -143,7 +143,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         let Scram(secret, ctx) = self.state;
 
         // pause the timer while we communicate with the client
-        let _paused = ctx.latency_timer.pause();
+        let _paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
 
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
