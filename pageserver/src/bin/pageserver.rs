@@ -84,7 +84,15 @@ fn main() -> anyhow::Result<()> {
     env::set_current_dir(&workdir)
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
-    let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
+    let preferred_engine = crate::virtual_file::io_engine_feature_test()
+        .context("feature-test virtual_file io engine")?;
+
+    let conf = match initialize_config(
+        &cfg_file_path,
+        arg_matches,
+        &workdir,
+        preferred_engine,
+    )? {
         ControlFlow::Continue(conf) => conf,
         ControlFlow::Break(()) => {
             info!("Pageserver config init successful");
@@ -120,6 +128,9 @@ fn main() -> anyhow::Result<()> {
         &[("node_id", &conf.id.to_string())],
     );
 
+    // after setting up logging, log the effective IO engine choice
+    info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
+
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
         utils::crashsafe::create_dir_all(conf.tenants_path())
@@ -143,6 +154,7 @@ fn initialize_config(
     cfg_file_path: &Utf8Path,
     arg_matches: clap::ArgMatches,
     workdir: &Utf8Path,
+    preferred_engine: virtual_file::IoEngineFeatureTestResult,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
     let update_config = init || arg_matches.get_flag("update-config");
@@ -192,7 +204,7 @@ fn initialize_config(
     }
 
     debug!("Resulting toml: {toml}");
-    let conf = PageServerConf::parse_and_validate(&toml, workdir)
+    let conf = PageServerConf::parse_and_validate(&toml, workdir, preferred_engine)
         .context("Failed to parse pageserver configuration")?;
 
     if update_config {

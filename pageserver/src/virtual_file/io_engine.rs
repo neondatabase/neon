@@ -253,3 +253,79 @@ impl IoEngine {
         }
     }
 }
+
+pub enum FeatureTestResult {
+    PlatformPreferred(IoEngineKind),
+    Worse {
+        engine: IoEngineKind,
+        remark: &'static str,
+    },
+}
+
+impl FeatureTestResult {
+    #[cfg(target_os = "linux")]
+    const PLATFORM_PREFERRED: IoEngineKind = IoEngineKind::TokioEpollUring;
+    #[cfg(not(target_os = "linux"))]
+    const PLATFORM_PREFERRED: IoEngineKind = IoEngineKind::StdFs;
+}
+
+impl Into<IoEngineKind> for FeatureTestResult {
+    fn into(self) -> IoEngineKind {
+        match self {
+            FeatureTestResult::PlatformPreferred(e) => e,
+            FeatureTestResult::Worse { engine, .. } => engine,
+        }
+    }
+}
+
+/// Somewhat costly under the hood, to only once.
+/// Panics if we can't set up the feature test.
+pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
+    std::thread::spawn(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Ok(FeatureTestResult::PlatformPreferred(
+                FeatureTestResult::PLATFORM_DEFAULT,
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        Ok(match rt.block_on(tokio_epoll_uring::System::launch()) {
+            Ok(_) => FeatureTestResult::PlatformPreferred({
+                assert!(matches!(
+                    IoEngineKind::TokioEpollUring,
+                    FeatureTestResult::PLATFORM_PREFERRED
+                ));
+                FeatureTestResult::PLATFORM_PREFERRED
+            }),
+            Err(tokio_epoll_uring::LaunchResult::IoUringBuild(e)) => {
+                let remark;
+                match e.raw_os_error() {
+                    None => {
+                        remark = "creating tokio-epoll-uring failed with non-OS error: {e}";
+                    }
+                    Some(nix::libc::EFAULT) => {
+                        remark = "tokio-epoll-uring crate produces EFAULT?";
+                    }
+                    Some(nix::libc::EPERM) => {
+                        remark = "creating io_uring fails with EPERM";
+                    }
+                    Some(x) => {
+                        anyhow::bail!(
+                            "temporary error: creating tokio-epoll-uring fails with errno {x}"
+                        );
+                    }
+                }
+                FeatureTestResult::Worse {
+                    engine: IoEngineKind::StdFs,
+                    remark,
+                }
+            }
+        })
+    })
+    .join()
+    .unwrap()
+}

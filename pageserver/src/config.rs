@@ -30,15 +30,14 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
-use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::timeline::GetVectoredImpl;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
-use crate::virtual_file;
+use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
+use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{
     IGNORED_TENANT_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
     TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
@@ -655,7 +654,10 @@ impl PageServerConfigBuilder {
         self.validate_vectored_get = BuilderValue::Set(value);
     }
 
-    pub fn build(self) -> anyhow::Result<PageServerConf> {
+    pub fn build(
+        self,
+        default_engine: virtual_file::IoEngineFeatureTestResult,
+    ) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
         let concurrent_tenant_warmup = self
@@ -738,9 +740,17 @@ impl PageServerConfigBuilder {
                 .secondary_download_concurrency
                 .ok_or(default.secondary_download_concurrency),
             ingest_batch_size: self.ingest_batch_size.ok_or(default.ingest_batch_size),
-            virtual_file_io_engine: self
-                .virtual_file_io_engine
-                .ok_or(default.virtual_file_io_engine),
+            virtual_file_io_engine: match self.virtual_file_io_engine {
+                BuilderValue::Set(v) => v,
+                BuilderValue::NotSet => match default_engine {
+                    io_engine::FeatureTestResult::PlatformPreferred(v) => v,
+                    io_engine::FeatureTestResult::Worse { engine, remark } => {
+                        // TODO: bubble this up to the caller so we can tracing::warn! it.
+                        eprintln!("auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}");
+                        engine
+                    }
+                },
+            },
             get_vectored_impl: self.get_vectored_impl.ok_or(default.get_vectored_impl),
             max_vectored_read_bytes: self
                 .max_vectored_read_bytes
@@ -900,7 +910,11 @@ impl PageServerConf {
     /// validating the input and failing on errors.
     ///
     /// This leaves any options not present in the file in the built-in defaults.
-    pub fn parse_and_validate(toml: &Document, workdir: &Utf8Path) -> anyhow::Result<Self> {
+    pub fn parse_and_validate(
+        toml: &Document,
+        workdir: &Utf8Path,
+        default_engine: virtual_file::IoEngineFeatureTestResult,
+    ) -> anyhow::Result<Self> {
         let mut builder = PageServerConfigBuilder::default();
         builder.workdir(workdir.to_owned());
 
@@ -1011,7 +1025,7 @@ impl PageServerConf {
             }
         }
 
-        let mut conf = builder.build().context("invalid config")?;
+        let mut conf = builder.build(default_engine).context("invalid config")?;
 
         if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
@@ -1261,8 +1275,14 @@ background_task_maximum_delay = '334 s'
         );
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
-            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
+        let parsed_config = PageServerConf::parse_and_validate(
+            &toml,
+            &workdir,
+            crate::virtual_file::io_engine_feature_test()
+                .unwrap()
+                .into(),
+        )
+        .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
             parsed_config,
@@ -1341,8 +1361,14 @@ background_task_maximum_delay = '334 s'
         );
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
-            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
+        let parsed_config = PageServerConf::parse_and_validate(
+            &toml,
+            &workdir,
+            crate::virtual_file::io_engine_feature_test()
+                .unwrap()
+                .into(),
+        )
+        .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
             parsed_config,
@@ -1427,12 +1453,16 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for the local FS");
+            let parsed_remote_storage_config = PageServerConf::parse_and_validate(
+                &toml,
+                &workdir,
+                crate::virtual_file::io_engine_feature_test()
+                    .unwrap()
+                    .into(),
+            )
+            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"))
+            .remote_storage_config
+            .expect("Should have remote storage config for the local FS");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -1488,12 +1518,16 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for S3");
+            let parsed_remote_storage_config = PageServerConf::parse_and_validate(
+                &toml,
+                &workdir,
+                crate::virtual_file::io_engine_feature_test()
+                    .unwrap()
+                    .into(),
+            )
+            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"))
+            .remote_storage_config
+            .expect("Should have remote storage config for S3");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -1533,7 +1567,13 @@ trace_read_requests = {trace_read_requests}"#,
 
         let toml = config_string.parse()?;
 
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        let conf = PageServerConf::parse_and_validate(
+            &toml,
+            &workdir,
+            crate::virtual_file::io_engine_feature_test()
+                .unwrap()
+                .into(),
+        )?;
         assert_eq!(
             conf.default_tenant_conf.trace_read_requests, trace_read_requests,
             "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
@@ -1599,7 +1639,13 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse()?;
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        let conf = PageServerConf::parse_and_validate(
+            &toml,
+            &workdir,
+            crate::virtual_file::io_engine_feature_test()
+                .unwrap()
+                .into(),
+        )?;
 
         assert_eq!(conf.pg_distrib_dir, pg_distrib_dir);
         assert_eq!(
@@ -1660,7 +1706,14 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse().unwrap();
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+        let conf = PageServerConf::parse_and_validate(
+            &toml,
+            &workdir,
+            crate::virtual_file::io_engine_feature_test()
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
 
         match &conf.default_tenant_conf.eviction_policy {
             EvictionPolicy::OnlyImitiate(t) => {
