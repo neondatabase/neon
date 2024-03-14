@@ -4577,8 +4577,8 @@ impl<'a> TimelineWriter<'a> {
         batch: VecMap<Lsn, (Key, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for (lsn, (key, val)) in batch.into_iter() {
-            self.put(key, lsn, &val, ctx).await?
+        for (lsn, (key, val)) in batch.as_slice() {
+            self.put(*key, *lsn, val, ctx).await?
         }
 
         Ok(())

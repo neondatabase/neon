@@ -151,18 +151,10 @@ impl<K: Ord, V> VecMap<K, V> {
     }
 }
 
-impl<K: Ord, V> IntoIterator for VecMap<K, V> {
-    type Item = (K, V);
-    type IntoIter = std::vec::IntoIter<(K, V)>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
 impl<K: Ord, V> FromIterator<(K, V)> for VecMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut vec_map = VecMap::default();
+
         vec_map.0 = iter.into_iter().collect();
         vec_map.0.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
 
@@ -333,5 +325,13 @@ mod tests {
         left.extend(&mut one_map).unwrap_err();
         assert_eq!(left.as_slice(), &[(0, ()), (1, ())]);
         assert_eq!(one_map.as_slice(), &[(1, ())]);
+    }
+
+    #[test]
+    fn vec_map_from() {
+        let vec = vec![(3, ()), (1, ()), (2, ()), (6, ())];
+        let vec_map = VecMap::from_iter(vec);
+
+        assert_eq!(vec_map.as_slice(), &[(1, ()), (2, ()), (3, ()), (6, ())]);
     }
 }
