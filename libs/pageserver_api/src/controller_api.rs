@@ -66,7 +66,7 @@ pub struct TenantShardMigrateRequest {
     pub node_id: NodeId,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum NodeAvailability {
     // Normal, happy state
     Active,
@@ -88,7 +88,7 @@ impl FromStr for NodeAvailability {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum NodeSchedulingPolicy {
     Active,
     Filling,
