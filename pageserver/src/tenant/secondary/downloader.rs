@@ -701,6 +701,8 @@ impl<'a> TenantDownloader<'a> {
                 tokio::fs::remove_file(&local_path)
                     .await
                     .or_else(fs_ext::ignore_not_found)?;
+            } else {
+                tracing::info!("Downloaded layer {}, size {}", layer.name, downloaded_bytes);
             }
 
             SECONDARY_MODE.download_layer.inc();
