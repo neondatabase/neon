@@ -1,5 +1,6 @@
 use crate::persistence::Persistence;
 use crate::service;
+use hyper::StatusCode;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
@@ -17,6 +18,8 @@ use utils::sync::gate::GateGuard;
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
 use crate::tenant_state::{IntentState, ObservedState, ObservedStateLocation};
+
+const DEFAULT_HEATMAP_PERIOD: &str = "60s";
 
 /// Object with the lifetime of the background reconcile task that is created
 /// for tenants which have a difference between their intent and observed states.
@@ -485,17 +488,29 @@ impl Reconciler {
                 )
                 .await
             {
-                Some(Ok(observed)) => observed,
+                Some(Ok(observed)) => Some(observed),
+                Some(Err(mgmt_api::Error::ApiError(status, _msg)))
+                    if status == StatusCode::NOT_FOUND =>
+                {
+                    None
+                }
                 Some(Err(e)) => return Err(e.into()),
                 None => return Err(ReconcileError::Cancel),
             };
             tracing::info!("Scanned location configuration on {attached_node}: {observed_conf:?}");
-            self.observed.locations.insert(
-                attached_node.get_id(),
-                ObservedStateLocation {
-                    conf: observed_conf,
-                },
-            );
+            match observed_conf {
+                Some(conf) => {
+                    // Pageserver returned a state: update it in observed.  This may still be an indeterminate (None) state,
+                    // if internally the pageserver's TenantSlot was being mutated (e.g. some long running API call is still running)
+                    self.observed
+                        .locations
+                        .insert(attached_node.get_id(), ObservedStateLocation { conf });
+                }
+                None => {
+                    // Pageserver returned 404: we have confirmation that there is no state for this shard on that pageserver.
+                    self.observed.locations.remove(&attached_node.get_id());
+                }
+            }
         }
 
         Ok(())
@@ -525,7 +540,12 @@ impl Reconciler {
                 )));
             };
 
-            let mut wanted_conf = attached_location_conf(generation, &self.shard, &self.config);
+            let mut wanted_conf = attached_location_conf(
+                generation,
+                &self.shard,
+                &self.config,
+                !self.intent.secondary.is_empty(),
+            );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
@@ -662,10 +682,26 @@ impl Reconciler {
     }
 }
 
+/// We tweak the externally-set TenantConfig while configuring
+/// locations, using our awareness of whether secondary locations
+/// are in use to automatically enable/disable heatmap uploads.
+fn ha_aware_config(config: &TenantConfig, has_secondaries: bool) -> TenantConfig {
+    let mut config = config.clone();
+    if has_secondaries {
+        if config.heatmap_period.is_none() {
+            config.heatmap_period = Some(DEFAULT_HEATMAP_PERIOD.to_string());
+        }
+    } else {
+        config.heatmap_period = None;
+    }
+    config
+}
+
 pub(crate) fn attached_location_conf(
     generation: Generation,
     shard: &ShardIdentity,
     config: &TenantConfig,
+    has_secondaries: bool,
 ) -> LocationConfig {
     LocationConfig {
         mode: LocationConfigMode::AttachedSingle,
@@ -674,7 +710,7 @@ pub(crate) fn attached_location_conf(
         shard_number: shard.number.0,
         shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
-        tenant_conf: config.clone(),
+        tenant_conf: ha_aware_config(config, has_secondaries),
     }
 }
 
@@ -689,6 +725,6 @@ pub(crate) fn secondary_location_conf(
         shard_number: shard.number.0,
         shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
-        tenant_conf: config.clone(),
+        tenant_conf: ha_aware_config(config, true),
     }
 }

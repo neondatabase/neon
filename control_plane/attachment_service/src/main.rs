@@ -206,6 +206,12 @@ async fn migration_run(database_url: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     tokio::runtime::Builder::new_current_thread()
         // We use spawn_blocking for database operations, so require approximately
         // as many blocking threads as we will open database connections.
