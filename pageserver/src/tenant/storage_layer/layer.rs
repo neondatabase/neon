@@ -310,21 +310,32 @@ impl Layer {
     /// Assuming the layer is already downloaded, returns a guard which will prohibit eviction
     /// while the guard exists.
     ///
-    /// Returns None if the layer is currently evicted.
+    /// Returns None if the layer is currently evicted or becoming evicted.
+    // FIXME: get rid of the error at last
     pub(crate) async fn keep_resident(&self) -> anyhow::Result<Option<ResidentLayer>> {
-        let downloaded = match self.0.get_or_maybe_download(false, None).await {
-            Ok(d) => d,
-            // technically there are a lot of possible errors, but in practice it should only be
-            // DownloadRequired which is tripped up. could work to improve this situation
-            // statically later.
-            Err(DownloadError::DownloadRequired) => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let Some(downloaded) = self.0.inner.get().and_then(|rowe| rowe.get()) else {
+            return Ok(None);
         };
 
         Ok(Some(ResidentLayer {
             downloaded,
             owner: self.clone(),
         }))
+    }
+
+    /// Weak indicator of is the layer resident or not. Good enough for eviction, which can deal
+    /// with `EvictionError::NotFound`.
+    ///
+    /// Compared to [`Layer::keep_resident`] this method avoids acquiring new strong references.
+    ///
+    /// Returns `true` if this layer might be resident, or `false`, if it most likely evicted or
+    /// will be unless a read happens soon.
+    pub(crate) fn is_likely_resident(&self) -> bool {
+        self.0
+            .inner
+            .get()
+            .map(|rowe| rowe.is_likely_resident())
+            .unwrap_or(false)
     }
 
     /// Downloads if necessary and creates a guard, which will keep this layer from being evicted.
@@ -400,6 +411,31 @@ enum ResidentOrWantedEvicted {
 }
 
 impl ResidentOrWantedEvicted {
+    /// Non-mutating access to the a DownloadedLayer, if possible.
+    ///
+    /// This is not used on the read path (anything that calls
+    /// [`LayerInner::get_or_maybe_download`]) because it was decided that reads always win
+    /// evictions, and part of that winning is using [`ResidentOrWantedEvicted::get_and_upgrade`].
+    fn get(&self) -> Option<Arc<DownloadedLayer>> {
+        match self {
+            ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
+            ResidentOrWantedEvicted::WantedEvicted(weak, _) => weak.upgrade(),
+        }
+    }
+
+    /// Best-effort query for residency right now, not as strong guarantee as receiving a strong
+    /// reference from [`ResidentOrWantedEvicted::get`].
+    fn is_likely_resident(&self) -> bool {
+        match self {
+            ResidentOrWantedEvicted::Resident(_) => true,
+            ResidentOrWantedEvicted::WantedEvicted(weak, _) => weak.strong_count() > 0,
+        }
+    }
+
+    /// Upgrades any weak to strong if possible.
+    ///
+    /// Returns a strong reference if possible, along with a boolean telling if an upgrade
+    /// happened.
     fn get_and_upgrade(&mut self) -> Option<(Arc<DownloadedLayer>, bool)> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => Some((strong.clone(), false)),
@@ -420,7 +456,7 @@ impl ResidentOrWantedEvicted {
     ///
     /// Returns `Some` if this was the first time eviction was requested. Care should be taken to
     /// drop the possibly last strong reference outside of the mutex of
-    /// heavier_once_cell::OnceCell.
+    /// [`heavier_once_cell::OnceCell`].
     fn downgrade(&mut self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => {
@@ -1083,9 +1119,11 @@ impl LayerInner {
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.desc.filename().file_name();
 
-        // this is not accurate: we could have the file locally but there was a cancellation
-        // and now we are not in sync, or we are currently downloading it.
-        let remote = self.inner.get().is_none();
+        let resident = self
+            .inner
+            .get()
+            .map(|rowe| rowe.is_likely_resident())
+            .unwrap_or(false);
 
         let access_stats = self.access_stats.as_api_model(reset);
 
@@ -1097,7 +1135,7 @@ impl LayerInner {
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
-                remote,
+                remote: !resident,
                 access_stats,
             }
         } else {
@@ -1107,7 +1145,7 @@ impl LayerInner {
                 layer_file_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn,
-                remote,
+                remote: !resident,
                 access_stats,
             }
         }
