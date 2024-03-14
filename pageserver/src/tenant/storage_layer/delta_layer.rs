@@ -724,6 +724,8 @@ impl DeltaLayerInner {
             Summary::des_prefix(summary_blk.as_ref()).context("deserialize first block")?;
 
         if let Some(mut expected_summary) = summary {
+            // assume backward compatibility
+            expected_summary.format_version = actual_summary.format_version;
             // production code path
             expected_summary.index_start_blk = actual_summary.index_start_blk;
             expected_summary.index_root_blk = actual_summary.index_root_blk;
