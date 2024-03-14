@@ -743,19 +743,21 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
     // which may happen in two cases:
     // - extension was just installed
     // - extension was already installed and is up to date
-    let query = "ALTER EXTENSION neon UPDATE";
-    info!("update neon extension version with query: {}", query);
-    client.simple_query(query)?;
+    // DISABLED due to compute node unpinning epic
+    // let query = "ALTER EXTENSION neon UPDATE";
+    // info!("update neon extension version with query: {}", query);
+    // client.simple_query(query)?;
 
     Ok(())
 }
 
 #[instrument(skip_all)]
-pub fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
-    info!("handle neon extension upgrade");
-    let query = "ALTER EXTENSION neon UPDATE";
-    info!("update neon extension version with query: {}", query);
-    client.simple_query(query)?;
+pub fn handle_neon_extension_upgrade(_client: &mut Client) -> Result<()> {
+    info!("handle neon extension upgrade (not really)");
+    // DISABLED due to compute node unpinning epic
+    // let query = "ALTER EXTENSION neon UPDATE";
+    // info!("update neon extension version with query: {}", query);
+    // client.simple_query(query)?;
 
     Ok(())
 }
