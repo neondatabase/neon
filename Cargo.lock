@@ -6468,6 +6468,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "async-compression",
  "async-trait",
  "bincode",
  "byteorder",
@@ -6506,12 +6507,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tokio-tar",
  "tokio-util",
  "tracing",
  "tracing-error",
  "tracing-subscriber",
  "url",
  "uuid",
+ "walkdir",
  "workspace_hack",
 ]
 
