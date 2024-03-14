@@ -1,10 +1,11 @@
-use std::ops::{Deref, Range};
+use std::ops::Deref;
 
 use tokio_epoll_uring::BoundedBuf;
 use tracing::error;
 
 use crate::{
-    page_cache::{self, PAGE_SZ},
+    context::RequestContext,
+    page_cache::{self, PageReadGuard, PAGE_SZ},
     virtual_file::{owned_buffers_io::write::OwnedAsyncWriter, VirtualFile},
 };
 
@@ -15,7 +16,13 @@ pub struct Writer<const N: usize, W: OwnedAsyncWriter, C: Cache<N, W>> {
 }
 
 pub trait Cache<const PAGE_SZ: usize, W> {
-    async fn fill_cache(&self, under: &W, page_no: u64, contents: &[u8; PAGE_SZ]);
+    async fn fill_cache(
+        &self,
+        under: &W,
+        page_no: u64,
+        contents: &[u8; PAGE_SZ],
+        ctx: &RequestContext,
+    );
 }
 
 impl<const N: usize, W, C> Writer<N, W, C>
@@ -54,18 +61,18 @@ where
     >(
         &mut self,
         buf: B,
+        ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let buf = buf.slice_full();
         assert_eq!(buf.bytes_init() % N, 0);
         self.invariants();
-        let pre = self.written;
         let saved_bounds = buf.bounds();
         let debug_assert_contents_eq = if cfg!(debug_assertions) {
             Some(buf[..].to_vec())
         } else {
             None
         };
-        let res = self.under.write_all(buf).await;
+        let res = self.under.write_all(buf, ctx).await;
         let res = if let Ok((nwritten, buf)) = res {
             assert_eq!(nwritten % N, 0);
             let buf = tokio_epoll_uring::Slice::from_buf_bounds(buf, saved_bounds);
@@ -73,13 +80,14 @@ where
                 debug_assert_eq!(&before[..], &buf[..]);
             }
             assert_eq!(nwritten, buf.bytes_init());
-            let new_written = self.written + (nwritten as u64);
             for page_no_in_buf in 0..(nwritten / N) {
-                let page: &[u8; N] = todo!();
+                let page: &[u8; N] = (&buf[(page_no_in_buf * N)..((page_no_in_buf + 1) * N)])
+                    .try_into()
+                    .unwrap();
                 self.cache
-                    .fill_cache(&self.under, self.written / (N as u64), page)
+                    .fill_cache(&self.under, self.written / (N as u64), page, ctx)
                     .await;
-                self.written += (N as u64);
+                self.written += N as u64;
             }
             self.written += nwritten as u64;
             Ok((nwritten, tokio_epoll_uring::Slice::into_inner(buf)))
@@ -90,7 +98,7 @@ where
         res
     }
 
-    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    async fn write_all_borrowed(&mut self, _: &[u8], _: &RequestContext) -> std::io::Result<usize> {
         // TODO: use type system to ensure this doesn't happen at runtime
         panic!("don't put the types together this way")
     }
@@ -111,21 +119,28 @@ impl VirtualFileAdaptor {
 }
 
 impl<'c> Cache<{ PAGE_SZ }, VirtualFileAdaptor> for &'c crate::page_cache::PageCache {
-    async fn fill_cache(&self, under: &VirtualFileAdaptor, page_no: u64, contents: &[u8; PAGE_SZ]) {
+    async fn fill_cache(
+        &self,
+        under: &VirtualFileAdaptor,
+        page_no: u64,
+        contents: &[u8; PAGE_SZ],
+        ctx: &RequestContext,
+    ) {
         match self
             .read_immutable_buf(
                 under.file_id,
                 u32::try_from(page_no).expect("files larger than u32::MAX * 8192 aren't supported"),
-                todo!("funnel through context"),
+                ctx,
             )
             .await
         {
             Ok(crate::page_cache::ReadBufResult::Found(guard)) => {
                 debug_assert_eq!(guard.deref(), contents);
             }
-            Ok(crate::page_cache::ReadBufResult::NotFound(guard)) => {
+            Ok(crate::page_cache::ReadBufResult::NotFound(mut guard)) => {
                 guard.copy_from_slice(contents);
-                guard.mark_valid();
+                let guard: PageReadGuard<'_> = guard.mark_valid();
+                drop(guard);
             }
             Err(e) => {
                 error!("failed to get immutable buf to pre-warm page cache: {e:?}");
@@ -142,11 +157,12 @@ impl OwnedAsyncWriter for VirtualFileAdaptor {
     >(
         &mut self,
         buf: B,
+        ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
-        OwnedAsyncWriter::write_all(&mut self.file, buf).await
+        OwnedAsyncWriter::write_all(&mut self.file, buf, ctx).await
     }
 
-    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    async fn write_all_borrowed(&mut self, _: &[u8], _: &RequestContext) -> std::io::Result<usize> {
         // TODO: use type system to ensure this doesn't happen at runtime
         panic!("don't put the types together this way")
     }

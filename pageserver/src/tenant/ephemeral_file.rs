@@ -3,9 +3,8 @@
 
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
-use crate::page_cache::{self, PageCache, PAGE_SZ};
+use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
-use crate::virtual_file::owned_buffers_io::util::page_cache_priming_writer::VirtualFileAdaptor;
 use crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter;
 use crate::virtual_file::{self, owned_buffers_io, VirtualFile};
 use camino::Utf8PathBuf;
@@ -75,7 +74,8 @@ impl EphemeralFile {
             file,
             page_cache_file_id,
         );
-        let file = owned_buffers_io::util::page_cache_priming_writer::Writer::new(file, page_cache::get());
+        let file =
+            owned_buffers_io::util::page_cache_priming_writer::Writer::new(file, page_cache::get());
         let file = owned_buffers_io::util::size_tracking_writer::Writer::new(file);
         let file = owned_buffers_io::write::BufferedWriter::new(file);
         let file = owned_buffers_io::util::size_tracking_writer::Writer::new(file);
@@ -185,7 +185,7 @@ impl EphemeralFile {
     pub(crate) async fn write_blob(
         &mut self,
         srcbuf: &[u8],
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> Result<u64, io::Error> {
         let pos = self.file.bytes_written();
 
@@ -194,15 +194,15 @@ impl EphemeralFile {
             // short one-byte length header
             let len_buf = [srcbuf.len() as u8];
 
-            self.file.write_all_borrowed(&len_buf).await?;
+            self.file.write_all_borrowed(&len_buf, ctx).await?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
-            self.file.write_all_borrowed(&len_buf).await?;
+            self.file.write_all_borrowed(&len_buf, ctx).await?;
         }
 
         // Write the payload
-        self.file.write_all_borrowed(&srcbuf).await?;
+        self.file.write_all_borrowed(&srcbuf, ctx).await?;
 
         Ok(pos)
     }
@@ -223,7 +223,16 @@ impl Drop for EphemeralFile {
         // We leave them there, [`crate::page_cache::PageCache::find_victim`] will evict them when needed.
 
         // unlink the file
-        let res = std::fs::remove_file(&self.file.as_inner().as_inner().as_inner().as_inner().as_inner().path);
+        let res = std::fs::remove_file(
+            &self
+                .file
+                .as_inner()
+                .as_inner()
+                .as_inner()
+                .as_inner()
+                .as_inner()
+                .path,
+        );
         if let Err(e) = res {
             if e.kind() != std::io::ErrorKind::NotFound {
                 // just never log the not found errors, we cannot do anything for them; on detach

@@ -10,6 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
+use crate::context::RequestContext;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
 use crate::page_cache::PageWriteGuard;
@@ -1092,13 +1093,14 @@ impl OwnedAsyncWriter for VirtualFile {
     >(
         &mut self,
         buf: B,
+        _: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let (buf, res) = VirtualFile::write_all(self, buf).await;
         res.map(move |v| (v, buf))
     }
 
     #[inline(always)]
-    async fn write_all_borrowed(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+    async fn write_all_borrowed(&mut self, _buf: &[u8], _ctx: &RequestContext) -> std::io::Result<usize> {
         // TODO: ensure this through the type system
         panic!("this should not happen");
     }
