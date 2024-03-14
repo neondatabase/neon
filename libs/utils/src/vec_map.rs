@@ -24,10 +24,6 @@ impl<K: Ord, V> VecMap<K, V> {
         self.0.as_slice()
     }
 
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
     /// This function may panic if given a range where the lower bound is
     /// greater than the upper bound.
     pub fn slice_range<R: RangeBounds<K>>(&self, range: R) -> &[(K, V)] {
