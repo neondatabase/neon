@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "storage_controller"
+path = "src/main.rs"
+
 [features]
 default = []
 # Enables test-only APIs and behaviors
@@ -15,8 +19,10 @@ aws-config.workspace = true
 aws-sdk-secretsmanager.workspace = true
 camino.workspace = true
 clap.workspace = true
+fail.workspace = true
 futures.workspace = true
 git-version.workspace = true
+hex.workspace = true
 hyper.workspace = true
 humantime.workspace = true
 once_cell.workspace = true

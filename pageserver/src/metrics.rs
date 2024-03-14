@@ -1,5 +1,4 @@
 use enum_map::EnumMap;
-use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
@@ -168,7 +167,7 @@ impl GetVectoredLatency {
 pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_get_vectored_seconds",
-        "Time spent in get_vectored",
+        "Time spent in get_vectored, excluding time spent in timeline_get_throttle.",
         &["task_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
@@ -1283,11 +1282,65 @@ pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|
     })
 });
 
-impl DurationResultObserver for BasebackupQueryTime {
-    fn observe_result<T, E>(&self, res: &Result<T, E>, duration: std::time::Duration) {
+pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
+    parent: &'a BasebackupQueryTime,
+    ctx: &'c RequestContext,
+    start: std::time::Instant,
+}
+
+impl BasebackupQueryTime {
+    pub(crate) fn start_recording<'c: 'a, 'a>(
+        &'a self,
+        ctx: &'c RequestContext,
+    ) -> BasebackupQueryTimeOngoingRecording<'_, '_> {
+        let start = Instant::now();
+        match ctx.micros_spent_throttled.open() {
+            Ok(()) => (),
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!(error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
+                });
+            }
+        }
+        BasebackupQueryTimeOngoingRecording {
+            parent: self,
+            ctx,
+            start,
+        }
+    }
+}
+
+impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
+    pub(crate) fn observe<T, E>(self, res: &Result<T, E>) {
+        let elapsed = self.start.elapsed();
+        let ex_throttled = self
+            .ctx
+            .micros_spent_throttled
+            .close_and_checked_sub_from(elapsed);
+        let ex_throttled = match ex_throttled {
+            Ok(ex_throttled) => ex_throttled,
+            Err(error) => {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!(error, "error deducting time spent throttled; this message is logged at a global rate limit");
+                });
+                elapsed
+            }
+        };
         let label_value = if res.is_ok() { "ok" } else { "error" };
-        let metric = self.0.get_metric_with_label_values(&[label_value]).unwrap();
-        metric.observe(duration.as_secs_f64());
+        let metric = self
+            .parent
+            .0
+            .get_metric_with_label_values(&[label_value])
+            .unwrap();
+        metric.observe(ex_throttled.as_secs_f64());
     }
 }
 
@@ -1964,10 +2017,8 @@ impl TimelineMetrics {
     pub(crate) fn resident_physical_size_get(&self) -> u64 {
         self.resident_physical_size_gauge.get()
     }
-}
 
-impl Drop for TimelineMetrics {
-    fn drop(&mut self) {
+    pub(crate) fn shutdown(&self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
@@ -2622,6 +2673,12 @@ pub fn preinitialize_metrics() {
 
     Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
     Lazy::force(&disk_usage_based_eviction::METRICS);
+
+    for state_name in pageserver_api::models::TenantState::VARIANTS {
+        // initialize the metric for all gauges, otherwise the time series might seemingly show
+        // values from last restart.
+        TENANT_STATE_METRIC.with_label_values(&[state_name]).set(0);
+    }
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]

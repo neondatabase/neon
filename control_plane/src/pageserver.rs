@@ -17,7 +17,6 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
-use pageserver_api::controller_api::NodeRegisterRequest;
 use pageserver_api::models::{
     self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
 };
@@ -31,7 +30,6 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::attachment_service::AttachmentService;
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
@@ -111,7 +109,7 @@ impl PageServerNode {
                 control_plane_api.as_str()
             ));
 
-            // Attachment service uses the same auth as pageserver: if JWT is enabled
+            // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
             if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
@@ -163,8 +161,8 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, config_overrides: &[&str], register: bool) -> anyhow::Result<()> {
-        self.start_node(config_overrides, false, register).await
+    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        self.start_node(config_overrides, false).await
     }
 
     fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
@@ -202,6 +200,28 @@ impl PageServerNode {
             String::from_utf8_lossy(&init_output.stderr),
         );
 
+        // Write metadata file, used by pageserver on startup to register itself with
+        // the storage controller
+        let metadata_path = datadir.join("metadata.json");
+
+        let (_http_host, http_port) =
+            parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
+        let http_port = http_port.unwrap_or(9898);
+        // Intentionally hand-craft JSON: this acts as an implicit format compat test
+        // in case the pageserver-side structure is edited, and reflects the real life
+        // situation: the metadata is written by some other script.
+        std::fs::write(
+            metadata_path,
+            serde_json::to_vec(&serde_json::json!({
+                "host": "localhost",
+                "port": self.pg_connection_config.port(),
+                "http_host": "localhost",
+                "http_port": http_port,
+            }))
+            .unwrap(),
+        )
+        .expect("Failed to write metadata file");
+
         Ok(())
     }
 
@@ -209,27 +229,7 @@ impl PageServerNode {
         &self,
         config_overrides: &[&str],
         update_config: bool,
-        register: bool,
     ) -> anyhow::Result<()> {
-        // Register the node with the storage controller before starting pageserver: pageserver must be registered to
-        // successfully call /re-attach and finish starting up.
-        if register {
-            let attachment_service = AttachmentService::from_env(&self.env);
-            let (pg_host, pg_port) =
-                parse_host_port(&self.conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
-            let (http_host, http_port) = parse_host_port(&self.conf.listen_http_addr)
-                .expect("Unable to parse listen_http_addr");
-            attachment_service
-                .node_register(NodeRegisterRequest {
-                    node_id: self.conf.id,
-                    listen_pg_addr: pg_host.to_string(),
-                    listen_pg_port: pg_port.unwrap_or(5432),
-                    listen_http_addr: http_host.to_string(),
-                    listen_http_port: http_port.unwrap_or(80),
-                })
-                .await?;
-        }
-
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
@@ -429,6 +429,8 @@ impl PageServerNode {
             generation,
             config,
             shard_parameters: ShardParameters::default(),
+            // Placement policy is not meaningful for creations not done via storage controller
+            placement_policy: None,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

@@ -1846,6 +1846,8 @@ impl Tenant {
         // Wait for any in-flight operations to complete
         self.gate.close().await;
 
+        remove_tenant_metrics(&self.tenant_shard_id);
+
         Ok(())
     }
 
@@ -3557,11 +3559,6 @@ async fn run_initdb(
     Ok(())
 }
 
-impl Drop for Tenant {
-    fn drop(&mut self) {
-        remove_tenant_metrics(&self.tenant_shard_id);
-    }
-}
 /// Dump contents of a layer file to stdout.
 pub async fn dump_layerfile_from_path(
     path: &Utf8Path,
@@ -3679,7 +3676,10 @@ pub(crate) mod harness {
     }
 
     impl TenantHarness {
-        pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
+        pub fn create_custom(
+            test_name: &'static str,
+            tenant_conf: TenantConf,
+        ) -> anyhow::Result<Self> {
             setup_logging();
 
             let repo_dir = PageServerConf::test_repo_dir(test_name);
@@ -3690,14 +3690,6 @@ pub(crate) mod harness {
             // Make a static copy of the config. This can never be free'd, but that's
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
-
-            // Disable automatic GC and compaction to make the unit tests more deterministic.
-            // The tests perform them manually if needed.
-            let tenant_conf = TenantConf {
-                gc_period: Duration::ZERO,
-                compaction_period: Duration::ZERO,
-                ..TenantConf::default()
-            };
 
             let tenant_id = TenantId::generate();
             let tenant_shard_id = TenantShardId::unsharded(tenant_id);
@@ -3724,6 +3716,18 @@ pub(crate) mod harness {
                 remote_fs_dir,
                 deletion_queue,
             })
+        }
+
+        pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
+            // Disable automatic GC and compaction to make the unit tests more deterministic.
+            // The tests perform them manually if needed.
+            let tenant_conf = TenantConf {
+                gc_period: Duration::ZERO,
+                compaction_period: Duration::ZERO,
+                ..TenantConf::default()
+            };
+
+            Self::create_custom(test_name, tenant_conf)
         }
 
         pub fn span(&self) -> tracing::Span {
@@ -3833,6 +3837,7 @@ mod tests {
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
+    use crate::tenant::timeline::CompactFlags;
     use crate::DEFAULT_PG_VERSION;
     use bytes::BytesMut;
     use hex_literal::hex;
@@ -3849,7 +3854,7 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -3861,7 +3866,7 @@ mod tests {
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -3927,7 +3932,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
 
         #[allow(non_snake_case)]
         let TEST_KEY_A: Key = Key::from_hex("110000000033333333444444445500000001").unwrap();
@@ -3961,7 +3966,7 @@ mod tests {
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
-        let new_writer = newtline.writer().await;
+        let mut new_writer = newtline.writer().await;
         new_writer
             .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"), &ctx)
             .await?;
@@ -3993,7 +3998,7 @@ mod tests {
     ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         {
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             // Create a relation on the timeline
             writer
                 .put(
@@ -4018,7 +4023,7 @@ mod tests {
         }
         tline.freeze_and_flush().await?;
         {
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     *TEST_KEY,
@@ -4381,7 +4386,7 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4398,7 +4403,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4415,7 +4420,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4432,7 +4437,7 @@ mod tests {
             .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
             .await?;
 
-        let writer = tline.writer().await;
+        let mut writer = tline.writer().await;
         writer
             .put(
                 *TEST_KEY,
@@ -4489,7 +4494,7 @@ mod tests {
         for _ in 0..repeat {
             for _ in 0..key_count {
                 test_key.field6 = blknum;
-                let writer = timeline.writer().await;
+                let mut writer = timeline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4620,10 +4625,7 @@ mod tests {
         drop(guard);
 
         // Pick a big LSN such that we query over all the changes.
-        // Technically, u64::MAX - 1 is the largest LSN supported by the read path,
-        // but there seems to be a bug on the non-vectored search path which surfaces
-        // in that case.
-        let reads_lsn = Lsn(u64::MAX - 1000);
+        let reads_lsn = Lsn(u64::MAX - 1);
 
         for read in reads {
             info!("Doing vectored read on {:?}", read);
@@ -4632,6 +4634,145 @@ mod tests {
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
                 .await;
+        }
+
+        Ok(())
+    }
+
+    // Test that vectored get handles layer gaps correctly
+    // by advancing into the next ancestor timeline if required.
+    //
+    // The test generates timelines that look like the diagram below.
+    // We leave a gap in one of the L1 layers at `gap_at_key` (`/` in the diagram).
+    // The reconstruct data for that key lies in the ancestor timeline (`X` in the diagram).
+    //
+    // ```
+    //-------------------------------+
+    //                          ...  |
+    //               [   L1   ]      |
+    //     [ / L1   ]                | Child Timeline
+    // ...                           |
+    // ------------------------------+
+    //     [ X L1   ]                | Parent Timeline
+    // ------------------------------+
+    // ```
+    #[tokio::test]
+    async fn test_get_vectored_key_gap() -> anyhow::Result<()> {
+        let tenant_conf = TenantConf {
+            // Make compaction deterministic
+            gc_period: Duration::ZERO,
+            compaction_period: Duration::ZERO,
+            // Encourage creation of L1 layers
+            checkpoint_distance: 16 * 1024,
+            compaction_target_size: 8 * 1024,
+            ..TenantConf::default()
+        };
+
+        let harness = TenantHarness::create_custom("test_get_vectored_key_gap", tenant_conf)?;
+        let (tenant, ctx) = harness.load().await;
+
+        let mut current_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let gap_at_key = current_key.add(100);
+        let mut current_lsn = Lsn(0x10);
+
+        const KEY_COUNT: usize = 10_000;
+
+        let timeline_id = TimelineId::generate();
+        let current_timeline = tenant
+            .create_test_timeline(timeline_id, current_lsn, DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        current_lsn += 0x100;
+
+        let mut writer = current_timeline.writer().await;
+        writer
+            .put(
+                gap_at_key,
+                current_lsn,
+                &Value::Image(test_img(&format!("{} at {}", gap_at_key, current_lsn))),
+                &ctx,
+            )
+            .await?;
+        writer.finish_write(current_lsn);
+        drop(writer);
+
+        let mut latest_lsns = HashMap::new();
+        latest_lsns.insert(gap_at_key, current_lsn);
+
+        current_timeline.freeze_and_flush().await?;
+
+        let child_timeline_id = TimelineId::generate();
+
+        tenant
+            .branch_timeline_test(
+                &current_timeline,
+                child_timeline_id,
+                Some(current_lsn),
+                &ctx,
+            )
+            .await?;
+        let child_timeline = tenant
+            .get_timeline(child_timeline_id, true)
+            .expect("Should have the branched timeline");
+
+        for i in 0..KEY_COUNT {
+            if current_key == gap_at_key {
+                current_key = current_key.next();
+                continue;
+            }
+
+            current_lsn += 0x10;
+
+            let mut writer = child_timeline.writer().await;
+            writer
+                .put(
+                    current_key,
+                    current_lsn,
+                    &Value::Image(test_img(&format!("{} at {}", current_key, current_lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(current_lsn);
+            drop(writer);
+
+            latest_lsns.insert(current_key, current_lsn);
+            current_key = current_key.next();
+
+            // Flush every now and then to encourage layer file creation.
+            if i % 500 == 0 {
+                child_timeline.freeze_and_flush().await?;
+            }
+        }
+
+        child_timeline.freeze_and_flush().await?;
+        let mut flags = EnumSet::new();
+        flags.insert(CompactFlags::ForceRepartition);
+        child_timeline
+            .compact(&CancellationToken::new(), flags, &ctx)
+            .await?;
+
+        let key_near_end = {
+            let mut tmp = current_key;
+            tmp.field6 -= 10;
+            tmp
+        };
+
+        let key_near_gap = {
+            let mut tmp = gap_at_key;
+            tmp.field6 -= 10;
+            tmp
+        };
+
+        let read = KeySpace {
+            ranges: vec![key_near_gap..gap_at_key.next(), key_near_end..current_key],
+        };
+        let results = child_timeline
+            .get_vectored_impl(read.clone(), current_lsn, &ctx)
+            .await?;
+
+        for (key, img_res) in results {
+            let expected = test_img(&format!("{} at {}", key, latest_lsns[&key]));
+            assert_eq!(img_res?, expected);
         }
 
         Ok(())
@@ -4660,7 +4801,7 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     test_key,
@@ -4681,7 +4822,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4749,7 +4890,7 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer().await;
+            let mut writer = tline.writer().await;
             writer
                 .put(
                     test_key,
@@ -4778,7 +4919,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4855,7 +4996,7 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer().await;
+                let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
@@ -4998,6 +5139,25 @@ mod tests {
             .conf
             .timeline_uninit_mark_file_path(tenant.tenant_shard_id, TIMELINE_ID)
             .exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_at_max_lsn() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_read_at_max_lsn")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let lsn = Lsn(0x10);
+        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+
+        let test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let read_lsn = Lsn(u64::MAX - 1);
+
+        assert!(tline.get(test_key, read_lsn, &ctx).await.is_ok());
 
         Ok(())
     }

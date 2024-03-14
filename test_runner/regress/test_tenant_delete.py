@@ -190,6 +190,8 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             # So by ignoring these instead of waiting for empty upload queue
             # we execute more distinct code paths.
             '.*stopping left-over name="remote upload".*',
+            # an on-demand is cancelled by shutdown
+            ".*initial size calculation failed: downloading failed, possibly for shutdown",
         ]
     )
 

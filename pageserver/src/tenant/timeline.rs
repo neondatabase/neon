@@ -27,6 +27,18 @@ use pageserver_api::{
 };
 use rand::Rng;
 use serde_with::serde_as;
+use storage_broker::BrokerClientChannel;
+use tokio::{
+    runtime::Handle,
+    sync::{oneshot, watch},
+};
+use tokio_util::sync::CancellationToken;
+use tracing::*;
+use utils::{
+    bin_ser::BeSer,
+    sync::gate::{Gate, GateGuard},
+};
+
 use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -41,14 +53,6 @@ use std::{
     cmp::{max, min, Ordering},
     ops::ControlFlow,
 };
-use storage_broker::BrokerClientChannel;
-use tokio::{
-    runtime::Handle,
-    sync::{oneshot, watch},
-};
-use tokio_util::sync::CancellationToken;
-use tracing::*;
-use utils::sync::gate::{Gate, GateGuard};
 
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
@@ -271,7 +275,7 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
-    write_lock: tokio::sync::Mutex<()>,
+    write_lock: tokio::sync::Mutex<Option<TimelineWriterState>>,
 
     /// Used to avoid multiple `flush_loop` tasks running
     pub(super) flush_loop_state: Mutex<FlushLoopState>,
@@ -630,6 +634,8 @@ impl Timeline {
     /// If a remote layer file is needed, it is downloaded as part of this
     /// call.
     ///
+    /// This method enforces [`Self::timeline_get_throttle`] internally.
+    ///
     /// NOTE: It is considered an error to 'get' a key that doesn't exist. The
     /// abstraction above this needs to store suitable metadata to track what
     /// data exists with what keys, in separate metadata entries. If a
@@ -640,7 +646,18 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
+    #[inline(always)]
     pub(crate) async fn get(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.timeline_get_throttle.throttle(ctx, 1).await;
+        self.get_impl(key, lsn, ctx).await
+    }
+    /// Not subject to [`Self::timeline_get_throttle`].
+    async fn get_impl(
         &self,
         key: Key,
         lsn: Lsn,
@@ -649,8 +666,6 @@ impl Timeline {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
-
-        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
@@ -748,10 +763,6 @@ impl Timeline {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
-        self.timeline_get_throttle
-            .throttle(ctx, key_count as usize)
-            .await;
-
         for range in &keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
@@ -768,11 +779,18 @@ impl Timeline {
             self.conf.get_vectored_impl
         );
 
-        let _timer = crate::metrics::GET_VECTORED_LATENCY
+        let start = crate::metrics::GET_VECTORED_LATENCY
             .for_task_kind(ctx.task_kind())
-            .map(|t| t.start_timer());
+            .map(|metric| (metric, Instant::now()));
 
-        match self.conf.get_vectored_impl {
+        // start counting after throttle so that throttle time
+        // is always less than observation time
+        let throttled = self
+            .timeline_get_throttle
+            .throttle(ctx, key_count as usize)
+            .await;
+
+        let res = match self.conf.get_vectored_impl {
             GetVectoredImpl::Sequential => {
                 self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
             }
@@ -786,9 +804,33 @@ impl Timeline {
 
                 vectored_res
             }
+        };
+
+        if let Some((metric, start)) = start {
+            let elapsed = start.elapsed();
+            let ex_throttled = if let Some(throttled) = throttled {
+                elapsed.checked_sub(throttled)
+            } else {
+                Some(elapsed)
+            };
+
+            if let Some(ex_throttled) = ex_throttled {
+                metric.observe(ex_throttled.as_secs_f64());
+            } else {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!("error deducting time spent throttled; this message is logged at a global rate limit");
+                });
+            }
         }
+
+        res
     }
 
+    /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn get_vectored_sequential_impl(
         &self,
         keyspace: KeySpace,
@@ -799,7 +841,7 @@ impl Timeline {
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                let block = self.get(key, lsn, ctx).await;
+                let block = self.get_impl(key, lsn, ctx).await;
 
                 use PageReconstructError::*;
                 match block {
@@ -849,6 +891,7 @@ impl Timeline {
         Ok(results)
     }
 
+    /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn validate_get_vectored_impl(
         &self,
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
@@ -917,8 +960,6 @@ impl Timeline {
         seq: &Bytes,
         vec: &Bytes,
     ) {
-        use utils::bin_ser::BeSer;
-
         if *key == AUX_FILES_KEY {
             // The value reconstruct of AUX_FILES_KEY from records is not deterministic
             // since it uses a hash map under the hood. Hence, deserialise both results
@@ -1149,56 +1190,8 @@ impl Timeline {
     pub(crate) async fn writer(&self) -> TimelineWriter<'_> {
         TimelineWriter {
             tl: self,
-            _write_guard: self.write_lock.lock().await,
+            write_guard: self.write_lock.lock().await,
         }
-    }
-
-    /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
-    /// the in-memory layer, and initiate flushing it if so.
-    ///
-    /// Also flush after a period of time without new data -- it helps
-    /// safekeepers to regard pageserver as caught up and suspend activity.
-    pub(crate) async fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
-        let last_lsn = self.get_last_record_lsn();
-        let open_layer_size = {
-            let guard = self.layers.read().await;
-            let layers = guard.layer_map();
-            let Some(open_layer) = layers.open_layer.as_ref() else {
-                return Ok(());
-            };
-            open_layer.size().await?
-        };
-        let last_freeze_at = self.last_freeze_at.load();
-        let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
-        let distance = last_lsn.widening_sub(last_freeze_at);
-        // Rolling the open layer can be triggered by:
-        // 1. The distance from the last LSN we rolled at. This bounds the amount of WAL that
-        //    the safekeepers need to store.  For sharded tenants, we multiply by shard count to
-        //    account for how writes are distributed across shards: we expect each node to consume
-        //    1/count of the LSN on average.
-        // 2. The size of the currently open layer.
-        // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
-        //    up and suspend activity.
-        if (distance
-            >= self.get_checkpoint_distance() as i128 * self.shard_identity.count.count() as i128)
-            || open_layer_size > self.get_checkpoint_distance()
-            || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
-        {
-            info!(
-                "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
-                distance,
-                open_layer_size,
-                last_freeze_ts.elapsed()
-            );
-
-            self.freeze_inmem_layer(true).await;
-            self.last_freeze_at.store(last_lsn);
-            *(self.last_freeze_ts.write().unwrap()) = Instant::now();
-
-            // Wake up the layer flusher
-            self.flush_frozen_layers();
-        }
-        Ok(())
     }
 
     pub(crate) fn activate(
@@ -1303,6 +1296,8 @@ impl Timeline {
 
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
+
+        self.metrics.shutdown();
     }
 
     pub(crate) fn set_state(&self, new_state: TimelineState) {
@@ -1635,7 +1630,7 @@ impl Timeline {
                 layer_flush_start_tx,
                 layer_flush_done_tx,
 
-                write_lock: tokio::sync::Mutex::new(()),
+                write_lock: tokio::sync::Mutex::new(None),
 
                 gc_info: std::sync::RwLock::new(GcInfo {
                     retain_lsns: Vec::new(),
@@ -2522,7 +2517,7 @@ impl Timeline {
         // 'prev_lsn' tracks the last LSN that we were at in our search. It's used
         // to check that each iteration make some progress, to break infinite
         // looping if something goes wrong.
-        let mut prev_lsn = Lsn(u64::MAX);
+        let mut prev_lsn = None;
 
         let mut result = ValueReconstructResult::Continue;
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
@@ -2542,18 +2537,20 @@ impl Timeline {
                         MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
                         return Ok(traversal_path);
                     }
-                    if prev_lsn <= cont_lsn {
-                        // Didn't make any progress in last iteration. Error out to avoid
-                        // getting stuck in the loop.
-                        return Err(layer_traversal_error(format!(
-                            "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
-                            key,
-                            Lsn(cont_lsn.0 - 1),
-                            request_lsn,
-                            timeline.ancestor_lsn
-                        ), traversal_path));
+                    if let Some(prev) = prev_lsn {
+                        if prev <= cont_lsn {
+                            // Didn't make any progress in last iteration. Error out to avoid
+                            // getting stuck in the loop.
+                            return Err(layer_traversal_error(format!(
+                                "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
+                                key,
+                                Lsn(cont_lsn.0 - 1),
+                                request_lsn,
+                                timeline.ancestor_lsn
+                            ), traversal_path));
+                        }
                     }
-                    prev_lsn = cont_lsn;
+                    prev_lsn = Some(cont_lsn);
                 }
                 ValueReconstructResult::Missing => {
                     return Err(layer_traversal_error(
@@ -2583,7 +2580,7 @@ impl Timeline {
 
                 timeline_owned = timeline.get_ready_ancestor_timeline(ctx).await?;
                 timeline = &*timeline_owned;
-                prev_lsn = Lsn(u64::MAX);
+                prev_lsn = None;
                 continue 'outer;
             }
 
@@ -2784,7 +2781,7 @@ impl Timeline {
         let guard = timeline.layers.read().await;
         let layers = guard.layer_map();
 
-        'outer: loop {
+        loop {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
             }
@@ -2810,12 +2807,7 @@ impl Timeline {
                 }
                 None => {
                     for range in unmapped_keyspace.ranges.iter() {
-                        let results = match layers.range_search(range.clone(), cont_lsn) {
-                            Some(res) => res,
-                            None => {
-                                break 'outer;
-                            }
-                        };
+                        let results = layers.range_search(range.clone(), cont_lsn);
 
                         results
                             .found
@@ -2966,43 +2958,6 @@ impl Timeline {
         Ok(layer)
     }
 
-    async fn put_value(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        val: &Value,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        //info!("PUT: key {} at {}", key, lsn);
-        let layer = self.get_layer_for_write(lsn).await?;
-        layer.put_value(key, lsn, val, ctx).await?;
-        Ok(())
-    }
-
-    async fn put_values(
-        &self,
-        values: &HashMap<Key, Vec<(Lsn, Value)>>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Pick the first LSN in the batch to get the layer to write to.
-        for lsns in values.values() {
-            if let Some((lsn, _)) = lsns.first() {
-                let layer = self.get_layer_for_write(*lsn).await?;
-                layer.put_values(values, ctx).await?;
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    async fn put_tombstones(&self, tombstones: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
-        if let Some((_, lsn)) = tombstones.first() {
-            let layer = self.get_layer_for_write(*lsn).await?;
-            layer.put_tombstones(tombstones).await?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
@@ -3013,14 +2968,20 @@ impl Timeline {
     async fn freeze_inmem_layer(&self, write_lock_held: bool) {
         // Freeze the current open in-memory layer. It will be written to disk on next
         // iteration.
+
         let _write_guard = if write_lock_held {
             None
         } else {
             Some(self.write_lock.lock().await)
         };
+
+        self.freeze_inmem_layer_at(self.get_last_record_lsn()).await;
+    }
+
+    async fn freeze_inmem_layer_at(&self, at: Lsn) {
         let mut guard = self.layers.write().await;
         guard
-            .try_freeze_in_memory_layer(self.get_last_record_lsn(), &self.last_freeze_at)
+            .try_freeze_in_memory_layer(at, &self.last_freeze_at)
             .await;
     }
 
@@ -3045,7 +3006,6 @@ impl Timeline {
             }
 
             trace!("waking up");
-            let timer = self.metrics.flush_time_histo.start_timer();
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
                 if self.cancel.is_cancelled() {
@@ -3055,6 +3015,8 @@ impl Timeline {
                     // waiting at the same time we as drop out of this loop.
                     return;
                 }
+
+                let timer = self.metrics.flush_time_histo.start_timer();
 
                 let layer_to_flush = {
                     let guard = self.layers.read().await;
@@ -3077,13 +3039,12 @@ impl Timeline {
                         break err;
                     }
                 }
+                timer.stop_and_record();
             };
             // Notify any listeners that we're done
             let _ = self
                 .layer_flush_done_tx
                 .send_replace((flush_counter, result));
-
-            timer.stop_and_record();
         }
     }
 
@@ -3151,6 +3112,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<(), FlushLayerError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
+
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
@@ -4397,13 +4359,43 @@ fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageRecon
     PageReconstructError::from(msg)
 }
 
+struct TimelineWriterState {
+    open_layer: Arc<InMemoryLayer>,
+    current_size: u64,
+    // Previous Lsn which passed through
+    prev_lsn: Option<Lsn>,
+    // Largest Lsn which passed through the current writer
+    max_lsn: Option<Lsn>,
+    // Cached details of the last freeze. Avoids going trough the atomic/lock on every put.
+    cached_last_freeze_at: Lsn,
+    cached_last_freeze_ts: Instant,
+}
+
+impl TimelineWriterState {
+    fn new(
+        open_layer: Arc<InMemoryLayer>,
+        current_size: u64,
+        last_freeze_at: Lsn,
+        last_freeze_ts: Instant,
+    ) -> Self {
+        Self {
+            open_layer,
+            current_size,
+            prev_lsn: None,
+            max_lsn: None,
+            cached_last_freeze_at: last_freeze_at,
+            cached_last_freeze_ts: last_freeze_ts,
+        }
+    }
+}
+
 /// Various functions to mutate the timeline.
 // TODO Currently, Deref is used to allow easy access to read methods from this trait.
 // This is probably considered a bad practice in Rust and should be fixed eventually,
 // but will cause large code changes.
 pub(crate) struct TimelineWriter<'a> {
     tl: &'a Timeline,
-    _write_guard: tokio::sync::MutexGuard<'a, ()>,
+    write_guard: tokio::sync::MutexGuard<'a, Option<TimelineWriterState>>,
 }
 
 impl Deref for TimelineWriter<'_> {
@@ -4414,31 +4406,239 @@ impl Deref for TimelineWriter<'_> {
     }
 }
 
+impl Drop for TimelineWriter<'_> {
+    fn drop(&mut self) {
+        self.write_guard.take();
+    }
+}
+
+#[derive(PartialEq)]
+enum OpenLayerAction {
+    Roll,
+    Open,
+    None,
+}
+
 impl<'a> TimelineWriter<'a> {
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
     pub(crate) async fn put(
-        &self,
+        &mut self,
         key: Key,
         lsn: Lsn,
         value: &Value,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.tl.put_value(key, lsn, value, ctx).await
+        // Avoid doing allocations for "small" values.
+        // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
+        // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
+        let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
+        value.ser_into(&mut buf)?;
+        let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
+
+        let action = self.get_open_layer_action(lsn, buf_size);
+        let layer = self.handle_open_layer_action(lsn, action).await?;
+        let res = layer.put_value(key, lsn, &buf, ctx).await;
+
+        if res.is_ok() {
+            // Update the current size only when the entire write was ok.
+            // In case of failures, we may have had partial writes which
+            // render the size tracking out of sync. That's ok because
+            // the checkpoint distance should be significantly smaller
+            // than the S3 single shot upload limit of 5GiB.
+            let state = self.write_guard.as_mut().unwrap();
+
+            state.current_size += buf_size;
+            state.prev_lsn = Some(lsn);
+            state.max_lsn = std::cmp::max(state.max_lsn, Some(lsn));
+        }
+
+        res
     }
 
+    /// "Tick" the timeline writer: it will roll the open layer if required
+    /// and do nothing else.
+    pub(crate) async fn tick(&mut self) -> anyhow::Result<()> {
+        self.open_layer_if_present().await?;
+
+        let last_record_lsn = self.get_last_record_lsn();
+        let action = self.get_open_layer_action(last_record_lsn, 0);
+        if action == OpenLayerAction::Roll {
+            self.roll_layer(last_record_lsn).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Populate the timeline writer state only if an in-memory layer
+    /// is already open.
+    async fn open_layer_if_present(&mut self) -> anyhow::Result<()> {
+        assert!(self.write_guard.is_none());
+
+        let open_layer = {
+            let guard = self.layers.read().await;
+            let layers = guard.layer_map();
+            match layers.open_layer {
+                Some(ref open_layer) => open_layer.clone(),
+                None => {
+                    return Ok(());
+                }
+            }
+        };
+
+        let initial_size = open_layer.size().await?;
+        let last_freeze_at = self.last_freeze_at.load();
+        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
+        self.write_guard.replace(TimelineWriterState::new(
+            open_layer,
+            initial_size,
+            last_freeze_at,
+            last_freeze_ts,
+        ));
+
+        Ok(())
+    }
+
+    async fn handle_open_layer_action(
+        &mut self,
+        at: Lsn,
+        action: OpenLayerAction,
+    ) -> anyhow::Result<&Arc<InMemoryLayer>> {
+        match action {
+            OpenLayerAction::Roll => {
+                let freeze_at = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
+                self.roll_layer(freeze_at).await?;
+                self.open_layer(at).await?;
+            }
+            OpenLayerAction::Open => self.open_layer(at).await?,
+            OpenLayerAction::None => {
+                assert!(self.write_guard.is_some());
+            }
+        }
+
+        Ok(&self.write_guard.as_ref().unwrap().open_layer)
+    }
+
+    async fn open_layer(&mut self, at: Lsn) -> anyhow::Result<()> {
+        let layer = self.tl.get_layer_for_write(at).await?;
+        let initial_size = layer.size().await?;
+
+        let last_freeze_at = self.last_freeze_at.load();
+        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
+        self.write_guard.replace(TimelineWriterState::new(
+            layer,
+            initial_size,
+            last_freeze_at,
+            last_freeze_ts,
+        ));
+
+        Ok(())
+    }
+
+    async fn roll_layer(&mut self, freeze_at: Lsn) -> anyhow::Result<()> {
+        assert!(self.write_guard.is_some());
+
+        self.tl.freeze_inmem_layer_at(freeze_at).await;
+
+        let now = Instant::now();
+        *(self.last_freeze_ts.write().unwrap()) = now;
+
+        self.tl.flush_frozen_layers();
+
+        let current_size = self.write_guard.as_ref().unwrap().current_size;
+        if current_size > self.get_checkpoint_distance() {
+            warn!("Flushed oversized open layer with size {}", current_size)
+        }
+
+        Ok(())
+    }
+
+    fn get_open_layer_action(&self, lsn: Lsn, new_value_size: u64) -> OpenLayerAction {
+        let state = &*self.write_guard;
+        let Some(state) = &state else {
+            return OpenLayerAction::Open;
+        };
+
+        if state.prev_lsn == Some(lsn) {
+            // Rolling mid LSN is not supported by downstream code.
+            // Hence, only roll at LSN boundaries.
+            return OpenLayerAction::None;
+        }
+
+        if state.current_size == 0 {
+            // Don't roll empty layers
+            return OpenLayerAction::None;
+        }
+
+        let distance = lsn.widening_sub(state.cached_last_freeze_at);
+        let proposed_open_layer_size = state.current_size + new_value_size;
+
+        // Rolling the open layer can be triggered by:
+        // 1. The distance from the last LSN we rolled at. This bounds the amount of WAL that
+        //    the safekeepers need to store.  For sharded tenants, we multiply by shard count to
+        //    account for how writes are distributed across shards: we expect each node to consume
+        //    1/count of the LSN on average.
+        // 2. The size of the currently open layer.
+        // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
+        //    up and suspend activity.
+        if distance
+            >= self.get_checkpoint_distance() as i128 * self.shard_identity.count.count() as i128
+        {
+            info!(
+                "Will roll layer at {} with layer size {} due to LSN distance ({})",
+                lsn, state.current_size, distance
+            );
+
+            OpenLayerAction::Roll
+        } else if proposed_open_layer_size >= self.get_checkpoint_distance() {
+            info!(
+                "Will roll layer at {} with layer size {} due to layer size ({})",
+                lsn, state.current_size, proposed_open_layer_size
+            );
+
+            OpenLayerAction::Roll
+        } else if distance > 0
+            && state.cached_last_freeze_ts.elapsed() >= self.get_checkpoint_timeout()
+        {
+            info!(
+                "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
+                lsn,
+                state.current_size,
+                state.cached_last_freeze_ts.elapsed()
+            );
+
+            OpenLayerAction::Roll
+        } else {
+            OpenLayerAction::None
+        }
+    }
+
+    /// Put a batch keys at the specified Lsns.
+    ///
+    /// The batch should be sorted by Lsn such that it's safe
+    /// to roll the open layer mid batch.
     pub(crate) async fn put_batch(
-        &self,
-        batch: &HashMap<Key, Vec<(Lsn, Value)>>,
+        &mut self,
+        batch: Vec<(Key, Lsn, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.tl.put_values(batch, ctx).await
+        for (key, lsn, val) in batch {
+            self.put(key, lsn, &val, ctx).await?
+        }
+
+        Ok(())
     }
 
-    pub(crate) async fn delete_batch(&self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
-        self.tl.put_tombstones(batch).await
+    pub(crate) async fn delete_batch(&mut self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+        if let Some((_, lsn)) = batch.first() {
+            let action = self.get_open_layer_action(*lsn, 0);
+            let layer = self.handle_open_layer_action(*lsn, action).await?;
+            layer.put_tombstones(batch).await?;
+        }
+
+        Ok(())
     }
 
     /// Track the end of the latest digested WAL record.

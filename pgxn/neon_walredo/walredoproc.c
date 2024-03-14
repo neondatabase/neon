@@ -220,6 +220,9 @@ enter_seccomp_mode(void)
 }
 #endif /* HAVE_LIBSECCOMP */
 
+PGDLLEXPORT void
+WalRedoMain(int argc, char *argv[]);
+
 /*
  * Entry point for the WAL redo process.
  *

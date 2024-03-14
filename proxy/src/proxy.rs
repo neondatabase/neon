@@ -248,7 +248,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let tls = config.tls_config.as_ref();
 
-    let pause = ctx.latency_timer.pause();
+    let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(stream, mode.handshake_tls(tls));
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
@@ -378,6 +378,11 @@ impl NeonOptions {
     }
     pub fn parse_options_raw(options: &str) -> Self {
         Self::parse_from_iter(StartupMessageParams::parse_options_raw(options))
+    }
+
+    pub fn is_ephemeral(&self) -> bool {
+        // Currently, neon endpoint options are all reserved for ephemeral endpoints.
+        !self.0.is_empty()
     }
 
     fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {

@@ -88,8 +88,6 @@ impl FromStr for NodeAvailability {
     }
 }
 
-/// FIXME: this is a duplicate of the type in the attachment_service crate, because the
-/// type needs to be defined with diesel traits in there.
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq)]
 pub enum NodeSchedulingPolicy {
     Active,
@@ -125,5 +123,45 @@ impl From<NodeSchedulingPolicy> for String {
     }
 }
 
+/// Controls how tenant shards are mapped to locations on pageservers, e.g. whether
+/// to create secondary locations.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum PlacementPolicy {
+    /// Cheapest way to attach a tenant: just one pageserver, no secondary
+    Single,
+    /// Production-ready way to attach a tenant: one attached pageserver and
+    /// some number of secondaries.
+    Double(usize),
+    /// Create one secondary mode locations. This is useful when onboarding
+    /// a tenant, or for an idle tenant that we might want to bring online quickly.
+    Secondary,
+
+    /// Do not attach to any pageservers.  This is appropriate for tenants that
+    /// have been idle for a long time, where we do not mind some delay in making
+    /// them available in future.
+    Detached,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateResponse {}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use serde_json;
+
+    /// Check stability of PlacementPolicy's serialization
+    #[test]
+    fn placement_policy_encoding() -> anyhow::Result<()> {
+        let v = PlacementPolicy::Double(1);
+        let encoded = serde_json::to_string(&v)?;
+        assert_eq!(encoded, "{\"Double\":1}");
+        assert_eq!(serde_json::from_str::<PlacementPolicy>(&encoded)?, v);
+
+        let v = PlacementPolicy::Single;
+        let encoded = serde_json::to_string(&v)?;
+        assert_eq!(encoded, "\"Single\"");
+        assert_eq!(serde_json::from_str::<PlacementPolicy>(&encoded)?, v);
+        Ok(())
+    }
+}

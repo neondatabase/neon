@@ -1,6 +1,5 @@
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
-use crate::PlacementPolicy;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
@@ -11,7 +10,9 @@ use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 use utils::auth::{Scope, SwappableJwtAuth};
+use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::{auth_middleware, check_permission_with, request_span};
 use utils::http::request::{must_get_query_param, parse_request_param};
 use utils::id::{TenantId, TimelineId};
@@ -31,7 +32,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
 
-use control_plane::attachment_service::{AttachHookRequest, InspectRequest};
+use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
 
 /// State available to HTTP request handlers
 #[derive(Clone)]
@@ -119,13 +120,9 @@ async fn handle_tenant_create(
 
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
 
-    // TODO: enable specifying this.  Using Single as a default helps legacy tests to work (they
-    // have no expectation of HA).
-    let placement_policy = PlacementPolicy::Single;
-
     json_response(
         StatusCode::CREATED,
-        service.tenant_create(create_req, placement_policy).await?,
+        service.tenant_create(create_req).await?,
     )
 }
 
@@ -179,14 +176,14 @@ async fn handle_tenant_location_config(
     service: Arc<Service>,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
 
     let config_req = json_request::<TenantLocationConfigRequest>(&mut req).await?;
     json_response(
         StatusCode::OK,
         service
-            .tenant_location_config(tenant_id, config_req)
+            .tenant_location_config(tenant_shard_id, config_req)
             .await?,
     )
 }
@@ -559,6 +556,9 @@ pub fn make_router(
         .post("/debug/v1/consistency_check", |r| {
             request_span(r, handle_consistency_check)
         })
+        .put("/debug/v1/failpoints", |r| {
+            request_span(r, |r| failpoints_handler(r, CancellationToken::new()))
+        })
         .get("/control/v1/tenant/:tenant_id/locate", |r| {
             tenant_service_handler(r, handle_tenant_locate)
         })
@@ -592,7 +592,7 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_id/config", |r| {
             tenant_service_handler(r, handle_tenant_config_get)
         })
-        .put("/v1/tenant/:tenant_id/location_config", |r| {
+        .put("/v1/tenant/:tenant_shard_id/location_config", |r| {
             tenant_service_handler(r, handle_tenant_location_config)
         })
         .put("/v1/tenant/:tenant_id/time_travel_remote_storage", |r| {

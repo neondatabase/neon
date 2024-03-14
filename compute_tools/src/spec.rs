@@ -302,9 +302,9 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             RoleAction::Create => {
                 // This branch only runs when roles are created through the console, so it is
                 // safe to add more permissions here. BYPASSRLS and REPLICATION are inherited
-                // from neon_superuser.
+                // from neon_superuser. (NOTE: REPLICATION has been removed from here for now).
                 let mut query: String = format!(
-                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
+                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("running role create query: '{}'", &query);
@@ -805,6 +805,18 @@ $$;"#,
         "",
         "",
         // Add new migrations below.
+        r#"
+DO $$
+DECLARE
+    role_name TEXT;
+BEGIN
+    FOR role_name IN SELECT rolname FROM pg_roles WHERE rolreplication IS TRUE
+    LOOP
+        RAISE NOTICE 'EXECUTING ALTER ROLE % NOREPLICATION', quote_ident(role_name);
+        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOREPLICATION';
+    END LOOP;
+END
+$$;"#,
     ];
 
     let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";

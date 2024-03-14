@@ -80,7 +80,7 @@ def test_tenant_s3_restore(
     assert (
         ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
     ), "tenant removed before we deletion was issued"
-    env.attachment_service.attach_hook_drop(tenant_id)
+    env.storage_controller.attach_hook_drop(tenant_id)
 
     tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
@@ -103,7 +103,7 @@ def test_tenant_s3_restore(
         tenant_id, timestamp=ts_before_deletion, done_if_after=ts_after_deletion
     )
 
-    generation = env.attachment_service.attach_hook_issue(tenant_id, env.pageserver.id)
+    generation = env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id)
 
     ps_http.tenant_attach(tenant_id, generation=generation)
     env.pageserver.quiesce_tenants()

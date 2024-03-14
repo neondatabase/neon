@@ -343,23 +343,6 @@ pub(super) async fn handle_walreceiver_connection(
                             modification.commit(&ctx).await?;
                             uncommitted_records = 0;
                             filtered_records = 0;
-
-                            //
-                            // We should check checkpoint distance after appending each ingest_batch_size bytes because otherwise
-                            // layer size can become much larger than `checkpoint_distance`.
-                            // It can append because wal-sender is sending WAL using 125kb chucks and some WAL records can cause writing large
-                            // amount of data to key-value storage. So performing this check only after processing
-                            // all WAL records in the chunk, can cause huge L0 layer files.
-                            //
-                            timeline
-                                .check_checkpoint_distance()
-                                .await
-                                .with_context(|| {
-                                    format!(
-                                        "Failed to check checkpoint distance for timeline {}",
-                                        timeline.timeline_id
-                                    )
-                                })?;
                         }
                     }
 
@@ -406,15 +389,16 @@ pub(super) async fn handle_walreceiver_connection(
             }
         }
 
-        timeline
-            .check_checkpoint_distance()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to check checkpoint distance for timeline {}",
-                    timeline.timeline_id
-                )
-            })?;
+        {
+            // This is a hack. It piggybacks on the keepalive messages sent by the
+            // safekeeper in order to enforce `checkpoint_timeout` on the currently
+            // open layer. This hack doesn't provide a bound on the total size of
+            // in-memory layers on a pageserver. See https://github.com/neondatabase/neon/issues/6916.
+            let mut writer = timeline.writer().await;
+            if let Err(err) = writer.tick().await {
+                warn!("Timeline writer tick failed: {err}");
+            }
+        }
 
         if let Some(last_lsn) = status_update {
             let timeline_remote_consistent_lsn = timeline

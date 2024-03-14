@@ -14,6 +14,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
@@ -1150,7 +1151,12 @@ async fn tenant_shard_split_handler(
 
     let new_shards = state
         .tenant_manager
-        .shard_split(tenant_shard_id, ShardCount::new(req.new_shard_count), &ctx)
+        .shard_split(
+            tenant_shard_id,
+            ShardCount::new(req.new_shard_count),
+            req.new_stripe_size,
+            &ctx,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1516,6 +1522,29 @@ async fn list_location_config_handler(
             })
             .collect(),
     };
+    json_response(StatusCode::OK, result)
+}
+
+async fn get_location_config_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let slot = state.tenant_manager.get(tenant_shard_id);
+
+    let Some(slot) = slot else {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Tenant shard not found").into(),
+        ));
+    };
+
+    let result: Option<LocationConfig> = match slot {
+        TenantSlot::Attached(t) => Some(t.get_location_conf()),
+        TenantSlot::Secondary(s) => Some(s.get_location_conf()),
+        TenantSlot::InProgress(_) => None,
+    };
+
     json_response(StatusCode::OK, result)
 }
 
@@ -2079,6 +2108,16 @@ where
     R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
     H: FnOnce(Request<Body>, CancellationToken) -> R + Send + Sync + 'static,
 {
+    if request.uri() != &"/v1/failpoints".parse::<Uri>().unwrap() {
+        fail::fail_point!("api-503", |_| Err(ApiError::ResourceUnavailable(
+            "failpoint".into()
+        )));
+
+        fail::fail_point!("api-500", |_| Err(ApiError::InternalServerError(
+            anyhow::anyhow!("failpoint")
+        )));
+    }
+
     // Spawn a new task to handle the request, to protect the handler from unexpected
     // async cancellations. Most pageserver functions are not async cancellation safe.
     // We arm a drop-guard, so that if Hyper drops the Future, we signal the task
@@ -2222,6 +2261,9 @@ pub fn make_router(
         })
         .get("/v1/location_config", |r| {
             api_handler(r, list_location_config_handler)
+        })
+        .get("/v1/location_config/:tenant_shard_id", |r| {
+            api_handler(r, get_location_config_handler)
         })
         .put(
             "/v1/tenant/:tenant_shard_id/time_travel_remote_storage",

@@ -57,9 +57,9 @@ use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 
-use crate::attachment_service::AttachmentService;
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
+use crate::storage_controller::StorageController;
 
 use compute_api::responses::{ComputeState, ComputeStatus};
 use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
@@ -656,7 +656,7 @@ impl Endpoint {
         // Wait for it to start
         let mut attempt = 0;
         const ATTEMPT_INTERVAL: Duration = Duration::from_millis(100);
-        const MAX_ATTEMPTS: u32 = 10 * 30; // Wait up to 30 s
+        const MAX_ATTEMPTS: u32 = 10 * 90; // Wait up to 1.5 min
         loop {
             attempt += 1;
             match self.get_status().await {
@@ -750,17 +750,17 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        // If we weren't given explicit pageservers, query the attachment service
+        // If we weren't given explicit pageservers, query the storage controller
         if pageservers.is_empty() {
-            let attachment_service = AttachmentService::from_env(&self.env);
-            let locate_result = attachment_service.tenant_locate(self.tenant_id).await?;
+            let storage_controller = StorageController::from_env(&self.env);
+            let locate_result = storage_controller.tenant_locate(self.tenant_id).await?;
             pageservers = locate_result
                 .shards
                 .into_iter()
                 .map(|shard| {
                     (
                         Host::parse(&shard.listen_pg_addr)
-                            .expect("Attachment service reported bad hostname"),
+                            .expect("Storage controller reported bad hostname"),
                         shard.listen_pg_port,
                     )
                 })
@@ -774,7 +774,10 @@ impl Endpoint {
             spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
         }
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
         let response = client
             .post(format!(
                 "http://{}:{}/configure",

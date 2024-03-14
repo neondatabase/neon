@@ -1,6 +1,10 @@
 use crate::{auth, rate_limiter::RateBucketInfo, serverless::GlobalConnPoolOptions};
 use anyhow::{bail, ensure, Context, Ok};
-use rustls::{sign, Certificate, PrivateKey};
+use itertools::Itertools;
+use rustls::{
+    crypto::ring::sign,
+    pki_types::{CertificateDer, PrivateKeyDer},
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -88,14 +92,14 @@ pub fn configure_tls(
 
     let cert_resolver = Arc::new(cert_resolver);
 
-    let config = rustls::ServerConfig::builder()
-        .with_safe_default_cipher_suites()
-        .with_safe_default_kx_groups()
-        // allow TLS 1.2 to be compatible with older client libraries
-        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-        .with_no_client_auth()
-        .with_cert_resolver(cert_resolver.clone())
-        .into();
+    // allow TLS 1.2 to be compatible with older client libraries
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[
+        &rustls::version::TLS13,
+        &rustls::version::TLS12,
+    ])
+    .with_no_client_auth()
+    .with_cert_resolver(cert_resolver.clone())
+    .into();
 
     Ok(TlsConfig {
         config,
@@ -133,14 +137,14 @@ pub enum TlsServerEndPoint {
 }
 
 impl TlsServerEndPoint {
-    pub fn new(cert: &Certificate) -> anyhow::Result<Self> {
+    pub fn new(cert: &CertificateDer) -> anyhow::Result<Self> {
         let sha256_oids = [
             // I'm explicitly not adding MD5 or SHA1 here... They're bad.
             oid_registry::OID_SIG_ECDSA_WITH_SHA256,
             oid_registry::OID_PKCS1_SHA256WITHRSA,
         ];
 
-        let pem = x509_parser::parse_x509_certificate(&cert.0)
+        let pem = x509_parser::parse_x509_certificate(cert)
             .context("Failed to parse PEM object from cerficiate")?
             .1;
 
@@ -150,8 +154,7 @@ impl TlsServerEndPoint {
         let oid = pem.signature_algorithm.oid();
         let alg = reg.get(oid);
         if sha256_oids.contains(oid) {
-            let tls_server_end_point: [u8; 32] =
-                Sha256::new().chain_update(&cert.0).finalize().into();
+            let tls_server_end_point: [u8; 32] = Sha256::new().chain_update(cert).finalize().into();
             info!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
             Ok(Self::Sha256(tls_server_end_point))
         } else {
@@ -165,7 +168,7 @@ impl TlsServerEndPoint {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CertResolver {
     certs: HashMap<String, (Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint)>,
     default: Option<(Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint)>,
@@ -185,11 +188,14 @@ impl CertResolver {
         let priv_key = {
             let key_bytes = std::fs::read(key_path)
                 .context(format!("Failed to read TLS keys at '{key_path}'"))?;
-            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
-                .context(format!("Failed to parse TLS keys at '{key_path}'"))?;
+            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..]).collect_vec();
 
             ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
-            keys.pop().map(rustls::PrivateKey).unwrap()
+            PrivateKeyDer::Pkcs8(
+                keys.pop()
+                    .unwrap()
+                    .context(format!("Failed to parse TLS keys at '{key_path}'"))?,
+            )
         };
 
         let cert_chain_bytes = std::fs::read(cert_path)
@@ -197,14 +203,10 @@ impl CertResolver {
 
         let cert_chain = {
             rustls_pemfile::certs(&mut &cert_chain_bytes[..])
+                .try_collect()
                 .with_context(|| {
-                    format!(
-                    "Failed to read TLS certificate chain from bytes from file at '{cert_path}'."
-                )
+                    format!("Failed to read TLS certificate chain from bytes from file at '{cert_path}'.")
                 })?
-                .into_iter()
-                .map(rustls::Certificate)
-                .collect()
         };
 
         self.add_cert(priv_key, cert_chain, is_default)
@@ -212,15 +214,15 @@ impl CertResolver {
 
     pub fn add_cert(
         &mut self,
-        priv_key: PrivateKey,
-        cert_chain: Vec<Certificate>,
+        priv_key: PrivateKeyDer<'static>,
+        cert_chain: Vec<CertificateDer<'static>>,
         is_default: bool,
     ) -> anyhow::Result<()> {
         let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
 
         let first_cert = &cert_chain[0];
         let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
-        let pem = x509_parser::parse_x509_certificate(&first_cert.0)
+        let pem = x509_parser::parse_x509_certificate(first_cert)
             .context("Failed to parse PEM object from cerficiate")?
             .1;
 

@@ -36,11 +36,15 @@ use tokio::time::Instant;
 use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
+
+const DEFAULT_FEEDBACK_CAPACITY: usize = 8;
 
 /// Registry of WalReceivers (compute connections). Timeline holds it (wrapped
 /// in Arc).
 pub struct WalReceivers {
     mutex: Mutex<WalReceiversShared>,
+    pageserver_feedback_tx: tokio::sync::broadcast::Sender<PageserverFeedback>,
 }
 
 /// Id under which walreceiver is registered in shmem.
@@ -48,8 +52,12 @@ type WalReceiverId = usize;
 
 impl WalReceivers {
     pub fn new() -> Arc<WalReceivers> {
+        let (pageserver_feedback_tx, _) =
+            tokio::sync::broadcast::channel(DEFAULT_FEEDBACK_CAPACITY);
+
         Arc::new(WalReceivers {
             mutex: Mutex::new(WalReceiversShared { slots: Vec::new() }),
+            pageserver_feedback_tx,
         })
     }
 
@@ -115,6 +123,12 @@ impl WalReceivers {
     fn unregister(self: &Arc<WalReceivers>, id: WalReceiverId) {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
+    }
+
+    /// Broadcast pageserver feedback to connected walproposers.
+    pub fn broadcast_pageserver_feedback(&self, feedback: PageserverFeedback) {
+        // Err means there is no subscribers, it is fine.
+        let _ = self.pageserver_feedback_tx.send(feedback);
     }
 }
 
@@ -197,17 +211,28 @@ impl SafekeeperPostgresHandler {
         // sends, so this avoids deadlocks.
         let mut pgb_reader = pgb.split().context("START_WAL_PUSH split")?;
         let peer_addr = *pgb.get_peer_addr();
-        let network_reader = NetworkReader {
+        let mut network_reader = NetworkReader {
             ttid: self.ttid,
             conn_id: self.conn_id,
             pgb_reader: &mut pgb_reader,
             peer_addr,
             acceptor_handle: &mut acceptor_handle,
         };
-        let res = tokio::select! {
-            // todo: add read|write .context to these errors
-            r = network_reader.run(msg_tx, msg_rx, reply_tx) => r,
-            r = network_write(pgb, reply_rx) => r,
+
+        // Read first message and create timeline if needed.
+        let res = network_reader.read_first_message().await;
+
+        let res = if let Ok((tli, next_msg)) = res {
+            let pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback> =
+                tli.get_walreceivers().pageserver_feedback_tx.subscribe();
+
+            tokio::select! {
+                // todo: add read|write .context to these errors
+                r = network_reader.run(msg_tx, msg_rx, reply_tx, tli.clone(), next_msg) => r,
+                r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
+            }
+        } else {
+            res.map(|_| ())
         };
 
         // Join pg backend back.
@@ -251,12 +276,9 @@ struct NetworkReader<'a, IO> {
 }
 
 impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
-    async fn run(
-        self,
-        msg_tx: Sender<ProposerAcceptorMessage>,
-        msg_rx: Receiver<ProposerAcceptorMessage>,
-        reply_tx: Sender<AcceptorProposerMessage>,
-    ) -> Result<(), CopyStreamHandlerEnd> {
+    async fn read_first_message(
+        &mut self,
+    ) -> Result<(Arc<Timeline>, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
         // Receive information about server to create timeline, if not yet.
         let next_msg = read_message(self.pgb_reader).await?;
         let tli = match next_msg {
@@ -278,9 +300,19 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
                 )))
             }
         };
+        Ok((tli, next_msg))
+    }
 
+    async fn run(
+        self,
+        msg_tx: Sender<ProposerAcceptorMessage>,
+        msg_rx: Receiver<ProposerAcceptorMessage>,
+        reply_tx: Sender<AcceptorProposerMessage>,
+        tli: Arc<Timeline>,
+        next_msg: ProposerAcceptorMessage,
+    ) -> Result<(), CopyStreamHandlerEnd> {
         *self.acceptor_handle = Some(WalAcceptor::spawn(
-            tli.clone(),
+            tli,
             msg_rx,
             reply_tx,
             Some(self.conn_id),
@@ -320,18 +352,46 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
 async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_writer: &mut PostgresBackend<IO>,
     mut reply_rx: Receiver<AcceptorProposerMessage>,
+    mut pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback>,
 ) -> Result<(), CopyStreamHandlerEnd> {
     let mut buf = BytesMut::with_capacity(128);
 
+    // storing append_response to inject PageserverFeedback into it
+    let mut last_append_response = None;
+
     loop {
-        match reply_rx.recv().await {
-            Some(msg) => {
-                buf.clear();
-                msg.serialize(&mut buf)?;
-                pgb_writer.write_message(&BeMessage::CopyData(&buf)).await?;
+        // trying to read either AcceptorProposerMessage or PageserverFeedback
+        let msg = tokio::select! {
+            reply = reply_rx.recv() => {
+                if let Some(msg) = reply {
+                    if let AcceptorProposerMessage::AppendResponse(append_response) = &msg {
+                        last_append_response = Some(append_response.clone());
+                    }
+                    Some(msg)
+                } else {
+                    return Ok(()); // chan closed, WalAcceptor terminated
+                }
             }
-            None => return Ok(()), // chan closed, WalAcceptor terminated
-        }
+
+            feedback = pageserver_feedback_rx.recv() =>
+                match (feedback, &last_append_response) {
+                    (Ok(feedback), Some(append_response)) => {
+                        // clone AppendResponse and inject PageserverFeedback into it
+                        let mut append_response = append_response.clone();
+                        append_response.pageserver_feedback = Some(feedback);
+                        Some(AcceptorProposerMessage::AppendResponse(append_response))
+                    }
+                    _ => None,
+                }
+        };
+
+        let Some(msg) = msg else {
+            continue;
+        };
+
+        buf.clear();
+        msg.serialize(&mut buf)?;
+        pgb_writer.write_message(&BeMessage::CopyData(&buf)).await?;
     }
 }
 
