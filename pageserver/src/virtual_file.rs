@@ -1100,7 +1100,11 @@ impl OwnedAsyncWriter for VirtualFile {
     }
 
     #[inline(always)]
-    async fn write_all_borrowed(&mut self, _buf: &[u8], _ctx: &RequestContext) -> std::io::Result<usize> {
+    async fn write_all_borrowed(
+        &mut self,
+        _buf: &[u8],
+        _ctx: &RequestContext,
+    ) -> std::io::Result<usize> {
         // TODO: ensure this through the type system
         panic!("this should not happen");
     }

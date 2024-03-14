@@ -85,9 +85,13 @@ where
                     .try_into()
                     .unwrap();
                 self.cache
-                    .fill_cache(&self.under, self.written / (N as u64), page, ctx)
+                    .fill_cache(
+                        &self.under,
+                        (self.written / (N as u64)) + (page_no_in_buf as u64),
+                        page,
+                        ctx,
+                    )
                     .await;
-                self.written += N as u64;
             }
             self.written += nwritten as u64;
             Ok((nwritten, tokio_epoll_uring::Slice::into_inner(buf)))
