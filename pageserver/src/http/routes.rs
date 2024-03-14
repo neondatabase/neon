@@ -2053,6 +2053,10 @@ async fn get_utilization(
     r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    fail::fail_point!("get-utilization-http-handler", |_| {
+        Err(ApiError::ResourceUnavailable("failpoint".into()))
+    });
+
     // this probably could be completely public, but lets make that change later.
     check_permission(&r, None)?;
 

@@ -12,7 +12,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use utils::{backoff, id::NodeId};
 
-use crate::persistence::NodePersistence;
+use crate::{persistence::NodePersistence, scheduler::MaySchedule};
 
 /// Represents the in-memory description of a Node.
 ///
@@ -111,8 +111,8 @@ impl Node {
         use NodeAvailability::*;
 
         match (self.availability, availability) {
-            (Offline, Active) => ToActive,
-            (Active, Offline) => ToOffline,
+            (Offline, Active(_)) => ToActive,
+            (Active(_), Offline) => ToOffline,
             _ => Unchanged,
         }
     }
@@ -123,21 +123,21 @@ impl Node {
         // a reference to the original Node's cancellation status.  Checking both of these results
         // in a "pessimistic" check where we will consider a Node instance unavailable if it was unavailable
         // when we cloned it, or if the original Node instance's cancellation token was fired.
-        matches!(self.availability, NodeAvailability::Active) && !self.cancel.is_cancelled()
+        matches!(self.availability, NodeAvailability::Active(_)) && !self.cancel.is_cancelled()
     }
 
     /// Is this node elegible to have work scheduled onto it?
-    pub(crate) fn may_schedule(&self) -> bool {
-        match self.availability {
-            NodeAvailability::Active => {}
-            NodeAvailability::Offline => return false,
-        }
+    pub(crate) fn may_schedule(&self) -> MaySchedule {
+        let score = match self.availability {
+            NodeAvailability::Active(score) => score,
+            NodeAvailability::Offline => return MaySchedule::No,
+        };
 
         match self.scheduling {
-            NodeSchedulingPolicy::Active => true,
-            NodeSchedulingPolicy::Draining => false,
-            NodeSchedulingPolicy::Filling => true,
-            NodeSchedulingPolicy::Pause => false,
+            NodeSchedulingPolicy::Active => MaySchedule::Yes(score),
+            NodeSchedulingPolicy::Draining => MaySchedule::No,
+            NodeSchedulingPolicy::Filling => MaySchedule::Yes(score),
+            NodeSchedulingPolicy::Pause => MaySchedule::No,
         }
     }
 
@@ -155,8 +155,7 @@ impl Node {
             listen_pg_addr,
             listen_pg_port,
             scheduling: NodeSchedulingPolicy::Filling,
-            // TODO: we shouldn't really call this Active until we've heartbeated it.
-            availability: NodeAvailability::Active,
+            availability: NodeAvailability::Offline,
             cancel: CancellationToken::new(),
         }
     }

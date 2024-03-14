@@ -38,6 +38,9 @@ const COMMAND: &str = "storage_controller";
 
 const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 
+// Use a shorter pageserver unavailability interval than the default to speed up tests.
+const NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
     pub tenant_shard_id: TenantShardId,
@@ -269,6 +272,8 @@ impl StorageController {
         // Run migrations on every startup, in case something changed.
         let database_url = self.setup_database().await?;
 
+        let max_unavailable: humantime::Duration = NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL.into();
+
         let mut args = vec![
             "-l",
             &self.listen,
@@ -276,6 +281,8 @@ impl StorageController {
             self.path.as_ref(),
             "--database-url",
             &database_url,
+            "--max-unavailable-interval",
+            &max_unavailable.to_string(),
         ]
         .into_iter()
         .map(|s| s.to_string())

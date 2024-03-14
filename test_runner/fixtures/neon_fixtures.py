@@ -2088,6 +2088,14 @@ class NeonStorageController(MetricsGetter):
         )
         return response.json()
 
+    def tenant_list(self):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/debug/v1/tenant",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
     def node_configure(self, node_id, body: dict[str, Any]):
         log.info(f"node_configure({node_id}, {body})")
         body["node_id"] = node_id
