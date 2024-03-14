@@ -1352,7 +1352,7 @@ impl Service {
 
         // Apply the updated generation to our in-memory state
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, _scheduler) = locked.parts_mut();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
 
         let mut response = ReAttachResponse {
             tenants: Vec::new(),
@@ -1428,6 +1428,7 @@ impl Service {
                 let mut new_nodes = (**nodes).clone();
                 if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
                     node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+                    scheduler.node_upsert(node);
                 }
                 let new_nodes = Arc::new(new_nodes);
                 *nodes = new_nodes;
