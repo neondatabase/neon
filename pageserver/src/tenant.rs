@@ -43,6 +43,8 @@ use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
 use utils::timeout::timeout_cancellable;
 use utils::timeout::TimeoutCancellableError;
+use utils::zstd::create_zst_tarball;
+use utils::zstd::extract_zst_tarball;
 
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
@@ -3042,8 +3044,13 @@ impl Tenant {
             }
         }
 
-        let (pgdata_zstd, tar_zst_size) =
-            import_datadir::create_tar_zst(pgdata_path, &temp_path).await?;
+        let (pgdata_zstd, tar_zst_size) = create_zst_tarball(pgdata_path, &temp_path).await?;
+        const INITDB_TAR_ZST_WARN_LIMIT: u64 = 2 * 1024 * 1024;
+        if tar_zst_size > INITDB_TAR_ZST_WARN_LIMIT {
+            warn!(
+                "compressed {temp_path} size of {tar_zst_size} is above limit {INITDB_TAR_ZST_WARN_LIMIT}."
+            );
+        }
 
         pausable_failpoint!("before-initdb-upload");
 
@@ -3143,7 +3150,7 @@ impl Tenant {
 
             let buf_read =
                 BufReader::with_capacity(remote_timeline_client::BUFFER_SIZE, initdb_tar_zst);
-            import_datadir::extract_tar_zst(&pgdata_path, buf_read)
+            extract_zst_tarball(&pgdata_path, buf_read)
                 .await
                 .context("extract initdb tar")?;
         } else {
