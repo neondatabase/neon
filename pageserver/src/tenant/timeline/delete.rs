@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
-use tracing::{debug, error, info, instrument, warn, Instrument, Span};
+use tracing::{debug, error, info, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId};
 
 use crate::{
@@ -124,7 +124,7 @@ async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTi
 /// No timeout here, GC & Compaction should be responsive to the
 /// `TimelineState::Stopping` change.
 // pub(super): documentation link
-pub(super) async fn delete_local_layer_files(
+pub(super) async fn delete_local_timeline_directory(
     conf: &PageServerConf,
     tenant_shard_id: TenantShardId,
     timeline: &Timeline,
@@ -149,8 +149,6 @@ pub(super) async fn delete_local_layer_files(
     // NB: This need not be atomic because the deleted flag in the IndexPart
     // will be observed during tenant/timeline load. The deletion will be resumed there.
     //
-    // For configurations without remote storage, we guarantee crash-safety by persising delete mark file.
-    //
     // Note that here we do not bail out on std::io::ErrorKind::NotFound.
     // This can happen if we're called a second time, e.g.,
     // because of a previous failure/cancellation at/after
@@ -158,72 +156,21 @@ pub(super) async fn delete_local_layer_files(
     //
     // ErrorKind::NotFound can also happen if we race with tenant detach, because,
     // no locks are shared.
-    //
-    // For now, log and continue.
-    // warn! level is technically not appropriate for the
-    // first case because we should expect retries to happen.
-    // But the error is so rare, it seems better to get attention if it happens.
-    //
-    // Note that metadata removal is skipped, this is not technically needed,
-    // but allows to reuse timeline loading code during resumed deletion.
-    // (we always expect that metadata is in place when timeline is being loaded)
+    tokio::fs::remove_dir_all(local_timeline_directory)
+        .await
+        .or_else(fs_ext::ignore_not_found)
+        .context("remove local timeline directory")?;
 
-    #[cfg(feature = "testing")]
-    let mut counter = 0;
-
-    // Timeline directory may not exist if we failed to delete mark file and request was retried.
-    if !local_timeline_directory.exists() {
-        return Ok(());
-    }
-
-    let metadata_path = conf.metadata_path(&tenant_shard_id, &timeline.timeline_id);
-
-    for entry in walkdir::WalkDir::new(&local_timeline_directory).contents_first(true) {
-        #[cfg(feature = "testing")]
-        {
-            counter += 1;
-            if counter == 2 {
-                fail::fail_point!("timeline-delete-during-rm", |_| {
-                    Err(anyhow::anyhow!("failpoint: timeline-delete-during-rm"))?
-                });
-            }
-        }
-
-        let entry = entry?;
-        if entry.path() == metadata_path {
-            debug!("found metadata, skipping");
-            continue;
-        }
-
-        if entry.path() == local_timeline_directory {
-            // Keeping directory because metedata file is still there
-            debug!("found timeline dir itself, skipping");
-            continue;
-        }
-
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                if crate::is_walkdir_io_not_found(&e) {
-                    warn!(
-                        timeline_dir=?local_timeline_directory,
-                        path=?entry.path().display(),
-                        "got not found err while removing timeline dir, proceeding anyway"
-                    );
-                    continue;
-                }
-                anyhow::bail!(e);
-            }
-        };
-
-        if metadata.is_dir() {
-            warn!(path=%entry.path().display(), "unexpected directory under timeline dir");
-            tokio::fs::remove_dir(entry.path()).await
-        } else {
-            tokio::fs::remove_file(entry.path()).await
-        }
-        .with_context(|| format!("Failed to remove: {}", entry.path().display()))?;
-    }
+    // Make sure previous deletions are ordered before mark removal.
+    // Otherwise there is no guarantee that they reach the disk before mark deletion.
+    // So its possible for mark to reach disk first and for other deletions
+    // to be reordered later and thus missed if a crash occurs.
+    // Note that we dont need to sync after mark file is removed
+    // because we can tolerate the case when mark file reappears on startup.
+    let timeline_path = conf.timelines_path(&tenant_shard_id);
+    crashsafe::fsync_async(timeline_path)
+        .await
+        .context("fsync_pre_mark_remove")?;
 
     info!("finished deleting layer files, releasing locks");
     drop(guards);
@@ -254,39 +201,6 @@ async fn cleanup_remaining_timeline_fs_traces(
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
 ) -> anyhow::Result<()> {
-    // Remove local metadata
-    tokio::fs::remove_file(conf.metadata_path(&tenant_shard_id, &timeline_id))
-        .await
-        .or_else(fs_ext::ignore_not_found)
-        .context("remove metadata")?;
-
-    fail::fail_point!("timeline-delete-after-rm-metadata", |_| {
-        Err(anyhow::anyhow!(
-            "failpoint: timeline-delete-after-rm-metadata"
-        ))?
-    });
-
-    // Remove timeline dir
-    tokio::fs::remove_dir(conf.timeline_path(&tenant_shard_id, &timeline_id))
-        .await
-        .or_else(fs_ext::ignore_not_found)
-        .context("timeline dir")?;
-
-    fail::fail_point!("timeline-delete-after-rm-dir", |_| {
-        Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm-dir"))?
-    });
-
-    // Make sure previous deletions are ordered before mark removal.
-    // Otherwise there is no guarantee that they reach the disk before mark deletion.
-    // So its possible for mark to reach disk first and for other deletions
-    // to be reordered later and thus missed if a crash occurs.
-    // Note that we dont need to sync after mark file is removed
-    // because we can tolerate the case when mark file reappears on startup.
-    let timeline_path = conf.timelines_path(&tenant_shard_id);
-    crashsafe::fsync_async(timeline_path)
-        .await
-        .context("fsync_pre_mark_remove")?;
-
     // Remove delete mark
     // TODO: once we are confident that no more exist in the field, remove this
     // line.  It cleans up a legacy marker file that might in rare cases be present.
@@ -356,12 +270,14 @@ impl DeleteTimelineFlow {
     // NB: If this fails half-way through, and is retried, the retry will go through
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
-    #[instrument(skip(tenant), fields(tenant_id=%tenant.tenant_shard_id.tenant_id, shard_id=%tenant.tenant_shard_id.shard_slug()))]
+    #[instrument(skip_all, fields(%inplace))]
     pub async fn run(
         tenant: &Arc<Tenant>,
         timeline_id: TimelineId,
         inplace: bool,
     ) -> Result<(), DeleteTimelineError> {
+        super::debug_assert_current_span_has_tenant_and_timeline_id();
+
         let (timeline, mut guard) = Self::prepare(tenant, timeline_id)?;
 
         guard.mark_in_progress()?;
@@ -417,6 +333,7 @@ impl DeleteTimelineFlow {
                 TimelineResources {
                     remote_client,
                     deletion_queue_client,
+                    timeline_get_throttle: tenant.timeline_get_throttle.clone(),
                 },
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
@@ -539,12 +456,7 @@ impl DeleteTimelineFlow {
                 };
                 Ok(())
             }
-            .instrument({
-                let span =
-                    tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),timeline_id=%timeline_id);
-                span.follows_from(Span::current());
-                span
-            }),
+            .instrument(tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),timeline_id=%timeline_id)),
         );
     }
 
@@ -554,14 +466,11 @@ impl DeleteTimelineFlow {
         tenant: &Tenant,
         timeline: &Timeline,
     ) -> Result<(), DeleteTimelineError> {
-        delete_local_layer_files(conf, tenant.tenant_shard_id, timeline).await?;
+        delete_local_timeline_directory(conf, tenant.tenant_shard_id, timeline).await?;
 
         delete_remote_layers_and_index(timeline).await?;
 
         pausable_failpoint!("in_progress_delete");
-
-        cleanup_remaining_timeline_fs_traces(conf, tenant.tenant_shard_id, timeline.timeline_id)
-            .await?;
 
         remove_timeline_from_tenant(tenant, timeline.timeline_id, &guard).await?;
 

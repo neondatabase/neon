@@ -4,10 +4,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use utils::backoff;
 use utils::id::NodeId;
 
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -166,6 +169,17 @@ async fn update_task(
     }
 }
 
+static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
+
+// Storage must be configured and initialized when this is called.
+fn get_configured_remote_storage() -> &'static GenericRemoteStorage {
+    REMOTE_STORAGE
+        .get()
+        .expect("failed to get remote storage")
+        .as_ref()
+        .unwrap()
+}
+
 const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 
 /// Sits on wal_backup_launcher_rx and starts/stops per timeline wal backup
@@ -199,7 +213,7 @@ pub async fn wal_backup_launcher_task_main(
             ttid = wal_backup_launcher_rx.recv() => {
                 // channel is never expected to get closed
                 let ttid = ttid.unwrap();
-                if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
+                if !conf.is_wal_backup_enabled() {
                     continue; /* just drain the channel and do nothing */
                 }
                 async {
@@ -484,18 +498,12 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
     res
 }
 
-static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
-
 async fn backup_object(
     source_file: &Utf8Path,
     target_file: &RemotePath,
     size: usize,
 ) -> Result<()> {
-    let storage = REMOTE_STORAGE
-        .get()
-        .expect("failed to get remote storage")
-        .as_ref()
-        .unwrap();
+    let storage = get_configured_remote_storage();
 
     let file = File::open(&source_file)
         .await
@@ -503,7 +511,11 @@ async fn backup_object(
 
     let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
 
-    storage.upload_storage_object(file, size, target_file).await
+    let cancel = CancellationToken::new();
+
+    storage
+        .upload_storage_object(file, size, target_file, &cancel)
+        .await
 }
 
 pub async fn read_object(
@@ -518,8 +530,10 @@ pub async fn read_object(
 
     info!("segment download about to start from remote path {file_path:?} at offset {offset}");
 
+    let cancel = CancellationToken::new();
+
     let download = storage
-        .download_storage_object(Some((offset, None)), file_path)
+        .download_storage_object(Some((offset, None)), file_path, &cancel)
         .await
         .with_context(|| {
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")
@@ -530,6 +544,64 @@ pub async fn read_object(
     let reader = tokio::io::BufReader::with_capacity(BUFFER_SIZE, reader);
 
     Ok(Box::pin(reader))
+}
+
+/// Delete WAL files for the given timeline. Remote storage must be configured
+/// when called.
+pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
+    let storage = get_configured_remote_storage();
+    let ttid_path = Utf8Path::new(&ttid.tenant_id.to_string()).join(ttid.timeline_id.to_string());
+    let remote_path = RemotePath::new(&ttid_path)?;
+
+    // see DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
+    // const Option unwrap is not stable, otherwise it would be const.
+    let batch_size: NonZeroU32 = NonZeroU32::new(1000).unwrap();
+
+    // A backoff::retry is used here for two reasons:
+    // - To provide a backoff rather than busy-polling the API on errors
+    // - To absorb transient 429/503 conditions without hitting our error
+    //   logging path for issues deleting objects.
+    //
+    // Note: listing segments might take a long time if there are many of them.
+    // We don't currently have http requests timeout cancellation, but if/once
+    // we have listing should get streaming interface to make progress.
+
+    let cancel = CancellationToken::new(); // not really used
+    backoff::retry(
+        || async {
+            // Do list-delete in batch_size batches to make progress even if there a lot of files.
+            // Alternatively we could make list_files return iterator, but it is more complicated and
+            // I'm not sure deleting while iterating is expected in s3.
+            loop {
+                let files = storage
+                    .list_files(Some(&remote_path), Some(batch_size), &cancel)
+                    .await?;
+                if files.is_empty() {
+                    return Ok(()); // done
+                }
+                // (at least) s3 results are sorted, so can log min/max:
+                // "List results are always returned in UTF-8 binary order."
+                info!(
+                    "deleting batch of {} WAL segments [{}-{}]",
+                    files.len(),
+                    files.first().unwrap().object_name().unwrap_or(""),
+                    files.last().unwrap().object_name().unwrap_or("")
+                );
+                storage.delete_objects(&files, &cancel).await?;
+            }
+        },
+        // consider TimeoutOrCancel::caused_by_cancel when using cancellation
+        |_| false,
+        3,
+        10,
+        "executing WAL segments deletion batch",
+        &cancel,
+    )
+    .await
+    .ok_or_else(|| anyhow::anyhow!("canceled"))
+    .and_then(|x| x)?;
+
+    Ok(())
 }
 
 /// Copy segments from one timeline to another. Used in copy_timeline.
@@ -553,7 +625,12 @@ pub async fn copy_s3_segments(
 
     let remote_path = RemotePath::new(&relative_dst_path)?;
 
-    let files = storage.list_files(Some(&remote_path)).await?;
+    let cancel = CancellationToken::new();
+
+    let files = storage
+        .list_files(Some(&remote_path), None, &cancel)
+        .await?;
+
     let uploaded_segments = &files
         .iter()
         .filter_map(|file| file.object_name().map(ToOwned::to_owned))
@@ -581,7 +658,7 @@ pub async fn copy_s3_segments(
         let from = RemotePath::new(&relative_src_path.join(&segment_name))?;
         let to = RemotePath::new(&relative_dst_path.join(&segment_name))?;
 
-        storage.copy_object(&from, &to).await?;
+        storage.copy_object(&from, &to, &cancel).await?;
     }
 
     info!(

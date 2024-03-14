@@ -1,15 +1,16 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
-use std::sync::Arc;
-
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
 };
+use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
+use crate::context::RequestMonitoring;
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
-use crate::{console::provider::CachedRoleSecret, context::RequestMonitoring};
+use crate::{auth::IpPattern, cache::Cached};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
 use tokio_postgres::{config::SslMode, Client};
 use tracing::{error, info, info_span, warn, Instrument};
@@ -48,7 +49,7 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let (secret, allowed_ips) = async {
             // Perhaps we could persist this connection, but then we'd have to
@@ -61,7 +62,7 @@ impl Api {
             let secret = match get_execute_postgres_query(
                 &client,
                 "select rolpassword from pg_catalog.pg_authid where rolname = $1",
-                &[&&*creds.inner.user],
+                &[&&*user_info.user],
                 "rolpassword",
             )
             .await?
@@ -72,21 +73,23 @@ impl Api {
                     secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
                 }
                 None => {
-                    warn!("user '{}' does not exist", creds.inner.user);
+                    warn!("user '{}' does not exist", user_info.user);
                     None
                 }
             };
             let allowed_ips = match get_execute_postgres_query(
                 &client,
                 "select allowed_ips from neon_control_plane.endpoints where endpoint_id = $1",
-                &[&creds.endpoint.as_str()],
+                &[&user_info.endpoint.as_str()],
                 "allowed_ips",
             )
             .await?
             {
                 Some(s) => {
                     info!("got allowed_ips: {s}");
-                    s.split(',').map(String::from).collect()
+                    s.split(',')
+                        .map(|s| IpPattern::from_str(s).unwrap())
+                        .collect()
                 }
                 None => vec![],
             };
@@ -99,6 +102,7 @@ impl Api {
         Ok(AuthInfo {
             secret,
             allowed_ips,
+            project_id: None,
         })
     }
 
@@ -146,31 +150,33 @@ impl super::Api for Api {
     async fn get_role_secret(
         &self,
         _ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         Ok(CachedRoleSecret::new_uncached(
-            self.do_get_auth_info(creds).await?.secret,
+            self.do_get_auth_info(user_info).await?.secret,
         ))
     }
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         _ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
-    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
+        user_info: &ComputeUserInfo,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
+        Ok((
+            Cached::new_uncached(Arc::new(
+                self.do_get_auth_info(user_info).await?.allowed_ips,
+            )),
+            None,
+        ))
     }
 
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
         _ctx: &mut RequestMonitoring,
-        _extra: &ConsoleReqExtra,
-        _creds: &ComputeUserInfo,
+        _user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        self.do_wake_compute()
-            .map_ok(CachedNodeInfo::new_uncached)
-            .await
+        self.do_wake_compute().map_ok(Cached::new_uncached).await
     }
 }
 

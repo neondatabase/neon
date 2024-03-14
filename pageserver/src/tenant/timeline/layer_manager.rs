@@ -1,4 +1,5 @@
 use anyhow::{bail, ensure, Context, Result};
+use futures::StreamExt;
 use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
@@ -20,19 +21,13 @@ use crate::{
 };
 
 /// Provides semantic APIs to manipulate the layer map.
+#[derive(Default)]
 pub(crate) struct LayerManager {
     layer_map: LayerMap,
     layer_fmgr: LayerFileManager<Layer>,
 }
 
 impl LayerManager {
-    pub(crate) fn create() -> Self {
-        Self {
-            layer_map: LayerMap::default(),
-            layer_fmgr: LayerFileManager::new(),
-        }
-    }
-
     pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
         self.layer_fmgr.get_from_desc(desc)
     }
@@ -246,12 +241,44 @@ impl LayerManager {
         layer.delete_on_drop();
     }
 
+    pub(crate) fn resident_layers(&self) -> impl futures::stream::Stream<Item = Layer> + '_ {
+        // for small layer maps, we most likely have all resident, but for larger more are likely
+        // to be evicted assuming lots of layers correlated with longer lifespan.
+
+        let layers = self
+            .layer_map()
+            .iter_historic_layers()
+            .map(|desc| self.get_from_desc(&desc));
+
+        let layers = futures::stream::iter(layers);
+
+        layers.filter_map(|layer| async move {
+            // TODO(#6028): this query does not really need to see the ResidentLayer
+            match layer.keep_resident().await {
+                Ok(Some(layer)) => Some(layer.drop_eviction_guard()),
+                Ok(None) => None,
+                Err(e) => {
+                    // these should not happen, but we cannot make them statically impossible right
+                    // now.
+                    tracing::warn!(%layer, "failed to keep the layer resident: {e:#}");
+                    None
+                }
+            }
+        })
+    }
+
     pub(crate) fn contains(&self, layer: &Layer) -> bool {
         self.layer_fmgr.contains(layer)
     }
 }
 
 pub(crate) struct LayerFileManager<T>(HashMap<PersistentLayerKey, T>);
+
+impl<T> Default for LayerFileManager<T> {
+    fn default() -> Self {
+        Self(HashMap::default())
+    }
+}
 
 impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
     fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
@@ -273,10 +300,6 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
 
     pub(crate) fn contains(&self, layer: &T) -> bool {
         self.0.contains_key(&layer.layer_desc().key())
-    }
-
-    pub(crate) fn new() -> Self {
-        Self(HashMap::new())
     }
 
     pub(crate) fn remove(&mut self, layer: &T) {

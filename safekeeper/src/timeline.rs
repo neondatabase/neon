@@ -28,16 +28,18 @@ use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use crate::receive_wal::WalReceivers;
 use crate::recovery::{recovery_main, Donor, RecoveryNeededInfo};
 use crate::safekeeper::{
-    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
-    SafekeeperMemState, ServerInfo, Term, TermLsn, INVALID_TERM,
+    AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, ServerInfo, Term, TermLsn,
+    INVALID_TERM,
 };
 use crate::send_wal::WalSenders;
+use crate::state::{TimelineMemState, TimelinePersistentState};
+use crate::wal_backup::{self};
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::FullTimelineInfo;
 use crate::wal_storage::Storage as wal_storage_iface;
-use crate::SafeKeeperConf;
 use crate::{debug_dump, wal_storage};
+use crate::{GlobalTimelines, SafeKeeperConf};
 
 /// Things safekeeper should know about timeline state on peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +123,7 @@ impl SharedState {
     fn create_new(
         conf: &SafeKeeperConf,
         ttid: &TenantTimelineId,
-        state: SafeKeeperState,
+        state: TimelinePersistentState,
     ) -> Result<Self> {
         if state.server.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(*ttid));
@@ -175,30 +177,28 @@ impl SharedState {
         })
     }
 
-    fn is_active(&self, num_computes: usize, remote_consistent_lsn: Lsn) -> bool {
+    fn is_active(&self, num_computes: usize) -> bool {
         self.is_wal_backup_required(num_computes)
             // FIXME: add tracking of relevant pageservers and check them here individually,
             // otherwise migration won't work (we suspend too early).
-            || remote_consistent_lsn < self.sk.inmem.commit_lsn
+            || self.sk.state.inmem.remote_consistent_lsn < self.sk.state.inmem.commit_lsn
     }
 
     /// Mark timeline active/inactive and return whether s3 offloading requires
     /// start/stop action. If timeline is deactivated, control file is persisted
     /// as maintenance task does that only for active timelines.
-    async fn update_status(
-        &mut self,
-        num_computes: usize,
-        remote_consistent_lsn: Lsn,
-        ttid: TenantTimelineId,
-    ) -> bool {
-        let is_active = self.is_active(num_computes, remote_consistent_lsn);
+    async fn update_status(&mut self, num_computes: usize, ttid: TenantTimelineId) -> bool {
+        let is_active = self.is_active(num_computes);
         if self.active != is_active {
             info!(
                 "timeline {} active={} now, remote_consistent_lsn={}, commit_lsn={}",
-                ttid, is_active, remote_consistent_lsn, self.sk.inmem.commit_lsn
+                ttid,
+                is_active,
+                self.sk.state.inmem.remote_consistent_lsn,
+                self.sk.state.inmem.commit_lsn
             );
             if !is_active {
-                if let Err(e) = self.sk.persist_inmem(remote_consistent_lsn).await {
+                if let Err(e) = self.sk.state.flush().await {
                     warn!("control file save in update_status failed: {:?}", e);
                 }
             }
@@ -212,8 +212,8 @@ impl SharedState {
         let seg_size = self.get_wal_seg_size();
         num_computes > 0 ||
         // Currently only the whole segment is offloaded, so compare segment numbers.
-            (self.sk.inmem.commit_lsn.segment_number(seg_size) >
-             self.sk.inmem.backup_lsn.segment_number(seg_size))
+            (self.sk.state.inmem.commit_lsn.segment_number(seg_size) >
+             self.sk.state.inmem.backup_lsn.segment_number(seg_size))
     }
 
     /// Is current state of s3 offloading is not what it ought to be?
@@ -227,7 +227,7 @@ impl SharedState {
             };
             trace!(
                 "timeline {} s3 offloading action {} pending: num_computes={}, commit_lsn={}, backup_lsn={}",
-                self.sk.state.timeline_id, action_pending, num_computes, self.sk.inmem.commit_lsn, self.sk.inmem.backup_lsn
+                self.sk.state.timeline_id, action_pending, num_computes, self.sk.state.inmem.commit_lsn, self.sk.state.inmem.backup_lsn
             );
         }
         res
@@ -248,7 +248,6 @@ impl SharedState {
         &self,
         ttid: &TenantTimelineId,
         conf: &SafeKeeperConf,
-        remote_consistent_lsn: Lsn,
     ) -> SafekeeperTimelineInfo {
         SafekeeperTimelineInfo {
             safekeeper_id: conf.my_id.0,
@@ -260,15 +259,15 @@ impl SharedState {
             last_log_term: self.sk.get_epoch(),
             flush_lsn: self.sk.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
-            commit_lsn: self.sk.inmem.commit_lsn.0,
-            remote_consistent_lsn: remote_consistent_lsn.0,
-            peer_horizon_lsn: self.sk.inmem.peer_horizon_lsn.0,
+            commit_lsn: self.sk.state.inmem.commit_lsn.0,
+            remote_consistent_lsn: self.sk.state.inmem.remote_consistent_lsn.0,
+            peer_horizon_lsn: self.sk.state.inmem.peer_horizon_lsn.0,
             safekeeper_connstr: conf
                 .advertise_pg_addr
                 .to_owned()
                 .unwrap_or(conf.listen_pg_addr.clone()),
             http_connstr: conf.listen_http_addr.to_owned(),
-            backup_lsn: self.sk.inmem.backup_lsn.0,
+            backup_lsn: self.sk.state.inmem.backup_lsn.0,
             local_start_lsn: self.sk.state.local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),
         }
@@ -286,6 +285,29 @@ impl SharedState {
             .filter(|p| now.duration_since(p.ts) <= heartbeat_timeout)
             .cloned()
             .collect()
+    }
+
+    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
+    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
+    /// offloading.
+    /// While it is safe to use inmem values for determining horizon,
+    /// we use persistent to make possible normal states less surprising.
+    fn get_horizon_segno(
+        &self,
+        wal_backup_enabled: bool,
+        extra_horizon_lsn: Option<Lsn>,
+    ) -> XLogSegNo {
+        let state = &self.sk.state;
+
+        use std::cmp::min;
+        let mut horizon_lsn = min(state.remote_consistent_lsn, state.peer_horizon_lsn);
+        if wal_backup_enabled {
+            horizon_lsn = min(horizon_lsn, state.backup_lsn);
+        }
+        if let Some(extra_horizon_lsn) = extra_horizon_lsn {
+            horizon_lsn = min(horizon_lsn, extra_horizon_lsn);
+        }
+        horizon_lsn.segment_number(state.server.wal_seg_size as usize)
     }
 }
 
@@ -354,6 +376,12 @@ pub struct Timeline {
 
     /// Directory where timeline state is stored.
     pub timeline_dir: Utf8PathBuf,
+
+    /// Should we keep WAL on disk for active replication connections.
+    /// Especially useful for sharding, when different shards process WAL
+    /// with different speed.
+    // TODO: add `Arc<SafeKeeperConf>` here instead of adding each field separately.
+    walsenders_keep_horizon: bool,
 }
 
 impl Timeline {
@@ -366,7 +394,6 @@ impl Timeline {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
         let shared_state = SharedState::restore(conf, &ttid)?;
-        let rcl = shared_state.sk.state.remote_consistent_lsn;
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state.commit_lsn);
         let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) = watch::channel(TermLsn::from((
@@ -375,6 +402,7 @@ impl Timeline {
         )));
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
+        let walreceivers = WalReceivers::new();
         Ok(Timeline {
             ttid,
             wal_backup_launcher_tx,
@@ -383,11 +411,12 @@ impl Timeline {
             term_flush_lsn_watch_tx,
             term_flush_lsn_watch_rx,
             mutex: Mutex::new(shared_state),
-            walsenders: WalSenders::new(rcl),
-            walreceivers: WalReceivers::new(),
+            walsenders: WalSenders::new(walreceivers.clone()),
+            walreceivers,
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
+            walsenders_keep_horizon: conf.walsenders_keep_horizon,
         })
     }
 
@@ -404,8 +433,10 @@ impl Timeline {
         let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) =
             watch::channel(TermLsn::from((INVALID_TERM, Lsn::INVALID)));
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
-        let state = SafeKeeperState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
+        let state =
+            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
+        let walreceivers = WalReceivers::new();
         Ok(Timeline {
             ttid,
             wal_backup_launcher_tx,
@@ -414,11 +445,12 @@ impl Timeline {
             term_flush_lsn_watch_tx,
             term_flush_lsn_watch_rx,
             mutex: Mutex::new(SharedState::create_new(conf, &ttid, state)?),
-            walsenders: WalSenders::new(Lsn(0)),
-            walreceivers: WalReceivers::new(),
+            walsenders: WalSenders::new(walreceivers.clone()),
+            walreceivers,
             cancellation_rx,
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
+            walsenders_keep_horizon: conf.walsenders_keep_horizon,
         })
     }
 
@@ -448,7 +480,7 @@ impl Timeline {
         fs::create_dir_all(&self.timeline_dir).await?;
 
         // Write timeline to disk and start background tasks.
-        if let Err(e) = shared_state.sk.persist_inmem(Lsn::INVALID).await {
+        if let Err(e) = shared_state.sk.state.flush().await {
             // Bootstrap failed, cancel timeline and remove timeline directory.
             self.cancel(shared_state);
 
@@ -473,14 +505,29 @@ impl Timeline {
         }
     }
 
-    /// Delete timeline from disk completely, by removing timeline directory. Background
-    /// timeline activities will stop eventually.
-    pub async fn delete_from_disk(
+    /// Delete timeline from disk completely, by removing timeline directory.
+    /// Background timeline activities will stop eventually.
+    ///
+    /// Also deletes WAL in s3. Might fail if e.g. s3 is unavailable, but
+    /// deletion API endpoint is retriable.
+    pub async fn delete(
         &self,
         shared_state: &mut MutexGuard<'_, SharedState>,
+        only_local: bool,
     ) -> Result<(bool, bool)> {
         let was_active = shared_state.active;
         self.cancel(shared_state);
+
+        // TODO: It's better to wait for s3 offloader termination before
+        // removing data from s3. Though since s3 doesn't have transactions it
+        // still wouldn't guarantee absense of data after removal.
+        let conf = GlobalTimelines::get_global_config();
+        if !only_local && conf.is_wal_backup_enabled() {
+            // Note: we concurrently delete remote storage data from multiple
+            // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
+            // do some retries anyway.
+            wal_backup::delete_timeline(&self.ttid).await?;
+        }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
         Ok((dir_existed, was_active))
     }
@@ -523,11 +570,7 @@ impl Timeline {
 
     async fn update_status(&self, shared_state: &mut SharedState) -> bool {
         shared_state
-            .update_status(
-                self.walreceivers.get_num(),
-                self.get_walsenders().get_remote_consistent_lsn(),
-                self.ttid,
-            )
+            .update_status(self.walreceivers.get_num(), self.ttid)
             .await
     }
 
@@ -558,8 +601,8 @@ impl Timeline {
         }
         let shared_state = self.write_shared_state().await;
         if self.walreceivers.get_num() == 0 {
-            return shared_state.sk.inmem.commit_lsn == Lsn(0) || // no data at all yet
-            reported_remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn;
+            return shared_state.sk.state.inmem.commit_lsn == Lsn(0) || // no data at all yet
+            reported_remote_consistent_lsn >= shared_state.sk.state.inmem.commit_lsn;
         }
         false
     }
@@ -615,15 +658,12 @@ impl Timeline {
             let mut shared_state = self.write_shared_state().await;
             rmsg = shared_state.sk.process_msg(msg).await?;
 
-            // if this is AppendResponse, fill in proper pageserver and hot
-            // standby feedback.
+            // if this is AppendResponse, fill in proper hot standby feedback.
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
-                let (ps_feedback, hs_feedback) = self.walsenders.get_feedbacks();
-                resp.hs_feedback = hs_feedback;
-                resp.pageserver_feedback = ps_feedback;
+                resp.hs_feedback = self.walsenders.get_hotstandby();
             }
 
-            commit_lsn = shared_state.sk.inmem.commit_lsn;
+            commit_lsn = shared_state.sk.state.inmem.commit_lsn;
             term_flush_lsn =
                 TermLsn::from((shared_state.sk.get_term(), shared_state.sk.flush_lsn()));
         }
@@ -647,14 +687,14 @@ impl Timeline {
     }
 
     /// Returns state of the timeline.
-    pub async fn get_state(&self) -> (SafekeeperMemState, SafeKeeperState) {
+    pub async fn get_state(&self) -> (TimelineMemState, TimelinePersistentState) {
         let state = self.write_shared_state().await;
-        (state.sk.inmem.clone(), state.sk.state.clone())
+        (state.sk.state.inmem.clone(), state.sk.state.clone())
     }
 
     /// Returns latest backup_lsn.
     pub async fn get_wal_backup_lsn(&self) -> Lsn {
-        self.write_shared_state().await.sk.inmem.backup_lsn
+        self.write_shared_state().await.sk.state.inmem.backup_lsn
     }
 
     /// Sets backup_lsn to the given value.
@@ -664,7 +704,7 @@ impl Timeline {
         }
 
         let mut state = self.write_shared_state().await;
-        state.sk.inmem.backup_lsn = max(state.sk.inmem.backup_lsn, backup_lsn);
+        state.sk.state.inmem.backup_lsn = max(state.sk.state.inmem.backup_lsn, backup_lsn);
         // we should check whether to shut down offloader, but this will be done
         // soon by peer communication anyway.
         Ok(())
@@ -673,21 +713,11 @@ impl Timeline {
     /// Get safekeeper info for broadcasting to broker and other peers.
     pub async fn get_safekeeper_info(&self, conf: &SafeKeeperConf) -> SafekeeperTimelineInfo {
         let shared_state = self.write_shared_state().await;
-        shared_state.get_safekeeper_info(
-            &self.ttid,
-            conf,
-            self.walsenders.get_remote_consistent_lsn(),
-        )
+        shared_state.get_safekeeper_info(&self.ttid, conf)
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub async fn record_safekeeper_info(&self, mut sk_info: SafekeeperTimelineInfo) -> Result<()> {
-        // Update local remote_consistent_lsn in memory (in .walsenders) and in
-        // sk_info to pass it down to control file.
-        sk_info.remote_consistent_lsn = self
-            .walsenders
-            .update_remote_consistent_lsn(Lsn(sk_info.remote_consistent_lsn))
-            .0;
+    pub async fn record_safekeeper_info(&self, sk_info: SafekeeperTimelineInfo) -> Result<()> {
         let is_wal_backup_action_pending: bool;
         let commit_lsn: Lsn;
         {
@@ -696,7 +726,7 @@ impl Timeline {
             let peer_info = PeerInfo::from_sk_info(&sk_info, Instant::now());
             shared_state.peers_info.upsert(&peer_info);
             is_wal_backup_action_pending = self.update_status(&mut shared_state).await;
-            commit_lsn = shared_state.sk.inmem.commit_lsn;
+            commit_lsn = shared_state.sk.state.inmem.commit_lsn;
         }
         self.commit_lsn_watch_tx.send(commit_lsn)?;
         // Wake up wal backup launcher, if it is time to stop the offloading.
@@ -704,6 +734,13 @@ impl Timeline {
             self.wal_backup_launcher_tx.send(self.ttid).await?;
         }
         Ok(())
+    }
+
+    /// Update in memory remote consistent lsn.
+    pub async fn update_remote_consistent_lsn(&self, candidate: Lsn) {
+        let mut shared_state = self.write_shared_state().await;
+        shared_state.sk.state.inmem.remote_consistent_lsn =
+            max(shared_state.sk.state.inmem.remote_consistent_lsn, candidate);
     }
 
     pub async fn get_peers(&self, conf: &SafeKeeperConf) -> Vec<PeerInfo> {
@@ -810,10 +847,20 @@ impl Timeline {
             bail!(TimelineError::Cancelled(self.ttid));
         }
 
+        // If enabled, we use LSN of the most lagging walsender as a WAL removal horizon.
+        // This allows to get better read speed for pageservers that are lagging behind,
+        // at the cost of keeping more WAL on disk.
+        let replication_horizon_lsn = if self.walsenders_keep_horizon {
+            self.walsenders.laggard_lsn()
+        } else {
+            None
+        };
+
         let horizon_segno: XLogSegNo;
         let remover = {
             let shared_state = self.write_shared_state().await;
-            horizon_segno = shared_state.sk.get_horizon_segno(wal_backup_enabled);
+            horizon_segno =
+                shared_state.get_horizon_segno(wal_backup_enabled, replication_horizon_lsn);
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(()); // nothing to do
             }
@@ -836,11 +883,10 @@ impl Timeline {
     /// to date so that storage nodes restart doesn't cause many pageserver ->
     /// safekeeper reconnections.
     pub async fn maybe_persist_control_file(&self) -> Result<()> {
-        let remote_consistent_lsn = self.walsenders.get_remote_consistent_lsn();
         self.write_shared_state()
             .await
             .sk
-            .maybe_persist_inmem_control_file(remote_consistent_lsn)
+            .maybe_persist_inmem_control_file()
             .await
     }
 
@@ -851,21 +897,21 @@ impl Timeline {
             return None;
         }
 
-        let ps_feedback = self.walsenders.get_ps_feedback();
+        let (ps_feedback_count, last_ps_feedback) = self.walsenders.get_ps_feedback_stats();
         let state = self.write_shared_state().await;
         if state.active {
             Some(FullTimelineInfo {
                 ttid: self.ttid,
-                ps_feedback,
+                ps_feedback_count,
+                last_ps_feedback,
                 wal_backup_active: state.wal_backup_active,
                 timeline_is_active: state.active,
                 num_computes: self.walreceivers.get_num() as u32,
                 last_removed_segno: state.last_removed_segno,
                 epoch_start_lsn: state.sk.epoch_start_lsn,
-                mem_state: state.sk.inmem.clone(),
+                mem_state: state.sk.state.inmem.clone(),
                 persisted_state: state.sk.state.clone(),
                 flush_lsn: state.sk.wal_store.flush_lsn(),
-                remote_consistent_lsn: self.get_walsenders().get_remote_consistent_lsn(),
                 wal_storage: state.sk.wal_store.get_metrics(),
             })
         } else {
@@ -889,12 +935,26 @@ impl Timeline {
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: state.last_removed_segno,
             epoch_start_lsn: state.sk.epoch_start_lsn,
-            mem_state: state.sk.inmem.clone(),
+            mem_state: state.sk.state.inmem.clone(),
             write_lsn,
             write_record_lsn,
             flush_lsn,
             file_open,
         }
+    }
+
+    /// Apply a function to the control file state and persist it.
+    pub async fn map_control_file<T>(
+        &self,
+        f: impl FnOnce(&mut TimelinePersistentState) -> Result<T>,
+    ) -> Result<T> {
+        let mut state = self.write_shared_state().await;
+        let mut persistent_state = state.sk.state.start_change();
+        // If f returns error, we abort the change and don't persist anything.
+        let res = f(&mut persistent_state)?;
+        // If persisting fails, we abort the change and return error.
+        state.sk.state.finish_change(&persistent_state).await?;
+        Ok(res)
     }
 }
 

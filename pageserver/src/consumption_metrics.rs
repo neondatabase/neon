@@ -17,7 +17,7 @@ use tracing::*;
 use utils::id::NodeId;
 
 mod metrics;
-use metrics::MetricsKey;
+use crate::consumption_metrics::metrics::MetricsKey;
 mod disk_cache;
 mod upload;
 
@@ -267,7 +267,7 @@ async fn calculate_synthetic_size_worker(
             }
         };
 
-        for (tenant_shard_id, tenant_state) in tenants {
+        for (tenant_shard_id, tenant_state, _gen) in tenants {
             if tenant_state != TenantState::Active {
                 continue;
             }

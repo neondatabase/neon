@@ -1,6 +1,10 @@
 use crate::{
-    auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
-    context::RequestMonitoring, error::UserFacingError, metrics::NUM_DB_CONNECTIONS_GAUGE,
+    auth::parse_endpoint_param,
+    cancellation::CancelClosure,
+    console::{errors::WakeComputeError, messages::MetricsAuxInfo},
+    context::RequestMonitoring,
+    error::{ReportableError, UserFacingError},
+    metrics::NUM_DB_CONNECTIONS_GAUGE,
     proxy::neon_option,
 };
 use futures::{FutureExt, TryFutureExt};
@@ -39,11 +43,35 @@ impl UserFacingError for ConnectionError {
             // This helps us drop irrelevant library-specific prefixes.
             // TODO: propagate severity level and other parameters.
             Postgres(err) => match err.as_db_error() {
-                Some(err) => err.message().to_owned(),
+                Some(err) => {
+                    let msg = err.message();
+
+                    if msg.starts_with("unsupported startup parameter: ")
+                        || msg.starts_with("unsupported startup parameter in options: ")
+                    {
+                        format!("{msg}. Please use unpooled connection or remove this parameter from the startup package. More details: https://neon.tech/docs/connect/connection-errors#unsupported-startup-parameter")
+                    } else {
+                        msg.to_owned()
+                    }
+                }
                 None => err.to_string(),
             },
             WakeComputeError(err) => err.to_string_client(),
             _ => COULD_NOT_CONNECT.to_owned(),
+        }
+    }
+}
+
+impl ReportableError for ConnectionError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self {
+            ConnectionError::Postgres(e) if e.as_db_error().is_some() => {
+                crate::error::ErrorKind::Postgres
+            }
+            ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::WakeComputeError(e) => e.get_error_kind(),
         }
     }
 }
@@ -65,7 +93,7 @@ impl ConnCfg {
     }
 
     /// Reuse password or auth keys from the other config.
-    pub fn reuse_password(&mut self, other: &Self) {
+    pub fn reuse_password(&mut self, other: Self) {
         if let Some(password) = other.get_password() {
             self.password(password);
         }
@@ -225,6 +253,8 @@ pub struct PostgresConnection {
     pub params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
     pub cancel_closure: CancelClosure,
+    /// Labels for proxy's metrics.
+    pub aux: MetricsAuxInfo,
 
     _guage: IntCounterPairGuard,
 }
@@ -235,6 +265,7 @@ impl ConnCfg {
         &self,
         ctx: &mut RequestMonitoring,
         allow_self_signed_compute: bool,
+        aux: MetricsAuxInfo,
         timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
@@ -269,6 +300,7 @@ impl ConnCfg {
             stream,
             params,
             cancel_closure,
+            aux,
             _guage: NUM_DB_CONNECTIONS_GAUGE
                 .with_label_values(&[ctx.protocol])
                 .guard(),

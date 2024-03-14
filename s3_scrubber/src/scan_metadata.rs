@@ -7,7 +7,7 @@ use crate::checks::{
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use aws_sdk_s3::Client;
-use futures_util::{pin_mut, StreamExt, TryStreamExt};
+use futures_util::{StreamExt, TryStreamExt};
 use histogram::Histogram;
 use pageserver::tenant::remote_timeline_client::remote_layer_path;
 use pageserver::tenant::IndexPart;
@@ -226,7 +226,7 @@ pub async fn scan_metadata(
         Ok((ttid, data))
     }
     let timelines = timelines.map_ok(|ttid| report_on_timeline(&s3_client, &target, ttid));
-    let timelines = timelines.try_buffered(CONCURRENCY);
+    let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
 
     // We must gather all the TenantShardTimelineId->S3TimelineBlobData for each tenant, because different
     // shards in the same tenant might refer to one anothers' keys if a shard split has happened.
@@ -309,7 +309,6 @@ pub async fn scan_metadata(
     // all results for the same tenant will be adjacent.  We accumulate these,
     // and then call `analyze_tenant` to flush, when we see the next tenant ID.
     let mut summary = MetadataSummary::new();
-    pin_mut!(timelines);
     while let Some(i) = timelines.next().await {
         let (ttid, data) = i?;
         summary.update_data(&data);

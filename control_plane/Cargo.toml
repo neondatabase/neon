@@ -19,6 +19,7 @@ hex.workspace = true
 hyper.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
+scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true

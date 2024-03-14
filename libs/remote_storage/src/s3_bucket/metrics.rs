@@ -12,6 +12,7 @@ pub(crate) enum RequestKind {
     Delete = 2,
     List = 3,
     Copy = 4,
+    TimeTravel = 5,
 }
 
 use RequestKind::*;
@@ -24,6 +25,7 @@ impl RequestKind {
             Delete => "delete_object",
             List => "list_objects",
             Copy => "copy_object",
+            TimeTravel => "time_travel_recover",
         }
     }
     const fn as_index(&self) -> usize {
@@ -31,7 +33,7 @@ impl RequestKind {
     }
 }
 
-pub(super) struct RequestTyped<C>([C; 5]);
+pub(super) struct RequestTyped<C>([C; 6]);
 
 impl<C> RequestTyped<C> {
     pub(super) fn get(&self, kind: RequestKind) -> &C {
@@ -40,8 +42,8 @@ impl<C> RequestTyped<C> {
 
     fn build_with(mut f: impl FnMut(RequestKind) -> C) -> Self {
         use RequestKind::*;
-        let mut it = [Get, Put, Delete, List, Copy].into_iter();
-        let arr = std::array::from_fn::<C, 5, _>(|index| {
+        let mut it = [Get, Put, Delete, List, Copy, TimeTravel].into_iter();
+        let arr = std::array::from_fn::<C, 6, _>(|index| {
             let next = it.next().unwrap();
             assert_eq!(index, next.as_index());
             f(next)

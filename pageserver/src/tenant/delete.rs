@@ -3,10 +3,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::{models::TenantState, shard::TenantShardId};
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, instrument, Instrument, Span};
+use tracing::{error, instrument, Instrument};
 
 use utils::{backoff, completion, crashsafe, fs_ext, id::TimelineId};
 
@@ -84,16 +84,18 @@ async fn create_remote_delete_mark(
             let data = bytes::Bytes::from_static(data);
             let stream = futures::stream::once(futures::future::ready(Ok(data)));
             remote_storage
-                .upload(stream, 0, &remote_mark_path, None)
+                .upload(stream, 0, &remote_mark_path, None, cancel)
                 .await
         },
-        |_e| false,
+        TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
-        backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
+        cancel,
     )
     .await
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
+    .and_then(|x| x)
     .context("mark_upload")?;
 
     Ok(())
@@ -136,7 +138,11 @@ async fn schedule_ordered_timeline_deletions(
     let mut already_running_deletions = vec![];
 
     for (timeline_id, _) in sorted.into_iter().rev() {
-        if let Err(e) = DeleteTimelineFlow::run(tenant, timeline_id, true).await {
+        let span = tracing::info_span!("timeline_delete", %timeline_id);
+        let res = DeleteTimelineFlow::run(tenant, timeline_id, true)
+            .instrument(span)
+            .await;
+        if let Err(e) = res {
             match e {
                 DeleteTimelineError::NotFound => {
                     // Timeline deletion finished after call to clone above but before call
@@ -178,14 +184,16 @@ async fn remove_tenant_remote_delete_mark(
     if let Some(remote_storage) = remote_storage {
         let path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
         backoff::retry(
-            || async { remote_storage.delete(&path).await },
-            |_e| false,
+            || async { remote_storage.delete(&path, cancel).await },
+            TimeoutOrCancel::caused_by_cancel,
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
-            backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
+            cancel,
         )
         .await
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
+        .and_then(|x| x)
         .context("remove_tenant_remote_delete_mark")?;
     }
     Ok(())
@@ -237,6 +245,8 @@ async fn cleanup_remaining_fs_traces(
     }
 
     rm(conf.tenant_deleted_mark_file_path(tenant_shard_id), false).await?;
+
+    rm(conf.tenant_heatmap_path(tenant_shard_id), false).await?;
 
     fail::fail_point!("tenant-delete-before-remove-tenant-dir", |_| {
         Err(anyhow::anyhow!(
@@ -409,7 +419,10 @@ impl DeleteTenantFlow {
             .await
             .expect("cant be stopping or broken");
 
-        tenant.attach(preload, ctx).await.context("attach")?;
+        tenant
+            .attach(preload, super::SpawnMode::Eager, ctx)
+            .await
+            .context("attach")?;
 
         Self::background(
             guard,
@@ -485,11 +498,7 @@ impl DeleteTenantFlow {
                 };
                 Ok(())
             }
-            .instrument({
-                let span = tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug());
-                span.follows_from(Span::current());
-                span
-            }),
+            .instrument(tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
         );
     }
 
@@ -542,6 +551,7 @@ impl DeleteTenantFlow {
         )
         .await?;
 
+        pausable_failpoint!("tenant-delete-before-cleanup-remaining-fs-traces-pausable");
         fail::fail_point!("tenant-delete-before-cleanup-remaining-fs-traces", |_| {
             Err(anyhow::anyhow!(
                 "failpoint: tenant-delete-before-cleanup-remaining-fs-traces"

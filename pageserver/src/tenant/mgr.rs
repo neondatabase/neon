@@ -2,10 +2,16 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
+use futures::stream::StreamExt;
+use itertools::Itertools;
 use pageserver_api::key::Key;
-use pageserver_api::shard::{ShardIdentity, ShardNumber, TenantShardId};
+use pageserver_api::models::ShardParameters;
+use pageserver_api::shard::{
+    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -20,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
-use utils::crashsafe;
+use utils::{completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -28,15 +34,17 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
+use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
-    AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, TenantConfOpt,
+    AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
+    TenantConfOpt,
 };
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
-use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext::PathExt;
@@ -56,6 +64,7 @@ use super::TenantSharedResources;
 /// that way we avoid having to carefully switch a tenant's ingestion etc on and off during
 /// its lifetime, and we can preserve some important safety invariants like `Tenant` always
 /// having a properly acquired generation (Secondary doesn't need a generation)
+#[derive(Clone)]
 pub(crate) enum TenantSlot {
     Attached(Arc<Tenant>),
     Secondary(Arc<SecondaryTenant>),
@@ -288,7 +297,7 @@ async fn init_load_generations(
     } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-        match client.re_attach().await {
+        match client.re_attach(conf).await {
             Ok(tenants) => tenants,
             Err(RetryForeverError::ShuttingDown) => {
                 anyhow::bail!("Shut down while waiting for control plane re-attach response")
@@ -352,12 +361,6 @@ fn load_tenant_config(
         return Ok(None);
     }
 
-    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-    if tenant_ignore_mark_file.exists() {
-        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-        return Ok(None);
-    }
-
     let tenant_shard_id = match tenant_dir_path
         .file_name()
         .unwrap_or_default()
@@ -369,6 +372,59 @@ fn load_tenant_config(
             return Ok(None);
         }
     };
+
+    // Clean up legacy `metadata` files.
+    // Doing it here because every single tenant directory is visited here.
+    // In any later code, there's different treatment of tenant dirs
+    // ... depending on whether the tenant is in re-attach response or not
+    // ... epending on whether the tenant is ignored or not
+    assert_eq!(
+        &conf.tenant_path(&tenant_shard_id),
+        &tenant_dir_path,
+        "later use of conf....path() methods would be dubious"
+    );
+    let timelines: Vec<TimelineId> = match conf.timelines_path(&tenant_shard_id).read_dir_utf8() {
+        Ok(iter) => {
+            let mut timelines = Vec::new();
+            for res in iter {
+                let p = res?;
+                let Some(timeline_id) = p.file_name().parse::<TimelineId>().ok() else {
+                    // skip any entries that aren't TimelineId, such as
+                    // - *.___temp dirs
+                    // - unfinished initdb uploads (test_non_uploaded_root_timeline_is_deleted_after_restart)
+                    continue;
+                };
+                timelines.push(timeline_id);
+            }
+            timelines
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(anyhow::anyhow!(e)),
+    };
+    for timeline_id in timelines {
+        let timeline_path = &conf.timeline_path(&tenant_shard_id, &timeline_id);
+        let metadata_path = timeline_path.join(METADATA_FILE_NAME);
+        match std::fs::remove_file(&metadata_path) {
+            Ok(()) => {
+                crashsafe::fsync(timeline_path)
+                    .context("fsync timeline dir after removing legacy metadata file")?;
+                info!("removed legacy metadata file at {metadata_path}");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // something removed the file earlier, or it was never there
+                // We don't care, this software version doesn't write it again, so, we're good.
+            }
+            Err(e) => {
+                anyhow::bail!("remove legacy metadata file: {e}: {metadata_path}");
+            }
+        }
+    }
+
+    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+    if tenant_ignore_mark_file.exists() {
+        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+        return Ok(None);
+    }
 
     Ok(Some((
         tenant_shard_id,
@@ -464,6 +520,26 @@ pub async fn init_tenant_mgr(
             // We have a generation map: treat it as the authority for whether
             // this tenant is really attached.
             if let Some(gen) = generations.get(&tenant_shard_id) {
+                if let LocationMode::Attached(attached) = &location_conf.mode {
+                    if attached.generation > *gen {
+                        tracing::error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                            "Control plane gave decreasing generation ({gen:?}) in re-attach response for tenant that was attached in generation {:?}, demoting to secondary",
+                            attached.generation
+                        );
+
+                        // We cannot safely attach this tenant given a bogus generation number, but let's avoid throwing away
+                        // local disk content: demote to secondary rather than detaching.
+                        tenants.insert(
+                            tenant_shard_id,
+                            TenantSlot::Secondary(SecondaryTenant::new(
+                                tenant_shard_id,
+                                location_conf.shard,
+                                location_conf.tenant_conf.clone(),
+                                &SecondaryLocationConfig { warm: false },
+                            )),
+                        );
+                    }
+                }
                 *gen
             } else {
                 match &location_conf.mode {
@@ -476,6 +552,8 @@ pub async fn init_tenant_mgr(
                             tenant_shard_id,
                             TenantSlot::Secondary(SecondaryTenant::new(
                                 tenant_shard_id,
+                                location_conf.shard,
+                                location_conf.tenant_conf,
                                 secondary_config,
                             )),
                         );
@@ -519,7 +597,7 @@ pub async fn init_tenant_mgr(
             shard_identity,
             Some(init_order.clone()),
             &TENANTS,
-            SpawnMode::Normal,
+            SpawnMode::Lazy,
             &ctx,
         ) {
             Ok(tenant) => {
@@ -581,13 +659,6 @@ pub(crate) fn tenant_spawn(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
-    info!(
-        tenant_id = %tenant_shard_id.tenant_id,
-        shard_id = %tenant_shard_id.shard_slug(),
-        generation = ?location_conf.location.generation,
-        attach_mode = ?location_conf.location.attach_mode,
-        "Attaching tenant"
-    );
     let tenant = match Tenant::spawn(
         conf,
         tenant_shard_id,
@@ -625,8 +696,6 @@ pub(crate) async fn shutdown_all_tenants() {
 }
 
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
-    use utils::completion;
-
     let mut join_set = JoinSet::new();
 
     // Atomically, 1. create the shutdown tasks and 2. prevent creation of new tenants.
@@ -665,7 +734,7 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                                     // going to log too many lines
                                     debug!("tenant successfully stopped");
                                 }
-                                .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug())),
+                                .instrument(info_span!("shutdown", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
                             );
 
                             total_attached += 1;
@@ -717,7 +786,7 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
         tokio::select! {
             Some(joined) = join_set.join_next() => {
                 match joined {
-                    Ok(()) => {}
+                    Ok(()) => {},
                     Err(join_error) if join_error.is_cancelled() => {
                         unreachable!("we are not cancelling any of the tasks");
                     }
@@ -760,6 +829,8 @@ pub(crate) enum SetNewTenantConfigError {
     GetTenant(#[from] GetTenantError),
     #[error(transparent)]
     Persist(anyhow::Error),
+    #[error(transparent)]
+    Other(anyhow::Error),
 }
 
 pub(crate) async fn set_new_tenant_config(
@@ -773,10 +844,21 @@ pub(crate) async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_shard_id, true)?;
 
+    if !tenant.tenant_shard_id().shard_count.is_unsharded() {
+        // Note that we use ShardParameters::default below.
+        return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
+            "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
+        )));
+    }
+
     // This is a legacy API that only operates on attached tenants: the preferred
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
-    let location_conf = LocationConf::attached_single(new_tenant_conf, tenant.generation);
+    let location_conf = LocationConf::attached_single(
+        new_tenant_conf.clone(),
+        tenant.generation,
+        &ShardParameters::default(),
+    );
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf)
         .await
@@ -830,15 +912,13 @@ impl TenantManager {
                 TenantState::Active => Ok(Arc::clone(tenant)),
                 _ => {
                     if active_only {
-                        Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
+                        Err(GetTenantError::NotActive(tenant_shard_id))
                     } else {
                         Ok(Arc::clone(tenant))
                     }
                 }
             },
-            Some(TenantSlot::InProgress(_)) => {
-                Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
-            }
+            Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_shard_id)),
             None | Some(TenantSlot::Secondary(_)) => {
                 Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
             }
@@ -861,13 +941,24 @@ impl TenantManager {
         }
     }
 
+    /// Whether the `TenantManager` is responsible for the tenant shard
+    pub(crate) fn manages_tenant_shard(&self, tenant_shard_id: TenantShardId) -> bool {
+        let locked = self.tenants.read().unwrap();
+
+        let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
+            .ok()
+            .flatten();
+
+        peek_slot.is_some()
+    }
+
     #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(crate) async fn upsert_location(
         &self,
         tenant_shard_id: TenantShardId,
         new_location_config: LocationConf,
         flush: Option<Duration>,
-        spawn_mode: SpawnMode,
+        mut spawn_mode: SpawnMode,
         ctx: &RequestContext,
     ) -> Result<Option<Arc<Tenant>>, UpsertLocationError> {
         debug_assert_current_span_has_tenant_id();
@@ -887,19 +978,29 @@ impl TenantManager {
                 tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Write)?;
             match (&new_location_config.mode, peek_slot) {
                 (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
-                    if attach_conf.generation == tenant.generation {
-                        // A transition from Attached to Attached in the same generation, we may
-                        // take our fast path and just provide the updated configuration
-                        // to the tenant.
-                        tenant.set_new_location_config(
-                            AttachedTenantConf::try_from(new_location_config.clone())
-                                .map_err(UpsertLocationError::BadRequest)?,
-                        );
+                    match attach_conf.generation.cmp(&tenant.generation) {
+                        Ordering::Equal => {
+                            // A transition from Attached to Attached in the same generation, we may
+                            // take our fast path and just provide the updated configuration
+                            // to the tenant.
+                            tenant.set_new_location_config(
+                                AttachedTenantConf::try_from(new_location_config.clone())
+                                    .map_err(UpsertLocationError::BadRequest)?,
+                            );
 
-                        Some(FastPathModified::Attached(tenant.clone()))
-                    } else {
-                        // Different generations, fall through to general case
-                        None
+                            Some(FastPathModified::Attached(tenant.clone()))
+                        }
+                        Ordering::Less => {
+                            return Err(UpsertLocationError::BadRequest(anyhow::anyhow!(
+                                "Generation {:?} is less than existing {:?}",
+                                attach_conf.generation,
+                                tenant.generation
+                            )));
+                        }
+                        Ordering::Greater => {
+                            // Generation advanced, fall through to general case of replacing `Tenant` object
+                            None
+                        }
                     }
                 }
                 (
@@ -907,6 +1008,7 @@ impl TenantManager {
                     Some(TenantSlot::Secondary(secondary_tenant)),
                 ) => {
                     secondary_tenant.set_config(secondary_conf);
+                    secondary_tenant.set_tenant_conf(&new_location_config.tenant_conf);
                     Some(FastPathModified::Secondary(secondary_tenant.clone()))
                 }
                 _ => {
@@ -1003,6 +1105,12 @@ impl TenantManager {
                     }
                 }
                 slot_guard.drop_old_value().expect("We just shut it down");
+
+                // Edge case: if we were called with SpawnMode::Create, but a Tenant already existed, then
+                // the caller thinks they're creating but the tenant already existed.  We must switch to
+                // Eager mode so that when starting this Tenant we properly probe remote storage for timelines,
+                // rather than assuming it to be empty.
+                spawn_mode = SpawnMode::Eager;
             }
             Some(TenantSlot::Secondary(state)) => {
                 info!("Shutting down secondary tenant");
@@ -1039,16 +1147,36 @@ impl TenantManager {
 
         let new_slot = match &new_location_config.mode {
             LocationMode::Secondary(secondary_config) => {
-                TenantSlot::Secondary(SecondaryTenant::new(tenant_shard_id, secondary_config))
+                let shard_identity = new_location_config.shard;
+                TenantSlot::Secondary(SecondaryTenant::new(
+                    tenant_shard_id,
+                    shard_identity,
+                    new_location_config.tenant_conf,
+                    secondary_config,
+                ))
             }
             LocationMode::Attached(_attach_config) => {
                 let shard_identity = new_location_config.shard;
+
+                // Testing hack: if we are configured with no control plane, then drop the generation
+                // from upserts.  This enables creating generation-less tenants even though neon_local
+                // always uses generations when calling the location conf API.
+                let attached_conf = if cfg!(feature = "testing") {
+                    let mut conf = AttachedTenantConf::try_from(new_location_config)?;
+                    if self.conf.control_plane_api.is_none() {
+                        conf.location.generation = Generation::none();
+                    }
+                    conf
+                } else {
+                    AttachedTenantConf::try_from(new_location_config)?
+                };
+
                 let tenant = tenant_spawn(
                     self.conf,
                     tenant_shard_id,
                     &tenant_path,
                     self.resources.clone(),
-                    AttachedTenantConf::try_from(new_location_config)?,
+                    attached_conf,
                     shard_identity,
                     None,
                     self.tenants,
@@ -1066,14 +1194,46 @@ impl TenantManager {
             None
         };
 
-        slot_guard.upsert(new_slot).map_err(|e| match e {
-            TenantSlotUpsertError::InternalError(e) => {
-                UpsertLocationError::Other(anyhow::anyhow!(e))
+        match slot_guard.upsert(new_slot) {
+            Err(TenantSlotUpsertError::InternalError(e)) => {
+                Err(UpsertLocationError::Other(anyhow::anyhow!(e)))
             }
-            TenantSlotUpsertError::MapState(e) => UpsertLocationError::Unavailable(e),
-        })?;
+            Err(TenantSlotUpsertError::MapState(e)) => Err(UpsertLocationError::Unavailable(e)),
+            Err(TenantSlotUpsertError::ShuttingDown((new_slot, _completion))) => {
+                // If we just called tenant_spawn() on a new tenant, and can't insert it into our map, then
+                // we must not leak it: this would violate the invariant that after shutdown_all_tenants, all tenants
+                // are shutdown.
+                //
+                // We must shut it down inline here.
+                match new_slot {
+                    TenantSlot::InProgress(_) => {
+                        // Unreachable because we never insert an InProgress
+                        unreachable!()
+                    }
+                    TenantSlot::Attached(tenant) => {
+                        let (_guard, progress) = utils::completion::channel();
+                        info!("Shutting down just-spawned tenant, because tenant manager is shut down");
+                        match tenant.shutdown(progress, false).await {
+                            Ok(()) => {
+                                info!("Finished shutting down just-spawned tenant");
+                            }
+                            Err(barrier) => {
+                                info!("Shutdown already in progress, waiting for it to complete");
+                                barrier.wait().await;
+                            }
+                        }
+                    }
+                    TenantSlot::Secondary(secondary_tenant) => {
+                        secondary_tenant.shutdown().await;
+                    }
+                }
 
-        Ok(attached_tenant)
+                Err(UpsertLocationError::Unavailable(
+                    TenantMapError::ShuttingDown,
+                ))
+            }
+            Ok(()) => Ok(attached_tenant),
+        }
     }
 
     /// Resetting a tenant is equivalent to detaching it, then attaching it again with the same
@@ -1090,7 +1250,7 @@ impl TenantManager {
         &self,
         tenant_shard_id: TenantShardId,
         drop_cache: bool,
-        ctx: RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
         let Some(old_slot) = slot_guard.get_old_value() else {
@@ -1142,8 +1302,8 @@ impl TenantManager {
             shard_identity,
             None,
             self.tenants,
-            SpawnMode::Normal,
-            &ctx,
+            SpawnMode::Eager,
+            ctx,
         )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
@@ -1189,11 +1349,33 @@ impl TenantManager {
         }
     }
 
+    /// Total list of all tenant slots: this includes attached, secondary, and InProgress.
+    pub(crate) fn list(&self) -> Vec<(TenantShardId, TenantSlot)> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => Vec::new(),
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => {
+                map.iter().map(|(k, v)| (*k, v.clone())).collect()
+            }
+        }
+    }
+
+    pub(crate) fn get(&self, tenant_shard_id: TenantShardId) -> Option<TenantSlot> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => None,
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => {
+                map.get(&tenant_shard_id).cloned()
+            }
+        }
+    }
+
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
         activation_timeout: Duration,
     ) -> Result<(), DeleteTenantError> {
+        super::span::debug_assert_current_span_has_tenant_id();
         // We acquire a SlotGuard during this function to protect against concurrent
         // changes while the ::prepare phase of DeleteTenantFlow executes, but then
         // have to return the Tenant to the map while the background deletion runs.
@@ -1253,14 +1435,399 @@ impl TenantManager {
         slot_guard.revert();
         result
     }
+
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), new_shard_count=%new_shard_count.literal()))]
+    pub(crate) async fn shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        new_shard_count: ShardCount,
+        new_stripe_size: Option<ShardStripeSize>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<TenantShardId>> {
+        let r = self
+            .do_shard_split(tenant_shard_id, new_shard_count, new_stripe_size, ctx)
+            .await;
+        if r.is_err() {
+            // Shard splitting might have left the original shard in a partially shut down state (it
+            // stops the shard's remote timeline client).  Reset it to ensure we leave things in
+            // a working state.
+            if self.get(tenant_shard_id).is_some() {
+                tracing::warn!("Resetting {tenant_shard_id} after shard split failure");
+                if let Err(e) = self.reset_tenant(tenant_shard_id, false, ctx).await {
+                    // Log this error because our return value will still be the original error, not this one.  This is
+                    // a severe error: if this happens, we might be leaving behind a tenant that is not fully functional
+                    // (e.g. has uploads disabled).  We can't do anything else: if reset fails then shutting the tenant down or
+                    // setting it broken probably won't help either.
+                    tracing::error!("Failed to reset {tenant_shard_id}: {e}");
+                }
+            }
+        }
+
+        r
+    }
+
+    pub(crate) async fn do_shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        new_shard_count: ShardCount,
+        new_stripe_size: Option<ShardStripeSize>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<TenantShardId>> {
+        let tenant = get_tenant(tenant_shard_id, true)?;
+
+        // Validate the incoming request
+        if new_shard_count.count() <= tenant_shard_id.shard_count.count() {
+            anyhow::bail!("Requested shard count is not an increase");
+        }
+        let expansion_factor = new_shard_count.count() / tenant_shard_id.shard_count.count();
+        if !expansion_factor.is_power_of_two() {
+            anyhow::bail!("Requested split is not a power of two");
+        }
+
+        if let Some(new_stripe_size) = new_stripe_size {
+            if tenant.get_shard_stripe_size() != new_stripe_size
+                && tenant_shard_id.shard_count.count() > 1
+            {
+                // This tenant already has multiple shards, it is illegal to try and change its stripe size
+                anyhow::bail!(
+                    "Shard stripe size may not be modified once tenant has multiple shards"
+                );
+            }
+        }
+
+        // Plan: identify what the new child shards will be
+        let child_shards = tenant_shard_id.split(new_shard_count);
+        tracing::info!(
+            "Shard {} splits into: {}",
+            tenant_shard_id.to_index(),
+            child_shards
+                .iter()
+                .map(|id| format!("{}", id.to_index()))
+                .join(",")
+        );
+
+        fail::fail_point!("shard-split-pre-prepare", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+
+        let parent_shard_identity = tenant.shard_identity;
+        let parent_tenant_conf = tenant.get_tenant_conf();
+        let parent_generation = tenant.generation;
+
+        // Phase 1: Write out child shards' remote index files, in the parent tenant's current generation
+        if let Err(e) = tenant.split_prepare(&child_shards).await {
+            // If [`Tenant::split_prepare`] fails, we must reload the tenant, because it might
+            // have been left in a partially-shut-down state.
+            tracing::warn!("Failed to prepare for split: {e}, reloading Tenant before returning");
+            self.reset_tenant(tenant_shard_id, false, ctx).await?;
+            return Err(e);
+        }
+
+        fail::fail_point!("shard-split-post-prepare", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+
+        self.resources.deletion_queue_client.flush_advisory();
+
+        // Phase 2: Put the parent shard to InProgress and grab a reference to the parent Tenant
+        drop(tenant);
+        let mut parent_slot_guard =
+            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let parent = match parent_slot_guard.get_old_value() {
+            Some(TenantSlot::Attached(t)) => t,
+            Some(TenantSlot::Secondary(_)) => anyhow::bail!("Tenant location in secondary mode"),
+            Some(TenantSlot::InProgress(_)) => {
+                // tenant_map_acquire_slot never returns InProgress, if a slot was InProgress
+                // it would return an error.
+                unreachable!()
+            }
+            None => {
+                // We don't actually need the parent shard to still be attached to do our work, but it's
+                // a weird enough situation that the caller probably didn't want us to continue working
+                // if they had detached the tenant they requested the split on.
+                anyhow::bail!("Detached parent shard in the middle of split!")
+            }
+        };
+        fail::fail_point!("shard-split-pre-hardlink", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+        // Optimization: hardlink layers from the parent into the children, so that they don't have to
+        // re-download & duplicate the data referenced in their initial IndexPart
+        self.shard_split_hardlink(parent, child_shards.clone())
+            .await?;
+        fail::fail_point!("shard-split-post-hardlink", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+
+        // Take a snapshot of where the parent's WAL ingest had got to: we will wait for
+        // child shards to reach this point.
+        let mut target_lsns = HashMap::new();
+        for timeline in parent.timelines.lock().unwrap().clone().values() {
+            target_lsns.insert(timeline.timeline_id, timeline.get_last_record_lsn());
+        }
+
+        // TODO: we should have the parent shard stop its WAL ingest here, it's a waste of resources
+        // and could slow down the children trying to catch up.
+
+        // Phase 3: Spawn the child shards
+        for child_shard in &child_shards {
+            let mut child_shard_identity = parent_shard_identity;
+            if let Some(new_stripe_size) = new_stripe_size {
+                child_shard_identity.stripe_size = new_stripe_size;
+            }
+            child_shard_identity.count = child_shard.shard_count;
+            child_shard_identity.number = child_shard.shard_number;
+
+            let child_location_conf = LocationConf {
+                mode: LocationMode::Attached(AttachedLocationConfig {
+                    generation: parent_generation,
+                    attach_mode: AttachmentMode::Single,
+                }),
+                shard: child_shard_identity,
+                tenant_conf: parent_tenant_conf.clone(),
+            };
+
+            self.upsert_location(
+                *child_shard,
+                child_location_conf,
+                None,
+                SpawnMode::Eager,
+                ctx,
+            )
+            .await?;
+        }
+
+        fail::fail_point!("shard-split-post-child-conf", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+
+        // Phase 4: wait for child chards WAL ingest to catch up to target LSN
+        for child_shard_id in &child_shards {
+            let child_shard_id = *child_shard_id;
+            let child_shard = {
+                let locked = TENANTS.read().unwrap();
+                let peek_slot =
+                    tenant_map_peek_slot(&locked, &child_shard_id, TenantSlotPeekMode::Read)?;
+                peek_slot.and_then(|s| s.get_attached()).cloned()
+            };
+            if let Some(t) = child_shard {
+                // Wait for the child shard to become active: this should be very quick because it only
+                // has to download the index_part that we just uploaded when creating it.
+                if let Err(e) = t.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await {
+                    // This is not fatal: we have durably created the child shard.  It just makes the
+                    // split operation less seamless for clients, as we will may detach the parent
+                    // shard before the child shards are fully ready to serve requests.
+                    tracing::warn!("Failed to wait for shard {child_shard_id} to activate: {e}");
+                    continue;
+                }
+
+                let timelines = t.timelines.lock().unwrap().clone();
+                for timeline in timelines.values() {
+                    let Some(target_lsn) = target_lsns.get(&timeline.timeline_id) else {
+                        continue;
+                    };
+
+                    tracing::info!(
+                        "Waiting for child shard {}/{} to reach target lsn {}...",
+                        child_shard_id,
+                        timeline.timeline_id,
+                        target_lsn
+                    );
+
+                    fail::fail_point!("shard-split-lsn-wait", |_| Err(anyhow::anyhow!(
+                        "failpoint"
+                    )));
+                    if let Err(e) = timeline.wait_lsn(*target_lsn, ctx).await {
+                        // Failure here might mean shutdown, in any case this part is an optimization
+                        // and we shouldn't hold up the split operation.
+                        tracing::warn!(
+                            "Failed to wait for timeline {} to reach lsn {target_lsn}: {e}",
+                            timeline.timeline_id
+                        );
+                    } else {
+                        tracing::info!(
+                            "Child shard {}/{} reached target lsn {}",
+                            child_shard_id,
+                            timeline.timeline_id,
+                            target_lsn
+                        );
+                    }
+                }
+            }
+        }
+
+        // Phase 5: Shut down the parent shard, and erase it from disk
+        let (_guard, progress) = completion::channel();
+        match parent.shutdown(progress, false).await {
+            Ok(()) => {}
+            Err(other) => {
+                other.wait().await;
+            }
+        }
+        let local_tenant_directory = self.conf.tenant_path(&tenant_shard_id);
+        let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
+            .await
+            .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            TaskKind::MgmtRequest,
+            None,
+            None,
+            "tenant_files_delete",
+            false,
+            async move {
+                fs::remove_dir_all(tmp_path.as_path())
+                    .await
+                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
+            },
+        );
+
+        fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+
+        parent_slot_guard.drop_old_value()?;
+
+        // Phase 6: Release the InProgress on the parent shard
+        drop(parent_slot_guard);
+
+        Ok(child_shards)
+    }
+
+    /// Part of [`Self::shard_split`]: hard link parent shard layers into child shards, as an optimization
+    /// to avoid the children downloading them again.
+    ///
+    /// For each resident layer in the parent shard, we will hard link it into all of the child shards.
+    async fn shard_split_hardlink(
+        &self,
+        parent_shard: &Tenant,
+        child_shards: Vec<TenantShardId>,
+    ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
+        let parent_path = self.conf.tenant_path(parent_shard.get_tenant_shard_id());
+        let (parent_timelines, parent_layers) = {
+            let mut parent_layers = Vec::new();
+            let timelines = parent_shard.timelines.lock().unwrap().clone();
+            let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
+            for timeline in timelines.values() {
+                let timeline_layers = timeline
+                    .layers
+                    .read()
+                    .await
+                    .resident_layers()
+                    .collect::<Vec<_>>()
+                    .await;
+                for layer in timeline_layers {
+                    let relative_path = layer
+                        .local_path()
+                        .strip_prefix(&parent_path)
+                        .context("Removing prefix from parent layer path")?;
+                    parent_layers.push(relative_path.to_owned());
+                }
+            }
+            debug_assert!(
+                !parent_layers.is_empty(),
+                "shutdown cannot empty the layermap"
+            );
+            (parent_timelines, parent_layers)
+        };
+
+        let mut child_prefixes = Vec::new();
+        let mut create_dirs = Vec::new();
+
+        for child in child_shards {
+            let child_prefix = self.conf.tenant_path(&child);
+            create_dirs.push(child_prefix.clone());
+            create_dirs.extend(
+                parent_timelines
+                    .iter()
+                    .map(|t| self.conf.timeline_path(&child, t)),
+            );
+
+            child_prefixes.push(child_prefix);
+        }
+
+        // Since we will do a large number of small filesystem metadata operations, batch them into
+        // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
+        let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            for dir in &create_dirs {
+                if let Err(e) = std::fs::create_dir_all(dir) {
+                    // Ignore AlreadyExists errors, drop out on all other errors
+                    match e.kind() {
+                        std::io::ErrorKind::AlreadyExists => {}
+                        _ => {
+                            return Err(anyhow::anyhow!(e).context(format!("Creating {dir}")));
+                        }
+                    }
+                }
+            }
+
+            for child_prefix in child_prefixes {
+                for relative_layer in &parent_layers {
+                    let parent_path = parent_path.join(relative_layer);
+                    let child_path = child_prefix.join(relative_layer);
+                    if let Err(e) = std::fs::hard_link(&parent_path, &child_path) {
+                        match e.kind() {
+                            std::io::ErrorKind::AlreadyExists => {}
+                            std::io::ErrorKind::NotFound => {
+                                tracing::info!(
+                                    "Layer {} not found during hard-linking, evicted during split?",
+                                    relative_layer
+                                );
+                            }
+                            _ => {
+                                return Err(anyhow::anyhow!(e).context(format!(
+                                    "Hard linking {relative_layer} into {child_prefix}"
+                                )))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Durability is not required for correctness, but if we crashed during split and
+            // then came restarted with empty timeline dirs, it would be very inefficient to
+            // re-populate from remote storage.
+            for dir in create_dirs {
+                if let Err(e) = crashsafe::fsync(&dir) {
+                    // Something removed a newly created timeline dir out from underneath us?  Extremely
+                    // unexpected, but not worth panic'ing over as this whole function is just an
+                    // optimization.
+                    tracing::warn!("Failed to fsync directory {dir}: {e}")
+                }
+            }
+
+            Ok(parent_layers.len())
+        });
+
+        match jh.await {
+            Ok(Ok(layer_count)) => {
+                tracing::info!(count = layer_count, "Hard linked layers into child shards");
+            }
+            Ok(Err(e)) => {
+                // This is an optimization, so we tolerate failure.
+                tracing::warn!("Error hard-linking layers, proceeding anyway: {e}")
+            }
+            Err(e) => {
+                // This is something totally unexpected like a panic, so bail out.
+                anyhow::bail!("Error joining hard linking task: {e}");
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GetTenantError {
+    /// NotFound is a TenantId rather than TenantShardId, because this error type is used from
+    /// getters that use a TenantId and a ShardSelector, not just getters that target a specific shard.
     #[error("Tenant {0} not found")]
     NotFound(TenantId),
+
     #[error("Tenant {0} is not active")]
-    NotActive(TenantId),
+    NotActive(TenantShardId),
     /// Broken is logically a subset of NotActive, but a distinct error is useful as
     /// NotActive is usually a retryable state for API purposes, whereas Broken
     /// is a stuck error state
@@ -1293,15 +1860,13 @@ pub(crate) fn get_tenant(
             TenantState::Active => Ok(Arc::clone(tenant)),
             _ => {
                 if active_only {
-                    Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
+                    Err(GetTenantError::NotActive(tenant_shard_id))
                 } else {
                     Ok(Arc::clone(tenant))
                 }
             }
         },
-        Some(TenantSlot::InProgress(_)) => {
-            Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
-        }
+        Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_shard_id)),
         None | Some(TenantSlot::Secondary(_)) => {
             Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
         }
@@ -1377,7 +1942,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
             }
             Some(TenantSlot::Secondary(_)) => {
                 return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
-                    tenant_id,
+                    tenant_shard_id,
                 )))
             }
             Some(TenantSlot::InProgress(barrier)) => {
@@ -1416,7 +1981,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
                     Some(TenantSlot::Attached(tenant)) => tenant.clone(),
                     _ => {
                         return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
-                            tenant_id,
+                            tenant_shard_id,
                         )))
                     }
                 }
@@ -1444,7 +2009,7 @@ pub(crate) enum DeleteTimelineError {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TenantStateError {
     #[error("Tenant {0} is stopping")]
-    IsStopping(TenantId),
+    IsStopping(TenantShardId),
     #[error(transparent)]
     SlotError(#[from] TenantSlotError),
     #[error(transparent)]
@@ -1581,7 +2146,7 @@ pub(crate) async fn load_tenant(
         shard_identity,
         None,
         &TENANTS,
-        SpawnMode::Normal,
+        SpawnMode::Eager,
         ctx,
     )
     .with_context(|| format!("Failed to schedule tenant processing in path {tenant_path:?}"))?;
@@ -1597,6 +2162,7 @@ pub(crate) async fn ignore_tenant(
     ignore_tenant0(conf, &TENANTS, tenant_id).await
 }
 
+#[instrument(skip_all, fields(shard_id))]
 async fn ignore_tenant0(
     conf: &'static PageServerConf,
     tenants: &std::sync::RwLock<TenantsMap>,
@@ -1604,6 +2170,10 @@ async fn ignore_tenant0(
 ) -> Result<(), TenantStateError> {
     // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    tracing::Span::current().record(
+        "shard_id",
+        tracing::field::display(tenant_shard_id.shard_slug()),
+    );
 
     remove_tenant_from_memory(tenants, tenant_shard_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
@@ -1629,8 +2199,8 @@ pub(crate) enum TenantMapListError {
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, TenantMapListError>
-{
+pub(crate) async fn list_tenants(
+) -> Result<Vec<(TenantShardId, TenantState, Generation)>, TenantMapListError> {
     let tenants = TENANTS.read().unwrap();
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -1638,7 +2208,9 @@ pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, 
     };
     Ok(m.iter()
         .filter_map(|(id, tenant)| match tenant {
-            TenantSlot::Attached(tenant) => Some((*id, tenant.current_state())),
+            TenantSlot::Attached(tenant) => {
+                Some((*id, tenant.current_state(), tenant.generation()))
+            }
             TenantSlot::Secondary(_) => None,
             TenantSlot::InProgress(_) => None,
         })
@@ -1678,14 +2250,31 @@ pub(crate) enum TenantSlotError {
 
 /// Superset of TenantMapError: issues that can occur when using a SlotGuard
 /// to insert a new value.
-#[derive(Debug, thiserror::Error)]
-pub enum TenantSlotUpsertError {
+#[derive(thiserror::Error)]
+pub(crate) enum TenantSlotUpsertError {
     /// An error where the slot is in an unexpected state, indicating a code bug
     #[error("Internal error updating Tenant")]
     InternalError(Cow<'static, str>),
 
     #[error(transparent)]
-    MapState(#[from] TenantMapError),
+    MapState(TenantMapError),
+
+    // If we encounter TenantManager shutdown during upsert, we must carry the Completion
+    // from the SlotGuard, so that the caller can hold it while they clean up: otherwise
+    // TenantManager shutdown might race ahead before we're done cleaning up any Tenant that
+    // was protected by the SlotGuard.
+    #[error("Shutting down")]
+    ShuttingDown((TenantSlot, utils::completion::Completion)),
+}
+
+impl std::fmt::Debug for TenantSlotUpsertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::InternalError(reason) => write!(f, "Internal Error {reason}"),
+            Self::MapState(map_error) => write!(f, "Tenant map state: {map_error:?}"),
+            Self::ShuttingDown(_completion) => write!(f, "Tenant map shutting down"),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1734,7 +2323,7 @@ pub struct SlotGuard {
 
     /// [`TenantSlot::InProgress`] carries the corresponding Barrier: it will
     /// release any waiters as soon as this SlotGuard is dropped.
-    _completion: utils::completion::Completion,
+    completion: utils::completion::Completion,
 }
 
 impl SlotGuard {
@@ -1747,7 +2336,7 @@ impl SlotGuard {
             tenant_shard_id,
             old_value,
             upserted: false,
-            _completion: completion,
+            completion,
         }
     }
 
@@ -1780,9 +2369,16 @@ impl SlotGuard {
             }
 
             let m = match &mut *locked {
-                TenantsMap::Initializing => return Err(TenantMapError::StillInitializing.into()),
+                TenantsMap::Initializing => {
+                    return Err(TenantSlotUpsertError::MapState(
+                        TenantMapError::StillInitializing,
+                    ))
+                }
                 TenantsMap::ShuttingDown(_) => {
-                    return Err(TenantMapError::ShuttingDown.into());
+                    return Err(TenantSlotUpsertError::ShuttingDown((
+                        new_value,
+                        self.completion.clone(),
+                    )));
                 }
                 TenantsMap::Open(m) => m,
             };
@@ -1830,7 +2426,9 @@ impl SlotGuard {
                 Err(TenantSlotUpsertError::InternalError(_)) => {
                     // We already logged the error, nothing else we can do.
                 }
-                Err(TenantSlotUpsertError::MapState(_)) => {
+                Err(
+                    TenantSlotUpsertError::MapState(_) | TenantSlotUpsertError::ShuttingDown(_),
+                ) => {
                     // If the map is shutting down, we need not replace anything
                 }
                 Ok(()) => {}
@@ -1928,18 +2526,22 @@ fn tenant_map_peek_slot<'a>(
     tenant_shard_id: &TenantShardId,
     mode: TenantSlotPeekMode,
 ) -> Result<Option<&'a TenantSlot>, TenantMapError> {
-    let m = match tenants.deref() {
-        TenantsMap::Initializing => return Err(TenantMapError::StillInitializing),
+    match tenants.deref() {
+        TenantsMap::Initializing => Err(TenantMapError::StillInitializing),
         TenantsMap::ShuttingDown(m) => match mode {
-            TenantSlotPeekMode::Read => m,
-            TenantSlotPeekMode::Write => {
-                return Err(TenantMapError::ShuttingDown);
-            }
+            TenantSlotPeekMode::Read => Ok(Some(
+                // When reading in ShuttingDown state, we must translate None results
+                // into a ShuttingDown error, because absence of a tenant shard ID in the map
+                // isn't a reliable indicator of the tenant being gone: it might have been
+                // InProgress when shutdown started, and cleaned up from that state such
+                // that it's now no longer in the map.  Callers will have to wait until
+                // we next start up to get a proper answer.  This avoids incorrect 404 API responses.
+                m.get(tenant_shard_id).ok_or(TenantMapError::ShuttingDown)?,
+            )),
+            TenantSlotPeekMode::Write => Err(TenantMapError::ShuttingDown),
         },
-        TenantsMap::Open(m) => m,
-    };
-
-    Ok(m.get(tenant_shard_id))
+        TenantsMap::Open(m) => Ok(m.get(tenant_shard_id)),
+    }
 }
 
 enum TenantSlotAcquireMode {
@@ -1967,7 +2569,7 @@ fn tenant_map_acquire_slot_impl(
     METRICS.tenant_slot_writes.inc();
 
     let mut locked = tenants.write().unwrap();
-    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard = %tenant_shard_id.shard_slug());
+    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug());
     let _guard = span.enter();
 
     let m = match &mut *locked {
@@ -2049,8 +2651,6 @@ async fn remove_tenant_from_memory<V, F>(
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
-    use utils::completion;
-
     let mut slot_guard =
         tenant_map_acquire_slot_impl(&tenant_shard_id, tenants, TenantSlotAcquireMode::MustExist)?;
 
@@ -2072,7 +2672,7 @@ where
                     // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
                     // wait for it but return an error right away because these are distinct requests.
                     slot_guard.revert();
-                    return Err(TenantStateError::IsStopping(tenant_shard_id.tenant_id));
+                    return Err(TenantStateError::IsStopping(tenant_shard_id));
                 }
             }
             Some(tenant)
@@ -2130,7 +2730,7 @@ pub(crate) async fn immediate_gc(
 
     let tenant = guard
         .get(&tenant_shard_id)
-        .map(Arc::clone)
+        .cloned()
         .with_context(|| format!("tenant {tenant_shard_id}"))
         .map_err(|e| ApiError::NotFound(e.into()))?;
 
@@ -2201,10 +2801,9 @@ pub(crate) async fn immediate_gc(
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::shard::TenantShardId;
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use tracing::{info_span, Instrument};
+    use tracing::Instrument;
 
     use crate::tenant::mgr::TenantSlot;
 
@@ -2215,17 +2814,16 @@ mod tests {
         // Test that if an InProgress tenant is in the map during shutdown, the shutdown will gracefully
         // wait for it to complete before proceeding.
 
-        let (t, _ctx) = TenantHarness::create("shutdown_awaits_in_progress_tenant")
-            .unwrap()
-            .load()
-            .await;
+        let h = TenantHarness::create("shutdown_awaits_in_progress_tenant").unwrap();
+        let (t, _ctx) = h.load().await;
 
         // harness loads it to active, which is forced and nothing is running on the tenant
 
-        let id = TenantShardId::unsharded(t.tenant_id());
+        let id = t.tenant_shard_id();
 
         // tenant harness configures the logging and we cannot escape it
-        let _e = info_span!("testing", tenant_id = %id).entered();
+        let span = h.span();
+        let _e = span.enter();
 
         let tenants = BTreeMap::from([(id, TenantSlot::Attached(t.clone()))]);
         let tenants = Arc::new(std::sync::RwLock::new(TenantsMap::Open(tenants)));
@@ -2246,7 +2844,7 @@ mod tests {
                     };
                     super::remove_tenant_from_memory(&tenants, id, cleanup).await
                 }
-                .instrument(info_span!("foobar", tenant_id = %id))
+                .instrument(h.span())
             });
 
             // now the long cleanup should be in place, with the stopping state

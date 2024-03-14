@@ -389,15 +389,16 @@ pub(super) async fn handle_walreceiver_connection(
             }
         }
 
-        timeline
-            .check_checkpoint_distance()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to check checkpoint distance for timeline {}",
-                    timeline.timeline_id
-                )
-            })?;
+        {
+            // This is a hack. It piggybacks on the keepalive messages sent by the
+            // safekeeper in order to enforce `checkpoint_timeout` on the currently
+            // open layer. This hack doesn't provide a bound on the total size of
+            // in-memory layers on a pageserver. See https://github.com/neondatabase/neon/issues/6916.
+            let mut writer = timeline.writer().await;
+            if let Err(err) = writer.tick().await {
+                warn!("Timeline writer tick failed: {err}");
+            }
+        }
 
         if let Some(last_lsn) = status_update {
             let timeline_remote_consistent_lsn = timeline
@@ -426,13 +427,21 @@ pub(super) async fn handle_walreceiver_connection(
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let current_timeline_size = timeline
-                .get_current_logical_size(
-                    crate::tenant::timeline::GetLogicalSizePriority::User,
-                    &ctx,
-                )
-                // FIXME: https://github.com/neondatabase/neon/issues/5963
-                .size_dont_care_about_accuracy();
+            let current_timeline_size = if timeline.tenant_shard_id.is_zero() {
+                timeline
+                    .get_current_logical_size(
+                        crate::tenant::timeline::GetLogicalSizePriority::User,
+                        &ctx,
+                    )
+                    // FIXME: https://github.com/neondatabase/neon/issues/5963
+                    .size_dont_care_about_accuracy()
+            } else {
+                // Non-zero shards send zero for logical size.  The safekeeper will ignore
+                // this number.  This is because in a sharded tenant, only shard zero maintains
+                // accurate logical size.
+                0
+            };
+
             let status_update = PageserverFeedback {
                 current_timeline_size,
                 last_received_lsn,

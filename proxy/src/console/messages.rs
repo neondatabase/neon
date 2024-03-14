@@ -1,6 +1,9 @@
-use serde::Deserialize;
-use smol_str::SmolStr;
+use serde::{Deserialize, Serialize};
 use std::fmt;
+
+use crate::auth::IpPattern;
+
+use crate::{BranchId, EndpointId, ProjectId};
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -14,7 +17,8 @@ pub struct ConsoleError {
 #[derive(Deserialize)]
 pub struct GetRoleSecret {
     pub role_secret: Box<str>,
-    pub allowed_ips: Option<Vec<Box<str>>>,
+    pub allowed_ips: Option<Vec<IpPattern>>,
+    pub project_id: Option<ProjectId>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -91,34 +95,20 @@ impl fmt::Debug for DatabaseInfo {
 /// Also known as `ProxyMetricsAuxInfo` in the console.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct MetricsAuxInfo {
-    pub endpoint_id: SmolStr,
-    pub project_id: SmolStr,
-    pub branch_id: SmolStr,
+    pub endpoint_id: EndpointId,
+    pub project_id: ProjectId,
+    pub branch_id: BranchId,
+    pub cold_start_info: Option<ColdStartInfo>,
 }
 
-impl MetricsAuxInfo {
-    /// Definitions of labels for traffic metric.
-    pub const TRAFFIC_LABELS: &'static [&'static str] = &[
-        // Received (rx) / sent (tx).
-        "direction",
-        // ID of a project.
-        "project_id",
-        // ID of an endpoint within a project.
-        "endpoint_id",
-        // ID of a branch within a project (snapshot).
-        "branch_id",
-    ];
-
-    /// Values of labels for traffic metric.
-    // TODO: add more type safety (validate arity & positions).
-    pub fn traffic_labels(&self, direction: &'static str) -> [&str; 4] {
-        [
-            direction,
-            &self.project_id,
-            &self.endpoint_id,
-            &self.branch_id,
-        ]
-    }
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ColdStartInfo {
+    #[default]
+    Unknown = 0,
+    Warm = 1,
+    PoolHit = 2,
+    PoolMiss = 3,
 }
 
 #[cfg(test)]
@@ -131,6 +121,7 @@ mod tests {
             "endpoint_id": "endpoint",
             "project_id": "project",
             "branch_id": "branch",
+            "cold_start_info": "unknown",
         })
     }
 
@@ -207,10 +198,15 @@ mod tests {
             "role_secret": "secret",
         });
         let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
-        // Empty `allowed_ips` field.
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
+        });
+        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        let json = json!({
+            "role_secret": "secret",
+            "allowed_ips": ["8.8.8.8"],
+            "project_id": "project",
         });
         let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
 

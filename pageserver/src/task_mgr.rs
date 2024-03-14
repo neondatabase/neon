@@ -30,10 +30,6 @@
 //! only a single tenant or timeline.
 //!
 
-// Clippy 1.60 incorrectly complains about the tokio::task_local!() macro.
-// Silence it. See https://github.com/rust-lang/rust-clippy/issues/9224.
-#![allow(clippy::declare_interior_mutable_const)]
-
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -192,6 +188,7 @@ task_local! {
     serde::Serialize,
     serde::Deserialize,
     strum_macros::IntoStaticStr,
+    strum_macros::EnumString,
 )]
 pub enum TaskKind {
     // Pageserver startup, i.e., `main`
@@ -275,9 +272,6 @@ pub enum TaskKind {
     // Task that uploads a file to remote storage
     RemoteUploadTask,
 
-    // Task that downloads a file from remote storage
-    RemoteDownloadTask,
-
     // task that handles the initial downloading of all tenants
     InitialLoad,
 
@@ -312,7 +306,6 @@ struct MutableTaskState {
 }
 
 struct PageServerTask {
-    #[allow(dead_code)] // unused currently
     task_id: PageserverTaskId,
 
     kind: TaskKind,
@@ -576,8 +569,8 @@ pub fn shutdown_token() -> CancellationToken {
 
 /// Has the current task been requested to shut down?
 pub fn is_shutdown_requested() -> bool {
-    if let Ok(cancel) = SHUTDOWN_TOKEN.try_with(|t| t.clone()) {
-        cancel.is_cancelled()
+    if let Ok(true_or_false) = SHUTDOWN_TOKEN.try_with(|t| t.is_cancelled()) {
+        true_or_false
     } else {
         if !cfg!(test) {
             warn!("is_shutdown_requested() called in an unexpected task or thread");

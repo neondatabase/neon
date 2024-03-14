@@ -327,16 +327,20 @@ impl GlobalTimelines {
     }
 
     /// Cancels timeline, then deletes the corresponding data directory.
-    pub async fn delete_force(ttid: &TenantTimelineId) -> Result<TimelineDeleteForceResult> {
+    /// If only_local, doesn't remove WAL segments in remote storage.
+    pub async fn delete(
+        ttid: &TenantTimelineId,
+        only_local: bool,
+    ) -> Result<TimelineDeleteForceResult> {
         let tli_res = TIMELINES_STATE.lock().unwrap().get(ttid);
         match tli_res {
             Ok(timeline) => {
                 // Take a lock and finish the deletion holding this mutex.
                 let mut shared_state = timeline.write_shared_state().await;
 
-                info!("deleting timeline {}", ttid);
+                info!("deleting timeline {}, only_local={}", ttid, only_local);
                 let (dir_existed, was_active) =
-                    timeline.delete_from_disk(&mut shared_state).await?;
+                    timeline.delete(&mut shared_state, only_local).await?;
 
                 // Remove timeline from the map.
                 // FIXME: re-enable it once we fix the issue with recreation of deleted timelines
@@ -369,8 +373,11 @@ impl GlobalTimelines {
     /// the tenant had, `true` if a timeline was active. There may be a race if new timelines are
     /// created simultaneously. In that case the function will return error and the caller should
     /// retry tenant deletion again later.
+    ///
+    /// If only_local, doesn't remove WAL segments in remote storage.
     pub async fn delete_force_all_for_tenant(
         tenant_id: &TenantId,
+        only_local: bool,
     ) -> Result<HashMap<TenantTimelineId, TimelineDeleteForceResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
         let to_delete = Self::get_all_for_tenant(*tenant_id);
@@ -379,7 +386,7 @@ impl GlobalTimelines {
 
         let mut deleted = HashMap::new();
         for tli in &to_delete {
-            match Self::delete_force(&tli.ttid).await {
+            match Self::delete(&tli.ttid, only_local).await {
                 Ok(result) => {
                     deleted.insert(tli.ttid, result);
                 }

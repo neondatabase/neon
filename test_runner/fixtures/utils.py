@@ -369,7 +369,12 @@ def start_in_background(
         return spawned_process
 
 
-def wait_until(number_of_iterations: int, interval: float, func: Fn):
+WaitUntilRet = TypeVar("WaitUntilRet")
+
+
+def wait_until(
+    number_of_iterations: int, interval: float, func: Callable[[], WaitUntilRet]
+) -> WaitUntilRet:
     """
     Wait until 'func' returns successfully, without exception. Returns the
     last return value from the function.
@@ -387,6 +392,18 @@ def wait_until(number_of_iterations: int, interval: float, func: Fn):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
+def assert_eq(a, b) -> None:
+    assert a == b
+
+
+def assert_gt(a, b) -> None:
+    assert a > b
+
+
+def assert_ge(a, b) -> None:
+    assert a >= b
+
+
 def run_pg_bench_small(pg_bin: "PgBin", connstr: str):
     """
     Fast way to populate data.
@@ -397,3 +414,36 @@ def run_pg_bench_small(pg_bin: "PgBin", connstr: str):
     }
     """
     pg_bin.run(["pgbench", "-i", "-I dtGvp", "-s1", connstr])
+
+
+def humantime_to_ms(humantime: str) -> float:
+    """
+    Converts Rust humantime's output string to milliseconds.
+
+    humantime_to_ms("1h 1ms 406us") -> 3600001.406
+    """
+
+    unit_multiplier_map = {
+        "ns": 1e-6,
+        "us": 1e-3,
+        "ms": 1,
+        "s": 1e3,
+        "m": 1e3 * 60,
+        "h": 1e3 * 60 * 60,
+    }
+    matcher = re.compile(rf"^(\d+)({'|'.join(unit_multiplier_map.keys())})$")
+    total_ms = 0.0
+
+    if humantime == "0":
+        return total_ms
+
+    for item in humantime.split():
+        if (match := matcher.search(item)) is not None:
+            n, unit = match.groups()
+            total_ms += int(n) * unit_multiplier_map[unit]
+        else:
+            raise ValueError(
+                f"can't parse '{item}' (from string '{humantime}'), known units are {', '.join(unit_multiplier_map.keys())}."
+            )
+
+    return round(total_ms, 3)

@@ -1,19 +1,52 @@
 use std::{ops::RangeInclusive, str::FromStr};
 
-use crate::key::{is_rel_block_key, Key};
+use crate::{
+    key::{is_rel_block_key, Key},
+    models::ShardParameters,
+};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
-use thiserror;
 use utils::id::TenantId;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
 pub struct ShardNumber(pub u8);
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
-pub struct ShardCount(pub u8);
+pub struct ShardCount(u8);
 
 impl ShardCount {
     pub const MAX: Self = Self(u8::MAX);
+
+    /// The internal value of a ShardCount may be zero, which means "1 shard, but use
+    /// legacy format for TenantShardId that excludes the shard suffix", also known
+    /// as `TenantShardId::unsharded`.
+    ///
+    /// This method returns the actual number of shards, i.e. if our internal value is
+    /// zero, we return 1 (unsharded tenants have 1 shard).
+    pub fn count(&self) -> u8 {
+        if self.0 > 0 {
+            self.0
+        } else {
+            1
+        }
+    }
+
+    /// The literal internal value: this is **not** the number of shards in the
+    /// tenant, as we have a special zero value for legacy unsharded tenants.  Use
+    /// [`Self::count`] if you want to know the cardinality of shards.
+    pub fn literal(&self) -> u8 {
+        self.0
+    }
+
+    pub fn is_unsharded(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// `v` may be zero, or the number of shards in the tenant.  `v` is what
+    /// [`Self::literal`] would return.
+    pub fn new(val: u8) -> Self {
+        Self(val)
+    }
 }
 
 impl ShardNumber {
@@ -83,7 +116,37 @@ impl TenantShardId {
     }
 
     pub fn is_unsharded(&self) -> bool {
-        self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
+        self.shard_number == ShardNumber(0) && self.shard_count.is_unsharded()
+    }
+
+    /// Convenience for dropping the tenant_id and just getting the ShardIndex: this
+    /// is useful when logging from code that is already in a span that includes tenant ID, to
+    /// keep messages reasonably terse.
+    pub fn to_index(&self) -> ShardIndex {
+        ShardIndex {
+            shard_number: self.shard_number,
+            shard_count: self.shard_count,
+        }
+    }
+
+    /// Calculate the children of this TenantShardId when splitting the overall tenant into
+    /// the given number of shards.
+    pub fn split(&self, new_shard_count: ShardCount) -> Vec<TenantShardId> {
+        let effective_old_shard_count = std::cmp::max(self.shard_count.0, 1);
+        let mut child_shards = Vec::new();
+        for shard_number in 0..ShardNumber(new_shard_count.0).0 {
+            // Key mapping is based on a round robin mapping of key hash modulo shard count,
+            // so our child shards are the ones which the same keys would map to.
+            if shard_number % effective_old_shard_count == self.shard_number.0 {
+                child_shards.push(TenantShardId {
+                    tenant_id: self.tenant_id,
+                    shard_number: ShardNumber(shard_number),
+                    shard_count: new_shard_count,
+                })
+            }
+        }
+
+        child_shards
     }
 }
 
@@ -333,7 +396,7 @@ const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 pub struct ShardIdentity {
     pub number: ShardNumber,
     pub count: ShardCount,
-    stripe_size: ShardStripeSize,
+    pub stripe_size: ShardStripeSize,
     layout: ShardLayout,
 }
 
@@ -403,6 +466,17 @@ impl ShardIdentity {
         }
     }
 
+    /// For use when creating ShardIdentity instances for new shards, where a creation request
+    /// specifies the ShardParameters that apply to all shards.
+    pub fn from_params(number: ShardNumber, params: &ShardParameters) -> Self {
+        Self {
+            number,
+            count: params.count,
+            layout: LAYOUT_V1,
+            stripe_size: params.stripe_size,
+        }
+    }
+
     fn is_broken(&self) -> bool {
         self.layout == LAYOUT_BROKEN
     }
@@ -427,10 +501,12 @@ impl ShardIdentity {
     pub fn is_key_disposable(&self, key: &Key) -> bool {
         if key_is_shard0(key) {
             // Q: Why can't we dispose of shard0 content if we're not shard 0?
-            // A: because the WAL ingestion logic currently ingests some shard 0
-            //    content on all shards, even though it's only read on shard 0.  If we
-            //    dropped it, then subsequent WAL ingest to these keys would encounter
-            //    an error.
+            // A1: because the WAL ingestion logic currently ingests some shard 0
+            //     content on all shards, even though it's only read on shard 0.  If we
+            //     dropped it, then subsequent WAL ingest to these keys would encounter
+            //     an error.
+            // A2: because key_is_shard0 also covers relation size keys, which are written
+            //     on all shards even though they're only maintained accurately on shard 0.
             false
         } else {
             !self.is_key_local(key)
@@ -579,10 +655,7 @@ fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Ke
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use bincode;
-    use utils::{id::TenantId, Hex};
+    use utils::Hex;
 
     use super::*;
 
@@ -772,5 +845,109 @@ mod tests {
 
         let shard = key_to_shard_number(ShardCount(10), DEFAULT_STRIPE_SIZE, &key);
         assert_eq!(shard, ShardNumber(8));
+    }
+
+    #[test]
+    fn shard_id_split() {
+        let tenant_id = TenantId::generate();
+        let parent = TenantShardId::unsharded(tenant_id);
+
+        // Unsharded into 2
+        assert_eq!(
+            parent.split(ShardCount(2)),
+            vec![
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(2),
+                    shard_number: ShardNumber(0)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(2),
+                    shard_number: ShardNumber(1)
+                }
+            ]
+        );
+
+        // Unsharded into 4
+        assert_eq!(
+            parent.split(ShardCount(4)),
+            vec![
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(4),
+                    shard_number: ShardNumber(0)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(4),
+                    shard_number: ShardNumber(1)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(4),
+                    shard_number: ShardNumber(2)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(4),
+                    shard_number: ShardNumber(3)
+                }
+            ]
+        );
+
+        // count=1 into 2 (check this works the same as unsharded.)
+        let parent = TenantShardId {
+            tenant_id,
+            shard_count: ShardCount(1),
+            shard_number: ShardNumber(0),
+        };
+        assert_eq!(
+            parent.split(ShardCount(2)),
+            vec![
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(2),
+                    shard_number: ShardNumber(0)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(2),
+                    shard_number: ShardNumber(1)
+                }
+            ]
+        );
+
+        // count=2 into count=8
+        let parent = TenantShardId {
+            tenant_id,
+            shard_count: ShardCount(2),
+            shard_number: ShardNumber(1),
+        };
+        assert_eq!(
+            parent.split(ShardCount(8)),
+            vec![
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(8),
+                    shard_number: ShardNumber(1)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(8),
+                    shard_number: ShardNumber(3)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(8),
+                    shard_number: ShardNumber(5)
+                },
+                TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount(8),
+                    shard_number: ShardNumber(7)
+                },
+            ]
+        );
     }
 }

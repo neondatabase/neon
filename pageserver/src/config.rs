@@ -7,8 +7,9 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{RemotePath, RemoteStorageConfig};
+use serde;
 use serde::de::IntoDeserializer;
-use std::env;
+use std::{collections::HashMap, env};
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
@@ -20,7 +21,6 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use toml_edit;
 use toml_edit::{Document, Item};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -33,15 +33,20 @@ use utils::{
 use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
+use crate::tenant::timeline::GetVectoredImpl;
+use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
+use crate::virtual_file;
 use crate::{
-    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
+    IGNORED_TENANT_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
     TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
 use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
+
+use self::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE;
 
 pub mod defaults {
     use crate::tenant::config::defaults::*;
@@ -79,6 +84,18 @@ pub mod defaults {
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 
+    #[cfg(target_os = "linux")]
+    pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "tokio-epoll-uring";
+
+    #[cfg(not(target_os = "linux"))]
+    pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
+
+    pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
+
+    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
+
+    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
+
     ///
     /// Default built-in configuration file.
     ///
@@ -114,6 +131,14 @@ pub mod defaults {
 
 #ingest_batch_size = {DEFAULT_INGEST_BATCH_SIZE}
 
+#virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
+
+#get_vectored_impl = '{DEFAULT_GET_VECTORED_IMPL}'
+
+#max_vectored_read_bytes = '{DEFAULT_MAX_VECTORED_READ_BYTES}'
+
+#validate_vectored_get = '{DEFAULT_VALIDATE_VECTORED_GET}'
+
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
@@ -128,7 +153,6 @@ pub mod defaults {
 
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
-#gc_feedback = false
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
 #secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
@@ -192,9 +216,9 @@ pub struct PageServerConf {
 
     pub log_format: LogFormat,
 
-    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup,
-    /// does not limit tenants loaded in response to client I/O.  A lower value implicitly deprioritizes
-    /// loading such tenants, vs. other work in the system.
+    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup or attach.
+    ///
+    /// A lower value implicitly deprioritizes loading such tenants, vs. other work in the system.
     pub concurrent_tenant_warmup: ConfigurableSemaphore,
 
     /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
@@ -247,6 +271,14 @@ pub struct PageServerConf {
 
     /// Maximum number of WAL records to be ingested and committed at the same time
     pub ingest_batch_size: u64,
+
+    pub virtual_file_io_engine: virtual_file::IoEngineKind,
+
+    pub get_vectored_impl: GetVectoredImpl,
+
+    pub max_vectored_read_bytes: MaxVectoredReadBytes,
+
+    pub validate_vectored_get: bool,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -271,6 +303,26 @@ impl<T> BuilderValue<T> {
             Self::NotSet => Err(err),
         }
     }
+}
+
+// Certain metadata (e.g. externally-addressable name, AZ) is delivered
+// as a separate structure.  This information is not neeed by the pageserver
+// itself, it is only used for registering the pageserver with the control
+// plane and/or storage controller.
+//
+#[derive(serde::Deserialize)]
+pub(crate) struct NodeMetadata {
+    #[serde(rename = "host")]
+    pub(crate) postgres_host: String,
+    #[serde(rename = "port")]
+    pub(crate) postgres_port: u16,
+    pub(crate) http_host: String,
+    pub(crate) http_port: u16,
+
+    // Deployment tools may write fields to the metadata file beyond what we
+    // use in this type: this type intentionally only names fields that require.
+    #[serde(flatten)]
+    pub(crate) other: HashMap<String, serde_json::Value>,
 }
 
 // needed to simplify config construction
@@ -331,6 +383,14 @@ struct PageServerConfigBuilder {
     secondary_download_concurrency: BuilderValue<usize>,
 
     ingest_batch_size: BuilderValue<u64>,
+
+    virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
+
+    get_vectored_impl: BuilderValue<GetVectoredImpl>,
+
+    max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
+
+    validate_vectored_get: BuilderValue<bool>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -406,6 +466,14 @@ impl Default for PageServerConfigBuilder {
             secondary_download_concurrency: Set(DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),
 
             ingest_batch_size: Set(DEFAULT_INGEST_BATCH_SIZE),
+
+            virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
+
+            get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
+            max_vectored_read_bytes: Set(MaxVectoredReadBytes(
+                NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
+            )),
+            validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
         }
     }
 }
@@ -562,6 +630,22 @@ impl PageServerConfigBuilder {
         self.ingest_batch_size = BuilderValue::Set(ingest_batch_size)
     }
 
+    pub fn virtual_file_io_engine(&mut self, value: virtual_file::IoEngineKind) {
+        self.virtual_file_io_engine = BuilderValue::Set(value);
+    }
+
+    pub fn get_vectored_impl(&mut self, value: GetVectoredImpl) {
+        self.get_vectored_impl = BuilderValue::Set(value);
+    }
+
+    pub fn get_max_vectored_read_bytes(&mut self, value: MaxVectoredReadBytes) {
+        self.max_vectored_read_bytes = BuilderValue::Set(value);
+    }
+
+    pub fn get_validate_vectored_get(&mut self, value: bool) {
+        self.validate_vectored_get = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_warmup = self
             .concurrent_tenant_warmup
@@ -669,6 +753,18 @@ impl PageServerConfigBuilder {
             ingest_batch_size: self
                 .ingest_batch_size
                 .ok_or(anyhow!("missing ingest_batch_size"))?,
+            virtual_file_io_engine: self
+                .virtual_file_io_engine
+                .ok_or(anyhow!("missing virtual_file_io_engine"))?,
+            get_vectored_impl: self
+                .get_vectored_impl
+                .ok_or(anyhow!("missing get_vectored_impl"))?,
+            max_vectored_read_bytes: self
+                .max_vectored_read_bytes
+                .ok_or(anyhow!("missing max_vectored_read_bytes"))?,
+            validate_vectored_get: self
+                .validate_vectored_get
+                .ok_or(anyhow!("missing validate_vectored_get"))?,
         })
     }
 }
@@ -684,6 +780,10 @@ impl PageServerConf {
 
     pub fn deletion_prefix(&self) -> Utf8PathBuf {
         self.workdir.join("deletion")
+    }
+
+    pub fn metadata_path(&self) -> Utf8PathBuf {
+        self.workdir.join("metadata.json")
     }
 
     pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
@@ -786,17 +886,6 @@ impl PageServerConf {
             .join(tenant_shard_id.to_string())
             .join(timeline_id.to_string())
             .join(connection_id.to_string())
-    }
-
-    /// Points to a place in pageserver's local directory,
-    /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-    ) -> Utf8PathBuf {
-        self.timeline_path(tenant_shard_id, timeline_id)
-            .join(METADATA_FILE_NAME)
     }
 
     /// Turns storage remote path of a file into its local path.
@@ -920,6 +1009,21 @@ impl PageServerConf {
                     builder.secondary_download_concurrency(parse_toml_u64(key, item)? as usize)
                 },
                 "ingest_batch_size" => builder.ingest_batch_size(parse_toml_u64(key, item)?),
+                "virtual_file_io_engine" => {
+                    builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
+                }
+                "get_vectored_impl" => {
+                    builder.get_vectored_impl(parse_toml_from_str("get_vectored_impl", item)?)
+                }
+                "max_vectored_read_bytes" => {
+                    let bytes = parse_toml_u64("max_vectored_read_bytes", item)? as usize;
+                    builder.get_max_vectored_read_bytes(
+                        MaxVectoredReadBytes(
+                            NonZeroUsize::new(bytes).expect("Max byte size of vectored read must be greater than 0")))
+                }
+                "validate_vectored_get" => {
+                    builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -993,6 +1097,13 @@ impl PageServerConf {
             heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
             secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
+            virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
+            get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
+            max_vectored_read_bytes: MaxVectoredReadBytes(
+                NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
+                    .expect("Invalid default constant"),
+            ),
+            validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
         }
     }
 }
@@ -1120,17 +1231,15 @@ impl ConfigurableSemaphore {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        num::{NonZeroU32, NonZeroUsize},
-    };
+    use std::{fs, num::NonZeroU32};
 
     use camino_tempfile::{tempdir, Utf8TempDir};
+    use pageserver_api::models::EvictionPolicy;
     use remote_storage::{RemoteStorageKind, S3Config};
     use utils::serde_percent::Percent;
 
     use super::*;
-    use crate::{tenant::config::EvictionPolicy, DEFAULT_PG_VERSION};
+    use crate::DEFAULT_PG_VERSION;
 
     const ALL_BASE_VALUES_TOML: &str = r#"
 # Initial configuration file created by 'pageserver --init'
@@ -1224,6 +1333,13 @@ background_task_maximum_delay = '334 s'
                 heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
+                virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
+                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
+                max_vectored_read_bytes: MaxVectoredReadBytes(
+                    NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
+                        .expect("Invalid default constant")
+                ),
+                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1287,6 +1403,13 @@ background_task_maximum_delay = '334 s'
                 heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: 100,
+                virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
+                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
+                max_vectored_read_bytes: MaxVectoredReadBytes(
+                    NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
+                        .expect("Invalid default constant")
+                ),
+                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -1332,6 +1455,7 @@ broker_endpoint = '{broker_endpoint}'
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
                     storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
+                    timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
                 },
                 "Remote storage config should correctly parse the local FS config and fill other storage defaults"
             );
@@ -1399,6 +1523,7 @@ broker_endpoint = '{broker_endpoint}'
                         concurrency_limit: s3_concurrency_limit,
                         max_keys_per_list_response: None,
                     }),
+                    timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
                 },
                 "Remote storage config should correctly parse the S3 config"
             );
@@ -1519,15 +1644,48 @@ threshold = "20m"
                 eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
             })
         );
+
         match &conf.default_tenant_conf.eviction_policy {
-            EvictionPolicy::NoEviction => panic!("Unexpected eviction opolicy tenant settings"),
-            EvictionPolicy::LayerAccessThreshold(eviction_thresold) => {
-                assert_eq!(eviction_thresold.period, Duration::from_secs(20 * 60));
-                assert_eq!(eviction_thresold.threshold, Duration::from_secs(20 * 60));
+            EvictionPolicy::LayerAccessThreshold(eviction_threshold) => {
+                assert_eq!(eviction_threshold.period, Duration::from_secs(20 * 60));
+                assert_eq!(eviction_threshold.threshold, Duration::from_secs(20 * 60));
             }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn parse_imitation_only_pageserver_config() {
+        let tempdir = tempdir().unwrap();
+        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir).unwrap();
+
+        let pageserver_conf_toml = format!(
+            r#"pg_distrib_dir = "{pg_distrib_dir}"
+metric_collection_endpoint = "http://sample.url"
+metric_collection_interval = "10min"
+id = 222
+
+[tenant_config]
+evictions_low_residence_duration_metric_threshold = "20m"
+
+[tenant_config.eviction_policy]
+kind = "OnlyImitiate"
+period = "20m"
+threshold = "20m"
+"#,
+        );
+        let toml: Document = pageserver_conf_toml.parse().unwrap();
+        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+
+        match &conf.default_tenant_conf.eviction_policy {
+            EvictionPolicy::OnlyImitiate(t) => {
+                assert_eq!(t.period, Duration::from_secs(20 * 60));
+                assert_eq!(t.threshold, Duration::from_secs(20 * 60));
+            }
+            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
+        }
     }
 
     fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {

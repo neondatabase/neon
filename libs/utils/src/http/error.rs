@@ -131,7 +131,9 @@ pub fn api_error_handler(api_error: ApiError) -> Response<Body> {
         ApiError::ResourceUnavailable(_) => info!("Error processing HTTP request: {api_error:#}"),
         ApiError::NotFound(_) => info!("Error processing HTTP request: {api_error:#}"),
         ApiError::InternalServerError(_) => error!("Error processing HTTP request: {api_error:?}"),
-        _ => error!("Error processing HTTP request: {api_error:#}"),
+        ApiError::ShuttingDown => info!("Shut down while processing HTTP request"),
+        ApiError::Timeout(_) => info!("Timeout while processing HTTP request: {api_error:#}"),
+        _ => info!("Error processing HTTP request: {api_error:#}"),
     }
 
     api_error.into_response()

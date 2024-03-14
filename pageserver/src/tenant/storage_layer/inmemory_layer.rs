@@ -9,13 +9,15 @@ use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::repository::{Key, Value};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
-use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
-use crate::tenant::Timeline;
+use crate::tenant::storage_layer::ValueReconstructResult;
+use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::{PageReconstructError, Timeline};
 use crate::walrecord;
-use anyhow::{ensure, Result};
+use anyhow::{anyhow, ensure, Result};
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
@@ -25,7 +27,10 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use super::{DeltaLayerWriter, ResidentLayer};
+use super::{
+    DeltaLayerWriter, ResidentLayer, ValueReconstructSituation, ValueReconstructState,
+    ValuesReconstructState,
+};
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -202,6 +207,91 @@ impl InMemoryLayer {
             Ok(ValueReconstructResult::Complete)
         }
     }
+
+    // Look up the keys in the provided keyspace and update
+    // the reconstruct state with whatever is found.
+    //
+    // If the key is cached, go no further than the cached Lsn.
+    pub(crate) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        end_lsn: Lsn,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::InMemoryLayer)
+            .build();
+
+        let inner = self.inner.read().await;
+        let reader = inner.file.block_cursor();
+
+        #[derive(Eq, PartialEq, Ord, PartialOrd)]
+        struct BlockRead {
+            key: Key,
+            lsn: Lsn,
+            block_offset: u64,
+        }
+
+        let mut planned_block_reads = BinaryHeap::new();
+
+        for range in keyspace.ranges.iter() {
+            let mut key = range.start;
+            while key < range.end {
+                if let Some(vec_map) = inner.index.get(&key) {
+                    let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
+                        Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
+                        None => self.start_lsn..end_lsn,
+                    };
+
+                    let slice = vec_map.slice_range(lsn_range);
+                    for (entry_lsn, pos) in slice.iter().rev() {
+                        planned_block_reads.push(BlockRead {
+                            key,
+                            lsn: *entry_lsn,
+                            block_offset: *pos,
+                        });
+                    }
+                }
+
+                key = key.next();
+            }
+        }
+
+        let keyspace_size = keyspace.total_size();
+
+        let mut completed_keys = HashSet::new();
+        while completed_keys.len() < keyspace_size && !planned_block_reads.is_empty() {
+            let block_read = planned_block_reads.pop().unwrap();
+            if completed_keys.contains(&block_read.key) {
+                continue;
+            }
+
+            let buf = reader.read_blob(block_read.block_offset, &ctx).await;
+            if let Err(e) = buf {
+                reconstruct_state
+                    .on_key_error(block_read.key, PageReconstructError::from(anyhow!(e)));
+                completed_keys.insert(block_read.key);
+                continue;
+            }
+
+            let value = Value::des(&buf.unwrap());
+            if let Err(e) = value {
+                reconstruct_state
+                    .on_key_error(block_read.key, PageReconstructError::from(anyhow!(e)));
+                completed_keys.insert(block_read.key);
+                continue;
+            }
+
+            let key_situation =
+                reconstruct_state.update_key(&block_read.key, block_read.lsn, value.unwrap());
+            if key_situation == ValueReconstructSituation::Complete {
+                completed_keys.insert(block_read.key);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for InMemoryLayer {
@@ -246,32 +336,17 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
+
     pub(crate) async fn put_value(
         &self,
         key: Key,
         lsn: Lsn,
-        val: &Value,
+        buf: &[u8],
         ctx: &RequestContext,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
-        self.put_value_locked(&mut inner, key, lsn, val, ctx).await
-    }
-
-    pub(crate) async fn put_values(
-        &self,
-        values: &HashMap<Key, Vec<(Lsn, Value)>>,
-        ctx: &RequestContext,
-    ) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        self.assert_writable();
-        for (key, vals) in values {
-            for (lsn, val) in vals {
-                self.put_value_locked(&mut inner, *key, *lsn, val, ctx)
-                    .await?;
-            }
-        }
-        Ok(())
+        self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
     }
 
     async fn put_value_locked(
@@ -279,22 +354,16 @@ impl InMemoryLayer {
         locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
         key: Key,
         lsn: Lsn,
-        val: &Value,
+        buf: &[u8],
         ctx: &RequestContext,
     ) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
 
         let off = {
-            // Avoid doing allocations for "small" values.
-            // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
-            // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
-            let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
-            buf.clear();
-            val.ser_into(&mut buf)?;
             locked_inner
                 .file
                 .write_blob(
-                    &buf,
+                    buf,
                     &RequestContextBuilder::extend(ctx)
                         .page_content_kind(PageContentKind::InMemoryLayer)
                         .build(),
@@ -322,7 +391,12 @@ impl InMemoryLayer {
     pub async fn freeze(&self, end_lsn: Lsn) {
         let inner = self.inner.write().await;
 
-        assert!(self.start_lsn < end_lsn);
+        assert!(
+            self.start_lsn < end_lsn,
+            "{} >= {}",
+            self.start_lsn,
+            end_lsn
+        );
         self.end_lsn.set(end_lsn).expect("end_lsn set only once");
 
         for vec_map in inner.index.values() {
@@ -383,9 +457,11 @@ impl InMemoryLayer {
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
                 let will_init = Value::des(&buf)?.will_init();
-                delta_layer_writer
-                    .put_value_bytes(key, *lsn, &buf, will_init)
-                    .await?;
+                let res;
+                (buf, res) = delta_layer_writer
+                    .put_value_bytes(key, *lsn, buf, will_init)
+                    .await;
+                res?;
             }
         }
 

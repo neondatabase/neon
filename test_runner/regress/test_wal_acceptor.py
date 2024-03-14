@@ -28,18 +28,25 @@ from fixtures.neon_fixtures import (
     PgBin,
     PgProtocol,
     Safekeeper,
-    SafekeeperHttpClient,
     SafekeeperPort,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.utils import (
+    assert_prefix_empty,
+    assert_prefix_not_empty,
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
-from fixtures.remote_storage import RemoteStorageKind, default_remote_storage
+from fixtures.remote_storage import (
+    RemoteStorageKind,
+    default_remote_storage,
+    s3_storage,
+)
+from fixtures.safekeeper.http import SafekeeperHttpClient
+from fixtures.safekeeper.utils import are_walreceivers_absent
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
@@ -118,7 +125,8 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
         with env.pageserver.http_client() as pageserver_http:
             timeline_details = [
                 pageserver_http.timeline_detail(
-                    tenant_id=tenant_id, timeline_id=branch_names_to_timeline_ids[branch_name]
+                    tenant_id=tenant_id,
+                    timeline_id=branch_names_to_timeline_ids[branch_name],
                 )
                 for branch_name in branch_names
             ]
@@ -273,11 +281,6 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.neon_cli.create_branch("test_broker", "main")
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     endpoint = env.endpoints.create_start("test_broker")
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
@@ -334,11 +337,6 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
-
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
 
     tenant_id = env.initial_tenant
     timeline_id = env.neon_cli.create_branch("test_safekeepers_wal_removal")
@@ -457,9 +455,18 @@ def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId,
 
 def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
+
+    # These are expected after timeline deletion on safekeepers.
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Timeline .* was not found in global map.*",
+            ".*Timeline .* was cancelled and cannot be used anymore.*",
+        ]
+    )
 
     tenant_id = env.initial_tenant
     timeline_id = env.neon_cli.create_branch("test_safekeepers_wal_backup")
@@ -488,7 +495,8 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     # put one of safekeepers down again
     env.safekeepers[0].stop()
     # restart postgres
-    endpoint.stop_and_destroy().create_start("test_safekeepers_wal_backup")
+    endpoint.stop()
+    endpoint = env.endpoints.create_start("test_safekeepers_wal_backup")
     # and ensure offloading still works
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
@@ -498,6 +506,17 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
         partial(is_segment_offloaded, env.safekeepers[1], tenant_id, timeline_id, seg_end),
         f"segment ending at {seg_end} get offloaded",
     )
+    env.safekeepers[0].start()
+    endpoint.stop()
+
+    # Test that after timeline deletion remote objects are gone.
+    prefix = "/".join([str(tenant_id), str(timeline_id)])
+    assert_prefix_not_empty(neon_env_builder.safekeepers_remote_storage, prefix)
+
+    for sk in env.safekeepers:
+        sk_http = sk.http_client()
+        sk_http.timeline_delete(tenant_id, timeline_id)
+    assert_prefix_empty(neon_env_builder.safekeepers_remote_storage, prefix)
 
 
 def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
@@ -586,7 +605,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
     # advancing peer_horizon_lsn.
     for sk in env.safekeepers:
         cli = sk.http_client()
-        cli.timeline_delete_force(tenant_id, timeline_id)
+        cli.timeline_delete(tenant_id, timeline_id, only_local=True)
         # restart safekeeper to clear its in-memory state
         sk.stop()
     # wait all potenital in flight pushes to broker arrive before starting
@@ -1079,12 +1098,6 @@ def is_flush_lsn_aligned(sk_http_clis, tenant_id, timeline_id):
     return all([flush_lsns[0] == flsn for flsn in flush_lsns])
 
 
-def are_walreceivers_absent(sk_http_cli, tenant_id: TenantId, timeline_id: TimelineId):
-    status = sk_http_cli.timeline_status(tenant_id, timeline_id)
-    log.info(f"waiting for walreceivers to be gone, currently {status.walreceivers}")
-    return len(status.walreceivers) == 0
-
-
 # Assert by xxd that WAL on given safekeepers is identical. No compute must be
 # running for this to be reliable.
 def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
@@ -1327,6 +1340,36 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
     env.safekeepers[2].stop()
     endpoint = env.endpoints.create_start("test_peer_recovery")
     endpoint.safe_psql("insert into t select generate_series(1,100), 'payload'")
+
+
+# Test that when compute is terminated in fast (or smart) mode, walproposer is
+# allowed to run and self terminate after shutdown checkpoint is written, so it
+# commits it to safekeepers before exiting. This not required for correctness,
+# but needed for tests using check_restored_datadir_content.
+def test_wp_graceful_shutdown(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_wp_graceful_shutdown")
+    ep = env.endpoints.create_start("test_wp_graceful_shutdown")
+    ep.safe_psql("create table t(key int, value text)")
+    ep.stop()
+
+    # figure out checkpoint lsn
+    ckpt_lsn = pg_bin.get_pg_controldata_checkpoint_lsn(ep.pg_data_dir_path())
+
+    sk_http_cli = env.safekeepers[0].http_client()
+    commit_lsn = sk_http_cli.timeline_status(tenant_id, timeline_id).commit_lsn
+    # Note: this is in memory value. Graceful shutdown of walproposer currently
+    # doesn't guarantee persisted value, which is ok as we need it only for
+    # tests. Persisting it without risking too many cf flushes needs a wp -> sk
+    # protocol change. (though in reality shutdown sync-safekeepers does flush
+    # of cf, so most of the time persisted value wouldn't lag)
+    log.info(f"sk commit_lsn {commit_lsn}")
+    # note that ckpt_lsn is the *beginning* of checkpoint record, so commit_lsn
+    # must be actually higher
+    assert commit_lsn > ckpt_lsn, "safekeeper must have checkpoint record"
 
 
 class SafekeeperEnv:
@@ -1623,7 +1666,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     endpoint_3.stop_and_destroy()
 
     # Remove initial tenant's br1 (active)
-    assert sk_http.timeline_delete_force(tenant_id, timeline_id_1)["dir_existed"]
+    assert sk_http.timeline_delete(tenant_id, timeline_id_1)["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_2)).is_dir()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).is_dir()
@@ -1631,7 +1674,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
     # Ensure repeated deletion succeeds
-    assert not sk_http.timeline_delete_force(tenant_id, timeline_id_1)["dir_existed"]
+    assert not sk_http.timeline_delete(tenant_id, timeline_id_1)["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_2)).is_dir()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).is_dir()
@@ -1642,13 +1685,13 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         # Ensure we cannot delete the other tenant
         for sk_h in [sk_http, sk_http_noauth]:
             with pytest.raises(sk_h.HTTPError, match="Forbidden|Unauthorized"):
-                assert sk_h.timeline_delete_force(tenant_id_other, timeline_id_other)
+                assert sk_h.timeline_delete(tenant_id_other, timeline_id_other)
             with pytest.raises(sk_h.HTTPError, match="Forbidden|Unauthorized"):
                 assert sk_h.tenant_delete_force(tenant_id_other)
         assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
     # Remove initial tenant's br2 (inactive)
-    assert sk_http.timeline_delete_force(tenant_id, timeline_id_2)["dir_existed"]
+    assert sk_http.timeline_delete(tenant_id, timeline_id_2)["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_2)).exists()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).is_dir()
@@ -1656,7 +1699,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
     # Remove non-existing branch, should succeed
-    assert not sk_http.timeline_delete_force(tenant_id, TimelineId("00" * 16))["dir_existed"]
+    assert not sk_http.timeline_delete(tenant_id, TimelineId("00" * 16))["dir_existed"]
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_1)).exists()
     assert not (sk_data_dir / str(tenant_id) / str(timeline_id_2)).exists()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).exists()
@@ -1918,3 +1961,51 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
             assert orig_digest == new_digest
 
     # TODO: test timelines can start after copy
+
+
+def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+    # initialize safekeeper
+    endpoint.safe_psql("create table t(key int, value text)")
+
+    # update control file
+    res = (
+        env.safekeepers[0]
+        .http_client()
+        .patch_control_file(
+            tenant_id,
+            timeline_id,
+            {
+                "timeline_start_lsn": "0/1",
+            },
+        )
+    )
+
+    timeline_start_lsn_before = res["old_control_file"]["timeline_start_lsn"]
+    timeline_start_lsn_after = res["new_control_file"]["timeline_start_lsn"]
+
+    log.info(f"patch_control_file response: {res}")
+    log.info(
+        f"updated control file timeline_start_lsn, before {timeline_start_lsn_before}, after {timeline_start_lsn_after}"
+    )
+
+    assert timeline_start_lsn_after == "0/1"
+    env.safekeepers[0].stop().start()
+
+    # wait/check that safekeeper is alive
+    endpoint.safe_psql("insert into t values (1, 'payload')")
+
+    # check that timeline_start_lsn is updated
+    res = (
+        env.safekeepers[0]
+        .http_client()
+        .debug_dump({"dump_control_file": "true", "timeline_id": str(timeline_id)})
+    )
+    log.info(f"dump_control_file response: {res}")
+    assert res["timelines"][0]["control_file"]["timeline_start_lsn"] == "0/1"

@@ -70,6 +70,9 @@ Should only be used e.g. for status check/tenant creation/list.
 Should only be used e.g. for status check.
 Currently also used for connection from any pageserver to any safekeeper.
 
+"generations_api": Provides access to the upcall APIs served by the storage controller or the control plane.
+
+"admin": Provides access to the control plane and admin APIs of the storage controller.
 
 ### CLI
 CLI generates a key pair during call to `neon_local init` with the following commands:

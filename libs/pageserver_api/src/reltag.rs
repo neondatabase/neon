@@ -32,6 +32,9 @@ pub struct RelTag {
     pub relnode: Oid,
 }
 
+/// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
+pub type BlockNumber = u32;
+
 impl PartialOrd for RelTag {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -108,9 +111,24 @@ impl RelTag {
 /// These files are divided into segments, which are divided into
 /// pages of the same BLCKSZ as used for relation files.
 ///
-#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Hash,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    strum_macros::EnumIter,
+    strum_macros::FromRepr,
+    enum_map::Enum,
+)]
+#[repr(u8)]
 pub enum SlruKind {
-    Clog,
+    Clog = 0,
     MultiXactMembers,
     MultiXactOffsets,
 }

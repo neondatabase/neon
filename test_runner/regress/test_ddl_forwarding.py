@@ -248,8 +248,15 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     # We don't have compute_ctl, so here, so create neon_superuser here manually
     cur.execute("CREATE ROLE neon_superuser NOLOGIN CREATEDB CREATEROLE")
 
-    with pytest.raises(psycopg2.InternalError):
-        cur.execute("ALTER ROLE neon_superuser LOGIN")
+    # Contrary to popular belief, being superman does not make you superuser
+    cur.execute("CREATE ROLE superman LOGIN NOSUPERUSER PASSWORD 'jungle_man'")
+
+    with ddl.pg.cursor(user="superman", password="jungle_man") as superman_cur:
+        # We allow real SUPERUSERs to ALTER neon_superuser
+        with pytest.raises(psycopg2.InternalError):
+            superman_cur.execute("ALTER ROLE neon_superuser LOGIN")
+
+    cur.execute("ALTER ROLE neon_superuser LOGIN")
 
     with pytest.raises(psycopg2.InternalError):
         cur.execute("CREATE DATABASE trololobus WITH OWNER neon_superuser")
@@ -289,7 +296,6 @@ def test_ddl_forwarding_invalid_db(neon_simple_env: NeonEnv):
         # Some non-existent url
         config_lines=["neon.console_url=http://localhost:9999/unknown/api/v0/roles_and_databases"],
     )
-    log.info("postgres is running on 'test_ddl_forwarding_invalid_db' branch")
 
     with endpoint.cursor() as cur:
         cur.execute("SET neon.forward_ddl = false")

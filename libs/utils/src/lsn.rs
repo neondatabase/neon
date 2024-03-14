@@ -415,7 +415,6 @@ mod tests {
 
     use super::*;
 
-    use serde::ser::Serialize;
     use serde_assert::{Deserializer, Serializer, Token, Tokens};
 
     #[test]

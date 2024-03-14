@@ -1,28 +1,29 @@
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod mock;
 pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::backend::ComputeUserInfo,
-    cache::{timed_lru, TimedLru},
+    auth::{
+        backend::{ComputeCredentialKeys, ComputeUserInfo},
+        IpPattern,
+    },
+    cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
+    config::{CacheOptions, ProjectInfoCacheOptions},
     context::RequestMonitoring,
-    scram,
+    scram, EndpointCacheKey, ProjectId,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use smol_str::SmolStr;
 use std::{sync::Arc, time::Duration};
-use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore},
-    time::Instant,
-};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
 use tracing::info;
 
 pub mod errors {
     use crate::{
-        error::{io_error, UserFacingError},
+        error::{io_error, ReportableError, UserFacingError},
         http,
         proxy::retry::ShouldRetry,
     };
@@ -72,13 +73,44 @@ pub mod errors {
                         // Status 406: endpoint is disabled (we don't allow connections).
                         format!("{REQUEST_FAILED}: endpoint is disabled")
                     }
-                    http::StatusCode::LOCKED => {
+                    http::StatusCode::LOCKED | http::StatusCode::UNPROCESSABLE_ENTITY => {
                         // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
                         format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contact our support")
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 },
                 _ => REQUEST_FAILED.to_owned(),
+            }
+        }
+    }
+
+    impl ReportableError for ApiError {
+        fn get_error_kind(&self) -> crate::error::ErrorKind {
+            match self {
+                ApiError::Console {
+                    status: http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
+                    ..
+                } => crate::error::ErrorKind::User,
+                ApiError::Console {
+                    status: http::StatusCode::UNPROCESSABLE_ENTITY,
+                    text,
+                } if text.contains("compute time quota of non-primary branches is exceeded") => {
+                    crate::error::ErrorKind::User
+                }
+                ApiError::Console {
+                    status: http::StatusCode::LOCKED,
+                    text,
+                } if text.contains("quota exceeded")
+                    || text.contains("the limit for current plan reached") =>
+                {
+                    crate::error::ErrorKind::User
+                }
+                ApiError::Console {
+                    status: http::StatusCode::TOO_MANY_REQUESTS,
+                    ..
+                } => crate::error::ErrorKind::ServiceRateLimit,
+                ApiError::Console { .. } => crate::error::ErrorKind::ControlPlane,
+                ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
     }
@@ -94,6 +126,11 @@ pub mod errors {
                     status: http::StatusCode::BAD_REQUEST,
                     ..
                 } => true,
+                // don't retry when quotas are exceeded
+                Self::Console {
+                    status: http::StatusCode::UNPROCESSABLE_ENTITY,
+                    ref text,
+                } => !text.contains("compute time quota of non-primary branches is exceeded"),
                 // locked can be returned when the endpoint was in transition
                 // or when quotas are exceeded. don't retry when quotas are exceeded
                 Self::Console {
@@ -152,6 +189,16 @@ pub mod errors {
             }
         }
     }
+
+    impl ReportableError for GetAuthInfoError {
+        fn get_error_kind(&self) -> crate::error::ErrorKind {
+            match self {
+                GetAuthInfoError::BadSecret => crate::error::ErrorKind::ControlPlane,
+                GetAuthInfoError::ApiError(_) => crate::error::ErrorKind::ControlPlane,
+            }
+        }
+    }
+
     #[derive(Debug, Error)]
     pub enum WakeComputeError {
         #[error("Console responded with a malformed compute address: {0}")]
@@ -196,28 +243,22 @@ pub mod errors {
             }
         }
     }
-}
 
-/// Extra query params we'd like to pass to the console.
-pub struct ConsoleReqExtra {
-    pub options: Vec<(String, String)>,
-}
-
-impl ConsoleReqExtra {
-    // https://swagger.io/docs/specification/serialization/ DeepObject format
-    // paramName[prop1]=value1&paramName[prop2]=value2&....
-    pub fn options_as_deep_object(&self) -> Vec<(String, String)> {
-        self.options
-            .iter()
-            .map(|(k, v)| (format!("options[{}]", k), v.to_string()))
-            .collect()
+    impl ReportableError for WakeComputeError {
+        fn get_error_kind(&self) -> crate::error::ErrorKind {
+            match self {
+                WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
+                WakeComputeError::ApiError(e) => e.get_error_kind(),
+                WakeComputeError::TimeoutError => crate::error::ErrorKind::ServiceRateLimit,
+            }
+        }
     }
 }
 
 /// Auth secret which is managed by the cloud.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum AuthSecret {
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     /// Md5 hash of user's password.
     Md5([u8; 16]),
 
@@ -229,7 +270,9 @@ pub enum AuthSecret {
 pub struct AuthInfo {
     pub secret: Option<AuthSecret>,
     /// List of IP addresses allowed for the autorization.
-    pub allowed_ips: Vec<String>,
+    pub allowed_ips: Vec<IpPattern>,
+    /// Project ID. This is used for cache invalidation.
+    pub project_id: Option<ProjectId>,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -248,52 +291,156 @@ pub struct NodeInfo {
     pub allow_self_signed_compute: bool,
 }
 
-pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
-pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
-pub type AllowedIpsCache = TimedLru<SmolStr, Arc<Vec<String>>>;
-pub type RoleSecretCache = TimedLru<(SmolStr, SmolStr), Option<AuthSecret>>;
-pub type CachedRoleSecret = timed_lru::Cached<&'static RoleSecretCache>;
+impl NodeInfo {
+    pub async fn connect(
+        &self,
+        ctx: &mut RequestMonitoring,
+        timeout: Duration,
+    ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
+        self.config
+            .connect(
+                ctx,
+                self.allow_self_signed_compute,
+                self.aux.clone(),
+                timeout,
+            )
+            .await
+    }
+    pub fn reuse_settings(&mut self, other: Self) {
+        self.allow_self_signed_compute = other.allow_self_signed_compute;
+        self.config.reuse_password(other.config);
+    }
+
+    pub fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
+        match keys {
+            ComputeCredentialKeys::Password(password) => self.config.password(password),
+            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
+        };
+    }
+}
+
+pub type NodeInfoCache = TimedLru<EndpointCacheKey, NodeInfo>;
+pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
+pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
+pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
 #[async_trait]
 pub trait Api {
     /// Get the client's auth secret for authentication.
+    /// Returns option because user not found situation is special.
+    /// We still have to mock the scram to avoid leaking information that user doesn't exist.
     async fn get_role_secret(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
-    ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
+        user_info: &ComputeUserInfo,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
+}
+
+#[non_exhaustive]
+pub enum ConsoleBackend {
+    /// Current Cloud API (V2).
+    Console(neon::Api),
+    /// Local mock of Cloud API (V2).
+    #[cfg(any(test, feature = "testing"))]
+    Postgres(mock::Api),
+    /// Internal testing
+    #[cfg(test)]
+    Test(Box<dyn crate::auth::backend::TestBackend>),
+}
+
+#[async_trait]
+impl Api for ConsoleBackend {
+    async fn get_role_secret(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
+        use ConsoleBackend::*;
+        match self {
+            Console(api) => api.get_role_secret(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Postgres(api) => api.get_role_secret(ctx, user_info).await,
+            #[cfg(test)]
+            Test(_) => unreachable!("this function should never be called in the test backend"),
+        }
+    }
+
+    async fn get_allowed_ips_and_secret(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
+        use ConsoleBackend::*;
+        match self {
+            Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            #[cfg(test)]
+            Test(api) => api.get_allowed_ips_and_secret(),
+        }
+    }
+
+    async fn wake_compute(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
+        use ConsoleBackend::*;
+
+        match self {
+            Console(api) => api.wake_compute(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Postgres(api) => api.wake_compute(ctx, user_info).await,
+            #[cfg(test)]
+            Test(api) => api.wake_compute(),
+        }
+    }
 }
 
 /// Various caches for [`console`](super).
 pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,
-    /// Cache for the `get_allowed_ips`. TODO(anna): use notifications listener instead.
-    pub allowed_ips: AllowedIpsCache,
-    /// Cache for the `get_role_secret`. TODO(anna): use notifications listener instead.
-    pub role_secret: RoleSecretCache,
+    /// Cache which stores project_id -> endpoint_ids mapping.
+    pub project_info: Arc<ProjectInfoCacheImpl>,
+}
+
+impl ApiCaches {
+    pub fn new(
+        wake_compute_cache_config: CacheOptions,
+        project_info_cache_config: ProjectInfoCacheOptions,
+    ) -> Self {
+        Self {
+            node_info: NodeInfoCache::new(
+                "node_info_cache",
+                wake_compute_cache_config.size,
+                wake_compute_cache_config.ttl,
+                true,
+            ),
+            project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
+        }
+    }
 }
 
 /// Various caches for [`console`](super).
 pub struct ApiLocks {
     name: &'static str,
-    node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
+    node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
     registered: prometheus::IntCounter,
@@ -361,7 +508,7 @@ impl ApiLocks {
 
     pub async fn get_wake_compute_permit(
         &self,
-        key: &Arc<str>,
+        key: &EndpointCacheKey,
     ) -> Result<WakeComputePermit, errors::WakeComputeError> {
         if self.permits == 0 {
             return Ok(WakeComputePermit { permit: None });

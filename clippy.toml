@@ -3,3 +3,10 @@ disallowed-methods = [
     # Allow this for now, to deny it later once we stop using Handle::block_on completely
     # "tokio::runtime::Handle::block_on",
 ]
+
+disallowed-macros = [
+    # use std::pin::pin
+    "futures::pin_mut",
+    # cannot disallow this, because clippy finds used from tokio macros
+    #"tokio::pin",
+]

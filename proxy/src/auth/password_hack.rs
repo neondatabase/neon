@@ -4,10 +4,11 @@
 //! UPDATE (Mon Aug  8 13:20:34 UTC 2022): the payload format has been simplified.
 
 use bstr::ByteSlice;
-use smol_str::SmolStr;
+
+use crate::EndpointId;
 
 pub struct PasswordHackPayload {
-    pub endpoint: SmolStr,
+    pub endpoint: EndpointId,
     pub password: Vec<u8>,
 }
 

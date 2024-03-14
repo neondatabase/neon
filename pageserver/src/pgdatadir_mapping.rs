@@ -10,11 +10,19 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
-use bytes::{Buf, Bytes};
-use pageserver_api::key::is_rel_block_key;
-use pageserver_api::reltag::{RelTag, SlruKind};
+use bytes::{Buf, Bytes, BytesMut};
+use enum_map::Enum;
+use itertools::Itertools;
+use pageserver_api::key::{
+    dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
+    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
+    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+};
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TimestampTz, TransactionId};
@@ -22,13 +30,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
+use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
-/// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
-pub type BlockNumber = u32;
+const MAX_AUX_FILE_DELTAS: usize = 1024;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -151,6 +159,7 @@ impl Timeline {
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            pending_directory_entries: Vec::new(),
             lsn,
         }
     }
@@ -316,6 +325,27 @@ impl Timeline {
             }
             Err(e) => Err(PageReconstructError::from(e)),
         }
+    }
+
+    /// Get the whole SLRU segment
+    pub(crate) async fn get_slru_segment(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        let n_blocks = self
+            .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
+            .await?;
+        let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
+        for blkno in 0..n_blocks {
+            let block = self
+                .get_slru_page_at_lsn(kind, segno, blkno, lsn, ctx)
+                .await?;
+            segment.extend_from_slice(&block[..BLCKSZ as usize]);
+        }
+        Ok(segment.freeze())
     }
 
     /// Look up given SLRU page version.
@@ -531,6 +561,33 @@ impl Timeline {
         Ok(Default::default())
     }
 
+    pub(crate) async fn get_slru_keyspace(
+        &self,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<KeySpace, PageReconstructError> {
+        let mut accum = KeySpaceAccum::new();
+
+        for kind in SlruKind::iter() {
+            let mut segments: Vec<u32> = self
+                .list_slru_segments(kind, version, ctx)
+                .await?
+                .into_iter()
+                .collect();
+            segments.sort_unstable();
+
+            for seg in segments {
+                let block_count = self.get_slru_segment_size(kind, seg, version, ctx).await?;
+
+                accum.add_range(
+                    slru_block_to_key(kind, seg, 0)..slru_block_to_key(kind, seg, block_count),
+                );
+            }
+        }
+
+        Ok(accum.to_keyspace())
+    }
+
     /// Get a list of SLRU segments
     pub(crate) async fn list_slru_segments(
         &self,
@@ -648,7 +705,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
@@ -816,6 +873,10 @@ pub struct DatadirModification<'a> {
     pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
+
+    /// For special "directory" keys that store key-value maps, track the size of the map
+    /// if it was updated in this modification.
+    pending_directory_entries: Vec<(DirectoryKind, usize)>,
 }
 
 impl<'a> DatadirModification<'a> {
@@ -847,6 +908,7 @@ impl<'a> DatadirModification<'a> {
         let buf = DbDirectory::ser(&DbDirectory {
             dbdirs: HashMap::new(),
         })?;
+        self.pending_directory_entries.push((DirectoryKind::Db, 0));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
         // Create AuxFilesDirectory
@@ -855,16 +917,24 @@ impl<'a> DatadirModification<'a> {
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, 0));
         self.put(TWOPHASEDIR_KEY, Value::Image(buf.into()));
 
         let buf: Bytes = SlruSegmentDirectory::ser(&SlruSegmentDirectory::default())?.into();
         let empty_dir = Value::Image(buf);
         self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
         self.put(
             slru_dir_to_key(SlruKind::MultiXactMembers),
             empty_dir.clone(),
         );
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
         self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
 
         Ok(())
     }
@@ -965,6 +1035,7 @@ impl<'a> DatadirModification<'a> {
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
             })?;
+            self.pending_directory_entries.push((DirectoryKind::Rel, 0));
             self.put(
                 rel_dir_to_key(spcnode, dbnode),
                 Value::Image(Bytes::from(buf)),
@@ -987,6 +1058,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.xids.insert(xid) {
             anyhow::bail!("twophase file for xid {} already exists", xid);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, dir.xids.len()));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1022,6 +1095,8 @@ impl<'a> DatadirModification<'a> {
         let mut dir = DbDirectory::des(&buf)?;
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
+            self.pending_directory_entries
+                .push((DirectoryKind::Db, dir.dbdirs.len()));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         } else {
             warn!(
@@ -1059,6 +1134,8 @@ impl<'a> DatadirModification<'a> {
             // Didn't exist. Update dbdir
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
             let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
+            self.pending_directory_entries
+                .push((DirectoryKind::Db, dbdir.dbdirs.len()));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // and create the RelDirectory
@@ -1073,6 +1150,10 @@ impl<'a> DatadirModification<'a> {
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
             return Err(RelationError::AlreadyExists);
         }
+
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, rel_dir.rels.len()));
+
         self.put(
             rel_dir_key,
             Value::Image(Bytes::from(
@@ -1164,6 +1245,9 @@ impl<'a> DatadirModification<'a> {
         let buf = self.get(dir_key, ctx).await?;
         let mut dir = RelDirectory::des(&buf)?;
 
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, dir.rels.len()));
+
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
             self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
         } else {
@@ -1199,6 +1283,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.segments.insert(segno) {
             anyhow::bail!("slru segment {kind:?}/{segno} already exists");
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(kind), dir.segments.len()));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1243,6 +1329,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.segments.remove(&segno) {
             warn!("slru segment {:?}/{} does not exist", kind, segno);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(kind), dir.segments.len()));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1273,6 +1361,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.xids.remove(&xid) {
             warn!("twophase file for xid {} does not exist", xid);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, dir.xids.len()));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1288,6 +1378,8 @@ impl<'a> DatadirModification<'a> {
         let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
             files: HashMap::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFiles, 0));
         self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         Ok(())
     }
@@ -1298,28 +1390,86 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
-            Ok(buf) => AuxFilesDirectory::des(&buf)?,
-            Err(e) => {
-                // This is expected: historical databases do not have the key.
-                debug!("Failed to get info about AUX files: {}", e);
-                AuxFilesDirectory {
-                    files: HashMap::new(),
+        let file_path = path.to_string();
+        let content = if content.is_empty() {
+            None
+        } else {
+            Some(Bytes::copy_from_slice(content))
+        };
+
+        let n_files;
+        let mut aux_files = self.tline.aux_files.lock().await;
+        if let Some(mut dir) = aux_files.dir.take() {
+            // We already updated aux files in `self`: emit a delta and update our latest value
+            dir.upsert(file_path.clone(), content.clone());
+            n_files = dir.files.len();
+            if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::Image(Bytes::from(
+                        AuxFilesDirectory::ser(&dir).context("serialize")?,
+                    )),
+                );
+                aux_files.n_deltas = 0;
+            } else {
+                self.put(
+                    AUX_FILES_KEY,
+                    Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                );
+                aux_files.n_deltas += 1;
+            }
+            aux_files.dir = Some(dir);
+        } else {
+            // Check if the AUX_FILES_KEY is initialized
+            match self.get(AUX_FILES_KEY, ctx).await {
+                Ok(dir_bytes) => {
+                    let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
+                    // Key is already set, we may append a delta
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::WalRecord(NeonWalRecord::AuxFile {
+                            file_path: file_path.clone(),
+                            content: content.clone(),
+                        }),
+                    );
+                    dir.upsert(file_path, content);
+                    n_files = dir.files.len();
+                    aux_files.dir = Some(dir);
+                }
+                Err(
+                    e @ (PageReconstructError::AncestorStopping(_)
+                    | PageReconstructError::Cancelled
+                    | PageReconstructError::AncestorLsnTimeout(_)),
+                ) => {
+                    // Important that we do not interpret a shutdown error as "not found" and thereby
+                    // reset the map.
+                    return Err(e.into());
+                }
+                // FIXME: PageReconstructError doesn't have an explicit variant for key-not-found, so
+                // we are assuming that all _other_ possible errors represents a missing key.  If some
+                // other error occurs, we may incorrectly reset the map of aux files.
+                Err(PageReconstructError::Other(_) | PageReconstructError::WalRedo(_)) => {
+                    // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                    let mut dir = AuxFilesDirectory {
+                        files: HashMap::new(),
+                    };
+                    dir.upsert(file_path, content);
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::Image(Bytes::from(
+                            AuxFilesDirectory::ser(&dir).context("serialize")?,
+                        )),
+                    );
+                    n_files = 1;
+                    aux_files.dir = Some(dir);
                 }
             }
-        };
-        let path = path.to_string();
-        if content.is_empty() {
-            dir.files.remove(&path);
-        } else {
-            dir.files.insert(path, Bytes::copy_from_slice(content));
         }
-        self.put(
-            AUX_FILES_KEY,
-            Value::Image(Bytes::from(
-                AuxFilesDirectory::ser(&dir).context("serialize")?,
-            )),
-        );
+
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFiles, n_files));
+
         Ok(())
     }
 
@@ -1349,7 +1499,7 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let writer = self.tline.writer().await;
+        let mut writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
@@ -1375,6 +1525,10 @@ impl<'a> DatadirModification<'a> {
             self.pending_nblocks = 0;
         }
 
+        for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
+            writer.update_directory_entries_count(kind, count as u64);
+        }
+
         Ok(())
     }
 
@@ -1384,14 +1538,22 @@ impl<'a> DatadirModification<'a> {
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let writer = self.tline.writer().await;
+        let mut writer = self.tline.writer().await;
 
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            writer.put_batch(&self.pending_updates, ctx).await?;
-            self.pending_updates.clear();
+            // The put_batch call below expects expects the inputs to be sorted by Lsn,
+            // so we do that first.
+            let lsn_ordered_batch: Vec<(Key, Lsn, Value)> = self
+                .pending_updates
+                .drain()
+                .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (key, lsn, val)))
+                .kmerge_by(|lhs, rhs| lhs.1 .0 < rhs.1 .0)
+                .collect();
+
+            writer.put_batch(lsn_ordered_batch, ctx).await?;
         }
 
         if !self.pending_deletions.is_empty() {
@@ -1410,6 +1572,10 @@ impl<'a> DatadirModification<'a> {
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
+        }
+
+        for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
+            writer.update_directory_entries_count(kind, count as u64);
         }
 
         Ok(())
@@ -1520,9 +1686,19 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct AuxFilesDirectory {
-    files: HashMap<String, Bytes>,
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
+pub(crate) struct AuxFilesDirectory {
+    pub(crate) files: HashMap<String, Bytes>,
+}
+
+impl AuxFilesDirectory {
+    pub(crate) fn upsert(&mut self, key: String, value: Option<Bytes>) {
+        if let Some(value) = value {
+            self.files.insert(key, value);
+        } else {
+            self.files.remove(&key);
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1536,388 +1712,82 @@ struct SlruSegmentDirectory {
     segments: HashSet<u32>,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, enum_map::Enum)]
+#[repr(u8)]
+pub(crate) enum DirectoryKind {
+    Db,
+    TwoPhase,
+    Rel,
+    AuxFiles,
+    SlruSegment(SlruKind),
+}
+
+impl DirectoryKind {
+    pub(crate) const KINDS_NUM: usize = <DirectoryKind as Enum>::LENGTH;
+    pub(crate) fn offset(&self) -> usize {
+        self.into_usize()
+    }
+}
+
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
-
-// Layout of the Key address space
-//
-// The Key struct, used to address the underlying key-value store, consists of
-// 18 bytes, split into six fields. See 'Key' in repository.rs. We need to map
-// all the data and metadata keys into those 18 bytes.
-//
-// Principles for the mapping:
-//
-// - Things that are often accessed or modified together, should be close to
-//   each other in the key space. For example, if a relation is extended by one
-//   block, we create a new key-value pair for the block data, and update the
-//   relation size entry. Because of that, the RelSize key comes after all the
-//   RelBlocks of a relation: the RelSize and the last RelBlock are always next
-//   to each other.
-//
-// The key space is divided into four major sections, identified by the first
-// byte, and the form a hierarchy:
-//
-// 00 Relation data and metadata
-//
-//   DbDir    () -> (dbnode, spcnode)
-//   Filenodemap
-//   RelDir   -> relnode forknum
-//       RelBlocks
-//       RelSize
-//
-// 01 SLRUs
-//
-//   SlruDir  kind
-//   SlruSegBlocks segno
-//   SlruSegSize
-//
-// 02 pg_twophase
-//
-// 03 misc
-//    Controlfile
-//    checkpoint
-//    pg_version
-//
-// 04 aux files
-//
-// Below is a full list of the keyspace allocation:
-//
-// DbDir:
-// 00 00000000 00000000 00000000 00   00000000
-//
-// Filenodemap:
-// 00 SPCNODE  DBNODE   00000000 00   00000000
-//
-// RelDir:
-// 00 SPCNODE  DBNODE   00000000 00   00000001 (Postgres never uses relfilenode 0)
-//
-// RelBlock:
-// 00 SPCNODE  DBNODE   RELNODE  FORK BLKNUM
-//
-// RelSize:
-// 00 SPCNODE  DBNODE   RELNODE  FORK FFFFFFFF
-//
-// SlruDir:
-// 01 kind     00000000 00000000 00   00000000
-//
-// SlruSegBlock:
-// 01 kind     00000001 SEGNO    00   BLKNUM
-//
-// SlruSegSize:
-// 01 kind     00000001 SEGNO    00   FFFFFFFF
-//
-// TwoPhaseDir:
-// 02 00000000 00000000 00000000 00   00000000
-//
-// TwoPhaseFile:
-// 02 00000000 00000000 00000000 00   XID
-//
-// ControlFile:
-// 03 00000000 00000000 00000000 00   00000000
-//
-// Checkpoint:
-// 03 00000000 00000000 00000000 00   00000001
-//
-// AuxFiles:
-// 03 00000000 00000000 00000000 00   00000002
-//
-
-//-- Section 01: relation data and metadata
-
-const DBDIR_KEY: Key = Key {
-    field1: 0x00,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 0,
-};
-
-fn dbdir_key_range(spcnode: Oid, dbnode: Oid) -> Range<Key> {
-    Key {
-        field1: 0x00,
-        field2: spcnode,
-        field3: dbnode,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }..Key {
-        field1: 0x00,
-        field2: spcnode,
-        field3: dbnode,
-        field4: 0xffffffff,
-        field5: 0xff,
-        field6: 0xffffffff,
-    }
-}
-
-fn relmap_file_key(spcnode: Oid, dbnode: Oid) -> Key {
-    Key {
-        field1: 0x00,
-        field2: spcnode,
-        field3: dbnode,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }
-}
-
-fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
-    Key {
-        field1: 0x00,
-        field2: spcnode,
-        field3: dbnode,
-        field4: 0,
-        field5: 0,
-        field6: 1,
-    }
-}
-
-pub(crate) fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
-    Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum,
-        field6: blknum,
-    }
-}
-
-fn rel_size_to_key(rel: RelTag) -> Key {
-    Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum,
-        field6: 0xffffffff,
-    }
-}
-
-fn rel_key_range(rel: RelTag) -> Range<Key> {
-    Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum,
-        field6: 0,
-    }..Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum + 1,
-        field6: 0,
-    }
-}
-
-//-- Section 02: SLRUs
-
-fn slru_dir_to_key(kind: SlruKind) -> Key {
-    Key {
-        field1: 0x01,
-        field2: match kind {
-            SlruKind::Clog => 0x00,
-            SlruKind::MultiXactMembers => 0x01,
-            SlruKind::MultiXactOffsets => 0x02,
-        },
-        field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: 0,
-    }
-}
-
-fn slru_block_to_key(kind: SlruKind, segno: u32, blknum: BlockNumber) -> Key {
-    Key {
-        field1: 0x01,
-        field2: match kind {
-            SlruKind::Clog => 0x00,
-            SlruKind::MultiXactMembers => 0x01,
-            SlruKind::MultiXactOffsets => 0x02,
-        },
-        field3: 1,
-        field4: segno,
-        field5: 0,
-        field6: blknum,
-    }
-}
-
-fn slru_segment_size_to_key(kind: SlruKind, segno: u32) -> Key {
-    Key {
-        field1: 0x01,
-        field2: match kind {
-            SlruKind::Clog => 0x00,
-            SlruKind::MultiXactMembers => 0x01,
-            SlruKind::MultiXactOffsets => 0x02,
-        },
-        field3: 1,
-        field4: segno,
-        field5: 0,
-        field6: 0xffffffff,
-    }
-}
-
-fn slru_segment_key_range(kind: SlruKind, segno: u32) -> Range<Key> {
-    let field2 = match kind {
-        SlruKind::Clog => 0x00,
-        SlruKind::MultiXactMembers => 0x01,
-        SlruKind::MultiXactOffsets => 0x02,
-    };
-
-    Key {
-        field1: 0x01,
-        field2,
-        field3: 1,
-        field4: segno,
-        field5: 0,
-        field6: 0,
-    }..Key {
-        field1: 0x01,
-        field2,
-        field3: 1,
-        field4: segno,
-        field5: 1,
-        field6: 0,
-    }
-}
-
-//-- Section 03: pg_twophase
-
-const TWOPHASEDIR_KEY: Key = Key {
-    field1: 0x02,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 0,
-};
-
-fn twophase_file_key(xid: TransactionId) -> Key {
-    Key {
-        field1: 0x02,
-        field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: xid,
-    }
-}
-
-fn twophase_key_range(xid: TransactionId) -> Range<Key> {
-    let (next_xid, overflowed) = xid.overflowing_add(1);
-
-    Key {
-        field1: 0x02,
-        field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: xid,
-    }..Key {
-        field1: 0x02,
-        field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: u8::from(overflowed),
-        field6: next_xid,
-    }
-}
-
-//-- Section 03: Control file
-const CONTROLFILE_KEY: Key = Key {
-    field1: 0x03,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 0,
-};
-
-const CHECKPOINT_KEY: Key = Key {
-    field1: 0x03,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 1,
-};
-
-const AUX_FILES_KEY: Key = Key {
-    field1: 0x03,
-    field2: 0,
-    field3: 0,
-    field4: 0,
-    field5: 0,
-    field6: 2,
-};
-
-// Reverse mappings for a few Keys.
-// These are needed by WAL redo manager.
-
-// AUX_FILES currently stores only data for logical replication (slots etc), and
-// we don't preserve these on a branch because safekeepers can't follow timeline
-// switch (and generally it likely should be optional), so ignore these.
-pub fn is_inherited_key(key: Key) -> bool {
-    key != AUX_FILES_KEY
-}
-
-/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
-pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
-    Ok(match key.field1 {
-        0x00 => (
-            RelTag {
-                spcnode: key.field2,
-                dbnode: key.field3,
-                relnode: key.field4,
-                forknum: key.field5,
-            },
-            key.field6,
-        ),
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
-}
-pub fn is_rel_fsm_block_key(key: Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
-}
-
-pub fn is_rel_vm_block_key(key: Key) -> bool {
-    key.field1 == 0x00
-        && key.field4 != 0
-        && key.field5 == VISIBILITYMAP_FORKNUM
-        && key.field6 != 0xffffffff
-}
-
-pub fn key_to_slru_block(key: Key) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
-    Ok(match key.field1 {
-        0x01 => {
-            let kind = match key.field2 {
-                0x00 => SlruKind::Clog,
-                0x01 => SlruKind::MultiXactMembers,
-                0x02 => SlruKind::MultiXactOffsets,
-                _ => anyhow::bail!("unrecognized slru kind 0x{:02x}", key.field2),
-            };
-            let segno = key.field4;
-            let blknum = key.field6;
-
-            (kind, segno, blknum)
-        }
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
-}
-
-fn is_slru_block_key(key: Key) -> bool {
-    key.field1 == 0x01                // SLRU-related
-        && key.field3 == 0x00000001   // but not SlruDir
-        && key.field6 != 0xffffffff // and not SlruSegSize
-}
 
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
-    //use super::repo_harness::*;
-    //use super::*;
+    use hex_literal::hex;
+    use utils::id::TimelineId;
+
+    use super::*;
+
+    use crate::{tenant::harness::TenantHarness, DEFAULT_PG_VERSION};
+
+    /// Test a round trip of aux file updates, from DatadirModification to reading back from the Timeline
+    #[tokio::test]
+    async fn aux_files_round_trip() -> anyhow::Result<()> {
+        let name = "aux_files_round_trip";
+        let harness = TenantHarness::create(name)?;
+
+        pub const TIMELINE_ID: TimelineId =
+            TimelineId::from_array(hex!("11223344556677881122334455667788"));
+
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        let tline = tline.raw_timeline().unwrap();
+
+        // First modification: insert two keys
+        let mut modification = tline.begin_modification(Lsn(0x1000));
+        modification.put_file("foo/bar1", b"content1", &ctx).await?;
+        modification.set_lsn(Lsn(0x1008))?;
+        modification.put_file("foo/bar2", b"content2", &ctx).await?;
+        modification.commit(&ctx).await?;
+        let expect_1008 = HashMap::from([
+            ("foo/bar1".to_string(), Bytes::from_static(b"content1")),
+            ("foo/bar2".to_string(), Bytes::from_static(b"content2")),
+        ]);
+
+        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        assert_eq!(readback, expect_1008);
+
+        // Second modification: update one key, remove the other
+        let mut modification = tline.begin_modification(Lsn(0x2000));
+        modification.put_file("foo/bar1", b"content3", &ctx).await?;
+        modification.set_lsn(Lsn(0x2008))?;
+        modification.put_file("foo/bar2", b"", &ctx).await?;
+        modification.commit(&ctx).await?;
+        let expect_2008 =
+            HashMap::from([("foo/bar1".to_string(), Bytes::from_static(b"content3"))]);
+
+        let readback = tline.list_aux_files(Lsn(0x2008), &ctx).await?;
+        assert_eq!(readback, expect_2008);
+
+        // Reading back in time works
+        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        assert_eq!(readback, expect_1008);
+
+        Ok(())
+    }
 
     /*
         fn assert_current_logical_size<R: Repository>(timeline: &DatadirTimeline<R>, lsn: Lsn) {

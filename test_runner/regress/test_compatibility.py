@@ -7,11 +7,13 @@ from typing import List, Optional
 
 import pytest
 import toml
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
 )
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
@@ -110,11 +112,6 @@ def test_create_snapshot(
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
     pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
     pg_bin.run_capture(
@@ -136,6 +133,7 @@ def test_create_snapshot(
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
+    env.storage_controller.stop()
 
     # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
     compatibility_snapshot_dir = (
@@ -143,7 +141,12 @@ def test_create_snapshot(
     )
     if compatibility_snapshot_dir.exists():
         shutil.rmtree(compatibility_snapshot_dir)
-    shutil.copytree(test_output_dir, compatibility_snapshot_dir)
+
+    shutil.copytree(
+        test_output_dir,
+        compatibility_snapshot_dir,
+        ignore=shutil.ignore_patterns("pg_dynshmem"),
+    )
 
 
 @check_ondisk_data_compatibility_if_enabled
@@ -223,13 +226,23 @@ def test_forward_compatibility(
     )
 
     try:
+        # TODO: remove this once the previous pageserrver version understands
+        # the 'get_vectored_impl' config
+        neon_env_builder.pageserver_get_vectored_impl = None
+
         neon_env_builder.num_safekeepers = 3
+        neon_local_binpath = neon_env_builder.neon_binpath
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
             neon_binpath=compatibility_neon_bin,
             pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
-        neon_env_builder.start()
+
+        # Use current neon_local even though we're using old binaries for
+        # everything else: our test code is written for latest CLI args.
+        env.neon_local_binpath = neon_local_binpath
+
+        neon_env_builder.start(register_pageservers=True)
 
         check_neon_works(
             env,
@@ -269,14 +282,20 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     timeline_id = env.initial_timeline
     pg_version = env.pg_version
 
-    # Delete all files from local_fs_remote_storage except initdb.tar.zst,
+    try:
+        pageserver_http.timeline_preserve_initdb_archive(tenant_id, timeline_id)
+    except PageserverApiException as e:
+        # Allow the error as we might be running the old pageserver binary
+        log.info(f"Got allowed error: '{e}'")
+
+    # Delete all files from local_fs_remote_storage except initdb-preserved.tar.zst,
     # the file is required for `timeline_create` with `existing_initdb_timeline_id`.
     #
     # TODO: switch to Path.walk() in Python 3.12
     # for dirpath, _dirnames, filenames in (repo_dir / "local_fs_remote_storage").walk():
     for dirpath, _dirnames, filenames in os.walk(repo_dir / "local_fs_remote_storage"):
         for filename in filenames:
-            if filename != "initdb.tar.zst":
+            if filename != "initdb-preserved.tar.zst" and filename != "initdb.tar.zst":
                 (Path(dirpath) / filename).unlink()
 
     timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)

@@ -5,6 +5,7 @@
 
 use anyhow::{bail, ensure, Context};
 
+use clap::ValueEnum;
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -71,10 +72,15 @@ pub struct LocalEnv {
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
 
-    // Control plane location: if None, we will not run attachment_service.  If set, this will
+    // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
     #[serde(default)]
     pub control_plane_api: Option<Url>,
+
+    // Control plane upcall API for storage controller.  If set, this will be propagated into the
+    // storage controller's configuration.
+    #[serde(default)]
+    pub control_plane_compute_hook_api: Option<Url>,
 
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
     #[serde(default)]
@@ -162,6 +168,31 @@ impl Default for SafekeeperConf {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum InitForceMode {
+    MustNotExist,
+    EmptyDirOk,
+    RemoveAllContents,
+}
+
+impl ValueEnum for InitForceMode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            Self::MustNotExist,
+            Self::EmptyDirOk,
+            Self::RemoveAllContents,
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(match self {
+            InitForceMode::MustNotExist => "must-not-exist",
+            InitForceMode::EmptyDirOk => "empty-dir-ok",
+            InitForceMode::RemoveAllContents => "remove-all-contents",
+        }))
+    }
+}
+
 impl SafekeeperConf {
     /// Compute is served by port on which only tenant scoped tokens allowed, if
     /// it is configured.
@@ -196,8 +227,12 @@ impl LocalEnv {
         self.neon_distrib_dir.join("pageserver")
     }
 
-    pub fn attachment_service_bin(&self) -> PathBuf {
-        self.neon_distrib_dir.join("attachment_service")
+    pub fn storage_controller_bin(&self) -> PathBuf {
+        // Irrespective of configuration, storage controller binary is always
+        // run from the same location as neon_local.  This means that for compatibility
+        // tests that run old pageserver/safekeeper, they still run latest storage controller.
+        let neon_local_bin_dir = env::current_exe().unwrap().parent().unwrap().to_owned();
+        neon_local_bin_dir.join("storage_controller")
     }
 
     pub fn safekeeper_bin(&self) -> PathBuf {
@@ -225,7 +260,13 @@ impl LocalEnv {
         if let Some(conf) = self.pageservers.iter().find(|node| node.id == id) {
             Ok(conf)
         } else {
-            bail!("could not find pageserver {id}")
+            let have_ids = self
+                .pageservers
+                .iter()
+                .map(|node| format!("{}:{}", node.id, node.listen_http_addr))
+                .collect::<Vec<_>>();
+            let joined = have_ids.join(",");
+            bail!("could not find pageserver {id}, have ids {joined}")
         }
     }
 
@@ -371,20 +412,23 @@ impl LocalEnv {
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
-        let private_key_path = if self.private_key_path.is_absolute() {
+        let private_key_path = self.get_private_key_path();
+        let key_data = fs::read(private_key_path)?;
+        encode_from_key_file(claims, &key_data)
+    }
+
+    pub fn get_private_key_path(&self) -> PathBuf {
+        if self.private_key_path.is_absolute() {
             self.private_key_path.to_path_buf()
         } else {
             self.base_data_dir.join(&self.private_key_path)
-        };
-
-        let key_data = fs::read(private_key_path)?;
-        encode_from_key_file(claims, &key_data)
+        }
     }
 
     //
     // Initialize a new Neon repository
     //
-    pub fn init(&mut self, pg_version: u32, force: bool) -> anyhow::Result<()> {
+    pub fn init(&mut self, pg_version: u32, force: &InitForceMode) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         ensure!(
@@ -393,25 +437,34 @@ impl LocalEnv {
         );
 
         if base_path.exists() {
-            if force {
-                println!("removing all contents of '{}'", base_path.display());
-                // instead of directly calling `remove_dir_all`, we keep the original dir but removing
-                // all contents inside. This helps if the developer symbol links another directory (i.e.,
-                // S3 local SSD) to the `.neon` base directory.
-                for entry in std::fs::read_dir(base_path)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_dir() {
-                        fs::remove_dir_all(&path)?;
-                    } else {
-                        fs::remove_file(&path)?;
+            match force {
+                InitForceMode::MustNotExist => {
+                    bail!(
+                        "directory '{}' already exists. Perhaps already initialized?",
+                        base_path.display()
+                    );
+                }
+                InitForceMode::EmptyDirOk => {
+                    if let Some(res) = std::fs::read_dir(base_path)?.next() {
+                        res.context("check if directory is empty")?;
+                        anyhow::bail!("directory not empty: {base_path:?}");
                     }
                 }
-            } else {
-                bail!(
-                    "directory '{}' already exists. Perhaps already initialized? (Hint: use --force to remove all contents)",
-                    base_path.display()
-                );
+                InitForceMode::RemoveAllContents => {
+                    println!("removing all contents of '{}'", base_path.display());
+                    // instead of directly calling `remove_dir_all`, we keep the original dir but removing
+                    // all contents inside. This helps if the developer symbol links another directory (i.e.,
+                    // S3 local SSD) to the `.neon` base directory.
+                    for entry in std::fs::read_dir(base_path)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        if path.is_dir() {
+                            fs::remove_dir_all(&path)?;
+                        } else {
+                            fs::remove_file(&path)?;
+                        }
+                    }
+                }
             }
         }
 

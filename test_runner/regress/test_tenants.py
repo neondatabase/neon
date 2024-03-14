@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import time
 from contextlib import closing
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import List
 
 import pytest
+import requests
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
@@ -16,8 +18,11 @@ from fixtures.metrics import (
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.utils import timeline_delete_wait_completed
+from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until_tenant_active
+from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId
 from fixtures.utils import wait_until
@@ -214,14 +219,14 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
             labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
             log.info(f"{sample.name}{{{labels}}} {sample.value}")
 
-    # Test that we gather tenant create metric
+    # Test that we gather tenant operations metrics
     storage_operation_metrics = [
         "pageserver_storage_operations_seconds_global_bucket",
         "pageserver_storage_operations_seconds_global_sum",
         "pageserver_storage_operations_seconds_global_count",
     ]
     for metric in storage_operation_metrics:
-        value = ps_metrics.query_all(metric, filter={"operation": "create tenant"})
+        value = ps_metrics.query_all(metric, filter={"operation": "layer flush"})
         assert value
 
 
@@ -281,7 +286,6 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
             ".*load failed.*list timelines directory.*",
         ]
     )
@@ -341,3 +345,120 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
     assert (
         tenant_active_count == 1
     ), f"Tenant {tenant_with_empty_timelines} should have metric as active"
+
+
+def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
+    """
+    Probabilistic stress test for the pageserver's handling of tenant requests
+    across a restart. This is intended to catch things like:
+    - Bad response codes during shutdown (e.g. returning 500 instead of 503)
+    - Issues where a tenant is still starting up while we receive a request for it
+    - Issues with interrupting/resuming tenant/timeline creation in shutdown
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+    tenant_id: TenantId = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Multiple creation requests which race will generate this error
+    env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
+
+    # Tenant creation requests which arrive out of order will generate complaints about
+    # generation nubmers out of order.
+    env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
+
+    # Our multiple creation requests will advance generation quickly, and when we skip
+    # a generation number we can generate these warnings
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates for tenant .+")
+
+    # Timeline::flush_and_shutdown cannot tell if it is hitting a failure because of
+    # an incomplete attach, or some other problem.  In the field this should be rare,
+    # so we allow it to log at WARN, even if it is occasionally a false positive.
+    env.pageserver.allowed_errors.append(".*failed to freeze and flush.*")
+
+    def create_bg(delay_ms):
+        time.sleep(delay_ms / 1000.0)
+        try:
+            env.pageserver.tenant_create(tenant_id=tenant_id)
+            env.pageserver.http_client().timeline_create(
+                PgVersion.NOT_SET, tenant_id, new_timeline_id=timeline_id
+            )
+        except PageserverApiException as e:
+            if e.status_code == 409:
+                log.info(f"delay_ms={delay_ms} 409")
+                pass
+            elif e.status_code == 400:
+                if "is less than existing" in e.message:
+                    # We send creation requests very close together in time: it is expected that these
+                    # race, and sometimes chigher-generation'd requests arrive first.  The pageserver rightly
+                    # rejects any attempt to make a generation number go backwards.
+                    pass
+                else:
+                    raise
+            else:
+                raise
+        except requests.exceptions.ConnectionError:
+            # Our requests might arrive during shutdown and be cut off at the transport level
+            pass
+
+    for _ in range(0, 10):
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futs = []
+            for delay_ms in (0, 1, 10, 50, 100, 200, 500, 800):
+                f = executor.submit(create_bg, delay_ms)
+                futs.append(f)
+            env.pageserver.stop()
+            env.pageserver.start()
+
+            for f in futs:
+                f.result(timeout=10)
+
+    # The tenant should end up active
+    wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)
+
+
+def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
+    """Test for the directory_entries_count metric"""
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+
+    endpoint_tenant = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+
+    # Not sure why but this many tables creates more relations than our limit
+    TABLE_COUNT = 1600
+    COUNT_AT_LEAST_EXPECTED = 5500
+
+    with endpoint_tenant.connect() as conn:
+        with conn.cursor() as cur:
+            # Wrapping begin; commit; around this and the loop below keeps the reproduction
+            # but it also doesn't have a performance benefit
+            cur.execute("CREATE TABLE template_tbl(key int primary key, value text);")
+            for i in range(TABLE_COUNT):
+                cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
+    wait_for_last_flush_lsn(env, endpoint_tenant, env.initial_tenant, env.initial_timeline)
+    endpoint_tenant.stop()
+
+    m = ps_http.get_metrics()
+    directory_entries_count_metric = m.query_all(
+        "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
+    )
+
+    def only_int(samples: List[Sample]) -> int:
+        assert len(samples) == 1
+        return int(samples[0].value)
+
+    directory_entries_count = only_int(directory_entries_count_metric)
+
+    log.info(f"pageserver_directory_entries_count metric value: {directory_entries_count}")
+
+    assert directory_entries_count > COUNT_AT_LEAST_EXPECTED
+
+    timeline_detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    counts = timeline_detail["directory_entries_counts"]
+    assert counts
+    log.info(f"directory counts: {counts}")
+    assert counts[2] > COUNT_AT_LEAST_EXPECTED

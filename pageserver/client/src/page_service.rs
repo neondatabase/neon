@@ -108,9 +108,32 @@ pub struct RelTagBlockNo {
 }
 
 impl PagestreamClient {
-    pub async fn shutdown(mut self) {
-        let _ = self.cancel_on_client_drop.take();
-        self.conn_task.await.unwrap();
+    pub async fn shutdown(self) {
+        let Self {
+            copy_both,
+            cancel_on_client_drop: cancel_conn_task,
+            conn_task,
+        } = self;
+        // The `copy_both` contains internal channel sender, the receiver of which is polled by `conn_task`.
+        // When `conn_task` observes the sender has been dropped, it sends a `FeMessage::CopyFail` into the connection.
+        // (see https://github.com/neondatabase/rust-postgres/blob/2005bf79573b8add5cf205b52a2b208e356cc8b0/tokio-postgres/src/copy_both.rs#L56).
+        //
+        // If we drop(copy_both) first, but then immediately drop the `cancel_on_client_drop`,
+        // the CopyFail mesage only makes it to the socket sometimes (i.e., it's a race).
+        //
+        // Further, the pageserver makes a lot of noise when it receives CopyFail.
+        // Computes don't send it in practice, they just hard-close the connection.
+        //
+        // So, let's behave like the computes and suppress the CopyFail as follows:
+        // kill the socket first, then drop copy_both.
+        //
+        // See also: https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-COPY
+        //
+        // NB: page_service doesn't have a use case to exit the `pagestream` mode currently.
+        // => https://github.com/neondatabase/neon/issues/6390
+        let _ = cancel_conn_task.unwrap();
+        conn_task.await.unwrap();
+        drop(copy_both);
     }
 
     pub async fn getpage(
@@ -133,7 +156,8 @@ impl PagestreamClient {
             PagestreamBeMessage::Error(e) => anyhow::bail!("Error: {:?}", e),
             PagestreamBeMessage::Exists(_)
             | PagestreamBeMessage::Nblocks(_)
-            | PagestreamBeMessage::DbSize(_) => {
+            | PagestreamBeMessage::DbSize(_)
+            | PagestreamBeMessage::GetSlruSegment(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",
                     msg.kind()

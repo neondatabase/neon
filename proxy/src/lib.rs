@@ -16,12 +16,15 @@ pub mod console;
 pub mod context;
 pub mod error;
 pub mod http;
+pub mod intern;
+pub mod jemalloc;
 pub mod logging;
 pub mod metrics;
 pub mod parse;
 pub mod protocol2;
 pub mod proxy;
 pub mod rate_limiter;
+pub mod redis;
 pub mod sasl;
 pub mod scram;
 pub mod serverless;
@@ -61,3 +64,79 @@ pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<Infallib
 pub fn flatten_err<T>(r: Result<anyhow::Result<T>, JoinError>) -> anyhow::Result<T> {
     r.context("join error").and_then(|x| x)
 }
+
+macro_rules! smol_str_wrapper {
+    ($name:ident) => {
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct $name(smol_str::SmolStr);
+
+        impl $name {
+            pub fn as_str(&self) -> &str {
+                self.0.as_str()
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl<T> std::cmp::PartialEq<T> for $name
+        where
+            smol_str::SmolStr: std::cmp::PartialEq<T>,
+        {
+            fn eq(&self, other: &T) -> bool {
+                self.0.eq(other)
+            }
+        }
+
+        impl<T> From<T> for $name
+        where
+            smol_str::SmolStr: From<T>,
+        {
+            fn from(x: T) -> Self {
+                Self(x.into())
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.0.as_ref()
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+            fn deref(&self) -> &str {
+                &*self.0
+            }
+        }
+
+        impl<'de> serde::de::Deserialize<'de> for $name {
+            fn deserialize<D: serde::de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                <smol_str::SmolStr as serde::de::Deserialize<'de>>::deserialize(d).map(Self)
+            }
+        }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                self.0.serialize(s)
+            }
+        }
+    };
+}
+
+// 90% of role name strings are 20 characters or less.
+smol_str_wrapper!(RoleName);
+// 50% of endpoint strings are 23 characters or less.
+smol_str_wrapper!(EndpointId);
+// 50% of branch strings are 23 characters or less.
+smol_str_wrapper!(BranchId);
+// 90% of project strings are 23 characters or less.
+smol_str_wrapper!(ProjectId);
+
+// will usually equal endpoint ID
+smol_str_wrapper!(EndpointCacheKey);
+
+smol_str_wrapper!(DbName);

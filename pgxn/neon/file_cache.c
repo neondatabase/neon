@@ -25,6 +25,8 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pagestore_client.h"
+#include "common/hashfn.h"
+#include "lib/hyperloglog.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include RELFILEINFO_HDR
@@ -60,6 +62,7 @@
 #define BLOCKS_PER_CHUNK	128 /* 1Mb chunk */
 #define MB					((uint64)1024*1024)
 
+#define HYPER_LOG_LOG_BIT_WIDTH   10
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ / BLOCKS_PER_CHUNK))
 
 typedef struct FileCacheEntry
@@ -84,6 +87,8 @@ typedef struct FileCacheControl
 	uint64		writes;
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
+	hyperLogLogState wss_estimation; /* estimation of wroking set size */
+	uint8_t		hyperloglog_hashes[(1 << HYPER_LOG_LOG_BIT_WIDTH) + 1];
 } FileCacheControl;
 
 static HTAB *lfc_hash;
@@ -232,6 +237,14 @@ lfc_shmem_startup(void)
 		lfc_ctl->writes = 0;
 		dlist_init(&lfc_ctl->lru);
 
+		/* Initialize hyper-log-log structure for estimating working set size */
+		initHyperLogLog(&lfc_ctl->wss_estimation, HYPER_LOG_LOG_BIT_WIDTH);
+
+		/* We need hashes in shared memory */
+		pfree(lfc_ctl->wss_estimation.hashesArr);
+		memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
+		lfc_ctl->wss_estimation.hashesArr = lfc_ctl->hyperloglog_hashes;
+
 		/* Recreate file cache on restart */
 		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
 		if (fd < 0)
@@ -308,13 +321,16 @@ lfc_change_limit_hook(int newval, void *extra)
 		Assert(victim->access_count == 0);
 #ifdef FALLOC_FL_PUNCH_HOLE
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0)
-			elog(LOG, "Failed to punch hole in file: %m");
+			neon_log(LOG, "Failed to punch hole in file: %m");
 #endif
 		hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 		lfc_ctl->used -= 1;
 	}
 	lfc_ctl->limit = new_size;
-	elog(DEBUG1, "set local file cache limit to %d", new_size);
+	if (new_size == 0) {
+		lfc_ctl->generation += 1;
+	}
+	neon_log(DEBUG1, "set local file cache limit to %d", new_size);
 
 	LWLockRelease(lfc_lock);
 }
@@ -327,7 +343,7 @@ lfc_init(void)
 	 * shared_preload_libraries.
 	 */
 	if (!process_shared_preload_libraries_in_progress)
-		elog(ERROR, "Neon module should be loaded via shared_preload_libraries");
+		neon_log(ERROR, "Neon module should be loaded via shared_preload_libraries");
 
 
 	DefineCustomIntVariable("neon.max_file_cache_size",
@@ -526,10 +542,16 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
+
+	/* Approximate working set */
+	tag.blockNum = blkno;
+	addHyperLogLog(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+
 	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
 	{
 		/* Page is not cached */
 		lfc_ctl->misses += 1;
+		pgBufferUsage.file_cache.misses += 1;
 		LWLockRelease(lfc_lock);
 		return false;
 	}
@@ -555,6 +577,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	{
 		Assert(LFC_ENABLED());
 		lfc_ctl->hits += 1;
+		pgBufferUsage.file_cache.hits += 1;
 		Assert(entry->access_count > 0);
 		if (--entry->access_count == 0)
 			dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
@@ -643,7 +666,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 			Assert(victim->access_count == 0);
 			entry->offset = victim->offset; /* grab victim's chunk */
 			hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
-			elog(DEBUG2, "Swap file cache page");
+			neon_log(DEBUG2, "Swap file cache page");
 		}
 		else
 		{
@@ -846,10 +869,10 @@ local_cache_pages(PG_FUNCTION_ARGS)
 		 * wrong) function definition though.
 		 */
 		if (get_call_result_type(fcinfo, NULL, &expected_tupledesc) != TYPEFUNC_COMPOSITE)
-			elog(ERROR, "return type must be a row type");
+			neon_log(ERROR, "return type must be a row type");
 
 		if (expected_tupledesc->natts != NUM_LOCALCACHE_PAGES_ELEM)
-			elog(ERROR, "incorrect number of output arguments");
+			neon_log(ERROR, "incorrect number of output arguments");
 
 		/* Construct a tuple descriptor for the result rows. */
 		tupledesc = CreateTemplateTupleDesc(expected_tupledesc->natts);
@@ -961,4 +984,22 @@ local_cache_pages(PG_FUNCTION_ARGS)
 	}
 	else
 		SRF_RETURN_DONE(funcctx);
+}
+
+PG_FUNCTION_INFO_V1(approximate_working_set_size);
+
+Datum
+approximate_working_set_size(PG_FUNCTION_ARGS)
+{
+	int32 dc = -1;
+	if (lfc_size_limit != 0)
+	{
+		bool reset = PG_GETARG_BOOL(0);
+		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
+		dc = (int32) estimateHyperLogLog(&lfc_ctl->wss_estimation);
+		if (reset)
+			memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
+		LWLockRelease(lfc_lock);
+	}
+	PG_RETURN_INT32(dc);
 }

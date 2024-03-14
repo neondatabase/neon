@@ -20,6 +20,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    NeonPageserver,
     PgBin,
     S3Scrubber,
     last_flush_lsn_upload,
@@ -62,6 +63,7 @@ def generate_uploads_and_deletions(
     tenant_id: Optional[TenantId] = None,
     timeline_id: Optional[TimelineId] = None,
     data: Optional[str] = None,
+    pageserver: NeonPageserver,
 ):
     """
     Using the environment's default tenant + timeline, generate a load pattern
@@ -76,12 +78,16 @@ def generate_uploads_and_deletions(
         timeline_id = env.initial_timeline
     assert timeline_id is not None
 
-    ps_http = env.pageserver.http_client()
+    ps_http = pageserver.http_client()
 
-    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+    with env.endpoints.create_start(
+        "main", tenant_id=tenant_id, pageserver_id=pageserver.id
+    ) as endpoint:
         if init:
             endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
-            last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+            last_flush_lsn_upload(
+                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
+            )
 
         def churn(data):
             endpoint.safe_psql_many(
@@ -102,7 +108,9 @@ def generate_uploads_and_deletions(
             # We are waiting for uploads as well as local flush, in order to avoid leaving the system
             # in a state where there are "future layers" in remote storage that will generate deletions
             # after a restart.
-            last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+            last_flush_lsn_upload(
+                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
+            )
             ps_http.timeline_checkpoint(tenant_id, timeline_id)
 
         # Compaction should generate some GC-elegible layers
@@ -195,14 +203,17 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     env.broker.try_start()
     for sk in env.safekeepers:
         sk.start()
-    env.attachment_service.start()
+    env.storage_controller.start()
+
+    # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
+    env.storage_controller.node_register(env.pageserver)
 
     env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
 
     env.neon_cli.create_tenant(
         tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
     )
-    generate_uploads_and_deletions(env)
+    generate_uploads_and_deletions(env, pageserver=env.pageserver)
 
     def parse_generation_suffix(key):
         m = re.match(".+-([0-9a-zA-Z]{8})$", key)
@@ -213,8 +224,14 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
             log.info(f"group: {m.group(1)}")
             return int(m.group(1), 16)
 
+    assert neon_env_builder.pageserver_remote_storage is not None
     pre_upgrade_keys = list(
-        [o["Key"] for o in list_prefix(neon_env_builder, delimiter="")["Contents"]]
+        [
+            o["Key"]
+            for o in list_prefix(neon_env_builder.pageserver_remote_storage, delimiter="")[
+                "Contents"
+            ]
+        ]
     )
     for key in pre_upgrade_keys:
         assert parse_generation_suffix(key) is None
@@ -224,12 +241,17 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     # Starting without the override that disabled control_plane_api
     env.pageserver.start()
 
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, pageserver=env.pageserver, init=False)
 
     legacy_objects: list[str] = []
     suffixed_objects = []
     post_upgrade_keys = list(
-        [o["Key"] for o in list_prefix(neon_env_builder, delimiter="")["Contents"]]
+        [
+            o["Key"]
+            for o in list_prefix(neon_env_builder.pageserver_remote_storage, delimiter="")[
+                "Contents"
+            ]
+        ]
     )
     for key in post_upgrade_keys:
         log.info(f"post-upgrade key: {key}")
@@ -251,9 +273,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     # Having written a mixture of generation-aware and legacy index_part.json,
     # ensure the scrubber handles the situation as expected.
-    metadata_summary = S3Scrubber(
-        neon_env_builder.test_output_dir, neon_env_builder
-    ).scan_metadata()
+    metadata_summary = S3Scrubber(neon_env_builder).scan_metadata()
     assert metadata_summary["tenant_count"] == 1  # Scrubber should have seen our timeline
     assert metadata_summary["timeline_count"] == 1
     assert metadata_summary["timeline_shard_count"] == 1
@@ -265,12 +285,16 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(
         RemoteStorageKind.MOCK_S3,
     )
+    neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
-    some_other_pageserver = 1234
-    ps_http = env.pageserver.http_client()
+    attached_to_id = env.storage_controller.locate(env.initial_tenant)[0]["node_id"]
+    main_pageserver = env.get_pageserver(attached_to_id)
+    other_pageserver = [p for p in env.pageservers if p.id != attached_to_id][0]
 
-    generate_uploads_and_deletions(env)
+    ps_http = main_pageserver.http_client()
+
+    generate_uploads_and_deletions(env, pageserver=main_pageserver)
 
     # Flush: pending deletions should all complete
     assert_deletion_queue(ps_http, lambda n: n > 0)
@@ -283,14 +307,14 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     assert timeline["remote_consistent_lsn"] == timeline["remote_consistent_lsn_visible"]
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
 
-    env.pageserver.allowed_errors.extend(
+    main_pageserver.allowed_errors.extend(
         [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
     )
 
     # Now advance the generation in the control plane: subsequent validations
     # from the running pageserver will fail.  No more deletions should happen.
-    env.attachment_service.attach_hook_issue(env.initial_tenant, some_other_pageserver)
-    generate_uploads_and_deletions(env, init=False)
+    env.storage_controller.attach_hook_issue(env.initial_tenant, other_pageserver.id)
+    generate_uploads_and_deletions(env, init=False, pageserver=main_pageserver)
 
     assert_deletion_queue(ps_http, lambda n: n > 0)
     queue_depth_before = get_deletion_queue_depth(ps_http)
@@ -342,9 +366,14 @@ def test_deletion_queue_recovery(
     neon_env_builder.enable_pageserver_remote_storage(
         RemoteStorageKind.MOCK_S3,
     )
+    neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
-    ps_http = env.pageserver.http_client()
+    attached_to_id = env.storage_controller.locate(env.initial_tenant)[0]["node_id"]
+    main_pageserver = env.get_pageserver(attached_to_id)
+    other_pageserver = [p for p in env.pageservers if p.id != attached_to_id][0]
+
+    ps_http = main_pageserver.http_client()
 
     failpoints = [
         # Prevent deletion lists from being executed, to build up some backlog of deletions
@@ -361,7 +390,7 @@ def test_deletion_queue_recovery(
 
     ps_http.configure_failpoints(failpoints)
 
-    generate_uploads_and_deletions(env)
+    generate_uploads_and_deletions(env, pageserver=main_pageserver)
 
     # There should be entries in the deletion queue
     assert_deletion_queue(ps_http, lambda n: n > 0)
@@ -388,7 +417,7 @@ def test_deletion_queue_recovery(
         # also wait to see the header hit the disk: this seems paranoid but the race
         # can really happen on a heavily overloaded test machine.
         def assert_header_written():
-            assert (env.pageserver.workdir / "deletion" / "header-01").exists()
+            assert (main_pageserver.workdir / "deletion" / "header-01").exists()
 
         wait_until(20, 1, assert_header_written)
 
@@ -398,15 +427,15 @@ def test_deletion_queue_recovery(
             before_restart_depth = get_deletion_queue_validated(ps_http)
 
     log.info(f"Restarting pageserver with {before_restart_depth} deletions enqueued")
-    env.pageserver.stop(immediate=True)
+    main_pageserver.stop(immediate=True)
 
     if keep_attachment == KeepAttachment.LOSE:
-        some_other_pageserver = 101010
-        env.attachment_service.attach_hook_issue(env.initial_tenant, some_other_pageserver)
+        some_other_pageserver = other_pageserver.id
+        env.storage_controller.attach_hook_issue(env.initial_tenant, some_other_pageserver)
 
-    env.pageserver.start()
+    main_pageserver.start()
 
-    def assert_deletions_submitted(n: int):
+    def assert_deletions_submitted(n: int) -> None:
         assert ps_http.get_metric_value("pageserver_deletion_queue_submitted_total") == n
 
     # After restart, issue a flush to kick the deletion frontend to do recovery.
@@ -427,7 +456,7 @@ def test_deletion_queue_recovery(
         #   validated before restart.
         assert get_deletion_queue_executed(ps_http) == before_restart_depth
     else:
-        env.pageserver.allowed_errors.extend([".*Dropping stale deletions.*"])
+        main_pageserver.allowed_errors.extend([".*Dropping stale deletions.*"])
 
         # If we lost the attachment, we should have dropped our pre-restart deletions.
         assert get_deletion_queue_dropped(ps_http) == before_restart_depth
@@ -436,8 +465,8 @@ def test_deletion_queue_recovery(
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
 
     # Restart again
-    env.pageserver.stop(immediate=True)
-    env.pageserver.start()
+    main_pageserver.stop(immediate=True)
+    main_pageserver.start()
 
     # No deletion lists should be recovered: this demonstrates that deletion lists
     # were cleaned up after being executed or dropped in the previous process lifetime.
@@ -456,7 +485,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     ps_http = env.pageserver.http_client()
 
-    generate_uploads_and_deletions(env)
+    generate_uploads_and_deletions(env, pageserver=env.pageserver)
 
     env.pageserver.allowed_errors.extend(
         [
@@ -468,12 +497,12 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     )
 
     # Simulate a major incident: the control plane goes offline
-    env.attachment_service.stop()
+    env.storage_controller.stop()
 
     # Remember how many validations had happened before the control plane went offline
     validated = get_deletion_queue_validated(ps_http)
 
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
 
     # The running pageserver should stop progressing deletions
     time.sleep(10)
@@ -484,11 +513,11 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # and serve clients.
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
     env.pageserver.start(
-        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",)
+        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
     )
 
     # The pageserver should provide service to clients
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
 
     # The pageserver should neither validate nor execute any deletions, it should have
     # loaded the DeletionLists from before though
@@ -498,7 +527,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     assert get_deletion_queue_executed(ps_http) == 0
 
     # When the control plane comes back up, normal service should resume
-    env.attachment_service.start()
+    env.storage_controller.start()
 
     ps_http.deletion_queue_flush(execute=True)
     assert get_deletion_queue_depth(ps_http) == 0
@@ -509,7 +538,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
     env.pageserver.start()
 
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
     ps_http.deletion_queue_flush(execute=True)
     assert get_deletion_queue_depth(ps_http) == 0
     assert get_deletion_queue_validated(ps_http) > 0
@@ -547,7 +576,7 @@ def test_eviction_across_generations(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    generate_uploads_and_deletions(env)
+    generate_uploads_and_deletions(env, pageserver=env.pageserver)
 
     read_all(env, tenant_id, timeline_id)
     evict_all_layers(env, tenant_id, timeline_id)

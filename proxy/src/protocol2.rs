@@ -1,22 +1,27 @@
 //! Proxy Protocol V2 implementation
 
 use std::{
-    future::poll_fn,
-    future::Future,
+    future::{poll_fn, Future},
     io,
     net::SocketAddr,
     pin::{pin, Pin},
+    sync::Mutex,
     task::{ready, Context, Poll},
 };
 
 use bytes::{Buf, BytesMut};
+use hyper::server::accept::Accept;
 use hyper::server::conn::{AddrIncoming, AddrStream};
+use metrics::IntCounterPairGuard;
 use pin_project_lite::pin_project;
-use tls_listener::AsyncAccept;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use uuid::Uuid;
+
+use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 
 pub struct ProxyProtocolAccept {
     pub incoming: AddrIncoming,
+    pub protocol: &'static str,
 }
 
 pin_project! {
@@ -326,21 +331,100 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
     }
 }
 
-impl AsyncAccept for ProxyProtocolAccept {
-    type Connection = WithClientIp<AddrStream>;
+impl Accept for ProxyProtocolAccept {
+    type Conn = WithConnectionGuard<WithClientIp<AddrStream>>;
 
     type Error = io::Error;
 
     fn poll_accept(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Connection, Self::Error>>> {
+    ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
         let conn = ready!(Pin::new(&mut self.incoming).poll_accept(cx)?);
+
+        let conn_id = uuid::Uuid::new_v4();
+        let span = tracing::info_span!("http_conn", ?conn_id);
+        {
+            let _enter = span.enter();
+            tracing::info!("accepted new TCP connection");
+        }
+
         let Some(conn) = conn else {
             return Poll::Ready(None);
         };
 
-        Poll::Ready(Some(Ok(WithClientIp::new(conn))))
+        Poll::Ready(Some(Ok(WithConnectionGuard {
+            inner: WithClientIp::new(conn),
+            connection_id: Uuid::new_v4(),
+            gauge: Mutex::new(Some(
+                NUM_CLIENT_CONNECTION_GAUGE
+                    .with_label_values(&[self.protocol])
+                    .guard(),
+            )),
+            span,
+        })))
+    }
+}
+
+pin_project! {
+    pub struct WithConnectionGuard<T> {
+        #[pin]
+        pub inner: T,
+        pub connection_id: Uuid,
+        pub gauge: Mutex<Option<IntCounterPairGuard>>,
+        pub span: tracing::Span,
+    }
+
+    impl<S> PinnedDrop for WithConnectionGuard<S> {
+        fn drop(this: Pin<&mut Self>) {
+            let _enter = this.span.enter();
+            tracing::info!("HTTP connection closed")
+        }
+    }
+}
+
+impl<T: AsyncWrite> AsyncWrite for WithConnectionGuard<T> {
+    #[inline]
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        self.project().inner.poll_write(cx, buf)
+    }
+
+    #[inline]
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        self.project().inner.poll_flush(cx)
+    }
+
+    #[inline]
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        self.project().inner.poll_shutdown(cx)
+    }
+
+    #[inline]
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        self.project().inner.poll_write_vectored(cx, bufs)
+    }
+
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
+
+impl<T: AsyncRead> AsyncRead for WithConnectionGuard<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.project().inner.poll_read(cx, buf)
     }
 }
 

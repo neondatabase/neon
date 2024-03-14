@@ -11,13 +11,15 @@ use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
-use pageserver_api::models::{self, LocationConfig, TenantInfo, TimelineInfo};
+use pageserver_api::models::{
+    self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
+};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -106,6 +108,16 @@ impl PageServerNode {
                 "control_plane_api='{}'",
                 control_plane_api.as_str()
             ));
+
+            // Storage controller uses the same auth as pageserver: if JWT is enabled
+            // for us, we will also need it to talk to them.
+            if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
+                let jwt_token = self
+                    .env
+                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
+                    .unwrap();
+                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
+            }
         }
 
         if !cli_overrides
@@ -149,7 +161,7 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
+    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         self.start_node(config_overrides, false).await
     }
 
@@ -188,6 +200,28 @@ impl PageServerNode {
             String::from_utf8_lossy(&init_output.stderr),
         );
 
+        // Write metadata file, used by pageserver on startup to register itself with
+        // the storage controller
+        let metadata_path = datadir.join("metadata.json");
+
+        let (_http_host, http_port) =
+            parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
+        let http_port = http_port.unwrap_or(9898);
+        // Intentionally hand-craft JSON: this acts as an implicit format compat test
+        // in case the pageserver-side structure is edited, and reflects the real life
+        // situation: the metadata is written by some other script.
+        std::fs::write(
+            metadata_path,
+            serde_json::to_vec(&serde_json::json!({
+                "host": "localhost",
+                "port": self.pg_connection_config.port(),
+                "http_host": "localhost",
+                "http_port": http_port,
+            }))
+            .unwrap(),
+        )
+        .expect("Failed to write metadata file");
+
         Ok(())
     }
 
@@ -195,7 +229,7 @@ impl PageServerNode {
         &self,
         config_overrides: &[&str],
         update_config: bool,
-    ) -> anyhow::Result<Child> {
+    ) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
@@ -232,7 +266,9 @@ impl PageServerNode {
                 }
             },
         )
-        .await
+        .await?;
+
+        Ok(())
     }
 
     fn pageserver_basic_args<'a>(
@@ -301,16 +337,8 @@ impl PageServerNode {
     pub async fn tenant_list(&self) -> mgmt_api::Result<Vec<TenantInfo>> {
         self.http_client.list_tenants().await
     }
-
-    pub async fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let mut settings = settings.clone();
-
-        let config = models::TenantConfig {
+    pub fn parse_config(mut settings: HashMap<&str, &str>) -> anyhow::Result<models::TenantConfig> {
+        let result = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -325,6 +353,11 @@ impl PageServerNode {
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
                 .transpose()?,
+            compaction_algorithm: settings
+                .remove("compaction_algorithm")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Failed to parse 'compaction_algorithm' json")?,
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
@@ -364,18 +397,40 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
-            gc_feedback: settings
-                .remove("gc_feedback")
+            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+            lazy_slru_download: settings
+                .remove("lazy_slru_download")
                 .map(|x| x.parse::<bool>())
                 .transpose()
-                .context("Failed to parse 'gc_feedback' as bool")?,
-            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                .context("Failed to parse 'lazy_slru_download' as bool")?,
+            timeline_get_throttle: settings
+                .remove("timeline_get_throttle")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("parse `timeline_get_throttle` from json")?,
         };
+        if !settings.is_empty() {
+            bail!("Unrecognized tenant settings: {settings:?}")
+        } else {
+            Ok(result)
+        }
+    }
+
+    pub async fn tenant_create(
+        &self,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
+        settings: HashMap<&str, &str>,
+    ) -> anyhow::Result<TenantId> {
+        let config = Self::parse_config(settings.clone())?;
 
         let request = models::TenantCreateRequest {
             new_tenant_id: TenantShardId::unsharded(new_tenant_id),
             generation,
             config,
+            shard_parameters: ShardParameters::default(),
+            // Placement policy is not meaningful for creations not done via storage controller
+            placement_policy: None,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -408,6 +463,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'compaction_threshold' as an integer")?,
+                compaction_algorithm: settings
+                    .remove("compactin_algorithm")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("Failed to parse 'compaction_algorithm' json")?,
                 gc_horizon: settings
                     .remove("gc_horizon")
                     .map(|x| x.parse::<u64>())
@@ -449,12 +509,17 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-                gc_feedback: settings
-                    .remove("gc_feedback")
+                heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                lazy_slru_download: settings
+                    .remove("lazy_slru_download")
                     .map(|x| x.parse::<bool>())
                     .transpose()
-                    .context("Failed to parse 'gc_feedback' as bool")?,
-                heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                    .context("Failed to parse 'lazy_slru_download' as bool")?,
+                timeline_get_throttle: settings
+                    .remove("timeline_get_throttle")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("parse `timeline_get_throttle` from json")?,
             }
         };
 
@@ -471,18 +536,22 @@ impl PageServerNode {
 
     pub async fn location_config(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
+        lazy: bool,
     ) -> anyhow::Result<()> {
         Ok(self
             .http_client
-            .location_config(tenant_id, config, flush_ms)
+            .location_config(tenant_shard_id, config, flush_ms, lazy)
             .await?)
     }
 
-    pub async fn timeline_list(&self, tenant_id: &TenantId) -> anyhow::Result<Vec<TimelineInfo>> {
-        Ok(self.http_client.list_timelines(*tenant_id).await?)
+    pub async fn timeline_list(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> anyhow::Result<Vec<TimelineInfo>> {
+        Ok(self.http_client.list_timelines(*tenant_shard_id).await?)
     }
 
     pub async fn tenant_secondary_download(&self, tenant_id: &TenantShardId) -> anyhow::Result<()> {
@@ -494,15 +563,13 @@ impl PageServerNode {
 
     pub async fn timeline_create(
         &self,
-        tenant_id: TenantId,
-        new_timeline_id: Option<TimelineId>,
+        tenant_shard_id: TenantShardId,
+        new_timeline_id: TimelineId,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
         existing_initdb_timeline_id: Option<TimelineId>,
     ) -> anyhow::Result<TimelineInfo> {
-        // If timeline ID was not specified, generate one
-        let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
         let req = models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
@@ -510,7 +577,10 @@ impl PageServerNode {
             pg_version,
             existing_initdb_timeline_id,
         };
-        Ok(self.http_client.timeline_create(tenant_id, &req).await?)
+        Ok(self
+            .http_client
+            .timeline_create(tenant_shard_id, &req)
+            .await?)
     }
 
     /// Import a basebackup prepared using either:
@@ -538,7 +608,7 @@ impl PageServerNode {
                 eprintln!("connection error: {}", e);
             }
         });
-        tokio::pin!(client);
+        let client = std::pin::pin!(client);
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
@@ -587,5 +657,15 @@ impl PageServerNode {
         }
 
         Ok(())
+    }
+
+    pub async fn tenant_synthetic_size(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> anyhow::Result<TenantHistorySize> {
+        Ok(self
+            .http_client
+            .tenant_synthetic_size(tenant_shard_id)
+            .await?)
     }
 }

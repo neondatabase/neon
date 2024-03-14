@@ -17,7 +17,7 @@ use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::Duration;
 use std::{fs, io, thread};
 
@@ -60,7 +60,7 @@ pub async fn start_process<F, Fut, AI, A, EI>(
     envs: EI,
     initial_pid_file: InitialPidFile,
     process_status_check: F,
-) -> anyhow::Result<Child>
+) -> anyhow::Result<()>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<bool>>,
@@ -72,7 +72,6 @@ where
     let log_path = datadir.join(format!("{process_name}.log"));
     let process_log_file = fs::OpenOptions::new()
         .create(true)
-        .write(true)
         .append(true)
         .open(&log_path)
         .with_context(|| {
@@ -98,7 +97,7 @@ where
         InitialPidFile::Expect(path) => path,
     };
 
-    let mut spawned_process = filled_cmd.spawn().with_context(|| {
+    let spawned_process = filled_cmd.spawn().with_context(|| {
         format!("Could not spawn {process_name}, see console output and log files for details.")
     })?;
     let pid = spawned_process.id();
@@ -106,12 +105,26 @@ where
         i32::try_from(pid)
             .with_context(|| format!("Subprocess {process_name} has invalid pid {pid}"))?,
     );
+    // set up a scopeguard to kill & wait for the child in case we panic or bail below
+    let spawned_process = scopeguard::guard(spawned_process, |mut spawned_process| {
+        println!("SIGKILL & wait the started process");
+        (|| {
+            // TODO: use another signal that can be caught by the child so it can clean up any children it spawned (e..g, walredo).
+            spawned_process.kill().context("SIGKILL child")?;
+            spawned_process.wait().context("wait() for child process")?;
+            anyhow::Ok(())
+        })()
+        .with_context(|| format!("scopeguard kill&wait child {process_name:?}"))
+        .unwrap();
+    });
 
     for retries in 0..RETRIES {
         match process_started(pid, pid_file_to_check, &process_status_check).await {
             Ok(true) => {
-                println!("\n{process_name} started, pid: {pid}");
-                return Ok(spawned_process);
+                println!("\n{process_name} started and passed status check, pid: {pid}");
+                // leak the child process, it'll outlive this neon_local invocation
+                drop(scopeguard::ScopeGuard::into_inner(spawned_process));
+                return Ok(());
             }
             Ok(false) => {
                 if retries == NOTICE_AFTER_RETRIES {
@@ -126,16 +139,15 @@ where
                 thread::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS));
             }
             Err(e) => {
-                println!("{process_name} failed to start: {e:#}");
-                if let Err(e) = spawned_process.kill() {
-                    println!("Could not stop {process_name} subprocess: {e:#}")
-                };
+                println!("error starting process {process_name:?}: {e:#}");
                 return Err(e);
             }
         }
     }
     println!();
-    anyhow::bail!("{process_name} did not start in {RETRY_UNTIL_SECS} seconds");
+    anyhow::bail!(
+        "{process_name} did not start+pass status checks within {RETRY_UNTIL_SECS} seconds"
+    );
 }
 
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
@@ -243,7 +255,9 @@ fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
     for env_key in [
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        // HOME is needed in combination with `AWS_PROFILE` to pick up the SSO sessions.
+        "HOME",
         "AZURE_STORAGE_ACCOUNT",
         "AZURE_STORAGE_ACCESS_KEY",
     ] {

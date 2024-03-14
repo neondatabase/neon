@@ -73,7 +73,6 @@
 
 use std::{
     collections::{hash_map::Entry, HashMap},
-    convert::TryInto,
     sync::{
         atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Weak,
@@ -262,7 +261,9 @@ pub struct PageCache {
     size_metrics: &'static PageCacheSizeMetrics,
 }
 
-struct PinnedSlotsPermit(tokio::sync::OwnedSemaphorePermit);
+struct PinnedSlotsPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
 
 ///
 /// PageReadGuard is a "lease" on a buffer, for reading. The page is kept locked
@@ -550,7 +551,6 @@ impl PageCache {
     // not require changes.
 
     async fn try_get_pinned_slot_permit(&self) -> anyhow::Result<PinnedSlotsPermit> {
-        let timer = crate::metrics::PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME.start_timer();
         match tokio::time::timeout(
             // Choose small timeout, neon_smgr does its own retries.
             // https://neondb.slack.com/archives/C04DGM6SMTM/p1694786876476869
@@ -559,11 +559,10 @@ impl PageCache {
         )
         .await
         {
-            Ok(res) => Ok(PinnedSlotsPermit(
-                res.expect("this semaphore is never closed"),
-            )),
+            Ok(res) => Ok(PinnedSlotsPermit {
+                _permit: res.expect("this semaphore is never closed"),
+            }),
             Err(_timeout) => {
-                timer.stop_and_discard();
                 crate::metrics::page_cache_errors_inc(
                     crate::metrics::PageCacheErrorKind::AcquirePinnedSlotTimeout,
                 );

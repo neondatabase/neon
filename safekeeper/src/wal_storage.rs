@@ -21,9 +21,10 @@ use tokio::fs::{self, remove_file, File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::*;
+use utils::crashsafe::durable_rename;
 
 use crate::metrics::{time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS};
-use crate::safekeeper::SafeKeeperState;
+use crate::state::TimelinePersistentState;
 use crate::wal_backup::read_object;
 use crate::SafeKeeperConf;
 use postgres_ffi::waldecoder::WalStreamDecoder;
@@ -125,7 +126,7 @@ impl PhysicalStorage {
         ttid: &TenantTimelineId,
         timeline_dir: Utf8PathBuf,
         conf: &SafeKeeperConf,
-        state: &SafeKeeperState,
+        state: &TimelinePersistentState,
     ) -> Result<PhysicalStorage> {
         let wal_seg_size = state.server.wal_seg_size as usize;
 
@@ -196,15 +197,6 @@ impl PhysicalStorage {
         Ok(())
     }
 
-    /// Call fsync if config requires so.
-    async fn fsync_file(&mut self, file: &File) -> Result<()> {
-        if !self.conf.no_sync {
-            self.metrics
-                .observe_flush_seconds(time_io_closure(file.sync_all()).await?);
-        }
-        Ok(())
-    }
-
     /// Open or create WAL segment file. Caller must call seek to the wanted position.
     /// Returns `file` and `is_partial`.
     async fn open_or_create(&mut self, segno: XLogSegNo) -> Result<(File, bool)> {
@@ -223,15 +215,33 @@ impl PhysicalStorage {
             Ok((file, true))
         } else {
             // Create and fill new partial file
+            //
+            // We're using fdatasync during WAL writing, so file size must not
+            // change; to this end it is filled with zeros here. To avoid using
+            // half initialized segment, first bake it under tmp filename and
+            // then rename.
+            let tmp_path = self.timeline_dir.join("waltmp");
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
-                .open(&wal_file_partial_path)
+                .open(&tmp_path)
                 .await
-                .with_context(|| format!("Failed to open log file {:?}", &wal_file_path))?;
+                .with_context(|| format!("Failed to open tmp wal file {:?}", &tmp_path))?;
 
             write_zeroes(&mut file, self.wal_seg_size).await?;
-            self.fsync_file(&file).await?;
+
+            // Note: this doesn't get into observe_flush_seconds metric. But
+            // segment init should be separate metric, if any.
+            if let Err(e) =
+                durable_rename(&tmp_path, &wal_file_partial_path, !self.conf.no_sync).await
+            {
+                // Probably rename succeeded, but fsync of it failed. Remove
+                // the file then to avoid using it.
+                remove_file(wal_file_partial_path)
+                    .await
+                    .or_else(utils::fs_ext::ignore_not_found)?;
+                return Err(e.into());
+            }
             Ok((file, true))
         }
     }
@@ -525,7 +535,7 @@ impl WalReader {
     pub fn new(
         workdir: Utf8PathBuf,
         timeline_dir: Utf8PathBuf,
-        state: &SafeKeeperState,
+        state: &TimelinePersistentState,
         start_pos: Lsn,
         enable_remote_read: bool,
     ) -> Result<Self> {
@@ -718,6 +728,11 @@ const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 
 /// Helper for filling file with zeroes.
 async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
+    fail::fail_point!("sk-write-zeroes", |_| {
+        info!("write_zeroes hit failpoint");
+        Err(anyhow::anyhow!("failpoint: sk-write-zeroes"))
+    });
+
     while count >= XLOG_BLCKSZ {
         file.write_all(ZERO_BLOCK).await?;
         count -= XLOG_BLCKSZ;

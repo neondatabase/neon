@@ -5,11 +5,12 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
+use bytes::BytesMut;
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
 use std::cmp::min;
-use std::fs::OpenOptions;
+
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
 use std::sync::atomic::AtomicU64;
@@ -26,7 +27,10 @@ pub struct EphemeralFile {
     /// An ephemeral file is append-only.
     /// We keep the last page, which can still be modified, in [`Self::mutable_tail`].
     /// The other pages, which can no longer be modified, are accessed through the page cache.
-    mutable_tail: [u8; PAGE_SZ],
+    ///
+    /// None <=> IO is ongoing.
+    /// Size is fixed to PAGE_SZ at creation time and must not be changed.
+    mutable_tail: Option<BytesMut>,
 }
 
 impl EphemeralFile {
@@ -47,7 +51,10 @@ impl EphemeralFile {
 
         let file = VirtualFile::open_with_options(
             &filename,
-            OpenOptions::new().read(true).write(true).create(true),
+            virtual_file::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true),
         )
         .await?;
 
@@ -57,7 +64,7 @@ impl EphemeralFile {
             _timeline_id: timeline_id,
             file,
             len: 0,
-            mutable_tail: [0u8; PAGE_SZ],
+            mutable_tail: Some(BytesMut::zeroed(PAGE_SZ)),
         })
     }
 
@@ -89,11 +96,10 @@ impl EphemeralFile {
                 page_cache::ReadBufResult::Found(guard) => {
                     return Ok(BlockLease::PageReadGuard(guard))
                 }
-                page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                    let buf: &mut [u8] = write_guard.deref_mut();
-                    debug_assert_eq!(buf.len(), PAGE_SZ);
-                    self.file
-                        .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
+                page_cache::ReadBufResult::NotFound(write_guard) => {
+                    let write_guard = self
+                        .file
+                        .read_exact_at_page(write_guard, blknum as u64 * PAGE_SZ as u64)
                         .await?;
                     let read_guard = write_guard.mark_valid();
                     return Ok(BlockLease::PageReadGuard(read_guard));
@@ -101,7 +107,13 @@ impl EphemeralFile {
             };
         } else {
             debug_assert_eq!(blknum as u64, self.len / PAGE_SZ as u64);
-            Ok(BlockLease::EphemeralFileMutableTail(&self.mutable_tail))
+            Ok(BlockLease::EphemeralFileMutableTail(
+                self.mutable_tail
+                    .as_deref()
+                    .expect("we're not doing IO, it must be Some()")
+                    .try_into()
+                    .expect("we ensure that it's always PAGE_SZ"),
+            ))
         }
     }
 
@@ -133,21 +145,27 @@ impl EphemeralFile {
             ) -> Result<(), io::Error> {
                 let mut src_remaining = src;
                 while !src_remaining.is_empty() {
-                    let dst_remaining = &mut self.ephemeral_file.mutable_tail[self.off..];
+                    let dst_remaining = &mut self
+                        .ephemeral_file
+                        .mutable_tail
+                        .as_deref_mut()
+                        .expect("IO is not yet ongoing")[self.off..];
                     let n = min(dst_remaining.len(), src_remaining.len());
                     dst_remaining[..n].copy_from_slice(&src_remaining[..n]);
                     self.off += n;
                     src_remaining = &src_remaining[n..];
                     if self.off == PAGE_SZ {
-                        match self
+                        let mutable_tail = std::mem::take(&mut self.ephemeral_file.mutable_tail)
+                            .expect("IO is not yet ongoing");
+                        let (mutable_tail, res) = self
                             .ephemeral_file
                             .file
-                            .write_all_at(
-                                &self.ephemeral_file.mutable_tail,
-                                self.blknum as u64 * PAGE_SZ as u64,
-                            )
-                            .await
-                        {
+                            .write_all_at(mutable_tail, self.blknum as u64 * PAGE_SZ as u64)
+                            .await;
+                        // TODO: If we panic before we can put the mutable_tail back, subsequent calls will fail.
+                        // I.e., the IO isn't retryable if we panic.
+                        self.ephemeral_file.mutable_tail = Some(mutable_tail);
+                        match res {
                             Ok(_) => {
                                 // Pre-warm the page cache with what we just wrote.
                                 // This isn't necessary for coherency/correctness, but it's how we've always done it.
@@ -167,7 +185,12 @@ impl EphemeralFile {
                                     Ok(page_cache::ReadBufResult::NotFound(mut write_guard)) => {
                                         let buf: &mut [u8] = write_guard.deref_mut();
                                         debug_assert_eq!(buf.len(), PAGE_SZ);
-                                        buf.copy_from_slice(&self.ephemeral_file.mutable_tail);
+                                        buf.copy_from_slice(
+                                            self.ephemeral_file
+                                                .mutable_tail
+                                                .as_deref()
+                                                .expect("IO is not ongoing"),
+                                        );
                                         let _ = write_guard.mark_valid();
                                         // pre-warm successful
                                     }
@@ -179,7 +202,11 @@ impl EphemeralFile {
                                 // Zero the buffer for re-use.
                                 // Zeroing is critical for correcntess because the write_blob code below
                                 // and similarly read_blk expect zeroed pages.
-                                self.ephemeral_file.mutable_tail.fill(0);
+                                self.ephemeral_file
+                                    .mutable_tail
+                                    .as_deref_mut()
+                                    .expect("IO is not ongoing")
+                                    .fill(0);
                                 // This block is done, move to next one.
                                 self.blknum += 1;
                                 self.off = 0;
@@ -273,7 +300,7 @@ mod tests {
     use super::*;
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
-    use crate::tenant::block_io::{BlockCursor, BlockReaderRef};
+    use crate::tenant::block_io::BlockReaderRef;
     use rand::{thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;

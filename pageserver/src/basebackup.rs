@@ -11,8 +11,9 @@
 //! from data stored in object storage.
 //!
 use anyhow::{anyhow, bail, ensure, Context};
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
+use pageserver_api::key::{key_to_slru_block, Key};
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
@@ -133,12 +134,102 @@ where
     ctx: &'a RequestContext,
 }
 
+/// A sink that accepts SLRU blocks ordered by key and forwards
+/// full segments to the archive.
+struct SlruSegmentsBuilder<'a, 'b, W>
+where
+    W: AsyncWrite + Send + Sync + Unpin,
+{
+    ar: &'a mut Builder<&'b mut W>,
+    buf: Vec<u8>,
+    current_segment: Option<(SlruKind, u32)>,
+    total_blocks: usize,
+}
+
+impl<'a, 'b, W> SlruSegmentsBuilder<'a, 'b, W>
+where
+    W: AsyncWrite + Send + Sync + Unpin,
+{
+    fn new(ar: &'a mut Builder<&'b mut W>) -> Self {
+        Self {
+            ar,
+            buf: Vec::new(),
+            current_segment: None,
+            total_blocks: 0,
+        }
+    }
+
+    async fn add_block(&mut self, key: &Key, block: Bytes) -> anyhow::Result<()> {
+        let (kind, segno, _) = key_to_slru_block(*key)?;
+
+        match kind {
+            SlruKind::Clog => {
+                ensure!(block.len() == BLCKSZ as usize || block.len() == BLCKSZ as usize + 8);
+            }
+            SlruKind::MultiXactMembers | SlruKind::MultiXactOffsets => {
+                ensure!(block.len() == BLCKSZ as usize);
+            }
+        }
+
+        let segment = (kind, segno);
+        match self.current_segment {
+            None => {
+                self.current_segment = Some(segment);
+                self.buf
+                    .extend_from_slice(block.slice(..BLCKSZ as usize).as_ref());
+            }
+            Some(current_seg) if current_seg == segment => {
+                self.buf
+                    .extend_from_slice(block.slice(..BLCKSZ as usize).as_ref());
+            }
+            Some(_) => {
+                self.flush().await?;
+
+                self.current_segment = Some(segment);
+                self.buf
+                    .extend_from_slice(block.slice(..BLCKSZ as usize).as_ref());
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> anyhow::Result<()> {
+        let nblocks = self.buf.len() / BLCKSZ as usize;
+        let (kind, segno) = self.current_segment.take().unwrap();
+        let segname = format!("{}/{:>04X}", kind.to_str(), segno);
+        let header = new_tar_header(&segname, self.buf.len() as u64)?;
+        self.ar.append(&header, self.buf.as_slice()).await?;
+
+        self.total_blocks += nblocks;
+        debug!("Added to basebackup slru {} relsize {}", segname, nblocks);
+
+        self.buf.clear();
+
+        Ok(())
+    }
+
+    async fn finish(mut self) -> anyhow::Result<()> {
+        let res = if self.current_segment.is_none() || self.buf.is_empty() {
+            Ok(())
+        } else {
+            self.flush().await
+        };
+
+        info!("Collected {} SLRU blocks", self.total_blocks);
+
+        res
+    }
+}
+
 impl<'a, W> Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
     async fn send_tarball(mut self) -> anyhow::Result<()> {
         // TODO include checksum
+
+        let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
@@ -166,20 +257,24 @@ where
                     .context("could not add config file to basebackup tarball")?;
             }
         }
-
-        // Gather non-relational files from object storage pages.
-        for kind in [
-            SlruKind::Clog,
-            SlruKind::MultiXactOffsets,
-            SlruKind::MultiXactMembers,
-        ] {
-            for segno in self
+        if !lazy_slru_download {
+            // Gather non-relational files from object storage pages.
+            let slru_partitions = self
                 .timeline
-                .list_slru_segments(kind, Version::Lsn(self.lsn), self.ctx)
+                .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
                 .await?
-            {
-                self.add_slru_segment(kind, segno).await?;
+                .partition(Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64);
+
+            let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
+
+            for part in slru_partitions.parts {
+                let blocks = self.timeline.get_vectored(part, self.lsn, self.ctx).await?;
+
+                for (key, block) in blocks {
+                    slru_builder.add_block(&key, block?).await?;
+                }
             }
+            slru_builder.finish().await?;
         }
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
@@ -302,39 +397,6 @@ where
             startblk = endblk;
         }
 
-        Ok(())
-    }
-
-    //
-    // Generate SLRU segment files from repository.
-    //
-    async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let nblocks = self
-            .timeline
-            .get_slru_segment_size(slru, segno, Version::Lsn(self.lsn), self.ctx)
-            .await?;
-
-        let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
-        for blknum in 0..nblocks {
-            let img = self
-                .timeline
-                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn, self.ctx)
-                .await?;
-
-            if slru == SlruKind::Clog {
-                ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
-            } else {
-                ensure!(img.len() == BLCKSZ as usize);
-            }
-
-            slru_buf.extend_from_slice(&img[..BLCKSZ as usize]);
-        }
-
-        let segname = format!("{}/{:>04X}", slru.to_str(), segno);
-        let header = new_tar_header(&segname, slru_buf.len() as u64)?;
-        self.ar.append(&header, slru_buf.as_slice()).await?;
-
-        trace!("Added to basebackup slru {} relsize {}", segname, nblocks);
         Ok(())
     }
 

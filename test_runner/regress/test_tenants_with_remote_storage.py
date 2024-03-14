@@ -61,11 +61,6 @@ async def all_tenants_workload(env: NeonEnv, tenants_endpoints):
 def test_tenants_many(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     tenants_endpoints: List[Tuple[TenantId, Endpoint]] = []
 
     for _ in range(1, 5):
@@ -117,14 +112,6 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.extend(
-        [
-            # FIXME: Are these expected?
-            ".*No timelines to attach received.*",
-            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
-        ]
-    )
-
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
 
@@ -160,10 +147,10 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadLayer.*, will retry.*"
     )
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
@@ -223,9 +210,6 @@ def test_tenant_redownloads_truncated_file_on_startup(
     env.pageserver.allowed_errors.extend(
         [
             ".*removing local file .* because .*",
-            # FIXME: Are these expected?
-            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
-            ".*No timelines to attach received.*",
         ]
     )
 

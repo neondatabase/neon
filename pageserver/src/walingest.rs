@@ -33,12 +33,13 @@ use utils::failpoint_support;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
-use crate::pgdatadir_mapping::*;
+use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
-use pageserver_api::reltag::{RelTag, SlruKind};
+use pageserver_api::key::rel_block_to_key;
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
@@ -102,7 +103,9 @@ impl WalIngest {
         buf.advance(decoded.main_data_offset);
 
         assert!(!self.checkpoint_modified);
-        if self.checkpoint.update_next_xid(decoded.xl_xid) {
+        if decoded.xl_xid != pg_constants::INVALID_TRANSACTION_ID
+            && self.checkpoint.update_next_xid(decoded.xl_xid)
+        {
             self.checkpoint_modified = true;
         }
 
@@ -330,15 +333,26 @@ impl WalIngest {
                         < 0
                     {
                         self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
-                        self.checkpoint_modified = true;
                     }
+                    trace!(
+                        "xlog_checkpoint.oldestActiveXid={}, checkpoint.oldestActiveXid={}",
+                        xlog_checkpoint.oldestActiveXid,
+                        self.checkpoint.oldestActiveXid
+                    );
+                    self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
+
+                    // Write a new checkpoint key-value pair on every checkpoint record, even
+                    // if nothing really changed. Not strictly required, but it seems nice to
+                    // have some trace of the checkpoint records in the layer files at the same
+                    // LSNs.
+                    self.checkpoint_modified = true;
                 }
             }
             pg_constants::RM_LOGICALMSG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
                 if info == pg_constants::XLOG_LOGICAL_MESSAGE {
-                    let xlrec = XlLogicalMessage::decode(&mut buf);
+                    let xlrec = crate::walrecord::XlLogicalMessage::decode(&mut buf);
                     let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
                     let message = &buf[xlrec.prefix_size..xlrec.prefix_size + xlrec.message_size];
                     if prefix == "neon-test" {
@@ -350,6 +364,13 @@ impl WalIngest {
                     } else if let Some(path) = prefix.strip_prefix("neon-file:") {
                         modification.put_file(path, message, ctx).await?;
                     }
+                }
+            }
+            pg_constants::RM_STANDBY_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                if info == pg_constants::XLOG_RUNNING_XACTS {
+                    let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
+                    self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
                 }
             }
             _x => {
@@ -1025,7 +1046,23 @@ impl WalIngest {
             // Copy content
             debug!("copying rel {} to {}, {} blocks", src_rel, dst_rel, nblocks);
             for blknum in 0..nblocks {
-                debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
+                // Sharding:
+                //  - src and dst are always on the same shard, because they differ only by dbNode, and
+                //    dbNode is not included in the hash inputs for sharding.
+                //  - This WAL command is replayed on all shards, but each shard only copies the blocks
+                //    that belong to it.
+                let src_key = rel_block_to_key(src_rel, blknum);
+                if !self.shard.is_key_local(&src_key) {
+                    debug!(
+                        "Skipping non-local key {} during XLOG_DBASE_CREATE",
+                        src_key
+                    );
+                    continue;
+                }
+                debug!(
+                    "copying block {} from {} ({}) to {}",
+                    blknum, src_rel, src_key, dst_rel
+                );
 
                 let content = modification
                     .tline
@@ -1339,16 +1376,22 @@ impl WalIngest {
             self.checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
             self.checkpoint_modified = true;
         }
-        let max_mbr_xid = xlrec.members.iter().fold(0u32, |acc, mbr| {
-            if mbr.xid.wrapping_sub(acc) as i32 > 0 {
-                mbr.xid
+        let max_mbr_xid = xlrec.members.iter().fold(None, |acc, mbr| {
+            if let Some(max_xid) = acc {
+                if mbr.xid.wrapping_sub(max_xid) as i32 > 0 {
+                    Some(mbr.xid)
+                } else {
+                    acc
+                }
             } else {
-                acc
+                Some(mbr.xid)
             }
         });
 
-        if self.checkpoint.update_next_xid(max_mbr_xid) {
-            self.checkpoint_modified = true;
+        if let Some(max_xid) = max_mbr_xid {
+            if self.checkpoint.update_next_xid(max_xid) {
+                self.checkpoint_modified = true;
+            }
         }
         Ok(())
     }
@@ -1624,8 +1667,6 @@ mod tests {
     use super::*;
     use crate::tenant::harness::*;
     use crate::tenant::remote_timeline_client::{remote_initdb_archive_path, INITDB_PATH};
-    use crate::tenant::Timeline;
-    use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
 
     use crate::DEFAULT_PG_VERSION;
@@ -1665,22 +1706,22 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest.put_rel_creation(&mut m, TESTREL_A, &ctx).await?;
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 3"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1 at 4"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 2, test_img("foo blk 2 at 5"), &ctx)
             .await?;
         m.commit(&ctx).await?;
 
@@ -1721,46 +1762,46 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 2")
+            test_img("foo blk 0 at 2")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
 
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 2 at 5")
+            test_img("foo blk 2 at 5")
         );
 
         // Truncate last block
@@ -1782,13 +1823,13 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
 
         // should still see the truncated block with older LSN
@@ -1802,7 +1843,7 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 2 at 5")
+            test_img("foo blk 2 at 5")
         );
 
         // Truncate to zero length
@@ -1821,7 +1862,7 @@ mod tests {
         // Extend from 0 to 2 blocks, leaving a gap
         let mut m = tline.begin_modification(Lsn(0x70));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         assert_eq!(
@@ -1840,13 +1881,13 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1")
+            test_img("foo blk 1")
         );
 
         // Extend a lot more, leaving a big gap that spans across segments
         let mut m = tline.begin_modification(Lsn(0x80));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1500, test_img("foo blk 1500"), &ctx)
             .await?;
         m.commit(&ctx).await?;
         assert_eq!(
@@ -1867,7 +1908,7 @@ mod tests {
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), false, &ctx)
                 .await?,
-            TEST_IMG("foo blk 1500")
+            test_img("foo blk 1500")
         );
 
         Ok(())
@@ -1885,7 +1926,7 @@ mod tests {
 
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
         m.commit(&ctx).await?;
 
@@ -1922,7 +1963,7 @@ mod tests {
         // Re-create it
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 4"), &ctx)
             .await?;
         m.commit(&ctx).await?;
 
@@ -1960,7 +2001,7 @@ mod tests {
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, test_img(&data), &ctx)
                 .await?;
         }
         m.commit(&ctx).await?;
@@ -1998,7 +2039,7 @@ mod tests {
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), false, &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2025,7 +2066,7 @@ mod tests {
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), false, &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2043,7 +2084,7 @@ mod tests {
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), false, &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2054,7 +2095,7 @@ mod tests {
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, lsn);
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, test_img(&data), &ctx)
                 .await?;
         }
         m.commit(&ctx).await?;
@@ -2079,7 +2120,7 @@ mod tests {
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), false, &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2100,7 +2141,7 @@ mod tests {
         for blknum in 0..RELSEG_SIZE + 1 {
             lsn += 0x10;
             let mut m = tline.begin_modification(Lsn(lsn));
-            let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
+            let img = test_img(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             walingest
                 .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img, &ctx)
                 .await?;
@@ -2201,7 +2242,8 @@ mod tests {
         let harness = TenantHarness::create("test_ingest_real_wal").unwrap();
         let (tenant, ctx) = harness.load().await;
 
-        let remote_initdb_path = remote_initdb_archive_path(&tenant.tenant_id(), &TIMELINE_ID);
+        let remote_initdb_path =
+            remote_initdb_archive_path(&tenant.tenant_shard_id().tenant_id, &TIMELINE_ID);
         let initdb_path = harness.remote_fs_dir.join(remote_initdb_path.get_path());
 
         std::fs::create_dir_all(initdb_path.parent().unwrap())

@@ -15,13 +15,18 @@
 
 #include "neon_pgversioncompat.h"
 
+#include "access/slru.h"
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "storage/block.h"
+#include "storage/buf_internals.h"
 #include "storage/smgr.h"
 #include "utils/memutils.h"
+
+#define MAX_SHARDS 128
+#define MAX_PAGESERVER_CONNSTRING_SIZE 256
 
 typedef enum
 {
@@ -30,6 +35,7 @@ typedef enum
 	T_NeonNblocksRequest,
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
+	T_NeonGetSlruSegmentRequest,
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -37,6 +43,7 @@ typedef enum
 	T_NeonGetPageResponse,
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
+	T_NeonGetSlruSegmentResponse,
 } NeonMessageTag;
 
 /* base struct for c-style inheritance */
@@ -51,6 +58,16 @@ typedef struct
 #define neon_log(tag, fmt, ...) ereport(tag,                                  \
 										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
 										 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
+#define neon_shard_log(shard_no, tag, fmt, ...) ereport(tag,	\
+														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
+														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
+
+/* SLRUs downloadable from page server */
+typedef enum {
+	SLRU_CLOG,
+	SLRU_MULTIXACT_MEMBERS,
+	SLRU_MULTIXACT_OFFSETS
+} SlruKind;
 
 /*
  * supertype of all the Neon*Request structs below
@@ -94,6 +111,13 @@ typedef struct
 	BlockNumber blkno;
 } NeonGetPageRequest;
 
+typedef struct
+{
+	NeonRequest req;
+	SlruKind kind;
+	int      segno;
+} NeonGetSlruSegmentRequest;
+
 /* supertype of all the Neon*Response structs below */
 typedef struct
 {
@@ -133,6 +157,14 @@ typedef struct
 												 * message */
 } NeonErrorResponse;
 
+typedef struct
+{
+	NeonMessageTag tag;
+	int         n_blocks;
+	char		data[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
+} NeonGetSlruSegmentResponse;
+
+
 extern StringInfoData nm_pack_request(NeonRequest *msg);
 extern NeonResponse *nm_unpack_response(StringInfo s);
 extern char *nm_to_string(NeonMessage *msg);
@@ -141,11 +173,13 @@ extern char *nm_to_string(NeonMessage *msg);
  * API
  */
 
+typedef unsigned shardno_t;
+
 typedef struct
 {
-	bool		(*send) (NeonRequest *request);
-	NeonResponse *(*receive) (void);
-	bool		(*flush) (void);
+	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
+	NeonResponse *(*receive) (shardno_t shard_no);
+	bool		(*flush) (shardno_t shard_no);
 } page_server_api;
 
 extern void prefetch_on_ps_disconnect(void);
@@ -158,6 +192,8 @@ extern int	readahead_buffer_size;
 extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
+
+extern shardno_t get_shard_number(BufferTag* tag);
 
 extern const f_smgr *smgr_neon(BackendId backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);

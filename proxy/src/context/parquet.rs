@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context;
-use bytes::BytesMut;
+use bytes::{buf::Writer, BufMut, BytesMut};
+use chrono::{Datelike, Timelike};
 use futures::{Stream, StreamExt};
 use parquet::{
     basic::Compression,
@@ -12,7 +13,7 @@ use parquet::{
     },
     record::RecordWriter,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig};
+use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
@@ -73,7 +74,7 @@ pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 // * after each rowgroup write, we check the length of the file and upload to s3 if large enough
 
 #[derive(parquet_derive::ParquetRecordWriter)]
-struct RequestData {
+pub struct RequestData {
     region: &'static str,
     protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
@@ -83,13 +84,23 @@ struct RequestData {
     username: Option<String>,
     application_name: Option<String>,
     endpoint_id: Option<String>,
+    database: Option<String>,
     project: Option<String>,
     branch: Option<String>,
+    auth_method: Option<&'static str>,
     error: Option<&'static str>,
+    /// Success is counted if we form a HTTP response with sql rows inside
+    /// Or if we make it to proxy_pass
+    success: bool,
+    /// Indicates if the cplane started the new compute node for this request.
+    cold_start_info: Option<&'static str>,
+    /// Tracks time from session start (HTTP request/libpq TCP handshake)
+    /// Through to success/failure
+    duration_us: u64,
 }
 
-impl From<RequestMonitoring> for RequestData {
-    fn from(value: RequestMonitoring) -> Self {
+impl From<&RequestMonitoring> for RequestData {
+    fn from(value: &RequestMonitoring) -> Self {
         Self {
             session_id: value.session_id,
             peer_addr: value.peer_addr.to_string(),
@@ -97,11 +108,29 @@ impl From<RequestMonitoring> for RequestData {
             username: value.user.as_deref().map(String::from),
             application_name: value.application.as_deref().map(String::from),
             endpoint_id: value.endpoint_id.as_deref().map(String::from),
+            database: value.dbname.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
             branch: value.branch.as_deref().map(String::from),
+            auth_method: value.auth_method.as_ref().map(|x| match x {
+                super::AuthMethod::Web => "web",
+                super::AuthMethod::ScramSha256 => "scram_sha_256",
+                super::AuthMethod::ScramSha256Plus => "scram_sha_256_plus",
+                super::AuthMethod::Cleartext => "cleartext",
+            }),
             protocol: value.protocol,
             region: value.region,
-            error: value.error_kind.as_ref().map(|e| e.to_str()),
+            error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
+            success: value.success,
+            cold_start_info: value.cold_start_info.as_ref().map(|x| match x {
+                crate::console::messages::ColdStartInfo::Unknown => "unknown",
+                crate::console::messages::ColdStartInfo::Warm => "warm",
+                crate::console::messages::ColdStartInfo::PoolHit => "pool_hit",
+                crate::console::messages::ColdStartInfo::PoolMiss => "pool_miss",
+            }),
+            duration_us: SystemTime::from(value.first_packet)
+                .elapsed()
+                .unwrap_or_default()
+                .as_micros() as u64, // 584 millenia... good enough
         }
     }
 }
@@ -180,8 +209,9 @@ async fn worker_inner(
     let mut rows = Vec::with_capacity(config.rows_per_group);
 
     let schema = rows.as_slice().schema()?;
-    let file = BytesWriter::default();
-    let mut w = SerializedFileWriter::new(file, schema.clone(), config.propeties.clone())?;
+    let buffer = BytesMut::new();
+    let w = buffer.writer();
+    let mut w = SerializedFileWriter::new(w, schema.clone(), config.propeties.clone())?;
 
     let mut last_upload = time::Instant::now();
 
@@ -209,20 +239,23 @@ async fn worker_inner(
     }
 
     if !w.flushed_row_groups().is_empty() {
-        let _: BytesWriter = upload_parquet(w, len, &storage).await?;
+        let _: Writer<BytesMut> = upload_parquet(w, len, &storage).await?;
     }
 
     Ok(())
 }
 
-async fn flush_rows(
+async fn flush_rows<W>(
     rows: Vec<RequestData>,
-    mut w: SerializedFileWriter<BytesWriter>,
+    mut w: SerializedFileWriter<W>,
 ) -> anyhow::Result<(
     Vec<RequestData>,
-    SerializedFileWriter<BytesWriter>,
+    SerializedFileWriter<W>,
     RowGroupMetaDataPtr,
-)> {
+)>
+where
+    W: std::io::Write + Send + 'static,
+{
     let span = Span::current();
     let (mut rows, w, rg_meta) = tokio::task::spawn_blocking(move || {
         let _enter = span.enter();
@@ -246,10 +279,10 @@ async fn flush_rows(
 }
 
 async fn upload_parquet(
-    w: SerializedFileWriter<BytesWriter>,
+    w: SerializedFileWriter<Writer<BytesMut>>,
     len: i64,
     storage: &GenericRemoteStorage,
-) -> anyhow::Result<BytesWriter> {
+) -> anyhow::Result<Writer<BytesMut>> {
     let len_uncompressed = w
         .flushed_row_groups()
         .iter()
@@ -258,15 +291,22 @@ async fn upload_parquet(
 
     // I don't know how compute intensive this is, although it probably isn't much... better be safe than sorry.
     // finish method only available on the fork: https://github.com/apache/arrow-rs/issues/5253
-    let (mut file, metadata) = tokio::task::spawn_blocking(move || w.finish())
+    let (writer, metadata) = tokio::task::spawn_blocking(move || w.finish())
         .await
         .unwrap()?;
 
-    let data = file.buf.split().freeze();
+    let mut buffer = writer.into_inner();
+    let data = buffer.split().freeze();
 
     let compression = len as f64 / len_uncompressed as f64;
     let size = data.len();
-    let id = uuid::Uuid::now_v7();
+    let now = chrono::Utc::now();
+    let id = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+        uuid::NoContext,
+        // we won't be running this in 1970. this cast is ok
+        now.timestamp() as u64,
+        now.timestamp_subsec_nanos(),
+    ));
 
     info!(
         %id,
@@ -274,40 +314,35 @@ async fn upload_parquet(
         size, compression, "uploading request parquet file"
     );
 
-    let path = RemotePath::from_string(&format!("requests_{id}.parquet"))?;
+    let year = now.year();
+    let month = now.month();
+    let day = now.day();
+    let hour = now.hour();
+    // segment files by time for S3 performance
+    let path = RemotePath::from_string(&format!(
+        "{year:04}/{month:02}/{day:02}/{hour:02}/requests_{id}.parquet"
+    ))?;
+    let cancel = CancellationToken::new();
     backoff::retry(
         || async {
             let stream = futures::stream::once(futures::future::ready(Ok(data.clone())));
-            storage.upload(stream, data.len(), &path, None).await
+            storage
+                .upload(stream, data.len(), &path, None, &cancel)
+                .await
         },
-        |_e| false,
+        TimeoutOrCancel::caused_by_cancel,
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_UPLOAD_MAX_RETRIES,
         "request_data_upload",
         // we don't want cancellation to interrupt here, so we make a dummy cancel token
-        backoff::Cancel::new(CancellationToken::new(), || anyhow::anyhow!("Cancelled")),
+        &cancel,
     )
     .await
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
+    .and_then(|x| x)
     .context("request_data_upload")?;
 
-    Ok(file)
-}
-
-// why doesn't BytesMut impl io::Write?
-#[derive(Default)]
-struct BytesWriter {
-    buf: BytesMut,
-}
-
-impl std::io::Write for BytesWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+    Ok(buffer.writer())
 }
 
 #[cfg(test)]
@@ -332,6 +367,7 @@ mod tests {
         DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
     };
     use tokio::{sync::mpsc, time};
+    use walkdir::WalkDir;
 
     use super::{worker_inner, ParquetConfig, ParquetUploadArgs, RequestData};
 
@@ -388,7 +424,8 @@ mod tests {
                     )
                     .unwrap(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
-                })
+                }),
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             })
         );
         assert_eq!(parquet_upload.parquet_upload_row_group_size, 100);
@@ -415,11 +452,16 @@ mod tests {
             application_name: Some("test".to_owned()),
             username: Some(hex::encode(rng.gen::<[u8; 4]>())),
             endpoint_id: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            database: Some(hex::encode(rng.gen::<[u8; 16]>())),
             project: Some(hex::encode(rng.gen::<[u8; 16]>())),
             branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            auth_method: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
             region: "us-east-1",
             error: None,
+            success: rng.gen(),
+            cold_start_info: Some("no"),
+            duration_us: rng.gen_range(0..30_000_000),
         }
     }
 
@@ -437,14 +479,17 @@ mod tests {
     ) -> Vec<(u64, usize, i64)> {
         let remote_storage_config = RemoteStorageConfig {
             storage: RemoteStorageKind::LocalFs(tmpdir.to_path_buf()),
+            timeout: std::time::Duration::from_secs(120),
         };
         let storage = GenericRemoteStorage::from_config(&remote_storage_config).unwrap();
 
         worker_inner(storage, rx, config).await.unwrap();
 
-        let mut files = std::fs::read_dir(tmpdir.as_std_path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
+        let mut files = WalkDir::new(tmpdir.as_std_path())
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.path().to_path_buf())
             .collect_vec();
         files.sort();
 
@@ -485,16 +530,16 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1029153, 3, 6000),
-                (1029075, 3, 6000),
-                (1029216, 3, 6000),
-                (1029129, 3, 6000),
-                (1029250, 3, 6000),
-                (1029017, 3, 6000),
-                (1029175, 3, 6000),
-                (1029247, 3, 6000),
-                (343124, 1, 2000)
-            ],
+                (1314406, 3, 6000),
+                (1314399, 3, 6000),
+                (1314459, 3, 6000),
+                (1314416, 3, 6000),
+                (1314546, 3, 6000),
+                (1314388, 3, 6000),
+                (1314180, 3, 6000),
+                (1314416, 3, 6000),
+                (438359, 1, 2000)
+            ]
         );
 
         tmpdir.close().unwrap();
@@ -523,12 +568,12 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1166201, 6, 12000),
-                (1163577, 6, 12000),
-                (1164641, 6, 12000),
-                (1168772, 6, 12000),
-                (196761, 1, 2000)
-            ],
+                (1220668, 5, 10000),
+                (1226818, 5, 10000),
+                (1228612, 5, 10000),
+                (1227974, 5, 10000),
+                (1219252, 5, 10000)
+            ]
         );
 
         tmpdir.close().unwrap();
@@ -559,12 +604,12 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1144934, 6, 12000),
-                (1144941, 6, 12000),
-                (1144735, 6, 12000),
-                (1144936, 6, 12000),
-                (191035, 1, 2000)
-            ],
+                (1206315, 5, 10000),
+                (1206046, 5, 10000),
+                (1206339, 5, 10000),
+                (1206327, 5, 10000),
+                (1206582, 5, 10000)
+            ]
         );
 
         tmpdir.close().unwrap();
@@ -588,16 +633,16 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1029153, 3, 6000),
-                (1029075, 3, 6000),
-                (1029216, 3, 6000),
-                (1029129, 3, 6000),
-                (1029250, 3, 6000),
-                (1029017, 3, 6000),
-                (1029175, 3, 6000),
-                (1029247, 3, 6000),
-                (343124, 1, 2000)
-            ],
+                (1314406, 3, 6000),
+                (1314399, 3, 6000),
+                (1314459, 3, 6000),
+                (1314416, 3, 6000),
+                (1314546, 3, 6000),
+                (1314388, 3, 6000),
+                (1314180, 3, 6000),
+                (1314416, 3, 6000),
+                (438359, 1, 2000)
+            ]
         );
 
         tmpdir.close().unwrap();
@@ -633,7 +678,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(515807, 2, 3001), (515585, 2, 3000), (515425, 2, 2999)],
+            [(658837, 2, 3001), (658551, 2, 3000), (658347, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

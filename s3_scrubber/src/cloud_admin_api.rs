@@ -1,11 +1,7 @@
-#![allow(unused)]
-
-use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use hex::FromHex;
-use pageserver::tenant::Tenant;
 use reqwest::{header, Client, StatusCode, Url};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
@@ -290,7 +286,7 @@ impl CloudAdminApiClient {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-                status => {
+                _status => {
                     return Err(Error::new(
                         "List active projects".to_string(),
                         ErrorKind::ResponseStatus(response.status()),

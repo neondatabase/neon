@@ -2,6 +2,8 @@
 //! with the "START_REPLICATION" message, and registry of walsenders.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::RECEIVED_PS_FEEDBACKS;
+use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
 use crate::timeline::Timeline;
 use crate::wal_service::ConnectionId;
@@ -19,10 +21,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::failpoint_support;
 use utils::id::TenantTimelineId;
-use utils::lsn::AtomicLsn;
 use utils::pageserver_feedback::PageserverFeedback;
 
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::net::SocketAddr;
 use std::str;
 use std::sync::Arc;
@@ -90,17 +91,15 @@ pub struct StandbyFeedback {
 
 /// WalSenders registry. Timeline holds it (wrapped in Arc).
 pub struct WalSenders {
-    /// Lsn maximized over all walsenders *and* peer data, so might be higher
-    /// than what we receive from replicas.
-    remote_consistent_lsn: AtomicLsn,
     mutex: Mutex<WalSendersShared>,
+    walreceivers: Arc<WalReceivers>,
 }
 
 impl WalSenders {
-    pub fn new(remote_consistent_lsn: Lsn) -> Arc<WalSenders> {
+    pub fn new(walreceivers: Arc<WalReceivers>) -> Arc<WalSenders> {
         Arc::new(WalSenders {
-            remote_consistent_lsn: AtomicLsn::from(remote_consistent_lsn),
             mutex: Mutex::new(WalSendersShared::new()),
+            walreceivers,
         })
     }
 
@@ -141,23 +140,44 @@ impl WalSenders {
         self.mutex.lock().slots.iter().flatten().cloned().collect()
     }
 
-    /// Get aggregated pageserver feedback.
-    pub fn get_ps_feedback(self: &Arc<WalSenders>) -> PageserverFeedback {
-        self.mutex.lock().agg_ps_feedback
+    /// Get LSN of the most lagging pageserver receiver. Return None if there are no
+    /// active walsenders.
+    pub fn laggard_lsn(self: &Arc<WalSenders>) -> Option<Lsn> {
+        self.mutex
+            .lock()
+            .slots
+            .iter()
+            .flatten()
+            .filter_map(|s| match s.feedback {
+                ReplicationFeedback::Pageserver(feedback) => Some(feedback.last_received_lsn),
+                ReplicationFeedback::Standby(_) => None,
+            })
+            .min()
     }
 
-    /// Get aggregated pageserver and hot standby feedback (we send them to compute).
-    pub fn get_feedbacks(self: &Arc<WalSenders>) -> (PageserverFeedback, HotStandbyFeedback) {
+    /// Returns total counter of pageserver feedbacks received and last feedback.
+    pub fn get_ps_feedback_stats(self: &Arc<WalSenders>) -> (u64, PageserverFeedback) {
         let shared = self.mutex.lock();
-        (shared.agg_ps_feedback, shared.agg_hs_feedback)
+        (shared.ps_feedback_counter, shared.last_ps_feedback)
+    }
+
+    /// Get aggregated hot standby feedback (we send it to compute).
+    pub fn get_hotstandby(self: &Arc<WalSenders>) -> HotStandbyFeedback {
+        self.mutex.lock().agg_hs_feedback
     }
 
     /// Record new pageserver feedback, update aggregated values.
     fn record_ps_feedback(self: &Arc<WalSenders>, id: WalSenderId, feedback: &PageserverFeedback) {
         let mut shared = self.mutex.lock();
         shared.get_slot_mut(id).feedback = ReplicationFeedback::Pageserver(*feedback);
-        shared.update_ps_feedback();
-        self.update_remote_consistent_lsn(shared.agg_ps_feedback.remote_consistent_lsn);
+        shared.last_ps_feedback = *feedback;
+        shared.ps_feedback_counter += 1;
+        drop(shared);
+
+        RECEIVED_PS_FEEDBACKS.inc();
+
+        // send feedback to connected walproposers
+        self.walreceivers.broadcast_pageserver_feedback(*feedback);
     }
 
     /// Record standby reply.
@@ -202,18 +222,6 @@ impl WalSenders {
         }
     }
 
-    /// Get remote_consistent_lsn maximized across all walsenders and peers.
-    pub fn get_remote_consistent_lsn(self: &Arc<WalSenders>) -> Lsn {
-        self.remote_consistent_lsn.load()
-    }
-
-    /// Update maximized remote_consistent_lsn, return new (potentially) value.
-    pub fn update_remote_consistent_lsn(self: &Arc<WalSenders>, candidate: Lsn) -> Lsn {
-        self.remote_consistent_lsn
-            .fetch_max(candidate)
-            .max(candidate)
-    }
-
     /// Unregister walsender.
     fn unregister(self: &Arc<WalSenders>, id: WalSenderId) {
         let mut shared = self.mutex.lock();
@@ -225,8 +233,10 @@ impl WalSenders {
 struct WalSendersShared {
     // aggregated over all walsenders value
     agg_hs_feedback: HotStandbyFeedback,
-    // aggregated over all walsenders value
-    agg_ps_feedback: PageserverFeedback,
+    // last feedback ever received from any pageserver, empty if none
+    last_ps_feedback: PageserverFeedback,
+    // total counter of pageserver feedbacks received
+    ps_feedback_counter: u64,
     slots: Vec<Option<WalSenderState>>,
 }
 
@@ -234,7 +244,8 @@ impl WalSendersShared {
     fn new() -> Self {
         WalSendersShared {
             agg_hs_feedback: HotStandbyFeedback::empty(),
-            agg_ps_feedback: PageserverFeedback::empty(),
+            last_ps_feedback: PageserverFeedback::empty(),
+            ps_feedback_counter: 0,
             slots: Vec::new(),
         }
     }
@@ -278,37 +289,6 @@ impl WalSendersShared {
             }
         }
         self.agg_hs_feedback = agg;
-    }
-
-    /// Update aggregated pageserver feedback. LSNs (last_received,
-    /// disk_consistent, remote_consistent) and reply timestamp are just
-    /// maximized; timeline_size if taken from feedback with highest
-    /// last_received lsn. This is generally reasonable, but we might want to
-    /// implement other policies once multiple pageservers start to be actively
-    /// used.
-    fn update_ps_feedback(&mut self) {
-        let init = PageserverFeedback::empty();
-        let acc =
-            self.slots
-                .iter()
-                .flatten()
-                .fold(init, |mut acc, ws_state| match ws_state.feedback {
-                    ReplicationFeedback::Pageserver(feedback) => {
-                        if feedback.last_received_lsn > acc.last_received_lsn {
-                            acc.current_timeline_size = feedback.current_timeline_size;
-                        }
-                        acc.last_received_lsn =
-                            max(feedback.last_received_lsn, acc.last_received_lsn);
-                        acc.disk_consistent_lsn =
-                            max(feedback.disk_consistent_lsn, acc.disk_consistent_lsn);
-                        acc.remote_consistent_lsn =
-                            max(feedback.remote_consistent_lsn, acc.remote_consistent_lsn);
-                        acc.replytime = max(feedback.replytime, acc.replytime);
-                        acc
-                    }
-                    ReplicationFeedback::Standby(_) => acc,
-                });
-        self.agg_ps_feedback = acc;
     }
 }
 
@@ -425,7 +405,7 @@ impl SafekeeperPostgresHandler {
             self.conf.timeline_dir(&tli.ttid),
             &persisted_state,
             start_pos,
-            self.conf.wal_backup_enabled,
+            self.conf.is_wal_backup_enabled(),
         )?;
 
         // Split to concurrently receive and send data; replies are generally
@@ -444,13 +424,29 @@ impl SafekeeperPostgresHandler {
             wal_reader,
             send_buf: [0; MAX_SEND_SIZE],
         };
-        let mut reply_reader = ReplyReader { reader, ws_guard };
+        let mut reply_reader = ReplyReader {
+            reader,
+            ws_guard: ws_guard.clone(),
+            tli,
+        };
 
         let res = tokio::select! {
             // todo: add read|write .context to these errors
             r = sender.run() => r,
             r = reply_reader.run() => r,
         };
+
+        let ws_state = ws_guard
+            .walsenders
+            .mutex
+            .lock()
+            .get_slot(ws_guard.id)
+            .clone();
+        info!(
+            "finished streaming to {}, feedback={:?}",
+            ws_state.addr, ws_state.feedback,
+        );
+
         // Join pg backend back.
         pgb.unsplit(reply_reader.reader)?;
 
@@ -638,17 +634,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
 struct ReplyReader<IO> {
     reader: PostgresBackendReader<IO>,
     ws_guard: Arc<WalSenderGuard>,
+    tli: Arc<Timeline>,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
     async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             let msg = self.reader.read_copy_message().await?;
-            self.handle_feedback(&msg)?
+            self.handle_feedback(&msg).await?
         }
     }
 
-    fn handle_feedback(&mut self, msg: &Bytes) -> anyhow::Result<()> {
+    async fn handle_feedback(&mut self, msg: &Bytes) -> anyhow::Result<()> {
         match msg.first().cloned() {
             Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
                 // Note: deserializing is on m[1..] because we skip the tag byte.
@@ -675,6 +672,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                 self.ws_guard
                     .walsenders
                     .record_ps_feedback(self.ws_guard.id, &ps_feedback);
+                self.tli
+                    .update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn)
+                    .await;
                 // in principle new remote_consistent_lsn could allow to
                 // deactivate the timeline, but we check that regularly through
                 // broker updated, not need to do it here
@@ -728,7 +728,6 @@ async fn wait_for_lsn(
 
 #[cfg(test)]
 mod tests {
-    use postgres_protocol::PG_EPOCH;
     use utils::id::{TenantId, TimelineId};
 
     use super::*;
@@ -786,28 +785,5 @@ mod tests {
         push_feedback(&mut wss, hs_feedback(1, 64));
         wss.update_hs_feedback();
         assert_eq!(wss.agg_hs_feedback.xmin, 42);
-    }
-
-    // form pageserver feedback with given last_record_lsn / tli size and the
-    // rest set to dummy values.
-    fn ps_feedback(current_timeline_size: u64, last_received_lsn: Lsn) -> ReplicationFeedback {
-        ReplicationFeedback::Pageserver(PageserverFeedback {
-            current_timeline_size,
-            last_received_lsn,
-            disk_consistent_lsn: Lsn::INVALID,
-            remote_consistent_lsn: Lsn::INVALID,
-            replytime: *PG_EPOCH,
-        })
-    }
-
-    // test that ps aggregation works as expected
-    #[test]
-    fn test_ps_feedback() {
-        let mut wss = WalSendersShared::new();
-        push_feedback(&mut wss, ps_feedback(8, Lsn(42)));
-        push_feedback(&mut wss, ps_feedback(4, Lsn(84)));
-        wss.update_ps_feedback();
-        assert_eq!(wss.agg_ps_feedback.current_timeline_size, 4);
-        assert_eq!(wss.agg_ps_feedback.last_received_lsn, Lsn(84));
     }
 }

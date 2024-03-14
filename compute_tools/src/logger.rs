@@ -38,3 +38,9 @@ pub fn init_tracing_and_logging(default_log_level: &str) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Replace all newline characters with a special character to make it
+/// easier to grep for log messages.
+pub fn inlinify(s: &str) -> String {
+    s.replace('\n', "\u{200B}")
+}

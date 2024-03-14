@@ -1,16 +1,19 @@
 pub mod partitioning;
+pub mod utilization;
+
+pub use utilization::PageserverUtilization;
 
 use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
+use postgres_ffi::BLCKSZ;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use strum_macros;
 use utils::{
     completion,
     history_buffer::HistoryBufferWithDropCounter,
@@ -18,7 +21,11 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::{reltag::RelTag, shard::TenantShardId};
+use crate::controller_api::PlacementPolicy;
+use crate::{
+    reltag::RelTag,
+    shard::{ShardCount, ShardStripeSize, TenantShardId},
+};
 use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -176,7 +183,7 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
     #[serde(default)]
@@ -188,6 +195,48 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct TenantShardSplitRequest {
+    pub new_shard_count: u8,
+
+    // A tenant's stripe size is only meaningful the first time their shard count goes
+    // above 1: therefore during a split from 1->N shards, we may modify the stripe size.
+    //
+    // If this is set while the stripe count is being increased from an already >1 value,
+    // then the request will fail with 400.
+    pub new_stripe_size: Option<ShardStripeSize>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantShardSplitResponse {
+    pub new_shards: Vec<TenantShardId>,
+}
+
+/// Parameters that apply to all shards in a tenant.  Used during tenant creation.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ShardParameters {
+    pub count: ShardCount,
+    pub stripe_size: ShardStripeSize,
+}
+
+impl ShardParameters {
+    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
+
+    pub fn is_unsharded(&self) -> bool {
+        self.count.is_unsharded()
+    }
+}
+
+impl Default for ShardParameters {
+    fn default() -> Self {
+        Self {
+            count: ShardCount::new(0),
+            stripe_size: Self::DEFAULT_STRIPE_SIZE,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
@@ -195,6 +244,17 @@ pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<u32>,
+
+    // If omitted, create a single shard with TenantShardId::unsharded()
+    #[serde(default)]
+    #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
+    pub shard_parameters: ShardParameters,
+
+    // This parameter is only meaningful in requests sent to the storage controller
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement_policy: Option<PlacementPolicy>,
+
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -217,13 +277,15 @@ impl std::ops::Deref for TenantCreateRequest {
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
+    // defer parsing compaction_algorithm, like eviction_policy
+    pub compaction_algorithm: Option<CompactionAlgorithm>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -232,21 +294,80 @@ pub struct TenantConfig {
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub trace_read_requests: Option<bool>,
-    // We defer the parsing of the eviction_policy field to the request handler.
-    // Otherwise we'd have to move the types for eviction policy into this package.
-    // We might do that once the eviction feature has stabilizied.
-    // For now, this field is not even documented in the openapi_spec.yml.
-    pub eviction_policy: Option<serde_json::Value>,
+    pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
+    pub lazy_slru_download: Option<bool>,
+    pub timeline_get_throttle: Option<ThrottleConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum EvictionPolicy {
+    NoEviction,
+    LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+    OnlyImitiate(EvictionPolicyLayerAccessThreshold),
+}
+
+impl EvictionPolicy {
+    pub fn discriminant_str(&self) -> &'static str {
+        match self {
+            EvictionPolicy::NoEviction => "NoEviction",
+            EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+            EvictionPolicy::OnlyImitiate(_) => "OnlyImitiate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum CompactionAlgorithm {
+    Legacy,
+    Tiered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvictionPolicyLayerAccessThreshold {
+    #[serde(with = "humantime_serde")]
+    pub period: Duration,
+    #[serde(with = "humantime_serde")]
+    pub threshold: Duration,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ThrottleConfig {
+    pub task_kinds: Vec<String>, // TaskKind
+    pub initial: usize,
+    #[serde(with = "humantime_serde")]
+    pub refill_interval: Duration,
+    pub refill_amount: NonZeroUsize,
+    pub max: usize,
+    pub fair: bool,
+}
+
+impl ThrottleConfig {
+    pub fn disabled() -> Self {
+        Self {
+            task_kinds: vec![], // effectively disables the throttle
+            // other values don't matter with emtpy `task_kinds`.
+            initial: 0,
+            refill_interval: Duration::from_millis(1),
+            refill_amount: NonZeroUsize::new(1).unwrap(),
+            max: 1,
+            fair: true,
+        }
+    }
+    /// The requests per second allowed  by the given config.
+    pub fn steady_rps(&self) -> f64 {
+        (self.refill_amount.get() as f64) / (self.refill_interval.as_secs_f64())
+    }
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
 /// lists out all possible states (and the virtual "Detached" state)
 /// in a flat form rather than using rust-style enums.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LocationConfigMode {
     AttachedSingle,
     AttachedMulti,
@@ -255,19 +376,21 @@ pub enum LocationConfigMode {
     Detached,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct LocationConfigSecondary {
     pub warm: bool,
 }
 
 /// An alternative representation of `pageserver::tenant::LocationConf`,
 /// for use in external-facing APIs.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct LocationConfig {
     pub mode: LocationConfigMode,
     /// If attaching, in what generation?
     #[serde(default)]
     pub generation: Option<u32>,
+
+    // If requesting mode `Secondary`, configuration for that.
     #[serde(default)]
     pub secondary_conf: Option<LocationConfigSecondary>,
 
@@ -280,9 +403,15 @@ pub struct LocationConfig {
     #[serde(default)]
     pub shard_stripe_size: u32,
 
-    // If requesting mode `Secondary`, configuration for that.
-    // Custom storage configuration for the tenant, if any
+    // This configuration only affects attached mode, but should be provided irrespective
+    // of the mode, as a secondary location might transition on startup if the response
+    // to the `/re-attach` control plane API requests it.
     pub tenant_conf: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LocationConfigListResponse {
+    pub tenant_shards: Vec<(TenantShardId, Option<LocationConfig>)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -297,9 +426,30 @@ pub struct StatusResponse {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigRequest {
-    pub tenant_id: TenantId,
+    pub tenant_id: Option<TenantShardId>,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantTimeTravelRequest {
+    pub shard_counts: Vec<ShardCount>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantShardLocation {
+    pub shard_id: TenantShardId,
+    pub node_id: NodeId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLocationConfigResponse {
+    pub shards: Vec<TenantShardLocation>,
+    // If the shards' ShardCount count is >1, stripe_size will be set.
+    pub stripe_size: Option<ShardStripeSize>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -368,12 +518,16 @@ pub struct TenantInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantDetails {
     #[serde(flatten)]
     pub tenant_info: TenantInfo,
+
+    pub walredo: Option<WalRedoManagerStatus>,
 
     pub timelines: Vec<TimelineId>,
 }
@@ -402,6 +556,8 @@ pub struct TimelineInfo {
 
     pub current_logical_size: u64,
     pub current_logical_size_is_accurate: bool,
+
+    pub directory_entries_counts: Vec<u64>,
 
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
@@ -562,6 +718,33 @@ pub struct TimelineGcRequest {
     pub gc_horizon: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalRedoManagerStatus {
+    pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub pid: Option<u32>,
+}
+
+pub mod virtual_file {
+    #[derive(
+        Copy,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        strum_macros::EnumString,
+        strum_macros::Display,
+        serde_with::DeserializeFromStr,
+        serde_with::SerializeDisplay,
+        Debug,
+    )]
+    #[strum(serialize_all = "kebab-case")]
+    pub enum IoEngineKind {
+        StdFs,
+        #[cfg(target_os = "linux")]
+        TokioEpollUring,
+    }
+}
+
 // Wrapped in libpq CopyData
 #[derive(PartialEq, Eq, Debug)]
 pub enum PagestreamFeMessage {
@@ -569,6 +752,7 @@ pub enum PagestreamFeMessage {
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
+    GetSlruSegment(PagestreamGetSlruSegmentRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -579,6 +763,7 @@ pub enum PagestreamBeMessage {
     GetPage(PagestreamGetPageResponse),
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
+    GetSlruSegment(PagestreamGetSlruSegmentResponse),
 }
 
 // Keep in sync with `pagestore_client.h`
@@ -589,6 +774,7 @@ enum PagestreamBeMessageTag {
     GetPage = 102,
     Error = 103,
     DbSize = 104,
+    GetSlruSegment = 105,
 }
 impl TryFrom<u8> for PagestreamBeMessageTag {
     type Error = u8;
@@ -599,6 +785,7 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
             102 => Ok(PagestreamBeMessageTag::GetPage),
             103 => Ok(PagestreamBeMessageTag::Error),
             104 => Ok(PagestreamBeMessageTag::DbSize),
+            105 => Ok(PagestreamBeMessageTag::GetSlruSegment),
             _ => Err(value),
         }
     }
@@ -633,6 +820,14 @@ pub struct PagestreamDbSizeRequest {
     pub dbnode: u32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct PagestreamGetSlruSegmentRequest {
+    pub latest: bool,
+    pub lsn: Lsn,
+    pub kind: u8,
+    pub segno: u32,
+}
+
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
     pub exists: bool,
@@ -649,6 +844,11 @@ pub struct PagestreamGetPageResponse {
 }
 
 #[derive(Debug)]
+pub struct PagestreamGetSlruSegmentResponse {
+    pub segment: Bytes,
+}
+
+#[derive(Debug)]
 pub struct PagestreamErrorResponse {
     pub message: String,
 }
@@ -656,6 +856,17 @@ pub struct PagestreamErrorResponse {
 #[derive(Debug)]
 pub struct PagestreamDbSizeResponse {
     pub db_size: i64,
+}
+
+// This is a cut-down version of TenantHistorySize from the pageserver crate, omitting fields
+// that require pageserver-internal types.  It is sufficient to get the total size.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantHistorySize {
+    pub id: TenantId,
+    /// Size is a mixture of WAL and logical size, so the unit is bytes.
+    ///
+    /// Will be none if `?inputs_only=true` was given.
+    pub size: Option<u64>,
 }
 
 impl PagestreamFeMessage {
@@ -699,6 +910,14 @@ impl PagestreamFeMessage {
                 bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.dbnode);
+            }
+
+            Self::GetSlruSegment(req) => {
+                bytes.put_u8(4);
+                bytes.put_u8(u8::from(req.latest));
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u8(req.kind);
+                bytes.put_u32(req.segno);
             }
         }
 
@@ -750,6 +969,14 @@ impl PagestreamFeMessage {
                 lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 dbnode: body.read_u32::<BigEndian>()?,
             })),
+            4 => Ok(PagestreamFeMessage::GetSlruSegment(
+                PagestreamGetSlruSegmentRequest {
+                    latest: body.read_u8()? != 0,
+                    lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                    kind: body.read_u8()?,
+                    segno: body.read_u32::<BigEndian>()?,
+                },
+            )),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
@@ -784,6 +1011,12 @@ impl PagestreamBeMessage {
             Self::DbSize(resp) => {
                 bytes.put_u8(Tag::DbSize as u8);
                 bytes.put_i64(resp.db_size);
+            }
+
+            Self::GetSlruSegment(resp) => {
+                bytes.put_u8(Tag::GetSlruSegment as u8);
+                bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
+                bytes.put(&resp.segment[..]);
             }
         }
 
@@ -825,6 +1058,14 @@ impl PagestreamBeMessage {
                     let db_size = buf.read_i64::<BigEndian>()?;
                     Self::DbSize(PagestreamDbSizeResponse { db_size })
                 }
+                Tag::GetSlruSegment => {
+                    let n_blocks = buf.read_u32::<BigEndian>()?;
+                    let mut segment = vec![0; n_blocks as usize * BLCKSZ as usize];
+                    buf.read_exact(&mut segment)?;
+                    Self::GetSlruSegment(PagestreamGetSlruSegmentResponse {
+                        segment: segment.into(),
+                    })
+                }
             };
         let remaining = buf.into_inner();
         if !remaining.is_empty() {
@@ -843,13 +1084,13 @@ impl PagestreamBeMessage {
             Self::GetPage(_) => "GetPage",
             Self::Error(_) => "Error",
             Self::DbSize(_) => "DbSize",
+            Self::GetSlruSegment(_) => "GetSlruSegment",
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use bytes::Buf;
     use serde_json::json;
 
     use super::*;
@@ -910,6 +1151,7 @@ mod tests {
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
+            generation: None,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -930,6 +1172,7 @@ mod tests {
             },
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
+            generation: None,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),

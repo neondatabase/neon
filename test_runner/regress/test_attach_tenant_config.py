@@ -63,10 +63,11 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
         ]
     )
 
-    def log_contains_bad_request():
-        env.pageserver.log_contains(".*Error processing HTTP request: Bad request")
-
-    wait_until(50, 0.1, log_contains_bad_request)
+    wait_until(
+        50,
+        0.1,
+        lambda: env.pageserver.assert_log_contains(".*Error processing HTTP request: Bad request"),
+    )
 
 
 def test_null_body(negative_env: NegativeTests):
@@ -136,7 +137,7 @@ def test_no_config(positive_env: NeonEnv, content_type: Optional[str]):
     ps_http.tenant_detach(tenant_id)
     assert tenant_id not in [TenantId(t["id"]) for t in ps_http.tenant_list()]
 
-    body = {"generation": env.attachment_service.attach_hook_issue(tenant_id, env.pageserver.id)}
+    body = {"generation": env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id)}
 
     ps_http.post(
         f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
@@ -160,21 +161,32 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
+        "compaction_algorithm": {
+            "kind": "Tiered",
+        },
         "eviction_policy": {
             "kind": "LayerAccessThreshold",
             "period": "20s",
             "threshold": "23h",
         },
         "evictions_low_residence_duration_metric_threshold": "2days",
-        "gc_feedback": True,
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
         "heatmap_period": "10m",
         "image_creation_threshold": 7,
         "pitr_interval": "1m",
         "lagging_wal_timeout": "23m",
+        "lazy_slru_download": True,
         "max_lsn_wal_lag": 230000,
         "min_resident_size_override": 23,
+        "timeline_get_throttle": {
+            "task_kinds": ["PageRequestHandler"],
+            "fair": True,
+            "initial": 0,
+            "refill_interval": "1s",
+            "refill_amount": 1000,
+            "max": 1000,
+        },
         "trace_read_requests": True,
         "walreceiver_connect_timeout": "13m",
     }

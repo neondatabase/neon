@@ -1,14 +1,13 @@
 use ::metrics::{
-    exponential_buckets, register_int_counter_pair_vec, register_int_counter_vec,
-    IntCounterPairVec, IntCounterVec,
+    exponential_buckets, register_histogram, register_histogram_vec, register_hll_vec,
+    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge,
+    register_int_gauge_vec, Histogram, HistogramVec, HyperLogLogVec, IntCounterPairVec,
+    IntCounterVec, IntGauge, IntGaugeVec,
 };
-use prometheus::{
-    register_histogram, register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec,
-    IntGaugeVec,
-};
+use metrics::{register_int_counter, register_int_counter_pair, IntCounter, IntCounterPair};
 
 use once_cell::sync::Lazy;
-use tokio::time;
+use tokio::time::{self, Instant};
 
 pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
     register_int_counter_pair_vec!(
@@ -47,9 +46,9 @@ pub static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "proxy_compute_connection_latency_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
-        // http/ws/tcp, true/false, true/false, success/failure
-        // 3 * 2 * 2 * 2 = 24 counters
-        &["protocol", "cache_miss", "pool_miss", "outcome"],
+        // http/ws/tcp, true/false, true/false, success/failure, client/client_and_cplane
+        // 3 * 2 * 2 * 2 * 2 = 48 counters
+        &["protocol", "cache_miss", "pool_miss", "outcome", "excluded"],
         // largest bucket = 2^16 * 0.5ms = 32s
         exponential_buckets(0.0005, 2.0, 16).unwrap(),
     )
@@ -115,12 +114,73 @@ pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
     .unwrap()
 });
 
-#[derive(Clone)]
+pub static HTTP_CONTENT_LENGTH: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_http_conn_content_length_bytes",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // largest bucket = 3^16 * 0.05ms = 2.15s
+        exponential_buckets(8.0, 2.0, 20).unwrap()
+    )
+    .unwrap()
+});
+
+pub static GC_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_http_pool_reclaimation_lag_seconds",
+        "Time it takes to reclaim unused connection pools",
+        // 1us -> 65ms
+        exponential_buckets(1e-6, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static ENDPOINT_POOLS: Lazy<IntCounterPair> = Lazy::new(|| {
+    register_int_counter_pair!(
+        "proxy_http_pool_endpoints_registered_total",
+        "Number of endpoints we have registered pools for",
+        "proxy_http_pool_endpoints_unregistered_total",
+        "Number of endpoints we have unregistered pools for",
+    )
+    .unwrap()
+});
+
+pub static NUM_OPEN_CLIENTS_IN_HTTP_POOL: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "proxy_http_pool_opened_connections",
+        "Number of opened connections to a database.",
+    )
+    .unwrap()
+});
+
+pub static NUM_CANCELLATION_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_cancellation_requests_total",
+        "Number of cancellation requests (per found/not_found).",
+        &["source", "kind"],
+    )
+    .unwrap()
+});
+
+pub enum Waiting {
+    Cplane,
+    Client,
+    Compute,
+}
+
+#[derive(Default)]
+struct Accumulated {
+    cplane: time::Duration,
+    client: time::Duration,
+    compute: time::Duration,
+}
+
 pub struct LatencyTimer {
     // time since the stopwatch was started
-    start: Option<time::Instant>,
+    start: time::Instant,
+    // time since the stopwatch was stopped
+    stop: Option<time::Instant>,
     // accumulated time on the stopwatch
-    pub accumulated: std::time::Duration,
+    accumulated: Accumulated,
     // label data
     protocol: &'static str,
     cache_miss: bool,
@@ -130,13 +190,16 @@ pub struct LatencyTimer {
 
 pub struct LatencyTimerPause<'a> {
     timer: &'a mut LatencyTimer,
+    start: time::Instant,
+    waiting_for: Waiting,
 }
 
 impl LatencyTimer {
     pub fn new(protocol: &'static str) -> Self {
         Self {
-            start: Some(time::Instant::now()),
-            accumulated: std::time::Duration::ZERO,
+            start: time::Instant::now(),
+            stop: None,
+            accumulated: Accumulated::default(),
             protocol,
             cache_miss: false,
             // by default we don't do pooling
@@ -146,11 +209,12 @@ impl LatencyTimer {
         }
     }
 
-    pub fn pause(&mut self) -> LatencyTimerPause<'_> {
-        // stop the stopwatch and record the time that we have accumulated
-        let start = self.start.take().expect("latency timer should be started");
-        self.accumulated += start.elapsed();
-        LatencyTimerPause { timer: self }
+    pub fn pause(&mut self, waiting_for: Waiting) -> LatencyTimerPause<'_> {
+        LatencyTimerPause {
+            timer: self,
+            start: Instant::now(),
+            waiting_for,
+        }
     }
 
     pub fn cache_miss(&mut self) {
@@ -163,8 +227,7 @@ impl LatencyTimer {
 
     pub fn success(&mut self) {
         // stop the stopwatch and record the time that we have accumulated
-        let start = self.start.take().expect("latency timer should be started");
-        self.accumulated += start.elapsed();
+        self.stop = Some(time::Instant::now());
 
         // success
         self.outcome = "success";
@@ -173,23 +236,42 @@ impl LatencyTimer {
 
 impl Drop for LatencyTimerPause<'_> {
     fn drop(&mut self) {
-        // start the stopwatch again
-        self.timer.start = Some(time::Instant::now());
+        let dur = self.start.elapsed();
+        match self.waiting_for {
+            Waiting::Cplane => self.timer.accumulated.cplane += dur,
+            Waiting::Client => self.timer.accumulated.client += dur,
+            Waiting::Compute => self.timer.accumulated.compute += dur,
+        }
     }
 }
 
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
-        let duration =
-            self.start.map(|start| start.elapsed()).unwrap_or_default() + self.accumulated;
+        let duration = self
+            .stop
+            .unwrap_or_else(time::Instant::now)
+            .duration_since(self.start);
+        // Excluding cplane communication from the accumulated time.
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
                 bool_to_str(self.cache_miss),
                 bool_to_str(self.pool_miss),
                 self.outcome,
+                "client",
             ])
-            .observe(duration.as_secs_f64())
+            .observe((duration.saturating_sub(self.accumulated.client)).as_secs_f64());
+        // Exclude client and cplane communication from the accumulated time.
+        let accumulated_total = self.accumulated.client + self.accumulated.cplane;
+        COMPUTE_CONNECTION_LATENCY
+            .with_label_values(&[
+                self.protocol,
+                bool_to_str(self.cache_miss),
+                bool_to_str(self.pool_miss),
+                self.outcome,
+                "client_and_cplane",
+            ])
+            .observe((duration.saturating_sub(accumulated_total)).as_secs_f64());
     }
 }
 
@@ -211,15 +293,6 @@ pub static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static NUM_BYTES_PROXIED_PER_CLIENT_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "proxy_io_bytes_per_client",
-        "Number of bytes sent/received between client and backend.",
-        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
-    )
-    .unwrap()
-});
-
 pub static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes",
@@ -236,3 +309,49 @@ pub const fn bool_to_str(x: bool) -> &'static str {
         "false"
     }
 }
+
+pub static CONNECTING_ENDPOINTS: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
+    register_hll_vec!(
+        32,
+        "proxy_connecting_endpoints",
+        "HLL approximate cardinality of endpoints that are connecting",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static ERROR_BY_KIND: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_errors_total",
+        "Number of errors by a given classification",
+        &["type"],
+    )
+    .unwrap()
+});
+
+pub static ENDPOINT_ERRORS_BY_KIND: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
+    register_hll_vec!(
+        32,
+        "proxy_endpoints_affected_by_errors",
+        "Number of endpoints affected by errors of a given classification",
+        &["type"],
+    )
+    .unwrap()
+});
+
+pub static REDIS_BROKEN_MESSAGES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_redis_errors_total",
+        "Number of errors by a given classification",
+        &["channel"],
+    )
+    .unwrap()
+});
+
+pub static TLS_HANDSHAKE_FAILURES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "proxy_tls_handshake_failures",
+        "Number of TLS handshake failures",
+    )
+    .unwrap()
+});

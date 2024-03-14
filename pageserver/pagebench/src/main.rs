@@ -3,7 +3,6 @@ use utils::logging;
 
 /// Re-usable pieces of code that aren't CLI-specific.
 mod util {
-    pub(crate) mod connstring;
     pub(crate) mod request_stats;
     #[macro_use]
     pub(crate) mod tokio_thread_local_stats;
@@ -35,6 +34,7 @@ fn main() {
         logging::Output::Stderr,
     )
     .unwrap();
+    logging::replace_panic_hook_with_tracing_panic_hook().forget();
 
     let args = Args::parse();
     match args {
