@@ -1,7 +1,6 @@
 import os
-from typing import Dict, List, Optional, Union
 import time
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import pytest
 import requests
@@ -835,6 +834,7 @@ def test_sharding_split_failures(
         assert_split_done()
 
     env.storage_controller.consistency_check()
+
 
 def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
     """
