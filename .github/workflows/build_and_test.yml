@@ -1129,6 +1129,7 @@ jobs:
               -f deployProxy=false \
               -f deployStorage=true \
               -f deployStorageBroker=true \
+              -f deployStorageController=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
