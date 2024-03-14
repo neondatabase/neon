@@ -10,7 +10,7 @@ use pageserver_api::{
         TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
         TimelineCreateRequest, TimelineInfo,
     },
-    shard::TenantShardId,
+    shard::{ShardStripeSize, TenantShardId},
 };
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
@@ -503,11 +503,15 @@ impl StorageController {
         &self,
         tenant_id: TenantId,
         new_shard_count: u8,
+        new_stripe_size: Option<ShardStripeSize>,
     ) -> anyhow::Result<TenantShardSplitResponse> {
         self.dispatch(
             Method::PUT,
             format!("control/v1/tenant/{tenant_id}/shard_split"),
-            Some(TenantShardSplitRequest { new_shard_count }),
+            Some(TenantShardSplitRequest {
+                new_shard_count,
+                new_stripe_size,
+            }),
         )
         .await
     }

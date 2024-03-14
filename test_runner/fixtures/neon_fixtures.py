@@ -2150,11 +2150,13 @@ class NeonStorageController(MetricsGetter):
         shards: list[dict[str, Any]] = body["shards"]
         return shards
 
-    def tenant_shard_split(self, tenant_id: TenantId, shard_count: int) -> list[TenantShardId]:
+    def tenant_shard_split(
+        self, tenant_id: TenantId, shard_count: int, shard_stripe_size: Optional[int] = None
+    ) -> list[TenantShardId]:
         response = self.request(
             "PUT",
             f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/shard_split",
-            json={"new_shard_count": shard_count},
+            json={"new_shard_count": shard_count, "new_stripe_size": shard_stripe_size},
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
@@ -2182,6 +2184,23 @@ class NeonStorageController(MetricsGetter):
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info("storage controller passed consistency check")
+
+    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
+        if isinstance(config_strings, tuple):
+            pairs = [config_strings]
+        else:
+            pairs = config_strings
+
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
+
+        res = self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/debug/v1/failpoints",
+            json=[{"name": name, "actions": actions} for name, actions in pairs],
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        log.info(f"Got failpoints request response code {res.status_code}")
+        res.raise_for_status()
 
     def __enter__(self) -> "NeonStorageController":
         return self
@@ -2950,6 +2969,7 @@ class NeonProxy(PgProtocol):
         user = quote(kwargs["user"])
         password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
+        timeout = kwargs.get("timeout")
 
         log.info(f"Executing http query: {query}")
 
@@ -2963,6 +2983,7 @@ class NeonProxy(PgProtocol):
                 "Neon-Pool-Opt-In": "true",
             },
             verify=str(self.test_output_dir / "proxy.crt"),
+            timeout=timeout,
         )
 
         if expected_code is not None:

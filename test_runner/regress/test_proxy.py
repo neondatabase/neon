@@ -596,3 +596,39 @@ def test_sql_over_http_timeout_cancel(static_proxy: NeonProxy):
     assert (
         "duplicate key value violates unique constraint" in res["message"]
     ), "HTTP query should conflict"
+
+
+def test_sql_over_http_connection_cancel(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    static_proxy.safe_psql("create table test_table ( id int primary key )")
+
+    # insert into a table, with a unique constraint, after sleeping for n seconds
+    query = "WITH temp AS ( \
+        SELECT pg_sleep($1) as sleep, $2::int as id \
+    ) INSERT INTO test_table (id) SELECT id FROM temp"
+
+    try:
+        # The request should complete before the proxy HTTP timeout triggers.
+        # Timeout and cancel the request on the client side before the query completes.
+        static_proxy.http_query(
+            query,
+            [static_proxy.http_timeout_seconds - 1, 1],
+            user="http",
+            password="http",
+            timeout=2,
+        )
+    except requests.exceptions.ReadTimeout:
+        pass
+
+    # wait until the query _would_ have been complete
+    time.sleep(static_proxy.http_timeout_seconds)
+
+    res = static_proxy.http_query(query, [1, 1], user="http", password="http", expected_code=200)
+    assert res["command"] == "INSERT", "HTTP query should insert"
+    assert res["rowCount"] == 1, "HTTP query should insert"
+
+    res = static_proxy.http_query(query, [0, 1], user="http", password="http", expected_code=400)
+    assert (
+        "duplicate key value violates unique constraint" in res["message"]
+    ), "HTTP query should conflict"

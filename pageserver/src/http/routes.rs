@@ -1151,7 +1151,12 @@ async fn tenant_shard_split_handler(
 
     let new_shards = state
         .tenant_manager
-        .shard_split(tenant_shard_id, ShardCount::new(req.new_shard_count), &ctx)
+        .shard_split(
+            tenant_shard_id,
+            ShardCount::new(req.new_shard_count),
+            req.new_stripe_size,
+            &ctx,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -2107,6 +2112,16 @@ where
     R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
     H: FnOnce(Request<Body>, CancellationToken) -> R + Send + Sync + 'static,
 {
+    if request.uri() != &"/v1/failpoints".parse::<Uri>().unwrap() {
+        fail::fail_point!("api-503", |_| Err(ApiError::ResourceUnavailable(
+            "failpoint".into()
+        )));
+
+        fail::fail_point!("api-500", |_| Err(ApiError::InternalServerError(
+            anyhow::anyhow!("failpoint")
+        )));
+    }
+
     // Spawn a new task to handle the request, to protect the handler from unexpected
     // async cancellations. Most pageserver functions are not async cancellation safe.
     // We arm a drop-guard, so that if Hyper drops the Future, we signal the task
@@ -2251,7 +2266,7 @@ pub fn make_router(
         .get("/v1/location_config", |r| {
             api_handler(r, list_location_config_handler)
         })
-        .get("/v1/location_config/:tenant_id", |r| {
+        .get("/v1/location_config/:tenant_shard_id", |r| {
             api_handler(r, get_location_config_handler)
         })
         .put(
