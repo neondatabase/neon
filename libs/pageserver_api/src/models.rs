@@ -724,6 +724,52 @@ pub struct WalRedoManagerStatus {
     pub pid: Option<u32>,
 }
 
+/// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
+/// a download job, timing out while waiting for it to run, and then inspecting this status to understand
+/// what's happening.
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+pub struct SecondaryProgress {
+    /// The remote storage LastModified time of the heatmap object we last downloaded.
+    #[serde(
+        serialize_with = "opt_ser_rfc3339_millis",
+        deserialize_with = "opt_deser_rfc3339_millis"
+    )]
+    pub heatmap_mtime: Option<SystemTime>,
+
+    /// The number of layers currently on-disk
+    pub layers_downloaded: usize,
+    /// The number of layers in the most recently seen heatmap
+    pub layers_total: usize,
+
+    /// The number of layers currently on-disk
+    pub bytes_downloaded: u64,
+    /// The number of layers in the most recently seen heatmap
+    pub bytes_total: u64,
+}
+
+fn opt_ser_rfc3339_millis<S: serde::Serializer>(
+    ts: &Option<SystemTime>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match ts {
+        Some(ts) => serializer.collect_str(&humantime::format_rfc3339_millis(*ts)),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn opt_deser_rfc3339_millis<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let s: Option<String> = serde::de::Deserialize::deserialize(deserializer)?;
+    match s {
+        None => Ok(None),
+        Some(s) => humantime::parse_rfc3339(&s)
+            .map_err(serde::de::Error::custom)
+            .map(|v| Some(v)),
+    }
+}
+
 pub mod virtual_file {
     #[derive(
         Copy,

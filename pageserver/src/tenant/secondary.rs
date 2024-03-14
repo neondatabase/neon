@@ -30,7 +30,6 @@ use pageserver_api::{
 };
 use remote_storage::GenericRemoteStorage;
 
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use utils::{completion::Barrier, id::TimelineId, sync::gate::Gate};
@@ -100,37 +99,7 @@ pub(crate) struct SecondaryTenant {
     detail: std::sync::Mutex<SecondaryDetail>,
 
     // Public state indicating overall progress of downloads relative to the last heatmap seen
-    pub(crate) progress: std::sync::Mutex<SecondaryProgress>,
-}
-
-/// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
-/// a download job, timing out while waiting for it to run, and then inspecting this status to understand
-/// what's happening.
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
-pub(crate) struct SecondaryProgress {
-    /// The remote storage LastModified time of the heatmap object we last downloaded.
-    #[serde(serialize_with = "ser_rfc3339_millis")]
-    heatmap_mtime: Option<SystemTime>,
-
-    /// The number of layers currently on-disk
-    layers_downloaded: usize,
-    /// The number of layers in the most recently seen heatmap
-    layers_total: usize,
-
-    /// The number of layers currently on-disk
-    bytes_downloaded: u64,
-    /// The number of layers in the most recently seen heatmap
-    bytes_total: u64,
-}
-
-fn ser_rfc3339_millis<S: serde::Serializer>(
-    ts: &Option<SystemTime>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match ts {
-        Some(ts) => serializer.collect_str(&humantime::format_rfc3339_millis(*ts)),
-        None => serializer.collect_str(""),
-    }
+    pub(crate) progress: std::sync::Mutex<models::SecondaryProgress>,
 }
 
 impl SecondaryTenant {

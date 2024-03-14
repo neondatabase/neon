@@ -30,7 +30,7 @@ use crate::{
 use super::{
     heatmap::HeatMapLayer,
     scheduler::{self, Completion, JobGenerator, SchedulingResult, TenantBackgroundJobs},
-    SecondaryProgress, SecondaryTenant,
+    SecondaryTenant,
 };
 
 use crate::tenant::{
@@ -41,6 +41,7 @@ use crate::tenant::{
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
+use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
 use remote_storage::{DownloadError, GenericRemoteStorage};
