@@ -442,47 +442,6 @@ impl TenantState {
         }
     }
 
-    /// Check whether we should reschedule this tenant shard.
-    pub(crate) fn should_schedule(&self, nodes: &Arc<HashMap<NodeId, Node>>) -> bool {
-        fn should_schedule_due_to_node(
-            intent: Option<NodeId>,
-            nodes: &Arc<HashMap<NodeId, Node>>,
-        ) -> bool {
-            match intent {
-                Some(node_id) => nodes
-                    .get(&node_id)
-                    .map(|node| !node.is_available())
-                    .unwrap_or(true),
-                None => true,
-            }
-        }
-
-        use PlacementPolicy::*;
-        match self.policy {
-            Single => should_schedule_due_to_node(self.intent.attached, nodes),
-            Double(secondary_count) => {
-                should_schedule_due_to_node(self.intent.attached, nodes)
-                    || self.intent.get_secondary().len() != secondary_count
-                    || self
-                        .intent
-                        .get_secondary()
-                        .iter()
-                        .any(|secondary| should_schedule_due_to_node(Some(*secondary), nodes))
-            }
-            Secondary => {
-                self.intent.get_attached().is_some()
-                    || self.intent.get_secondary().len() != 1
-                    || should_schedule_due_to_node(
-                        self.intent.get_secondary().first().copied(),
-                        nodes,
-                    )
-            }
-            Detached => {
-                self.intent.get_attached().is_some() || !self.intent.get_secondary().is_empty()
-            }
-        }
-    }
-
     pub(crate) fn schedule(&mut self, scheduler: &mut Scheduler) -> Result<(), ScheduleError> {
         // TODO: before scheduling new nodes, check if any existing content in
         // self.intent refers to pageservers that are offline, and pick other
@@ -657,19 +616,6 @@ impl TenantState {
         });
 
         !dirty_nodes.is_empty()
-    }
-
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
-    pub(crate) fn maybe_reschedule(
-        &mut self,
-        pageservers: &Arc<HashMap<NodeId, Node>>,
-        scheduler: &mut Scheduler,
-    ) -> Result<(), ScheduleError> {
-        if self.should_schedule(pageservers) {
-            return self.schedule(scheduler);
-        }
-
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

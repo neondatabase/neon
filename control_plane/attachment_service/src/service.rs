@@ -3693,16 +3693,11 @@ impl Service {
     /// Returns how many reconciliation tasks were started
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let (nodes, tenants, _scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
 
         let mut reconciles_spawned = 0;
-        for (tenant_shard_id, shard) in tenants.iter_mut() {
-            if let Err(err) = shard.maybe_reschedule(&pageservers, scheduler) {
-                // The cluster may be overloaded so this is legitimate.
-                tracing::info!("Background scheduling failed for {tenant_shard_id}: {err}");
-            }
-
+        for (_tenant_shard_id, shard) in tenants.iter_mut() {
             if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
                 reconciles_spawned += 1;
             }
