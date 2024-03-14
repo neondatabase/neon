@@ -17,6 +17,7 @@ use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::Stream;
+use rand::{distributions::Alphanumeric, Rng};
 use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -406,35 +407,36 @@ impl RemoteStorage for LocalFs {
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let target_path = from.with_base(&self.storage_root);
-        if file_exists(&target_path).map_err(DownloadError::BadInput)? {
-            let source = ReaderStream::new(
-                fs::OpenOptions::new()
-                    .read(true)
-                    .open(&target_path)
-                    .await
-                    .with_context(|| {
-                        format!("Failed to open source file {target_path:?} to use in the download")
-                    })
-                    .map_err(DownloadError::Other)?,
-            );
 
-            let metadata = self
-                .read_storage_metadata(&target_path)
+        let file_metadata = file_metadata(&target_path).await?;
+
+        let source = ReaderStream::new(
+            fs::OpenOptions::new()
+                .read(true)
+                .open(&target_path)
                 .await
-                .map_err(DownloadError::Other)?;
+                .with_context(|| {
+                    format!("Failed to open source file {target_path:?} to use in the download")
+                })
+                .map_err(DownloadError::Other)?,
+        );
 
-            let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
-            let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
+        let metadata = self
+            .read_storage_metadata(&target_path)
+            .await
+            .map_err(DownloadError::Other)?;
 
-            Ok(Download {
-                metadata,
-                last_modified: None,
-                etag: None,
-                download_stream: Box::pin(source),
-            })
-        } else {
-            Err(DownloadError::NotFound)
-        }
+        let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
+        let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
+
+        Ok(Download {
+            metadata,
+            last_modified: file_metadata
+                .modified()
+                .map_err(|e| DownloadError::Other(anyhow::anyhow!(e).context("Reading mtime")))?,
+            etag: mock_etag(),
+            download_stream: Box::pin(source),
+        })
     }
 
     async fn download_byte_range(
@@ -452,50 +454,50 @@ impl RemoteStorage for LocalFs {
                 return Err(DownloadError::Other(anyhow::anyhow!("Invalid range, start ({start_inclusive}) and end_exclusive ({end_exclusive:?}) difference is zero bytes")));
             }
         }
+
         let target_path = from.with_base(&self.storage_root);
-        if file_exists(&target_path).map_err(DownloadError::BadInput)? {
-            let mut source = tokio::fs::OpenOptions::new()
-                .read(true)
-                .open(&target_path)
-                .await
-                .with_context(|| {
-                    format!("Failed to open source file {target_path:?} to use in the download")
-                })
-                .map_err(DownloadError::Other)?;
-
-            let len = source
-                .metadata()
-                .await
-                .context("query file length")
-                .map_err(DownloadError::Other)?
-                .len();
-
-            source
-                .seek(io::SeekFrom::Start(start_inclusive))
-                .await
-                .context("Failed to seek to the range start in a local storage file")
-                .map_err(DownloadError::Other)?;
-
-            let metadata = self
-                .read_storage_metadata(&target_path)
-                .await
-                .map_err(DownloadError::Other)?;
-
-            let source = source.take(end_exclusive.unwrap_or(len) - start_inclusive);
-            let source = ReaderStream::new(source);
-
-            let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
-            let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
-
-            Ok(Download {
-                metadata,
-                last_modified: None,
-                etag: None,
-                download_stream: Box::pin(source),
+        let file_metadata = file_metadata(&target_path).await?;
+        let mut source = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&target_path)
+            .await
+            .with_context(|| {
+                format!("Failed to open source file {target_path:?} to use in the download")
             })
-        } else {
-            Err(DownloadError::NotFound)
-        }
+            .map_err(DownloadError::Other)?;
+
+        let len = source
+            .metadata()
+            .await
+            .context("query file length")
+            .map_err(DownloadError::Other)?
+            .len();
+
+        source
+            .seek(io::SeekFrom::Start(start_inclusive))
+            .await
+            .context("Failed to seek to the range start in a local storage file")
+            .map_err(DownloadError::Other)?;
+
+        let metadata = self
+            .read_storage_metadata(&target_path)
+            .await
+            .map_err(DownloadError::Other)?;
+
+        let source = source.take(end_exclusive.unwrap_or(len) - start_inclusive);
+        let source = ReaderStream::new(source);
+
+        let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
+        let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
+
+        Ok(Download {
+            metadata,
+            last_modified: file_metadata
+                .modified()
+                .map_err(|e| DownloadError::Other(anyhow::anyhow!(e).context("Reading mtime")))?,
+            etag: mock_etag(),
+            download_stream: Box::pin(source),
+        })
     }
 
     async fn delete(&self, path: &RemotePath, _cancel: &CancellationToken) -> anyhow::Result<()> {
@@ -610,13 +612,26 @@ async fn create_target_directory(target_file_path: &Utf8Path) -> anyhow::Result<
     Ok(())
 }
 
-fn file_exists(file_path: &Utf8Path) -> anyhow::Result<bool> {
-    if file_path.exists() {
-        ensure!(file_path.is_file(), "file path '{file_path}' is not a file");
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+async fn file_metadata(file_path: &Utf8Path) -> Result<std::fs::Metadata, DownloadError> {
+    tokio::fs::metadata(&file_path).await.map_err(|e| {
+        if e.kind() == ErrorKind::NotFound {
+            DownloadError::NotFound
+        } else {
+            DownloadError::BadInput(e.into())
+        }
+    })
+}
+
+// Use a different phony etag for every request: this satisfies code that uses etags to detect changes, they'll
+// think a file has always changed.  We could calculate a meaningful one by md5'ing the contents of files we
+// read, but that's expensive and the local_fs test helper's whole reason for existence is to run small tests
+// quickly, with less overhead than using a mock S3 server.
+fn mock_etag() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(16)
+        .map(char::from)
+        .collect()
 }
 
 #[cfg(test)]
