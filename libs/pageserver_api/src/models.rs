@@ -766,7 +766,7 @@ where
         None => Ok(None),
         Some(s) => humantime::parse_rfc3339(&s)
             .map_err(serde::de::Error::custom)
-            .map(|v| Some(v)),
+            .map(Some),
     }
 }
 
