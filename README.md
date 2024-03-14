@@ -238,6 +238,14 @@ If you encounter errors during setting up the initial tenant, it's best to stop 
 
 ## Running tests
 
+### Rust unit tests
+
+We are using [`cargo-nextest`](https://nexte.st/) to run the tests in Github Workflows.
+Some crates do not support running plain `cargo test` anymore, prefer `cargo nextest run` instead.
+You can install `cargo-nextest` with `cargo install cargo-nextest`.
+
+### Integration tests
+
 Ensure your dependencies are installed as described [here](https://github.com/neondatabase/neon#dependency-installation-notes).
 
 ```sh
