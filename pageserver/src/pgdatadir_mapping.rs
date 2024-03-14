@@ -15,6 +15,7 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
+use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
@@ -1549,11 +1550,8 @@ impl<'a> DatadirModification<'a> {
             let lsn_ordered_batch: VecMap<Lsn, (Key, Value)> = self
                 .pending_updates
                 .drain()
-                .flat_map(|(key, values)| {
-                    values
-                        .into_iter()
-                        .map(move |(lsn, value)| (lsn, (key, value)))
-                })
+                .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (lsn, (key, val))))
+                .kmerge_by(|lhs, rhs| lhs.0 < rhs.0)
                 .collect();
 
             writer.put_batch(lsn_ordered_batch, ctx).await?;
