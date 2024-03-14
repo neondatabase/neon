@@ -1241,7 +1241,7 @@ impl Service {
         // This Node is a mutable local copy: we will set it active so that we can use its
         // API client to reconcile with the node.  The Node in [`Self::nodes`] will get updated
         // later.
-        node.set_availability(NodeAvailability::Active);
+        node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
 
         let configs = match node
             .with_client_retries(
@@ -3488,7 +3488,7 @@ impl Service {
         availability: Option<NodeAvailability>,
         scheduling: Option<NodeSchedulingPolicy>,
     ) -> Result<(), ApiError> {
-        let _node_lock = self.node_op_locks.exclusive(config_req.node_id).await;
+        let _node_lock = self.node_op_locks.exclusive(node_id).await;
 
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
@@ -3502,12 +3502,12 @@ impl Service {
         //
         // The transition we calculate here remains valid later in the function because we hold the op lock on the node:
         // nothing else can mutate its availability while we run.
-        let availability_transition = if let Some(input_availability) = config_req.availability {
+        let availability_transition = if let Some(input_availability) = availability {
             let (activate_node, availability_transition) = {
                 let locked = self.inner.read().unwrap();
-                let Some(node) = locked.nodes.get(&config_req.node_id) else {
+                let Some(node) = locked.nodes.get(&node_id) else {
                     return Err(ApiError::NotFound(
-                        anyhow::anyhow!("Node {} not registered", config_req.node_id).into(),
+                        anyhow::anyhow!("Node {} not registered", node_id).into(),
                     ));
                 };
 
