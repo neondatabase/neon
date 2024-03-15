@@ -26,6 +26,7 @@ use std::{
 };
 
 use anyhow::{bail, Context};
+use azure_core::Etag;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
@@ -293,7 +294,7 @@ pub struct Download {
     /// The last time the file was modified (`last-modified` HTTP header)
     pub last_modified: SystemTime,
     /// A way to identify this specific version of the resource (`etag` HTTP header)
-    pub etag: String,
+    pub etag: Etag,
     /// Extra key-value data, associated with the current remote file.
     pub metadata: Option<StorageMetadata>,
 }

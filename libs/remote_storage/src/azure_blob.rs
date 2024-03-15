@@ -157,9 +157,8 @@ impl AzureBlobStorage {
             let mut bufs = Vec::new();
             while let Some(part) = response.next().await {
                 let part = part?;
-                let etag_str: &str = part.blob.properties.etag.as_ref();
                 if etag.is_none() {
-                    etag = Some(etag.unwrap_or_else(|| etag_str.to_owned()));
+                    etag = Some(part.blob.properties.etag);
                 }
                 if last_modified.is_none() {
                     last_modified = Some(part.blob.properties.last_modified.into());
