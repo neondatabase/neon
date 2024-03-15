@@ -55,10 +55,10 @@ use crate::RoleName;
 use super::backend::PoolingBackend;
 use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
+use super::http_util::json_response;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
 use super::json::JsonConversionError;
-use super::util::json_response;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

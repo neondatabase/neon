@@ -4,9 +4,9 @@
 
 mod backend;
 mod conn_pool;
+mod http_util;
 mod json;
 mod sql_over_http;
-mod util;
 mod websocket;
 
 use atomic_take::AtomicTake;
@@ -33,7 +33,7 @@ use crate::protocol2::WithClientIp;
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
-use crate::serverless::util::{api_error_into_response, json_response};
+use crate::serverless::http_util::{api_error_into_response, json_response};
 
 use std::net::IpAddr;
 use std::pin::pin;
@@ -104,7 +104,7 @@ pub async fn task_main(
     while let Some(res) = run_until_cancelled(ws_listener.accept(), &cancellation_token).await {
         let (conn, peer_addr) = res.context("could not accept TCP stream")?;
         if let Err(e) = conn.set_nodelay(true) {
-            tracing::error!("could not set nodolay: {e}");
+            tracing::error!("could not set nodelay: {e}");
             continue;
         }
         let conn_id = uuid::Uuid::new_v4();

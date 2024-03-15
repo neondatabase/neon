@@ -1,3 +1,6 @@
+//! Things stolen from `libs/utils/src/http` to add hyper 1.0 compatibility
+//! Will merge back in at some point in the future.
+
 use bytes::Bytes;
 
 use anyhow::Context;
@@ -7,6 +10,7 @@ use http_body_util::Full;
 use serde::Serialize;
 use utils::http::error::ApiError;
 
+/// Like [`ApiError::into_response`]
 pub fn api_error_into_response(this: ApiError) -> Response<Full<Bytes>> {
     match this {
         ApiError::BadRequest(err) => HttpErrorBody::response_from_msg_and_status(
@@ -48,17 +52,20 @@ pub fn api_error_into_response(this: ApiError) -> Response<Full<Bytes>> {
     }
 }
 
+/// Same as [`utils::http::error::HttpErrorBody`]
 #[derive(Serialize)]
 struct HttpErrorBody {
     pub msg: String,
 }
 
 impl HttpErrorBody {
-    pub fn response_from_msg_and_status(msg: String, status: StatusCode) -> Response<Full<Bytes>> {
+    /// Same as [`utils::http::error::HttpErrorBody::response_from_msg_and_status`]
+    fn response_from_msg_and_status(msg: String, status: StatusCode) -> Response<Full<Bytes>> {
         HttpErrorBody { msg }.to_response(status)
     }
 
-    pub fn to_response(&self, status: StatusCode) -> Response<Full<Bytes>> {
+    /// Same as [`utils::http::error::HttpErrorBody::to_response`]
+    fn to_response(&self, status: StatusCode) -> Response<Full<Bytes>> {
         Response::builder()
             .status(status)
             .header(http::header::CONTENT_TYPE, "application/json")
@@ -68,6 +75,7 @@ impl HttpErrorBody {
     }
 }
 
+/// Same as [`utils::http::json::json_response`]
 pub fn json_response<T: Serialize>(
     status: StatusCode,
     data: T,
