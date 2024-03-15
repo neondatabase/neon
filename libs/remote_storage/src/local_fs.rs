@@ -10,14 +10,13 @@ use std::{
     io::ErrorKind,
     num::NonZeroU32,
     pin::Pin,
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::Stream;
-use rand::{distributions::Alphanumeric, Rng};
 use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -429,12 +428,13 @@ impl RemoteStorage for LocalFs {
         let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
         let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
 
+        let etag = mock_etag(&file_metadata);
         Ok(Download {
             metadata,
             last_modified: file_metadata
                 .modified()
                 .map_err(|e| DownloadError::Other(anyhow::anyhow!(e).context("Reading mtime")))?,
-            etag: mock_etag(),
+            etag,
             download_stream: Box::pin(source),
         })
     }
@@ -490,12 +490,13 @@ impl RemoteStorage for LocalFs {
         let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
         let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
 
+        let etag = mock_etag(&file_metadata);
         Ok(Download {
             metadata,
             last_modified: file_metadata
                 .modified()
                 .map_err(|e| DownloadError::Other(anyhow::anyhow!(e).context("Reading mtime")))?,
-            etag: mock_etag(),
+            etag,
             download_stream: Box::pin(source),
         })
     }
@@ -622,16 +623,12 @@ async fn file_metadata(file_path: &Utf8Path) -> Result<std::fs::Metadata, Downlo
     })
 }
 
-// Use a different phony etag for every request: this satisfies code that uses etags to detect changes, they'll
-// think a file has always changed.  We could calculate a meaningful one by md5'ing the contents of files we
+// Use mtime as stand-in for ETag.  We could calculate a meaningful one by md5'ing the contents of files we
 // read, but that's expensive and the local_fs test helper's whole reason for existence is to run small tests
 // quickly, with less overhead than using a mock S3 server.
-fn mock_etag() -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(16)
-        .map(char::from)
-        .collect()
+fn mock_etag(meta: &std::fs::Metadata) -> String {
+    let mtime = meta.modified().expect("Filesystem mtime missing");
+    format!("{}", mtime.duration_since(UNIX_EPOCH).unwrap().as_millis())
 }
 
 #[cfg(test)]
