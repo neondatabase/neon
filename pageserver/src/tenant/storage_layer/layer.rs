@@ -741,7 +741,7 @@ impl LayerInner {
                         }
                     };
 
-                    let permit = if let Some(reason) = needs_download {
+                    let (permit, downloaded) = if let Some(reason) = needs_download {
                         if let NeedsDownload::NotFile(ft) = reason {
                             return Err(DownloadError::NotFile(ft));
                         }
@@ -773,23 +773,30 @@ impl LayerInner {
 
                         tracing::info!(%reason, "downloading on-demand");
 
-                        self.spawn_download_and_wait(timeline, permit).await?
+                        let permit = self.spawn_download_and_wait(timeline, permit).await?;
+
+                        (permit, true)
                     } else {
                         // the file is present locally, probably by a previous but cancelled call to
                         // get_or_maybe_download. alternatively we might be running without remote storage.
                         LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
-                        permit
+                        (permit, false)
                     };
 
                     scopeguard::ScopeGuard::into_inner(init_cancelled);
 
-                    let since_last_eviction =
-                        self.last_evicted_at.lock().unwrap().map(|ts| ts.elapsed());
-                    if let Some(since_last_eviction) = since_last_eviction {
-                        // FIXME: this will not always be recorded correctly until #6028 (the no
-                        // download needed branch above)
-                        LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+                    if downloaded {
+                        let since_last_eviction = self
+                            .last_evicted_at
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .map(|ts| ts.elapsed());
+
+                        if let Some(since_last_eviction) = since_last_eviction {
+                            LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+                        }
                     }
 
                     let res = Arc::new(DownloadedLayer {
