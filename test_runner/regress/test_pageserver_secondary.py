@@ -620,19 +620,37 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
         http_client = ps_secondary.http_client()
 
     # This has no chance to succeed: we have lots of layers and each one takes at least 1000ms
-    (status, progress) = http_client.tenant_secondary_download(tenant_id, wait_ms=5000)
+    (status, progress_1) = http_client.tenant_secondary_download(tenant_id, wait_ms=4000)
     assert status == 202
-    assert progress["heatmap_mtime"] is not None
-    assert progress["layers_downloaded"] > 0
-    assert progress["bytes_downloaded"] > 0
-    assert progress["layers_total"] > progress["layers_downloaded"]
-    assert progress["bytes_total"] > progress["bytes_downloaded"]
+    assert progress_1["heatmap_mtime"] is not None
+    assert progress_1["layers_downloaded"] > 0
+    assert progress_1["bytes_downloaded"] > 0
+    assert progress_1["layers_total"] > progress_1["layers_downloaded"]
+    assert progress_1["bytes_total"] > progress_1["bytes_downloaded"]
 
-    # Downloads are fast again: download should complete
+    # Multiple polls should work: use a shorter wait period this time
+    (status, progress_2) = http_client.tenant_secondary_download(tenant_id, wait_ms=1000)
+    assert status == 202
+    assert progress_2["heatmap_mtime"] is not None
+    assert progress_2["layers_downloaded"] > 0
+    assert progress_2["bytes_downloaded"] > 0
+    assert progress_2["layers_total"] > progress_2["layers_downloaded"]
+    assert progress_2["bytes_total"] > progress_2["bytes_downloaded"]
+
+    # Progress should be >= the first poll: this can only go backward if we see a new heatmap,
+    # and the heatmap period on the attached node is much longer than the runtime of this test, so no
+    # new heatmap should have been uploaded.
+    assert progress_2["layers_downloaded"] >= progress_1["layers_downloaded"]
+    assert progress_2["bytes_downloaded"] >= progress_1["bytes_downloaded"]
+    assert progress_2["layers_total"] == progress_1["layers_total"]
+    assert progress_2["bytes_total"] == progress_1["bytes_total"]
+
+    # Make downloads fast again: when the download completes within this last request, we
+    # get a 200 instead of a 202
     for ps in env.pageservers:
         ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "off")])
-    (status, progress) = http_client.tenant_secondary_download(tenant_id, wait_ms=20000)
+    (status, progress_3) = http_client.tenant_secondary_download(tenant_id, wait_ms=20000)
     assert status == 200
-    assert progress["heatmap_mtime"] is not None
-    assert progress["layers_total"] == progress["layers_downloaded"]
-    assert progress["bytes_total"] == progress["bytes_downloaded"]
+    assert progress_3["heatmap_mtime"] is not None
+    assert progress_3["layers_total"] == progress_3["layers_downloaded"]
+    assert progress_3["bytes_total"] == progress_3["bytes_downloaded"]
