@@ -282,49 +282,52 @@ impl From<FeatureTestResult> for IoEngineKind {
 /// Panics if we can't set up the feature test.
 pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
     std::thread::spawn(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+
         #[cfg(not(target_os = "linux"))]
         {
-            return Ok(FeatureTestResult::PlatformPreferred(
-                FeatureTestResult::PLATFORM_DEFAULT,
-            ));
+            Ok(FeatureTestResult::PlatformPreferred(
+                FeatureTestResult::PLATFORM_PREFERRED,
+            ))
         }
         #[cfg(target_os = "linux")]
-        Ok(match rt.block_on(tokio_epoll_uring::System::launch()) {
-            Ok(_) => FeatureTestResult::PlatformPreferred({
-                assert!(matches!(
-                    IoEngineKind::TokioEpollUring,
+        {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            Ok(match rt.block_on(tokio_epoll_uring::System::launch()) {
+                Ok(_) => FeatureTestResult::PlatformPreferred({
+                    assert!(matches!(
+                        IoEngineKind::TokioEpollUring,
+                        FeatureTestResult::PLATFORM_PREFERRED
+                    ));
                     FeatureTestResult::PLATFORM_PREFERRED
-                ));
-                FeatureTestResult::PLATFORM_PREFERRED
-            }),
-            Err(tokio_epoll_uring::LaunchResult::IoUringBuild(e)) => {
-                let remark = match e.raw_os_error() {
-                    Some(nix::libc::EPERM) => {
-                        // fall back
-                        "creating tokio-epoll-uring fails with EPERM, assuming it's admin-disabled "
-                            .to_string()
+                }),
+                Err(tokio_epoll_uring::LaunchResult::IoUringBuild(e)) => {
+                    let remark = match e.raw_os_error() {
+                        Some(nix::libc::EPERM) => {
+                            // fall back
+                            "creating tokio-epoll-uring fails with EPERM, assuming it's admin-disabled "
+                                .to_string()
+                        }
+                    Some(nix::libc::EFAULT) => {
+                            // fail feature test
+                            anyhow::bail!(
+                                "creating tokio-epoll-uring fails with EFAULT, might have corrupted memory"
+                            );
+                        }
+                        Some(_) | None => {
+                            // fall back
+                            format!("creating tokio-epoll-uring fails with error: {e:#}")
+                        }
+                };
+                    FeatureTestResult::Worse {
+                        engine: IoEngineKind::StdFs,
+                        remark,
                     }
-                   Some(nix::libc::EFAULT) => {
-                        // fail feature test
-                        anyhow::bail!(
-                            "creating tokio-epoll-uring fails with EFAULT, might have corrupted memory"
-                        );
-                    }
-                    Some(_) | None => {
-                        // fall back
-                        format!("creating tokio-epoll-uring fails with error: {e:#}")
-                    }
-               };
-                FeatureTestResult::Worse {
-                    engine: IoEngineKind::StdFs,
-                    remark,
                 }
-            }
-        })
+            })
+        }
     })
     .join()
     .unwrap()
