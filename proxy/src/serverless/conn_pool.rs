@@ -119,16 +119,12 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
         }
     }
 
-    fn put(
-        pool: &RwLock<Self>,
-        conn_info: &ConnInfo,
-        client: ClientInner<C>,
-    ) -> anyhow::Result<()> {
+    fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInner<C>) {
         let conn_id = client.conn_id;
 
         if client.is_closed() {
             info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
-            return Ok(());
+            return;
         }
         let global_max_conn = pool.read().global_pool_size_max_conns;
         if pool
@@ -138,7 +134,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
             >= global_max_conn
         {
             info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full");
-            return Ok(());
+            return;
         }
 
         // return connection to the pool
@@ -172,8 +168,6 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
         } else {
             info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
         }
-
-        Ok(())
     }
 }
 
@@ -612,13 +606,6 @@ impl<C: ClientInnerExt> Client<C> {
         let inner = inner.as_mut().expect("client inner should not be removed");
         (&mut inner.inner, Discard { pool, conn_info })
     }
-
-    pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        self.inner().1.check_idle(status)
-    }
-    pub fn discard(&mut self) {
-        self.inner().1.discard()
-    }
 }
 
 impl<C: ClientInnerExt> Discard<'_, C> {
@@ -660,7 +647,7 @@ impl<C: ClientInnerExt> Client<C> {
             // return connection to the pool
             return Some(move || {
                 let _span = current_span.enter();
-                let _ = EndpointConnPool::put(&conn_pool, &conn_info, client);
+                EndpointConnPool::put(&conn_pool, &conn_info, client);
             });
         }
         None
@@ -739,7 +726,7 @@ mod tests {
         {
             let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
             assert_eq!(0, pool.get_global_connections_count());
-            client.discard();
+            client.inner().1.discard();
             // Discard should not add the connection from the pool.
             assert_eq!(0, pool.get_global_connections_count());
         }

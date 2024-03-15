@@ -74,7 +74,7 @@ pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 // * after each rowgroup write, we check the length of the file and upload to s3 if large enough
 
 #[derive(parquet_derive::ParquetRecordWriter)]
-struct RequestData {
+pub struct RequestData {
     region: &'static str,
     protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
@@ -93,14 +93,14 @@ struct RequestData {
     /// Or if we make it to proxy_pass
     success: bool,
     /// Indicates if the cplane started the new compute node for this request.
-    cold_start_info: Option<String>,
+    cold_start_info: Option<&'static str>,
     /// Tracks time from session start (HTTP request/libpq TCP handshake)
     /// Through to success/failure
     duration_us: u64,
 }
 
-impl From<RequestMonitoring> for RequestData {
-    fn from(value: RequestMonitoring) -> Self {
+impl From<&RequestMonitoring> for RequestData {
+    fn from(value: &RequestMonitoring) -> Self {
         Self {
             session_id: value.session_id,
             peer_addr: value.peer_addr.to_string(),
@@ -121,10 +121,12 @@ impl From<RequestMonitoring> for RequestData {
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
-            cold_start_info: value
-                .cold_start_info
-                .as_ref()
-                .map(|x| serde_json::to_string(x).unwrap_or_default()),
+            cold_start_info: value.cold_start_info.as_ref().map(|x| match x {
+                crate::console::messages::ColdStartInfo::Unknown => "unknown",
+                crate::console::messages::ColdStartInfo::Warm => "warm",
+                crate::console::messages::ColdStartInfo::PoolHit => "pool_hit",
+                crate::console::messages::ColdStartInfo::PoolMiss => "pool_miss",
+            }),
             duration_us: SystemTime::from(value.first_packet)
                 .elapsed()
                 .unwrap_or_default()
@@ -458,7 +460,7 @@ mod tests {
             region: "us-east-1",
             error: None,
             success: rng.gen(),
-            cold_start_info: Some("no".into()),
+            cold_start_info: Some("no"),
             duration_us: rng.gen_range(0..30_000_000),
         }
     }

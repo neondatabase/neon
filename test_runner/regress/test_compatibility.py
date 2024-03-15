@@ -133,7 +133,7 @@ def test_create_snapshot(
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
-    env.attachment_service.stop()
+    env.storage_controller.stop()
 
     # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
     compatibility_snapshot_dir = (
@@ -242,7 +242,7 @@ def test_forward_compatibility(
         # everything else: our test code is written for latest CLI args.
         env.neon_local_binpath = neon_local_binpath
 
-        neon_env_builder.start()
+        neon_env_builder.start(register_pageservers=True)
 
         check_neon_works(
             env,

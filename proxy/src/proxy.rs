@@ -248,7 +248,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let tls = config.tls_config.as_ref();
 
-    let pause = ctx.latency_timer.pause();
+    let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(stream, mode.handshake_tls(tls));
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {

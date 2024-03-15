@@ -291,9 +291,9 @@ pub type DownloadStream =
 pub struct Download {
     pub download_stream: DownloadStream,
     /// The last time the file was modified (`last-modified` HTTP header)
-    pub last_modified: Option<SystemTime>,
+    pub last_modified: SystemTime,
     /// A way to identify this specific version of the resource (`etag` HTTP header)
-    pub etag: Option<String>,
+    pub etag: String,
     /// Extra key-value data, associated with the current remote file.
     pub metadata: Option<StorageMetadata>,
 }

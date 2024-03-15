@@ -1,14 +1,8 @@
-/// The attachment service mimics the aspects of the control plane API
-/// that are required for a pageserver to operate.
-///
-/// This enables running & testing pageservers without a full-blown
-/// deployment of the Neon cloud platform.
-///
 use anyhow::{anyhow, Context};
 use attachment_service::http::make_router;
 use attachment_service::metrics::preinitialize_metrics;
 use attachment_service::persistence::Persistence;
-use attachment_service::service::{Config, Service};
+use attachment_service::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
 use aws_config::{BehaviorVersion, Region};
 use camino::Utf8PathBuf;
 use clap::Parser;
@@ -60,6 +54,10 @@ struct Cli {
     /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
     #[arg(long)]
     database_url: Option<String>,
+
+    /// Grace period before marking unresponsive pageserver offline
+    #[arg(long)]
+    max_unavailable_interval: Option<humantime::Duration>,
 }
 
 /// Secrets may either be provided on the command line (for testing), or loaded from AWS SecretManager: this
@@ -212,6 +210,12 @@ async fn migration_run(database_url: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     tokio::runtime::Builder::new_current_thread()
         // We use spawn_blocking for database operations, so require approximately
         // as many blocking threads as we will open database connections.
@@ -249,6 +253,10 @@ async fn async_main() -> anyhow::Result<()> {
         jwt_token: secrets.jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
+        max_unavailable_interval: args
+            .max_unavailable_interval
+            .map(humantime::Duration::into)
+            .unwrap_or(MAX_UNAVAILABLE_INTERVAL_DEFAULT),
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations

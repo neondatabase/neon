@@ -17,7 +17,6 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
-use pageserver_api::controller_api::NodeRegisterRequest;
 use pageserver_api::models::{
     self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
 };
@@ -31,7 +30,6 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::attachment_service::AttachmentService;
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
@@ -80,18 +78,31 @@ impl PageServerNode {
     ///
     /// These all end up on the command line of the `pageserver` binary.
     fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
-        let id = format!("id={}", self.conf.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let http_auth_type_param = format!("http_auth_type='{}'", self.conf.http_auth_type);
-        let listen_http_addr_param = format!("listen_http_addr='{}'", self.conf.listen_http_addr);
+        let PageServerConf {
+            id,
+            listen_pg_addr,
+            listen_http_addr,
+            pg_auth_type,
+            http_auth_type,
+            virtual_file_io_engine,
+            get_vectored_impl,
+        } = &self.conf;
 
-        let pg_auth_type_param = format!("pg_auth_type='{}'", self.conf.pg_auth_type);
-        let listen_pg_addr_param = format!("listen_pg_addr='{}'", self.conf.listen_pg_addr);
+        let id = format!("id={}", id);
+
+        let http_auth_type_param = format!("http_auth_type='{}'", http_auth_type);
+        let listen_http_addr_param = format!("listen_http_addr='{}'", listen_http_addr);
+
+        let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
+        let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
+        let virtual_file_io_engine = format!("virtual_file_io_engine='{virtual_file_io_engine}'");
+        let get_vectored_impl = format!("get_vectored_impl='{get_vectored_impl}'");
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -103,6 +114,8 @@ impl PageServerNode {
             listen_http_addr_param,
             listen_pg_addr_param,
             broker_endpoint_param,
+            virtual_file_io_engine,
+            get_vectored_impl,
         ];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
@@ -111,9 +124,9 @@ impl PageServerNode {
                 control_plane_api.as_str()
             ));
 
-            // Attachment service uses the same auth as pageserver: if JWT is enabled
+            // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
-            if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
+            if matches!(http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
                     .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
@@ -131,8 +144,7 @@ impl PageServerNode {
             ));
         }
 
-        if self.conf.http_auth_type != AuthType::Trust || self.conf.pg_auth_type != AuthType::Trust
-        {
+        if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
@@ -163,8 +175,8 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, config_overrides: &[&str], register: bool) -> anyhow::Result<()> {
-        self.start_node(config_overrides, false, register).await
+    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        self.start_node(config_overrides, false).await
     }
 
     fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
@@ -202,6 +214,28 @@ impl PageServerNode {
             String::from_utf8_lossy(&init_output.stderr),
         );
 
+        // Write metadata file, used by pageserver on startup to register itself with
+        // the storage controller
+        let metadata_path = datadir.join("metadata.json");
+
+        let (_http_host, http_port) =
+            parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
+        let http_port = http_port.unwrap_or(9898);
+        // Intentionally hand-craft JSON: this acts as an implicit format compat test
+        // in case the pageserver-side structure is edited, and reflects the real life
+        // situation: the metadata is written by some other script.
+        std::fs::write(
+            metadata_path,
+            serde_json::to_vec(&serde_json::json!({
+                "host": "localhost",
+                "port": self.pg_connection_config.port(),
+                "http_host": "localhost",
+                "http_port": http_port,
+            }))
+            .unwrap(),
+        )
+        .expect("Failed to write metadata file");
+
         Ok(())
     }
 
@@ -209,27 +243,7 @@ impl PageServerNode {
         &self,
         config_overrides: &[&str],
         update_config: bool,
-        register: bool,
     ) -> anyhow::Result<()> {
-        // Register the node with the storage controller before starting pageserver: pageserver must be registered to
-        // successfully call /re-attach and finish starting up.
-        if register {
-            let attachment_service = AttachmentService::from_env(&self.env);
-            let (pg_host, pg_port) =
-                parse_host_port(&self.conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
-            let (http_host, http_port) = parse_host_port(&self.conf.listen_http_addr)
-                .expect("Unable to parse listen_http_addr");
-            attachment_service
-                .node_register(NodeRegisterRequest {
-                    node_id: self.conf.id,
-                    listen_pg_addr: pg_host.to_string(),
-                    listen_pg_port: pg_port.unwrap_or(5432),
-                    listen_http_addr: http_host.to_string(),
-                    listen_http_port: http_port.unwrap_or(80),
-                })
-                .await?;
-        }
-
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(

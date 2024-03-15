@@ -43,7 +43,7 @@ def single_timeline(
     log.info("detach template tenant form pageserver")
     env.pageserver.tenant_detach(template_tenant)
     env.pageserver.allowed_errors.append(
-        # tenant detach causes this because the underlying attach-hook removes the tenant from attachment_service entirely
+        # tenant detach causes this because the underlying attach-hook removes the tenant from storage controller entirely
         ".*Dropped remote consistent LSN updates.*",
     )
 

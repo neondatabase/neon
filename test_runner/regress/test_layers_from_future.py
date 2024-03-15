@@ -159,7 +159,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     time.sleep(1.1)  # so that we can use change in pre_stat.st_mtime to detect overwrites
 
     def get_generation_number():
-        attachment = env.attachment_service.inspect(tenant_id)
+        attachment = env.storage_controller.inspect(tenant_id)
         assert attachment is not None
         return attachment[0]
 
