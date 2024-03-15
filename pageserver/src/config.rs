@@ -41,7 +41,7 @@ use crate::tenant::{
 use crate::virtual_file;
 use crate::{
     IGNORED_TENANT_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
-    TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
+    TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
 };
 
 use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
@@ -845,18 +845,7 @@ impl PageServerConf {
             .join(timeline_id.to_string())
     }
 
-    pub fn timeline_uninit_mark_file_path(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-    ) -> Utf8PathBuf {
-        path_with_suffix_extension(
-            self.timeline_path(&tenant_shard_id, &timeline_id),
-            TIMELINE_UNINIT_MARK_SUFFIX,
-        )
-    }
-
-    pub fn timeline_delete_mark_file_path(
+    pub(crate) fn timeline_delete_mark_file_path(
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
@@ -867,7 +856,10 @@ impl PageServerConf {
         )
     }
 
-    pub fn tenant_deleted_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+    pub(crate) fn tenant_deleted_mark_file_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> Utf8PathBuf {
         self.tenant_path(tenant_shard_id)
             .join(TENANT_DELETED_MARKER_FILE_NAME)
     }
