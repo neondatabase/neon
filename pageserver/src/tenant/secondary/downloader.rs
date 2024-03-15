@@ -812,12 +812,10 @@ impl<'a> TenantDownloader<'a> {
             }
 
             // Failpoint for simulating slow remote storage
-            tracing::info!(">>failpoint");
             failpoint_support::sleep_millis_async!(
                 "secondary-layer-download-sleep",
                 &self.secondary_state.cancel
             );
-            tracing::info!("<<failpoint");
 
             // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
             let downloaded_bytes = match download_layer_file(
