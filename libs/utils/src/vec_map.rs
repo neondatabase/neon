@@ -16,6 +16,10 @@ impl<K, V> Default for VecMap<K, V> {
 pub struct InvalidKey;
 
 impl<K: Ord, V> VecMap<K, V> {
+    pub fn with_capacity(capacity: usize) -> Self {
+        VecMap(Vec::with_capacity(capacity))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -149,10 +153,20 @@ impl<K: Ord, V> VecMap<K, V> {
 
 impl<K: Ord, V> FromIterator<(K, V)> for VecMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut vec_map = VecMap::default();
+        let iter = iter.into_iter();
+        let initial_capacity = {
+            match iter.size_hint() {
+                (lower_bound, None) => lower_bound,
+                (_, Some(upper_bound)) => upper_bound,
+            }
+        };
 
-        vec_map.0 = iter.into_iter().collect();
-        vec_map.0.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+        let mut vec_map = VecMap::with_capacity(initial_capacity);
+        for (key, value) in iter {
+            vec_map
+                .append(key, value)
+                .expect("The passed collection needs to be sorted!");
+        }
 
         vec_map
     }
@@ -324,10 +338,17 @@ mod tests {
     }
 
     #[test]
-    fn vec_map_from() {
-        let vec = vec![(3, ()), (1, ()), (2, ()), (6, ())];
+    fn vec_map_from_sorted() {
+        let vec = vec![(1, ()), (2, ()), (3, ()), (6, ())];
         let vec_map = VecMap::from_iter(vec);
 
         assert_eq!(vec_map.as_slice(), &[(1, ()), (2, ()), (3, ()), (6, ())]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn vec_map_from_unsorted() {
+        let vec = vec![(5, ()), (2, ()), (3, ()), (6, ())];
+        let _ = VecMap::from_iter(vec);
     }
 }
