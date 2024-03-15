@@ -84,6 +84,7 @@ impl PoolingBackend {
         };
 
         if let Some(client) = maybe_client {
+            info!("cold_start_info=warm");
             ctx.set_cold_start_info(ColdStartInfo::Warm);
             return Ok(client);
         }
