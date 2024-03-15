@@ -179,6 +179,7 @@ impl AzureBlobStorage {
                     "Azure GET response contained no buffers"
                 )));
             }
+            // unwrap safety: if these were None, bufs would be empty and we would have returned an error already
             let etag = etag.unwrap();
             let last_modified = last_modified.unwrap();
 
