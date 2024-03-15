@@ -93,7 +93,6 @@ where
         Ok(())
     }
 
-    ///
     async fn flush(&mut self) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
         if buf.is_empty() {
