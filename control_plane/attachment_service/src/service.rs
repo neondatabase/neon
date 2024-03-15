@@ -7,7 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{id_lock_map::IdLockMap, persistence::AbortShardSplitStatus};
+use crate::{
+    id_lock_map::IdLockMap, persistence::AbortShardSplitStatus, reconciler::ReconcileError,
+};
 use anyhow::Context;
 use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
@@ -733,7 +735,19 @@ impl Service {
                 tenant.waiter.advance(result.sequence);
             }
             Err(e) => {
-                tracing::warn!("Reconcile error: {}", e);
+                match e {
+                    ReconcileError::Cancel => {
+                        tracing::info!("Reconciler was cancelled");
+                    }
+                    ReconcileError::Remote(mgmt_api::Error::Cancelled) => {
+                        // This might be due to the reconciler getting cancelled, or it might
+                        // be due to the `Node` being marked offline.
+                        tracing::info!("Reconciler cancelled during pageserver API call");
+                    }
+                    _ => {
+                        tracing::warn!("Reconcile error: {}", e);
+                    }
+                }
 
                 // Ordering: populate last_error before advancing error_seq,
                 // so that waiters will see the correct error after waiting.
