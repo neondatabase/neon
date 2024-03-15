@@ -360,8 +360,6 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
     )
 
     ps_http.configure_failpoints(("timeline-creation-after-uninit", "pause"))
-    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    ps_http.configure_failpoints(("before-upload-layer-pausable", "pause"))
 
     def start_creating_timeline():
         log.info(f"Creating (expect failure) timeline {env.initial_timeline}")
