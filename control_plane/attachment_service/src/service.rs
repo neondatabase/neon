@@ -2147,7 +2147,7 @@ impl Service {
                         None => Some(status_code),
                         Some(StatusCode::OK) => Some(status_code),
                         Some(cur) => {
-                            // Other status codes (e.g. 201) -- do not overwrite.
+                            // Other status codes (e.g. 202) -- do not overwrite.
                             Some(cur)
                         }
                     };
@@ -2155,7 +2155,7 @@ impl Service {
             }
         }
 
-        // If any of the shards return 201, indicate our result as 201.
+        // If any of the shards return 202, indicate our result as 202.
         match aggregate_status {
             None => {
                 match error {
