@@ -376,10 +376,6 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
 
         wait_until_paused(env, "timeline-creation-after-uninit")
 
-        # While in this "creation hung" state we will validate behavior of concurrent requests
-        # env.pageserver.allowed_errors.append(
-        #    ".*request{method=POST.*.*"
-        # )
         # While timeline creation is in progress, trying to create a timeline
         # again with the same ID should return 409
         with pytest.raises(
