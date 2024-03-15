@@ -775,7 +775,7 @@ impl LayerInner {
                 // get_or_maybe_download. alternatively we might be running without remote storage.
                 LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
-                let res = self.initialize_after_layer_is_on_disk(permit, false);
+                let res = self.initialize_after_layer_is_on_disk(permit);
                 return Ok(res);
             };
 
@@ -929,7 +929,22 @@ impl LayerInner {
                 timeline.metrics.resident_physical_size_add(size);
                 self.consecutive_failures.store(0, Ordering::Relaxed);
 
-                let res = self.initialize_after_layer_is_on_disk(permit, true);
+                let since_last_eviction = self
+                    .last_evicted_at
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .map(|ts| ts.elapsed());
+                if let Some(since_last_eviction) = since_last_eviction {
+                    LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+                }
+
+                self.access_stats.record_residence_event(
+                    LayerResidenceStatus::Resident,
+                    LayerResidenceEventReason::ResidenceChange,
+                );
+
+                let res = self.initialize_after_layer_is_on_disk(permit);
                 Ok(res)
             }
             Err(e) => {
@@ -966,7 +981,6 @@ impl LayerInner {
     fn initialize_after_layer_is_on_disk(
         self: &Arc<LayerInner>,
         permit: heavier_once_cell::InitPermit,
-        downloaded: bool,
     ) -> Arc<DownloadedLayer> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -981,29 +995,11 @@ impl LayerInner {
         // no need to make the evict_and_wait wait for the actual download to complete
         drop(self.status.send(Status::Downloaded));
 
-        if downloaded {
-            let since_last_eviction = self
-                .last_evicted_at
-                .lock()
-                .unwrap()
-                .take()
-                .map(|ts| ts.elapsed());
-            if let Some(since_last_eviction) = since_last_eviction {
-                LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
-            }
-        }
-
         let res = Arc::new(DownloadedLayer {
             owner: Arc::downgrade(self),
             kind: tokio::sync::OnceCell::default(),
             version: next_version,
         });
-
-        // FIXME: this might now be double-accounted for !downloaded
-        self.access_stats.record_residence_event(
-            LayerResidenceStatus::Resident,
-            LayerResidenceEventReason::ResidenceChange,
-        );
 
         let waiters = self.inner.initializer_count();
         if waiters > 0 {
