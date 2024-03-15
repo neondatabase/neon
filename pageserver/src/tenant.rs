@@ -1064,8 +1064,7 @@ impl Tenant {
             let entry_path = entry.path();
 
             let purge = if crate::is_temporary(entry_path)
-                // TODO: uninit_mark isn't needed any more, since uninitialized timelines are already
-                // covered by the check that the timeline must exist in remote storage.
+                // TODO: remove uninit mark code (https://github.com/neondatabase/neon/issues/5718)
                 || is_uninit_mark(entry_path)
                 || crate::is_delete_mark(entry_path)
             {
@@ -3217,6 +3216,8 @@ impl Tenant {
                 )
             })?;
 
+        pausable_failpoint!("timeline-creation-before-finish");
+
         // All done!
         let timeline = raw_timeline.finish_creation()?;
 
@@ -3316,17 +3317,9 @@ impl Tenant {
     ) -> Result<TimelineUninitMark, TimelineExclusionError> {
         let tenant_shard_id = self.tenant_shard_id;
 
-        let uninit_mark_path = self
-            .conf
-            .timeline_uninit_mark_file_path(tenant_shard_id, timeline_id);
         let timeline_path = self.conf.timeline_path(&tenant_shard_id, &timeline_id);
 
-        let uninit_mark = TimelineUninitMark::new(
-            self,
-            timeline_id,
-            uninit_mark_path.clone(),
-            timeline_path.clone(),
-        )?;
+        let uninit_mark = TimelineUninitMark::new(self, timeline_id, timeline_path.clone())?;
 
         // At this stage, we have got exclusive access to in-memory state for this timeline ID
         // for creation.
@@ -3341,22 +3334,6 @@ impl Tenant {
                 "Timeline directory already exists! This is a bug."
             )));
         }
-
-        // Create the on-disk uninit mark _after_ the in-memory acquisition of the tenant ID: guarantees
-        // that during process runtime, colliding creations will be caught in-memory without getting
-        // as far as failing to write a file.
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&uninit_mark_path)
-            .context("Failed to create uninit mark file")
-            .and_then(|_| {
-                crashsafe::fsync_file_and_parent(&uninit_mark_path)
-                    .context("Failed to fsync uninit mark file")
-            })
-            .with_context(|| {
-                format!("Failed to crate uninit mark for timeline {tenant_shard_id}/{timeline_id}")
-            })?;
 
         Ok(uninit_mark)
     }
@@ -5133,11 +5110,6 @@ mod tests {
         assert!(!harness
             .conf
             .timeline_path(&tenant.tenant_shard_id, &TIMELINE_ID)
-            .exists());
-
-        assert!(!harness
-            .conf
-            .timeline_uninit_mark_file_path(tenant.tenant_shard_id, TIMELINE_ID)
             .exists());
 
         Ok(())
