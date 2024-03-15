@@ -1405,7 +1405,9 @@ async fn update_tenant_config_handler(
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let state = get_state(&request);
-    mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
+    state
+        .tenant_manager
+        .set_new_tenant_config(tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", %tenant_id))
         .await?;
 
