@@ -326,7 +326,6 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.xfail
 def test_single_branch_get_tenant_size_grows(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion
 ):
@@ -349,6 +348,12 @@ def test_single_branch_get_tenant_size_grows(
     # adjust the gc_horizon accordingly.
     if pg_version == PgVersion.V14:
         gc_horizon = 0x4A000
+    elif pg_version == PgVersion.V15:
+        gc_horizon = 0x3BA00
+    elif pg_version == PgVersion.V16:
+        gc_horizon = 210000
+    else:
+        raise NotImplementedError(pg_version)
 
     neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
 
@@ -509,7 +514,8 @@ def test_single_branch_get_tenant_size_grows(
         collected_responses.append(("DROP", current_lsn, size))
 
     # Should have gone past gc_horizon, otherwise gc_horizon is too large
-    assert current_lsn - initdb_lsn > gc_horizon
+    bytes_written = current_lsn - initdb_lsn
+    assert bytes_written > gc_horizon
 
     # this isn't too many lines to forget for a while. observed while
     # developing these tests that locally the value is a bit more than what we
