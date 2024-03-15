@@ -215,6 +215,12 @@ procedure is:
 2. For all child shards, ensure they are not attached
 3. Drop child shards from the storage controller's database, and clear the split bit on the parent shards.
 
+Any remote storage content for child shards is left behind. This is similar to other cases where
+we may leave garbage objects in S3 (e.g. when we upload a layer but crash before uploading an
+index that references it). Future online scrub/cleanup functionality can remove these objects, or
+they will be removed when the tenant is deleted, as tenant deletion lists all objects in the prefix,
+which would include any child shards that were rolled back.
+
 If any timelines had been created on child shards, they will be lost when rolling back. To mitigate
 this, we will **block timeline creation during splitting**, so that we can safely roll back until
 the split is complete, without risking losing timelines.
@@ -249,7 +255,7 @@ modifications:
 The storage controller will expose an API for rolling back a complete split, for use
 in the field if we encounter some critical bug with a post-split tenant.
 
-#### On Pageserver Restart
+#### Retrying API calls during Pageserver Restart
 
 When a pageserver restarts during a split API call, it may witness on-disk content for both parent and
 child shards from an ongoing split. This does not intrinsically break anything, and the
@@ -270,13 +276,17 @@ split in progress will be automatically rolled back if the threshold for API
 retries is reached (e.g. if a pageserver stays offline for longer than a typical
 restart).
 
-#### On Storage Controller Restart
+#### Rollback on Storage Controller Restart
 
 On startup, the storage controller will inspect the split bit for tenant shards that
-it loads from the database. If any splits are in progress, it will spawn a task to
-attempt to complete the split. This task will be subject to the same retry thresholds
-as the original split attempt, such that if it cannot complete within a reasonable
-time, the split will be rolled back.
+it loads from the database. If any splits are in progress:
+
+- Database content will be reverted to the parent shards
+- Child shards will be dropped from memory
+- The parent and child shards will be included in the general startup reconciliation that
+  the storage controller does: any child shards will be detached from pageservers because
+  they don't exist in the storage controller's expected set of shards, and parent shards
+  will be attached if they aren't already.
 
 #### Storage controller API request failures/retries
 
@@ -423,7 +433,7 @@ lazily clean up parent shard layers once no child shards reference them.
 This may be done _very_ lazily: e.g. check every PITR interval. The cleanup procedure is:
 
 - list all the key prefixes beginning with the tenant ID, and select those shard prefixes
-  which do not belong to the most-recently-split set of shards (_ancestral shards_, i.e. shard*count < max(shard_count) over all shards), and those shard prefixes which do belong to the current shard_count set (\_current shards*)
+  which do not belong to the most-recently-split set of shards (_ancestral shards_, i.e. `shard*count < max(shard_count) over all shards)`, and those shard prefixes which do have the latest shard count (_current shards_)
 - If there are no _ancestral shard_ prefixes found, we have nothing to clean up and
   may drop out now.
 - find the latest-generation index for each _current shard_, read all and accumulate the set of layers belonging to ancestral shards referenced by these indices.
