@@ -6,6 +6,10 @@
 //! Initialize using [`init`].
 //!
 //! Then use [`get`] and  [`super::OpenOptions`].
+//!
+//!
+
+pub(super) mod tokio_epoll_uring_ext;
 
 use tokio_epoll_uring::{IoBuf, Slice};
 use tracing::Instrument;
@@ -145,7 +149,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.read(file_guard, offset, buf).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
@@ -160,7 +164,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.fsync(file_guard).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
@@ -178,7 +182,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.fdatasync(file_guard).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
@@ -197,7 +201,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.statx(file_guard).await;
                 (
                     resources,
@@ -220,7 +224,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.write(file_guard, offset, buf).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
