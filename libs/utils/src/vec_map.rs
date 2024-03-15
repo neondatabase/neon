@@ -172,6 +172,15 @@ impl<K: Ord, V> FromIterator<(K, V)> for VecMap<K, V> {
     }
 }
 
+impl<K: Ord, V> IntoIterator for VecMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::vec::IntoIter<(K, V)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 fn extract_key<K, V>(entry: &(K, V)) -> &K {
     &entry.0
 }
