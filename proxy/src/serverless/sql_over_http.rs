@@ -642,6 +642,7 @@ impl QueryData {
             }
             // The query was cancelled.
             Either::Right((_cancelled, query)) => {
+                tracing::info!("cancelling query");
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
                     tracing::error!(?err, "could not cancel query");
                 }
