@@ -553,3 +553,84 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
             )
         ),
     )
+
+
+@pytest.mark.parametrize("via_controller", [True, False])
+def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controller: bool):
+    """
+    Test use of secondary download API for slow downloads, where slow means either a healthy
+    system with a large capacity shard, or some unhealthy remote storage.
+
+    The download API is meant to respect a client-supplied time limit, and return 200 or 202
+    selectively based on whether the download completed.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.enable_pageserver_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+    )
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+
+    env.neon_cli.create_tenant(
+        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Double":1}'
+    )
+
+    attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+    ps_attached = env.get_pageserver(attached_to_id)
+    ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+    # Generate a bunch of small layers (we will apply a slowdown failpoint that works on a per-layer basis)
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(128)
+    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+    workload.write_rows(128)
+    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+    workload.write_rows(128)
+    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+    workload.write_rows(128)
+    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+
+    # Expect lots of layers
+    assert len(list_layers(ps_attached, tenant_id, timeline_id)) > 10
+
+    # Simulate large data by making layer downloads artifically slow
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "return(1000)")])
+
+    # Upload a heatmap, so that secondaries have something to download
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+
+    if via_controller:
+        http_client = env.storage_controller.pageserver_api()
+        http_client.tenant_location_conf(
+            tenant_id,
+            {
+                "mode": "Secondary",
+                "secondary_conf": {"warm": True},
+                "tenant_conf": {},
+                "generation": None,
+            },
+        )
+    else:
+        http_client = ps_secondary.http_client()
+
+    # This has no chance to succeed: we have lots of layers and each one takes at least 1000ms
+    (status, progress) = http_client.tenant_secondary_download(tenant_id, wait_ms=5000)
+    assert status == 202
+    assert progress["heatmap_mtime"] is not None
+    assert progress["layers_downloaded"] > 0
+    assert progress["bytes_downloaded"] > 0
+    assert progress["layers_total"] > progress["layers_downloaded"]
+    assert progress["bytes_total"] > progress["bytes_downloaded"]
+
+    # Downloads are fast again: download should complete
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "off")])
+    (status, progress) = http_client.tenant_secondary_download(tenant_id, wait_ms=5000)
+    assert status == 200
+    assert progress["heatmap_mtime"] is not None
+    assert progress["layers_total"] == progress["layers_downloaded"]
+    assert progress["bytes_total"] == progress["bytes_downloaded"]

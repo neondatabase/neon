@@ -357,9 +357,15 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/heatmap_upload")
         self.verbose_error(res)
 
-    def tenant_secondary_download(self, tenant_id: Union[TenantId, TenantShardId]):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/download")
+    def tenant_secondary_download(
+        self, tenant_id: Union[TenantId, TenantShardId], wait_ms: Optional[int] = None
+    ) -> tuple[int, dict[Any, Any]]:
+        url = f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/download"
+        if wait_ms is not None:
+            url = url + f"?wait_ms={wait_ms}"
+        res = self.post(url)
         self.verbose_error(res)
+        return (res.status_code, res.json())
 
     def set_tenant_config(self, tenant_id: Union[TenantId, TenantShardId], config: dict[str, Any]):
         assert "tenant_id" not in config.keys()

@@ -49,7 +49,8 @@ use remote_storage::{DownloadError, GenericRemoteStorage};
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
-    backoff, completion::Barrier, crashsafe::path_with_suffix_extension, fs_ext, id::TimelineId,
+    backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
+    id::TimelineId,
 };
 
 use super::{
@@ -826,6 +827,14 @@ impl<'a> TenantDownloader<'a> {
                     continue;
                 }
             }
+
+            // Failpoint for simulating slow remote storage
+            tracing::info!(">>failpoint");
+            failpoint_support::sleep_millis_async!(
+                "secondary-layer-download-sleep",
+                &self.secondary_state.cancel
+            );
+            tracing::info!("<<failpoint");
 
             // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
             let downloaded_bytes = match download_layer_file(
