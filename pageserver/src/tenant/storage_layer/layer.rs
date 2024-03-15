@@ -722,8 +722,6 @@ impl LayerInner {
                         .upgrade()
                         .ok_or_else(|| DownloadError::TimelineShutdown)?;
 
-                    // FIXME: grab a gate
-
                     let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
                     // check if we really need to be downloaded; could have been already downloaded by a
