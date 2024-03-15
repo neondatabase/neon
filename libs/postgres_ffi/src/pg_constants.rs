@@ -167,6 +167,7 @@ pub const RM_RELMAP_ID: u8 = 7;
 pub const RM_STANDBY_ID: u8 = 8;
 pub const RM_HEAP2_ID: u8 = 9;
 pub const RM_HEAP_ID: u8 = 10;
+pub const RM_REPLORIGIN_ID: u8 = 19;
 pub const RM_LOGICALMSG_ID: u8 = 21;
 
 // from neon_rmgr.h
@@ -223,6 +224,10 @@ pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
+/* From xlog.h */
+pub const XLOG_REPLORIGIN_SET: u8 = 0x00;
+pub const XLOG_REPLORIGIN_DROP: u8 = 0x10;
+
 /* From replication/slot.h */
 pub const REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
    + 64 /* NameData */  + 4*4;
@@ -236,6 +241,9 @@ pub const SLOTS_PER_FSM_PAGE: u32 = FSM_LEAF_NODES_PER_PAGE as u32;
 /* From visibilitymap.c */
 pub const VM_HEAPBLOCKS_PER_PAGE: u32 =
     (BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA) as u32 * (8 / 2); // MAPSIZE * (BITS_PER_BYTE / BITS_PER_HEAPBLOCK)
+
+/* From origin.c */
+pub const REPLICATION_STATE_MAGIC: u32 = 0x1257DADE;
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c

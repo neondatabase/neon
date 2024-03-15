@@ -9,7 +9,7 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{BlockNumber, TimestampTz};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
-use postgres_ffi::{XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
+use postgres_ffi::{RepOriginId, XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::{bin_ser::DeserializeError, lsn::Lsn};
@@ -814,6 +814,36 @@ impl XlRunningXacts {
             oldest_running_xid,
             latest_completed_xid,
             xids,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlReploriginDrop {
+    pub node_id: RepOriginId,
+}
+
+impl XlReploriginDrop {
+    pub fn decode(buf: &mut Bytes) -> XlReploriginDrop {
+        XlReploriginDrop {
+            node_id: buf.get_u16_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlReploriginSet {
+    pub remote_lsn: Lsn,
+    pub node_id: RepOriginId,
+}
+
+impl XlReploriginSet {
+    pub fn decode(buf: &mut Bytes) -> XlReploriginSet {
+        XlReploriginSet {
+            remote_lsn: Lsn(buf.get_u64_le()),
+            node_id: buf.get_u16_le(),
         }
     }
 }

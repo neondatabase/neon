@@ -363,37 +363,10 @@ where
                     ));
                     info!("Replication slot {} restart LSN={}", path, restart_lsn);
                     min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
-                } else if path.starts_with("pg_logical/replorigin_checkpoint") {
-                    let n_origins = (content.len() - 4 /* magic */ - 4 /* crc32 */) / 16 /* sizeof(ReplicationStateOnDisk) */;
-                    let mut new_content = Vec::with_capacity(content.len());
-                    new_content.extend_from_slice(&content[0..4]); // magic
-                    for i in 0..n_origins {
-                        let offs = 4 + i * 16;
-                        let origin_id =
-                            u16::from_le_bytes(content[offs..offs + 2].try_into().unwrap());
-                        let origin_lsn =
-                            u64::from_le_bytes(content[offs + 8..offs + 16].try_into().unwrap());
-                        new_content.extend_from_slice(&content[offs..offs + 8]); // aligned origin id
-
-                        // Try to get orgin_lsn for this origin_id at the moment of basebackup
-                        let key = replorigin_key(origin_id);
-                        if let Ok(buf) = self.timeline.get(key, self.lsn, self.ctx).await {
-                            let tx_origin_lsn = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-                            if tx_origin_lsn > origin_lsn {
-                                new_content.extend_from_slice(&buf[0..8]);
-                            } else {
-                                new_content.extend_from_slice(&content[offs + 8..offs + 16]);
-                            }
-                        }
-                    }
-                    let crc32 = crc32c::crc32c(&new_content);
-                    new_content.extend_from_slice(&crc32.to_le_bytes());
-                    self.ar
-                        .append(&header, &*new_content)
-                        .await
-                        .context("could not add aux file to basebackup tarball")?;
-                    continue;
+                } else if path == "pg_logical/replorigin_checkpoint" {
+                    continue; // skip repliction origin fiel because we will generate new one
                 }
+                let header = new_tar_header(&path, content.len() as u64)?;
                 self.ar
                     .append(&header, &*content)
                     .await
@@ -419,6 +392,23 @@ where
             .map_err(|e| BasebackupError::Server(e.into()))?
         {
             self.add_twophase_file(xid).await?;
+        }
+        let repl_origins = self.timeline.get_replorigins(self.lsn, self.ctx).await?;
+        let n_origins = repl_origins.len();
+        if n_origins != 0 {
+            let mut content = Vec::with_capacity(n_origins * 16 + 8);
+            content.extend_from_slice(&pg_constants::REPLICATION_STATE_MAGIC.to_le_bytes());
+            for (origin_id, origin_lsn) in repl_origins {
+                content.extend_from_slice(&origin_id.to_le_bytes());
+                content.extend_from_slice(&[0u8; 6]); // align to 8 bytes
+                content.extend_from_slice(&origin_lsn.0.to_le_bytes());
+            }
+            let crc32 = crc32c::crc32c(&content);
+            content.extend_from_slice(&crc32.to_le_bytes());
+            let header = new_tar_header("pg_logical/replorigin_checkpoint", content.len() as u64)?;
+            self.ar.append(&header, &*content).await.context(
+                "could not add pg_logical/replorigin_checkpoint file to basebackup tarball",
+            )?;
         }
 
         fail_point!("basebackup-before-control-file", |_| {

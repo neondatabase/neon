@@ -307,7 +307,7 @@ impl Key {
 // 03 00000000 00000000 00000000 00   00000002
 //
 // ReplOrigin:
-// 04 00000000 00000000 00000000 00   ORIGIN_ID
+// 03 00000000 00000000 00000000 00   00000003
 //
 
 //-- Section 01: relation data and metadata
@@ -590,19 +590,14 @@ pub const AUX_FILES_KEY: Key = Key {
     field6: 2,
 };
 
-//-- Section 04: Replication origin
-
-#[inline(always)]
-pub fn replorigin_key(origin_id: u16) -> Key {
-    Key {
-        field1: 0x04,
-        field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: origin_id as u32,
-    }
-}
+pub const REPL_ORIGIN_KEY: Key = Key {
+    field1: 0x03,
+    field2: 0,
+    field3: 0,
+    field4: 0,
+    field5: 0,
+    field6: 3,
+};
 
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.

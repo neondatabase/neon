@@ -18,16 +18,16 @@ use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
-    rel_key_range, rel_size_to_key, relmap_file_key, replorigin_key, slru_block_to_key,
-    slru_dir_to_key, slru_segment_key_range, slru_segment_size_to_key, twophase_file_key,
-    twophase_key_range, AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
+    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, REPL_ORIGIN_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{Oid, TimestampTz, TransactionId};
+use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -760,6 +760,33 @@ impl Timeline {
         }
     }
 
+    pub(crate) async fn get_replorigins(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
+        let mut repl_origins = self.repl_origins.lock().await;
+        if let Some(origins) = &*repl_origins {
+            return Ok(origins.map.clone());
+        }
+        match self.get(REPL_ORIGIN_KEY, lsn, ctx).await {
+            Ok(buf) => match ReplOrigins::des(&buf).context("deserialization failure") {
+                Ok(origins) => {
+                    let map = origins.map.clone();
+                    *repl_origins = Some(origins);
+                    Ok(map)
+                }
+                Err(e) => Err(PageReconstructError::from(e)),
+            },
+            Err(e) => {
+                // This is expected: historical databases do not have the key.
+                debug!("Failed to get info about repication origins: {}", e);
+                *repl_origins = Some(ReplOrigins::default());
+                Ok(HashMap::new())
+            }
+        }
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -1154,9 +1181,25 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
-    pub fn put_replorigin(&mut self, origin_id: u16, origin_lsn: Lsn) -> anyhow::Result<()> {
-        let key = replorigin_key(origin_id);
-        self.put(key, Value::Image(Bytes::from(origin_lsn.ser().unwrap())));
+    pub async fn set_replorigin(
+        &mut self,
+        origin_id: RepOriginId,
+        origin_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let mut repl_origins = self.tline.repl_origins.lock().await;
+        let origins = repl_origins.get_or_insert_with(|| ReplOrigins::default());
+        origins.map.insert(origin_id, origin_lsn);
+        let buf = ReplOrigins::ser(&origins)?;
+        self.put(REPL_ORIGIN_KEY, Value::Image(Bytes::from(buf)));
+        Ok(())
+    }
+
+    pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> anyhow::Result<()> {
+        let mut repl_origins = self.tline.repl_origins.lock().await;
+        let origins = repl_origins.get_or_insert_with(|| ReplOrigins::default());
+        origins.map.remove(&origin_id);
+        let buf = ReplOrigins::ser(&origins)?;
+        self.put(REPL_ORIGIN_KEY, Value::Image(Bytes::from(buf)));
         Ok(())
     }
 
@@ -1891,6 +1934,11 @@ impl AuxFilesDirectory {
             self.files.remove(&key);
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
+pub(crate) struct ReplOrigins {
+    pub(crate) map: HashMap<RepOriginId, Lsn>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

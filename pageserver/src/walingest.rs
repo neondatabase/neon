@@ -377,6 +377,18 @@ impl WalIngest {
                     self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
                 }
             }
+            pg_constants::RM_REPLORIGIN_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                if info == pg_constants::XLOG_REPLORIGIN_SET {
+                    let xlrec = crate::walrecord::XlReploriginSet::decode(&mut buf);
+                    modification
+                        .set_replorigin(xlrec.node_id, xlrec.remote_lsn)
+                        .await?
+                } else if info == pg_constants::XLOG_REPLORIGIN_DROP {
+                    let xlrec = crate::walrecord::XlReploriginDrop::decode(&mut buf);
+                    modification.drop_replorigin(xlrec.node_id).await?
+                }
+            }
             _x => {
                 // TODO: should probably log & fail here instead of blindly
                 // doing something without understanding the protocol
@@ -1247,7 +1259,9 @@ impl WalIngest {
             }
         }
         if origin_id != 0 {
-            modification.put_replorigin(origin_id, parsed.origin_lsn)?;
+            modification
+                .set_replorigin(origin_id, parsed.origin_lsn)
+                .await?;
         }
         Ok(())
     }
