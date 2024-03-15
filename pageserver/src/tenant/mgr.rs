@@ -262,8 +262,10 @@ pub struct TenantManager {
     tenants: &'static std::sync::RwLock<TenantsMap>,
     resources: TenantSharedResources,
 
-    // This token is for use in edge cases like tenant deletion, where we are doing work on a
-    // tenant after it has been shut down, during deletion.
+    // Long-running operations that happen outside of a [`Tenant`] lifetime should respect this token.
+    // This is for edge cases like tenant deletion.  In normal cases (within a Tenant lifetime),
+    // tenants have their own cancellation tokens, which we fire individually in [`Self::shutdown`], or
+    // when the tenant detaches.
     cancel: CancellationToken,
 }
 
