@@ -34,6 +34,7 @@ pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
     //!

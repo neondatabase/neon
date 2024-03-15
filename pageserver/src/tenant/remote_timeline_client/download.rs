@@ -21,8 +21,7 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::Generation;
-use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
-use crate::virtual_file::{on_fatal_io_error, owned_buffers_io, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
@@ -182,6 +181,7 @@ async fn download_object<'a>(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
+            use crate::virtual_file::owned_buffers_io::{self, util::size_tracking_writer};
             async {
                 let destination_file = VirtualFile::create(dst_path)
                     .await
