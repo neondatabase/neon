@@ -253,9 +253,12 @@ impl SecondaryTenant {
 }
 
 /// The SecondaryController is a pseudo-rpc client for administrative control of secondary mode downloads,
-/// and heatmap uploads.  This is not a hot data path: it's primarily a hook for tests,
-/// where we want to immediately upload/download for a particular tenant.  In normal operation
-/// uploads & downloads are autonomous and not driven by this interface.
+/// and heatmap uploads.  This is not a hot data path: it's used for:
+/// - Live migrations, where we want to ensure a migration destination has the freshest possible
+///   content before trying to cut over.
+/// - Tests, where we want to immediately upload/download for a particular tenant.
+///
+/// In normal operations, outside of migrations, uploads & downloads are autonomous and not driven by this interface.
 pub struct SecondaryController {
     upload_req_tx: tokio::sync::mpsc::Sender<CommandRequest<UploadCommand>>,
     download_req_tx: tokio::sync::mpsc::Sender<CommandRequest<DownloadCommand>>,
