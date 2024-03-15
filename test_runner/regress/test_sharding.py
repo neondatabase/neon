@@ -729,6 +729,10 @@ def test_sharding_split_failures(
         # thereby be unable to publish remote consistent LSN updates
         ps.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
 
+        # If we're using a failure that will panic the storage controller, all background
+        # upcalls from the pageserver can fail
+        ps.allowed_errors.append(".*calling control plane generation validation API failed.*")
+
     # Make sure the node we're failing has a shard on it, otherwise the test isn't testing anything
     assert (
         failure.pageserver_id is None

@@ -183,7 +183,13 @@ pub(super) async fn gather_inputs(
         // new gc run, which we have no control over. however differently from `Timeline::gc`
         // we don't consider the `Timeline::disk_consistent_lsn` at all, because we are not
         // actually removing files.
-        let mut next_gc_cutoff = cmp::min(gc_info.horizon_cutoff, gc_info.pitr_cutoff);
+        //
+        // We only consider [`GcInfo::pitr_cutoff`], and not [`GcInfo::horizon_cutoff`], because from
+        // a user's perspective they have only requested retention up to the time bound (pitr_cutoff), rather
+        // than a space bound (horizon cutoff).  This means that if someone drops a database and waits for their
+        // PITR interval, they will see synthetic size decrease, even if we are still storing data inside
+        // horizon_cutoff.
+        let mut next_gc_cutoff = gc_info.pitr_cutoff;
 
         // If the caller provided a shorter retention period, use that instead of the GC cutoff.
         let retention_param_cutoff = if let Some(max_retention_period) = max_retention_period {

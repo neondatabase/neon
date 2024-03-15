@@ -174,6 +174,15 @@ impl AzureBlobStorage {
                     .map_err(|e| DownloadError::Other(e.into()))?;
                 bufs.push(data);
             }
+
+            if bufs.is_empty() {
+                return Err(DownloadError::Other(anyhow::anyhow!(
+                    "Azure GET response contained no buffers"
+                )));
+            }
+            let etag = etag.unwrap();
+            let last_modified = last_modified.unwrap();
+
             Ok(Download {
                 download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
                 etag,

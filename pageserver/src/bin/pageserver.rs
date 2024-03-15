@@ -120,6 +120,9 @@ fn main() -> anyhow::Result<()> {
         &[("node_id", &conf.id.to_string())],
     );
 
+    // after setting up logging, log the effective IO engine choice
+    info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
+
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
         utils::crashsafe::create_dir_all(conf.tenants_path())

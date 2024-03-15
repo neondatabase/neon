@@ -34,7 +34,7 @@ class TimelineCreate406(PageserverApiException):
 class TimelineCreate409(PageserverApiException):
     def __init__(self, res: requests.Response):
         assert res.status_code == 409
-        super().__init__("", res.status_code)
+        super().__init__(res.json()["msg"], res.status_code)
 
 
 @dataclass
