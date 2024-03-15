@@ -101,3 +101,7 @@ harness = false
 [[bench]]
 name = "bench_walredo"
 harness = false
+
+[[bench]]
+name = "walredo_throughput"
+harness = false
