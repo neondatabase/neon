@@ -535,9 +535,9 @@ async fn timeline_create_handler(
                 )
             }
             Err(
-                tenant::CreateTimelineError::Conflict
-                | tenant::CreateTimelineError::AlreadyCreating,
-            ) => json_response(StatusCode::CONFLICT, ()),
+                e @ tenant::CreateTimelineError::Conflict
+                | e @ tenant::CreateTimelineError::AlreadyCreating,
+            ) => json_response(StatusCode::CONFLICT, HttpErrorBody::from_msg(e.to_string())),
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => json_response(
                 StatusCode::NOT_ACCEPTABLE,
                 HttpErrorBody::from_msg(format!("{err:#}")),

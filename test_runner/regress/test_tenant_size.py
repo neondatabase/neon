@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import List, Tuple
 
@@ -326,7 +327,7 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.xfail
+@pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
 def test_single_branch_get_tenant_size_grows(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion
 ):
@@ -349,10 +350,21 @@ def test_single_branch_get_tenant_size_grows(
     # adjust the gc_horizon accordingly.
     if pg_version == PgVersion.V14:
         gc_horizon = 0x4A000
+    elif pg_version == PgVersion.V15:
+        gc_horizon = 0x3BA00
+    elif pg_version == PgVersion.V16:
+        gc_horizon = 210000
+    else:
+        raise NotImplementedError(pg_version)
 
-    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
+    tenant_config = {
+        "compaction_period": "0s",
+        "gc_period": "0s",
+        "pitr_interval": "0s",
+        "gc_horizon": gc_horizon,
+    }
 
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_config)
 
     tenant_id = env.initial_tenant
     branch_name, timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
@@ -405,6 +417,7 @@ def test_single_branch_get_tenant_size_grows(
             current_lsn = after_lsn
         size_debug_file.write(size_debug)
         assert size > 0
+        log.info(f"size: {size} at lsn {current_lsn}")
         return (current_lsn, size)
 
     with env.endpoints.create_start(
@@ -492,24 +505,41 @@ def test_single_branch_get_tenant_size_grows(
 
             collected_responses.append(("DELETE", current_lsn, size))
 
+        size_before_drop = get_current_consistent_size(
+            env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
+        )[1]
+
         with endpoint.cursor() as cur:
             cur.execute("DROP TABLE t0")
+
+        # Without setting a PITR interval, dropping the table doesn't reclaim any space
+        # from the user's point of view, because the DROP transaction is too small
+        # to fall out of gc_horizon.
+        (current_lsn, size) = get_current_consistent_size(
+            env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
+        )
+        prev_size = collected_responses[-1][2]
+        check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
+
+        # Set a tiny PITR interval to allow the DROP to impact the synthetic size
+        # Because synthetic size calculation uses pitr interval when available,
+        # when our tenant is configured with a tiny pitr interval, dropping a table should
+        # cause synthetic size to go down immediately
+        tenant_config["pitr_interval"] = "1ms"
+        env.pageserver.http_client().set_tenant_config(tenant_id, tenant_config)
+        (current_lsn, size) = get_current_consistent_size(
+            env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
+        )
+        assert size < size_before_drop
 
         # The size of the tenant should still be as large as before we dropped
         # the table, because the drop operation can still be undone in the PITR
         # defined by gc_horizon.
-        (current_lsn, size) = get_current_consistent_size(
-            env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
-        )
-
-        prev_size = collected_responses[-1][2]
-
-        check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
-
         collected_responses.append(("DROP", current_lsn, size))
 
     # Should have gone past gc_horizon, otherwise gc_horizon is too large
-    assert current_lsn - initdb_lsn > gc_horizon
+    bytes_written = current_lsn - initdb_lsn
+    assert bytes_written > gc_horizon
 
     # this isn't too many lines to forget for a while. observed while
     # developing these tests that locally the value is a bit more than what we
