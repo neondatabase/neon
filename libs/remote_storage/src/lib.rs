@@ -26,7 +26,6 @@ use std::{
 };
 
 use anyhow::{bail, Context};
-use azure_core::Etag;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
@@ -42,6 +41,9 @@ pub use self::{
     simulate_failures::UnreliableWrapper,
 };
 use s3_bucket::RequestKind;
+
+/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
+pub use azure_core::Etag;
 
 pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 

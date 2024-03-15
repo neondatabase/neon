@@ -44,7 +44,7 @@ use futures::Future;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
@@ -130,7 +130,7 @@ pub(super) struct SecondaryDetail {
     pub(super) config: SecondaryLocationConfig,
 
     last_download: Option<Instant>,
-    last_etag: Option<String>,
+    last_etag: Option<Etag>,
     next_download: Option<Instant>,
     pub(super) timelines: HashMap<TimelineId, SecondaryDetailTimeline>,
 }
@@ -143,7 +143,7 @@ fn strftime(t: &'_ SystemTime) -> DelayedFormat<StrftimeItems<'_>> {
 
 /// Information returned from download function when it detects the heatmap has changed
 struct HeatMapModified {
-    etag: String,
+    etag: Etag,
     last_modified: SystemTime,
     bytes: Vec<u8>,
 }
@@ -706,7 +706,7 @@ impl<'a> TenantDownloader<'a> {
     /// still matches `prev_etag`.
     async fn download_heatmap(
         &self,
-        prev_etag: Option<&String>,
+        prev_etag: Option<&Etag>,
     ) -> Result<HeatMapDownload, UpdateError> {
         debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
