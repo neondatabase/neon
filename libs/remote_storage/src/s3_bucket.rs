@@ -35,8 +35,8 @@ use aws_sdk_s3::{
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
 
-use aws_smithy_types::byte_stream::ByteStream;
 use aws_smithy_types::{body::SdkBody, DateTime};
+use aws_smithy_types::{byte_stream::ByteStream, date_time::ConversionError};
 use bytes::Bytes;
 use futures::stream::Stream;
 use hyper::Body;
@@ -287,8 +287,16 @@ impl S3Bucket {
         let remaining = self.timeout.saturating_sub(started_at.elapsed());
 
         let metadata = object_output.metadata().cloned().map(StorageMetadata);
-        let etag = object_output.e_tag;
-        let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
+        let etag = object_output
+            .e_tag
+            .ok_or(DownloadError::Other(anyhow::anyhow!("Missing ETag header")))?;
+        let last_modified = object_output
+            .last_modified
+            .ok_or(DownloadError::Other(anyhow::anyhow!(
+                "Missing LastModified header"
+            )))?
+            .try_into()
+            .map_err(|e: ConversionError| DownloadError::Other(e.into()))?;
 
         let body = object_output.body;
         let body = ByteStreamAsStream::from(body);
