@@ -710,10 +710,6 @@ impl LayerInner {
                     // disable any scheduled but not yet running eviction deletions for this
                     let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
-                    // count cancellations, which currently remain largely unexpected
-                    let init_cancelled =
-                        scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-
                     // no need to make the evict_and_wait wait for the actual download to complete
                     drop(self.status.send(Status::Downloaded));
 
@@ -721,6 +717,10 @@ impl LayerInner {
                         .timeline
                         .upgrade()
                         .ok_or_else(|| DownloadError::TimelineShutdown)?;
+
+                    // count cancellations, which currently remain largely unexpected
+                    let init_cancelled =
+                        scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
 
                     let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
