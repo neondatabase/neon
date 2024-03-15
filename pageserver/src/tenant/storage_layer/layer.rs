@@ -835,15 +835,9 @@ impl LayerInner {
 
             let permit = self.spawn_download_and_wait(timeline, permit).await;
 
-            let permit = match permit {
-                Ok(permit) => permit,
-                Err(e) => {
-                    scopeguard::ScopeGuard::into_inner(init_cancelled);
-                    return Err(e);
-                }
-            };
-
             scopeguard::ScopeGuard::into_inner(init_cancelled);
+
+            let permit = permit?;
 
             let since_last_eviction = self
                 .last_evicted_at
