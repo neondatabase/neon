@@ -141,9 +141,16 @@ fn strftime(t: &'_ SystemTime) -> DelayedFormat<StrftimeItems<'_>> {
     datetime.format("%d/%m/%Y %T")
 }
 
-enum HeatmapDownload {
+/// Information returned from download function when it detects the heatmap has changed
+struct HeatMapModified {
+    etag: String,
+    last_modified: SystemTime,
+    bytes: Vec<u8>,
+}
+
+enum HeatMapDownload {
     // The heatmap's etag has changed: return the new etag, mtime and the body bytes
-    Modified(String, SystemTime, Vec<u8>),
+    Modified(HeatMapModified),
     // The heatmap's etag is unchanged
     Unmodified,
 }
@@ -499,17 +506,19 @@ impl<'a> TenantDownloader<'a> {
             .clone();
 
         // Download the tenant's heatmap
-        let (heatmap_etag, heatmap_mtime, heatmap_bytes) = match tokio::select!(
+        let HeatMapModified {
+            last_modified: heatmap_mtime,
+            etag: heatmap_etag,
+            bytes: heatmap_bytes,
+        } = match tokio::select!(
             bytes = self.download_heatmap(last_etag.as_ref()) => {bytes?},
             _ = self.secondary_state.cancel.cancelled() => return Ok(())
         ) {
-            HeatmapDownload::Unmodified => {
+            HeatMapDownload::Unmodified => {
                 tracing::info!("Heatmap unchanged since last successful download");
                 return Ok(());
             }
-            HeatmapDownload::Modified(heatmap_etag, heatmap_mtime, heatmap_bytes) => {
-                (heatmap_etag, heatmap_mtime, heatmap_bytes)
-            }
+            HeatMapDownload::Modified(m) => m,
         };
 
         let heatmap = serde_json::from_slice::<HeatMapTenant>(&heatmap_bytes)?;
@@ -698,7 +707,7 @@ impl<'a> TenantDownloader<'a> {
     async fn download_heatmap(
         &self,
         prev_etag: Option<&String>,
-    ) -> Result<HeatmapDownload, UpdateError> {
+    ) -> Result<HeatMapDownload, UpdateError> {
         debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         // TODO: pull up etag check into the request, to do a conditional GET rather than
@@ -718,17 +727,17 @@ impl<'a> TenantDownloader<'a> {
                     .map_err(UpdateError::from)?;
 
                 if Some(&download.etag) == prev_etag {
-                    Ok(HeatmapDownload::Unmodified)
+                    Ok(HeatMapDownload::Unmodified)
                 } else {
                     let mut heatmap_bytes = Vec::new();
                     let mut body = tokio_util::io::StreamReader::new(download.download_stream);
                     let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
                     SECONDARY_MODE.download_heatmap.inc();
-                    Ok(HeatmapDownload::Modified(
-                        download.etag,
-                        download.last_modified,
-                        heatmap_bytes,
-                    ))
+                    Ok(HeatMapDownload::Modified(HeatMapModified {
+                        etag: download.etag,
+                        last_modified: download.last_modified,
+                        bytes: heatmap_bytes,
+                    }))
                 }
             },
             |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
