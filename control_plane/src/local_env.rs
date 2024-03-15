@@ -72,13 +72,13 @@ pub struct LocalEnv {
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
 
-    // Control plane upcall API for pageserver: if None, we will not run attachment_service.  If set, this will
+    // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
     #[serde(default)]
     pub control_plane_api: Option<Url>,
 
-    // Control plane upcall API for attachment service.  If set, this will be propagated into the
-    // attachment service's configuration.
+    // Control plane upcall API for storage controller.  If set, this will be propagated into the
+    // storage controller's configuration.
     #[serde(default)]
     pub control_plane_compute_hook_api: Option<Url>,
 
@@ -114,7 +114,7 @@ impl NeonBroker {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PageServerConf {
     // node id
     pub id: NodeId,
@@ -126,6 +126,9 @@ pub struct PageServerConf {
     // auth type used for the PG and HTTP ports
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+
+    pub(crate) virtual_file_io_engine: String,
+    pub(crate) get_vectored_impl: String,
 }
 
 impl Default for PageServerConf {
@@ -136,6 +139,9 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
+            // FIXME: use the ones exposed by pageserver crate
+            virtual_file_io_engine: "tokio-epoll-uring".to_owned(),
+            get_vectored_impl: "sequential".to_owned(),
         }
     }
 }
@@ -227,10 +233,10 @@ impl LocalEnv {
         self.neon_distrib_dir.join("pageserver")
     }
 
-    pub fn attachment_service_bin(&self) -> PathBuf {
-        // Irrespective of configuration, attachment service binary is always
+    pub fn storage_controller_bin(&self) -> PathBuf {
+        // Irrespective of configuration, storage controller binary is always
         // run from the same location as neon_local.  This means that for compatibility
-        // tests that run old pageserver/safekeeper, they still run latest attachment service.
+        // tests that run old pageserver/safekeeper, they still run latest storage controller.
         let neon_local_bin_dir = env::current_exe().unwrap().parent().unwrap().to_owned();
         neon_local_bin_dir.join("storage_controller")
     }

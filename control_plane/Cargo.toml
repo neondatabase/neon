@@ -12,6 +12,7 @@ clap.workspace = true
 comfy-table.workspace = true
 futures.workspace = true
 git-version.workspace = true
+humantime.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 postgres.workspace = true

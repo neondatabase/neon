@@ -831,7 +831,10 @@ mod test {
     }
 
     impl ControlPlaneGenerationsApi for MockControlPlane {
-        async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
+        async fn re_attach(
+            &self,
+            _conf: &PageServerConf,
+        ) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
             unimplemented!()
         }
         async fn validate(

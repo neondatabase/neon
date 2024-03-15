@@ -266,7 +266,7 @@ impl Client {
         lazy: bool,
     ) -> Result<()> {
         let req_body = TenantLocationConfigRequest {
-            tenant_id: tenant_shard_id,
+            tenant_id: Some(tenant_shard_id),
             config,
         };
 
@@ -420,6 +420,15 @@ impl Client {
     ) -> Result<()> {
         let uri = format!("{}/v1/io_engine", self.mgmt_api_endpoint);
         self.request(Method::PUT, uri, engine)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn get_utilization(&self) -> Result<PageserverUtilization> {
+        let uri = format!("{}/v1/utilization", self.mgmt_api_endpoint);
+        self.get(uri)
             .await?
             .json()
             .await

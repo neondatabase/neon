@@ -137,7 +137,7 @@ def test_no_config(positive_env: NeonEnv, content_type: Optional[str]):
     ps_http.tenant_detach(tenant_id)
     assert tenant_id not in [TenantId(t["id"]) for t in ps_http.tenant_list()]
 
-    body = {"generation": env.attachment_service.attach_hook_issue(tenant_id, env.pageserver.id)}
+    body = {"generation": env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id)}
 
     ps_http.post(
         f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
