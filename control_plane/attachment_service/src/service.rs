@@ -2108,9 +2108,6 @@ impl Service {
             targets
         };
 
-        // TODO: this API, and the underlying pageserver API, should take a timeout argument so that for long running
-        // downloads, they can return a clean 202 response instead of the HTTP client timing out.
-
         // Issue concurrent requests to all shards' locations
         let mut futs = FuturesUnordered::new();
         for (tenant_shard_id, node) in targets {
