@@ -37,7 +37,7 @@ def test_pageserver_init_node_id(
     assert (
         bad_init.returncode == 1
     ), "pageserver should not be able to init new config without the node id"
-    assert "missing config value \"id\"" in bad_init.stderr
+    assert 'missing config value "id"' in bad_init.stderr
     assert not pageserver_config.exists(), "config file should not be created after init error"
 
     good_init_cmd = ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
