@@ -731,7 +731,15 @@ impl LayerInner {
                     let needs_download = self
                         .needs_download()
                         .await
-                        .map_err(DownloadError::PreStatFailed)?;
+                        .map_err(DownloadError::PreStatFailed);
+
+                    let needs_download = match needs_download {
+                        Ok(reason) => reason,
+                        Err(e) => {
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
+                            return Err(e);
+                        }
+                    };
 
                     let permit = if let Some(reason) = needs_download {
                         if let NeedsDownload::NotFile(ft) = reason {
@@ -744,16 +752,22 @@ impl LayerInner {
                         self.wanted_evicted.store(false, Ordering::Release);
 
                         if !can_ever_evict {
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
                             return Err(DownloadError::NoRemoteStorage);
                         }
 
                         if let Some(ctx) = ctx {
-                            self.check_expected_download(ctx)?;
+                            let res = self.check_expected_download(ctx);
+                            if let Err(e) = res {
+                                scopeguard::ScopeGuard::into_inner(init_cancelled);
+                                return Err(e);
+                            }
                         }
 
                         if !allow_download {
                             // this does look weird, but for LayerInner the "downloading" means also changing
                             // internal once related state ...
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
                             return Err(DownloadError::DownloadRequired);
                         }
 
@@ -767,6 +781,8 @@ impl LayerInner {
 
                         permit
                     };
+
+                    scopeguard::ScopeGuard::into_inner(init_cancelled);
 
                     let since_last_eviction =
                         self.last_evicted_at.lock().unwrap().map(|ts| ts.elapsed());
@@ -794,8 +810,6 @@ impl LayerInner {
                             "completing the on-demand download for other tasks"
                         );
                     }
-
-                    scopeguard::ScopeGuard::into_inner(init_cancelled);
 
                     Ok((ResidentOrWantedEvicted::Resident(res), permit))
                 }
