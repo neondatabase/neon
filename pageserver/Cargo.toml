@@ -48,6 +48,7 @@ postgres.workspace = true
 postgres_backend.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
+procfs.workspace = true
 rand.workspace = true
 regex.workspace = true
 scopeguard.workspace = true

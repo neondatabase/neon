@@ -98,7 +98,7 @@ impl OpenOptions {
             OpenOptions::StdFs(x) => x.open(path).map(|file| file.into()),
             #[cfg(target_os = "linux")]
             OpenOptions::TokioEpollUring(x) => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = super::io_engine::tokio_epoll_uring_ext::thread_local_system().await;
                 system.open(path, x).await.map_err(|e| match e {
                     tokio_epoll_uring::Error::Op(e) => e,
                     tokio_epoll_uring::Error::System(system) => {
