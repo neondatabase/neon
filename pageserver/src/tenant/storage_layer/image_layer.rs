@@ -396,8 +396,8 @@ impl ImageLayerInner {
         let actual_summary =
             Summary::des_prefix(summary_blk.as_ref()).context("deserialize first block")?;
 
-        if actual_summary.format_version > STORAGE_FORMAT_VERSION {
-            bail!("Forward compatibility of storage is not supported: current format version is {}, format version of layer {} is {}", STORAGE_FORMAT_VERSION, path, actual_summary.format_version);
+        if actual_summary.format_version > COMPRESSED_STORAGE_FORMAT_VERSION {
+            bail!("Forward compatibility of storage is not supported: current format version is {}, format version of layer {} is {}", COMPRESSED_STORAGE_FORMAT_VERSION, path, actual_summary.format_version);
         }
         if let Some(mut expected_summary) = summary {
             // assume backward compatibility
@@ -697,10 +697,15 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self
-            .blob_writer
-            .write_compressed_blob(img, self.compression)
-            .await?;
+        let off = if STORAGE_FORMAT_VERSION >= COMPRESSED_STORAGE_FORMAT_VERSION {
+            self.blob_writer
+                .write_compressed_blob(img, self.compression)
+                .await?
+        } else {
+            let (_img, res) = self.blob_writer.write_blob(img).await;
+            // TODO: re-use the buffer for `img` further upstack
+            res?
+        };
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;

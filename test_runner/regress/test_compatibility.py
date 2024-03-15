@@ -195,7 +195,6 @@ def test_backward_compatibility(
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
-@pytest.mark.skip("Compression support breaks forward compatibility")
 def test_forward_compatibility(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
