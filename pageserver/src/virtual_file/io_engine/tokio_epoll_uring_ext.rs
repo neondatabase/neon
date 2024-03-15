@@ -3,7 +3,7 @@
 //!
 //! This is primarily necessary due to ENOMEM aka OutOfMemory errors during io_uring creation
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
-//! See https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391 for more details.
+//! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
