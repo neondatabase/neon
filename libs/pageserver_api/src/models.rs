@@ -741,9 +741,9 @@ pub struct SecondaryProgress {
     /// The number of layers in the most recently seen heatmap
     pub layers_total: usize,
 
-    /// The number of layers currently on-disk
+    /// The number of layer bytes currently on-disk
     pub bytes_downloaded: u64,
-    /// The number of layers in the most recently seen heatmap
+    /// The number of layer bytes in the most recently seen heatmap
     pub bytes_total: u64,
 }
 
