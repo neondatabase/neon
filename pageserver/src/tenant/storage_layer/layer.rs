@@ -771,7 +771,15 @@ impl LayerInner {
 
                         tracing::info!(%reason, "downloading on-demand");
 
-                        let permit = self.spawn_download_and_wait(timeline, permit).await?;
+                        let permit = self.spawn_download_and_wait(timeline, permit).await;
+
+                        let permit = match permit {
+                            Ok(permit) => permit,
+                            Err(e) => {
+                                scopeguard::ScopeGuard::into_inner(init_cancelled);
+                                return Err(e);
+                            }
+                        };
 
                         (permit, true)
                     } else {
