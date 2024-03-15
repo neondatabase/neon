@@ -54,7 +54,6 @@ pub async fn thread_local_system() -> Handle {
     loop {
         let thread_local_state = THREAD_LOCAL.with(|arc| arc.clone());
         let inner = &thread_local_state.0;
-        // NB: thread_id becomes stale after first await
         let get_or_init_res = inner
             .cell
             .get_or_try_init(|| async {
