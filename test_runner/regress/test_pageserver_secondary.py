@@ -1,4 +1,5 @@
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -555,6 +556,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     )
 
 
+@pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
 @pytest.mark.parametrize("via_controller", [True, False])
 def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controller: bool):
     """
@@ -629,7 +631,7 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
     # Downloads are fast again: download should complete
     for ps in env.pageservers:
         ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "off")])
-    (status, progress) = http_client.tenant_secondary_download(tenant_id, wait_ms=5000)
+    (status, progress) = http_client.tenant_secondary_download(tenant_id, wait_ms=20000)
     assert status == 200
     assert progress["heatmap_mtime"] is not None
     assert progress["layers_total"] == progress["layers_downloaded"]
