@@ -745,12 +745,6 @@ impl LayerInner {
         }
 
         async move {
-            // disable any scheduled but not yet running eviction deletions for this
-            let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
-
-            // no need to make the evict_and_wait wait for the actual download to complete
-            drop(self.status.send(Status::Downloaded));
-
             let timeline = self
                 .timeline
                 .upgrade()
@@ -781,7 +775,7 @@ impl LayerInner {
                 // get_or_maybe_download. alternatively we might be running without remote storage.
                 LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
-                let res = self.initialize_after_layer_is_on_disk(next_version, permit, false);
+                let res = self.initialize_after_layer_is_on_disk(permit, false);
                 return Ok(res);
             };
 
@@ -789,11 +783,6 @@ impl LayerInner {
                 scopeguard::ScopeGuard::into_inner(init_cancelled);
                 return Err(DownloadError::NotFile(ft));
             }
-
-            // only reset this after we've decided we really need to download. otherwise it'd
-            // be impossible to mark cancelled downloads for eviction, like one could imagine
-            // we would like to do for prefetching which was not needed.
-            self.wanted_evicted.store(false, Ordering::Release);
 
             if timeline.remote_client.as_ref().is_none() {
                 scopeguard::ScopeGuard::into_inner(init_cancelled);
@@ -823,7 +812,7 @@ impl LayerInner {
 
             let permit = permit?;
 
-            let res = self.initialize_after_layer_is_on_disk(next_version, permit, true);
+            let res = self.initialize_after_layer_is_on_disk(permit, true);
             Ok(res)
         }
         .instrument(tracing::info_span!("get_or_maybe_download", layer=%self))
@@ -986,11 +975,21 @@ impl LayerInner {
     /// changes are made before we can write to the OnceCell in non-cancellable fashion.
     fn initialize_after_layer_is_on_disk(
         self: &Arc<LayerInner>,
-        next_version: usize,
         permit: heavier_once_cell::InitPermit,
         downloaded: bool,
     ) -> Arc<DownloadedLayer> {
         debug_assert_current_span_has_tenant_and_timeline_id();
+
+        // disable any scheduled but not yet running eviction deletions for this
+        let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
+
+        // only reset this after we've decided we really need to download. otherwise it'd
+        // be impossible to mark cancelled downloads for eviction, like one could imagine
+        // we would like to do for prefetching which was not needed.
+        self.wanted_evicted.store(false, Ordering::Release);
+
+        // no need to make the evict_and_wait wait for the actual download to complete
+        drop(self.status.send(Status::Downloaded));
 
         if downloaded {
             let since_last_eviction = self
@@ -1000,8 +999,6 @@ impl LayerInner {
                 .take()
                 .map(|ts| ts.elapsed());
             if let Some(since_last_eviction) = since_last_eviction {
-                // FIXME: this will not always be recorded correctly until #6028 (the no
-                // download needed branch above)
                 LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
             }
         }
