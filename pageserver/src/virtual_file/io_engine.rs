@@ -278,7 +278,7 @@ impl Into<IoEngineKind> for FeatureTestResult {
     }
 }
 
-/// Somewhat costly under the hood, to only once.
+/// Somewhat costly under the hood, do only once.
 /// Panics if we can't set up the feature test.
 pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
     std::thread::spawn(|| {
