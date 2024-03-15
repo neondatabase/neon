@@ -296,6 +296,7 @@ impl DeleteTenantFlow {
         remote_storage: Option<GenericRemoteStorage>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
         tenant: Arc<Tenant>,
+        cancel: &CancellationToken,
     ) -> Result<(), DeleteTenantError> {
         span::debug_assert_current_span_has_tenant_id();
 
@@ -303,7 +304,9 @@ impl DeleteTenantFlow {
 
         let mut guard = Self::prepare(&tenant).await?;
 
-        if let Err(e) = Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant).await {
+        if let Err(e) =
+            Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant, cancel).await
+        {
             tenant.set_broken(format!("{e:#}")).await;
             return Err(e);
         }
@@ -322,6 +325,7 @@ impl DeleteTenantFlow {
         conf: &'static PageServerConf,
         remote_storage: Option<&GenericRemoteStorage>,
         tenant: &Tenant,
+        cancel: &CancellationToken,
     ) -> Result<(), DeleteTenantError> {
         guard.mark_in_progress()?;
 
@@ -335,15 +339,9 @@ impl DeleteTenantFlow {
         // Though sounds scary, different mark name?
         // Detach currently uses remove_dir_all so in case of a crash we can end up in a weird state.
         if let Some(remote_storage) = &remote_storage {
-            create_remote_delete_mark(
-                conf,
-                remote_storage,
-                &tenant.tenant_shard_id,
-                // Can't use tenant.cancel, it's already shut down.  TODO: wire in an appropriate token
-                &CancellationToken::new(),
-            )
-            .await
-            .context("remote_mark")?
+            create_remote_delete_mark(conf, remote_storage, &tenant.tenant_shard_id, cancel)
+                .await
+                .context("remote_mark")?
         }
 
         fail::fail_point!("tenant-delete-before-create-local-mark", |_| {
@@ -546,8 +544,7 @@ impl DeleteTenantFlow {
             conf,
             remote_storage.as_ref(),
             &tenant.tenant_shard_id,
-            // Can't use tenant.cancel, it's already shut down.  TODO: wire in an appropriate token
-            &CancellationToken::new(),
+            &task_mgr::shutdown_token(),
         )
         .await?;
 

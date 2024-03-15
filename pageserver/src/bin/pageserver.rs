@@ -317,6 +317,7 @@ fn start_pageserver(
     let http_listener = tcp_listener::bind(http_addr)?;
 
     let pg_addr = &conf.listen_pg_addr;
+
     info!("Starting pageserver pg protocol handler on {pg_addr}");
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
@@ -549,7 +550,7 @@ fn start_pageserver(
         let router_state = Arc::new(
             http::routes::State::new(
                 conf,
-                tenant_manager,
+                tenant_manager.clone(),
                 http_auth.clone(),
                 remote_storage.clone(),
                 broker_client.clone(),
@@ -693,6 +694,7 @@ fn start_pageserver(
                 let bg_remote_storage = remote_storage.clone();
                 let bg_deletion_queue = deletion_queue.clone();
                 BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
+                    &tenant_manager,
                     bg_remote_storage.map(|_| bg_deletion_queue),
                     0,
                 ));
