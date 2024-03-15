@@ -3605,6 +3605,13 @@ impl Service {
                         observed_loc.conf = None;
                     }
 
+                    if new_nodes.len() == 1 {
+                        // Special case for single-node cluster: there is no point trying to reschedule
+                        // any tenant shards: avoid doing so, in order to avoid spewing warnings about
+                        // failures to schedule them.
+                        continue;
+                    }
+
                     if tenant_state.intent.demote_attached(node_id) {
                         tenant_state.sequence = tenant_state.sequence.next();
                         match tenant_state.schedule(scheduler) {
