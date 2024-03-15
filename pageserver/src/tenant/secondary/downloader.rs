@@ -563,7 +563,7 @@ impl<'a> TenantDownloader<'a> {
         tracing::debug!("Wrote local heatmap to {}", heatmap_path);
 
         // Clean up any local layers that aren't in the heatmap.  We do this first for all timelines, on the general
-        // principle that deletions should be done before writes whereever possible, and so that we can use this
+        // principle that deletions should be done before writes wherever possible, and so that we can use this
         // phase to initialize our SecondaryProgress.
         {
             let heatmap_stats = heatmap.get_stats();
