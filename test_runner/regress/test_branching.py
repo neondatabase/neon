@@ -359,7 +359,7 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
         env.pg_version, env.initial_tenant, success_timeline, timeout=60
     )
 
-    ps_http.configure_failpoints(("timeline-creation-before-finish", "pause"))
+    ps_http.configure_failpoints(("timeline-creation-after-uninit", "pause"))
     ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
     ps_http.configure_failpoints(("before-upload-layer-pausable", "pause"))
 
@@ -374,7 +374,7 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
     try:
         t.start()
 
-        wait_until_paused(env, "timeline-creation-before-finish")
+        wait_until_paused(env, "timeline-creation-after-uninit")
 
         # While in this "creation hung" state we will validate behavior of concurrent requests
         # env.pageserver.allowed_errors.append(

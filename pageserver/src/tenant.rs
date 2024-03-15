@@ -1465,6 +1465,8 @@ impl Tenant {
             }
         };
 
+        pausable_failpoint!("timeline-creation-after-uninit");
+
         let loaded_timeline = match ancestor_timeline_id {
             Some(ancestor_timeline_id) => {
                 let ancestor_timeline = self
@@ -3215,8 +3217,6 @@ impl Tenant {
                     "Failed to flush after pgdatadir import for timeline {tenant_shard_id}/{timeline_id}"
                 )
             })?;
-
-        pausable_failpoint!("timeline-creation-before-finish");
 
         // All done!
         let timeline = raw_timeline.finish_creation()?;
