@@ -258,7 +258,7 @@ pub enum FeatureTestResult {
     PlatformPreferred(IoEngineKind),
     Worse {
         engine: IoEngineKind,
-        remark: &'static str,
+        remark: String,
     },
 }
 
@@ -269,9 +269,9 @@ impl FeatureTestResult {
     const PLATFORM_PREFERRED: IoEngineKind = IoEngineKind::StdFs;
 }
 
-impl Into<IoEngineKind> for FeatureTestResult {
-    fn into(self) -> IoEngineKind {
-        match self {
+impl From<FeatureTestResult> for IoEngineKind {
+    fn from(val: FeatureTestResult) -> Self {
+        match val {
             FeatureTestResult::PlatformPreferred(e) => e,
             FeatureTestResult::Worse { engine, .. } => engine,
         }
@@ -302,23 +302,23 @@ pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
                 FeatureTestResult::PLATFORM_PREFERRED
             }),
             Err(tokio_epoll_uring::LaunchResult::IoUringBuild(e)) => {
-                let remark;
-                match e.raw_os_error() {
-                    None => {
-                        remark = "creating tokio-epoll-uring failed with non-OS error: {e}";
-                    }
-                    Some(nix::libc::EFAULT) => {
-                        remark = "tokio-epoll-uring crate produces EFAULT?";
-                    }
+                let remark = match e.raw_os_error() {
                     Some(nix::libc::EPERM) => {
-                        remark = "creating io_uring fails with EPERM";
+                        // fall back
+                        "creating tokio-epoll-uring fails with EPERM, assuming it's admin-disabled "
+                            .to_string()
                     }
-                    Some(x) => {
+                   Some(nix::libc::EFAULT) => {
+                        // fail feature test
                         anyhow::bail!(
-                            "temporary error: creating tokio-epoll-uring fails with errno {x}"
+                            "creating tokio-epoll-uring fails with EFAULT, might have corrupted memory"
                         );
                     }
-                }
+                    Some(_) | None => {
+                        // fall back
+                        format!("creating tokio-epoll-uring fails with error: {e:#}")
+                    }
+               };
                 FeatureTestResult::Worse {
                     engine: IoEngineKind::StdFs,
                     remark,
