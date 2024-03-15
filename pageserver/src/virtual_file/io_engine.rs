@@ -285,9 +285,9 @@ pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
 
         #[cfg(not(target_os = "linux"))]
         {
-            return Ok(FeatureTestResult::PlatformPreferred(
+            Ok(FeatureTestResult::PlatformPreferred(
                 FeatureTestResult::PLATFORM_PREFERRED,
-            ));
+            ))
         }
         #[cfg(target_os = "linux")]
         {
