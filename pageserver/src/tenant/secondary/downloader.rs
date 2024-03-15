@@ -540,18 +540,8 @@ impl<'a> TenantDownloader<'a> {
         // principle that deletions should be done before writes wherever possible, and so that we can use this
         // phase to initialize our SecondaryProgress.
         {
-            let heatmap_stats = heatmap.get_stats();
-            // We will construct a progress object, and then populate its initial "downloaded" numbers
-            // while iterating through local layer state in [`Self::prepare_timelines`]
-            let mut progress_init = SecondaryProgress {
-                layers_total: heatmap_stats.layers,
-                bytes_total: heatmap_stats.bytes,
-                heatmap_mtime: Some(heatmap_mtime),
-                layers_downloaded: 0,
-                bytes_downloaded: 0,
-            };
-            self.prepare_timelines(&heatmap, &mut progress_init).await?;
-            *self.secondary_state.progress.lock().unwrap() = progress_init;
+            *self.secondary_state.progress.lock().unwrap() =
+                self.prepare_timelines(&heatmap, heatmap_mtime).await?;
         }
 
         // Download the layers in the heatmap
@@ -579,12 +569,23 @@ impl<'a> TenantDownloader<'a> {
     }
 
     /// Do any fast local cleanup that comes before the much slower process of downloading
-    /// layers from remote storage
+    /// layers from remote storage.  In the process, initialize the SecondaryProgress object
+    /// that will later be updated incrementally as we download layers.
     async fn prepare_timelines(
         &self,
         heatmap: &HeatMapTenant,
-        progress: &mut SecondaryProgress,
-    ) -> Result<(), UpdateError> {
+        heatmap_mtime: SystemTime,
+    ) -> Result<SecondaryProgress, UpdateError> {
+        let heatmap_stats = heatmap.get_stats();
+        // We will construct a progress object, and then populate its initial "downloaded" numbers
+        // while iterating through local layer state in [`Self::prepare_timelines`]
+        let mut progress = SecondaryProgress {
+            layers_total: heatmap_stats.layers,
+            bytes_total: heatmap_stats.bytes,
+            heatmap_mtime: Some(heatmap_mtime),
+            layers_downloaded: 0,
+            bytes_downloaded: 0,
+        };
         // Accumulate list of things to delete while holding the detail lock, for execution after dropping the lock
         let mut delete_layers = Vec::new();
         let mut delete_timelines = Vec::new();
@@ -673,7 +674,7 @@ impl<'a> TenantDownloader<'a> {
                 .maybe_fatal_err("Removing secondary timeline")?;
         }
 
-        Ok(())
+        Ok(progress)
     }
 
     /// Returns downloaded bytes if the etag differs from `prev_etag`, or None if the object
