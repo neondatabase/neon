@@ -523,32 +523,6 @@ impl<'a> TenantDownloader<'a> {
 
         let heatmap = serde_json::from_slice::<HeatMapTenant>(&heatmap_bytes)?;
 
-        // {
-        //     let mut ondisk_bytes = 0;
-        //     let mut ondisk_layers = 0;
-        //     {
-        //         let detail = self.secondary_state.detail.lock().unwrap();
-        //         for (timeline_id, timeline) in detail.timelines.values() {
-        //             for (layer_name, layer) in timeline.on_disk_layers.values() {
-        //                 if let Some(hm_tl) = heatmap.timelines.get(timeline_id) {
-        //                     if hm_tl.l
-
-        //                     ondisk_layers += 1;
-        //                     ondisk_bytes += layer.metadata.file_size();
-        //                 }
-        //             }
-        //             timeline.on_disk_layers.len()
-        //         }
-        //     }
-        //     let mut progress = self.secondary_state.progress.lock().unwrap();
-        //     let heatmap_stats = heatmap.get_stats();
-        //     progress.layers_total = heatmap_stats.layers;
-        //     progress.bytes_total = heatmap_stats.bytes;
-        //     progress.heatmap_mtime = Some(heatmap_mtime);
-        //     progress.bytes_downloaded = ondisk_bytes;
-        //     progress.layers_downloaded = ondisk_layers;
-        // }
-
         // Save the heatmap: this will be useful on restart, allowing us to reconstruct
         // layer metadata without having to re-download it.
         let heatmap_path = self.conf.tenant_heatmap_path(tenant_shard_id);
