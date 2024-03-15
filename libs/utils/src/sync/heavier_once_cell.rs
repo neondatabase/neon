@@ -110,7 +110,12 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Returns a guard to an existing initialized value, or returns an unique initialization
+    /// permit which can be used to initialize this `OnceCell` using `OnceCell::set`.
     pub async fn get_or_init_detached(&self) -> Result<Guard<'_, T>, InitPermit> {
+        // It looks like OnceCell::get_or_init could be implemented using this method instead of
+        // duplication. However, that makes the future be !Send due to possibly holding on to the
+        // MutexGuard over an await point.
         loop {
             let sem = {
                 let guard = self.inner.lock().unwrap();
