@@ -1,5 +1,5 @@
 name: 'Create Allure report'
-description: 'Generate Allure report from uploaded by actions/allure-report-store tests results'
+description: 'Generate Allure report from uploaded by actions/allure-results-store tests results'
 
 inputs:
   connstr:
