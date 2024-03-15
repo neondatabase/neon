@@ -62,3 +62,25 @@ impl HeatMapTimeline {
         }
     }
 }
+
+pub(crate) struct HeatMapStats {
+    pub(crate) bytes: u64,
+    pub(crate) layers: usize,
+}
+
+impl HeatMapTenant {
+    pub(crate) fn get_stats(&self) -> HeatMapStats {
+        let mut stats = HeatMapStats {
+            bytes: 0,
+            layers: 0,
+        };
+        for timeline in &self.timelines {
+            for layer in &timeline.layers {
+                stats.layers += 1;
+                stats.bytes += layer.metadata.file_size;
+            }
+        }
+
+        stats
+    }
+}

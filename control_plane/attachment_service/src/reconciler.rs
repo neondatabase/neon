@@ -8,7 +8,7 @@ use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
@@ -258,22 +258,81 @@ impl Reconciler {
         tenant_shard_id: TenantShardId,
         node: &Node,
     ) -> Result<(), ReconcileError> {
-        match node
-            .with_client_retries(
-                |client| async move { client.tenant_secondary_download(tenant_shard_id).await },
-                &self.service_config.jwt_token,
-                1,
-                1,
-                Duration::from_secs(60),
-                &self.cancel,
-            )
-            .await
-        {
-            None => Err(ReconcileError::Cancel),
-            Some(Ok(_)) => Ok(()),
-            Some(Err(e)) => {
-                tracing::info!("  (skipping destination download: {})", e);
-                Ok(())
+        // This is not the timeout for a request, but the total amount of time we're willing to wait
+        // for a secondary location to get up to date before
+        const TOTAL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+        // This the long-polling interval for the secondary download requests we send to destination pageserver
+        // during a migration.
+        const REQUEST_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+
+        let started_at = Instant::now();
+
+        loop {
+            let (status, progress) = match node
+                .with_client_retries(
+                    |client| async move {
+                        client
+                            .tenant_secondary_download(
+                                tenant_shard_id,
+                                Some(REQUEST_DOWNLOAD_TIMEOUT),
+                            )
+                            .await
+                    },
+                    &self.service_config.jwt_token,
+                    1,
+                    3,
+                    REQUEST_DOWNLOAD_TIMEOUT * 2,
+                    &self.cancel,
+                )
+                .await
+            {
+                None => Err(ReconcileError::Cancel),
+                Some(Ok(v)) => Ok(v),
+                Some(Err(e)) => {
+                    // Give up, but proceed: it's unfortunate if we couldn't freshen the destination before
+                    // attaching, but we should not let an issue with a secondary location stop us proceeding
+                    // with a live migration.
+                    tracing::warn!("Failed to prepare by downloading layers on node {node}: {e})");
+                    return Ok(());
+                }
+            }?;
+
+            if status == StatusCode::OK {
+                tracing::info!(
+                    "Downloads to {} complete: {}/{} layers, {}/{} bytes",
+                    node,
+                    progress.layers_downloaded,
+                    progress.layers_total,
+                    progress.bytes_downloaded,
+                    progress.bytes_total
+                );
+                return Ok(());
+            } else if status == StatusCode::ACCEPTED {
+                let total_runtime = started_at.elapsed();
+                if total_runtime > TOTAL_DOWNLOAD_TIMEOUT {
+                    tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
+                        total_runtime.as_millis(),
+                        progress.layers_downloaded,
+                        progress.layers_total,
+                        progress.bytes_downloaded,
+                        progress.bytes_total
+                    );
+                    // Give up, but proceed: an incompletely warmed destination doesn't prevent migration working,
+                    // it just makes the I/O performance for users less good.
+                    return Ok(());
+                }
+
+                // Log and proceed around the loop to retry.  We don't sleep between requests, because our HTTP call
+                // to the pageserver is a long-poll.
+                tracing::info!(
+                    "Downloads to {} not yet complete: {}/{} layers, {}/{} bytes",
+                    node,
+                    progress.layers_downloaded,
+                    progress.layers_total,
+                    progress.bytes_downloaded,
+                    progress.bytes_total
+                );
             }
         }
     }

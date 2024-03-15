@@ -30,6 +30,7 @@ use crate::{
 };
 
 use super::{RemoteStorage, StorageMetadata};
+use crate::Etag;
 
 const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
 
@@ -626,9 +627,9 @@ async fn file_metadata(file_path: &Utf8Path) -> Result<std::fs::Metadata, Downlo
 // Use mtime as stand-in for ETag.  We could calculate a meaningful one by md5'ing the contents of files we
 // read, but that's expensive and the local_fs test helper's whole reason for existence is to run small tests
 // quickly, with less overhead than using a mock S3 server.
-fn mock_etag(meta: &std::fs::Metadata) -> String {
+fn mock_etag(meta: &std::fs::Metadata) -> Etag {
     let mtime = meta.modified().expect("Filesystem mtime missing");
-    format!("{}", mtime.duration_since(UNIX_EPOCH).unwrap().as_millis())
+    format!("{}", mtime.duration_since(UNIX_EPOCH).unwrap().as_millis()).into()
 }
 
 #[cfg(test)]

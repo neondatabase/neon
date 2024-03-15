@@ -249,13 +249,26 @@ impl Client {
         Ok(())
     }
 
-    pub async fn tenant_secondary_download(&self, tenant_id: TenantShardId) -> Result<()> {
-        let uri = format!(
+    pub async fn tenant_secondary_download(
+        &self,
+        tenant_id: TenantShardId,
+        wait: Option<std::time::Duration>,
+    ) -> Result<(StatusCode, SecondaryProgress)> {
+        let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/secondary/download",
             self.mgmt_api_endpoint, tenant_id
-        );
-        self.request(Method::POST, &uri, ()).await?;
-        Ok(())
+        ))
+        .expect("Cannot build URL");
+
+        if let Some(wait) = wait {
+            path.query_pairs_mut()
+                .append_pair("wait_ms", &format!("{}", wait.as_millis()));
+        }
+
+        let response = self.request(Method::POST, path, ()).await?;
+        let status = response.status();
+        let progress: SecondaryProgress = response.json().await.map_err(Error::ReceiveBody)?;
+        Ok((status, progress))
     }
 
     pub async fn location_config(

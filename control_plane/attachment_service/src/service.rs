@@ -16,7 +16,15 @@ use diesel::result::DatabaseErrorKind;
 use futures::{stream::FuturesUnordered, StreamExt};
 use hyper::StatusCode;
 use pageserver_api::{
-    controller_api::UtilizationScore,
+    controller_api::{
+        NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
+        TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
+        TenantShardMigrateRequest, TenantShardMigrateResponse, UtilizationScore,
+    },
+    models::{SecondaryProgress, TenantConfigRequest},
+};
+
+use pageserver_api::{
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
         PageserverUtilization, ShardParameters, TenantConfig, TenantCreateRequest,
@@ -29,14 +37,6 @@ use pageserver_api::{
         ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
         ValidateResponse, ValidateResponseTenant,
     },
-};
-use pageserver_api::{
-    controller_api::{
-        NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
-        TenantShardMigrateRequest, TenantShardMigrateResponse,
-    },
-    models::TenantConfigRequest,
 };
 use pageserver_client::mgmt_api;
 use tokio::sync::OwnedRwLockWriteGuard;
@@ -2084,7 +2084,8 @@ impl Service {
     pub(crate) async fn tenant_secondary_download(
         &self,
         tenant_id: TenantId,
-    ) -> Result<(), ApiError> {
+        wait: Option<Duration>,
+    ) -> Result<(StatusCode, SecondaryProgress), ApiError> {
         let _tenant_lock = self.tenant_op_locks.shared(tenant_id).await;
 
         // Acquire lock and yield the collection of shard-node tuples which we will send requests onward to
@@ -2107,32 +2108,71 @@ impl Service {
             targets
         };
 
-        // TODO: this API, and the underlying pageserver API, should take a timeout argument so that for long running
-        // downloads, they can return a clean 202 response instead of the HTTP client timing out.
-
         // Issue concurrent requests to all shards' locations
         let mut futs = FuturesUnordered::new();
         for (tenant_shard_id, node) in targets {
             let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
             futs.push(async move {
-                let result = client.tenant_secondary_download(tenant_shard_id).await;
-                (result, node)
+                let result = client
+                    .tenant_secondary_download(tenant_shard_id, wait)
+                    .await;
+                (result, node, tenant_shard_id)
             })
         }
 
         // Handle any errors returned by pageservers.  This includes cases like this request racing with
         // a scheduling operation, such that the tenant shard we're calling doesn't exist on that pageserver any more, as
         // well as more general cases like 503s, 500s, or timeouts.
-        while let Some((result, node)) = futs.next().await {
-            let Err(e) = result else { continue };
-
-            // Secondary downloads are always advisory: if something fails, we nevertheless report success, so that whoever
-            // is calling us will proceed with whatever migration they're doing, albeit with a slightly less warm cache
-            // than they had hoped for.
-            tracing::warn!("Ignoring tenant secondary download error from pageserver {node}: {e}",);
+        let mut aggregate_progress = SecondaryProgress::default();
+        let mut aggregate_status: Option<StatusCode> = None;
+        let mut error: Option<mgmt_api::Error> = None;
+        while let Some((result, node, tenant_shard_id)) = futs.next().await {
+            match result {
+                Err(e) => {
+                    // Secondary downloads are always advisory: if something fails, we nevertheless report success, so that whoever
+                    // is calling us will proceed with whatever migration they're doing, albeit with a slightly less warm cache
+                    // than they had hoped for.
+                    tracing::warn!("Secondary download error from pageserver {node}: {e}",);
+                    error = Some(e)
+                }
+                Ok((status_code, progress)) => {
+                    tracing::info!(%tenant_shard_id, "Shard status={status_code} progress: {progress:?}");
+                    aggregate_progress.layers_downloaded += progress.layers_downloaded;
+                    aggregate_progress.layers_total += progress.layers_total;
+                    aggregate_progress.bytes_downloaded += progress.bytes_downloaded;
+                    aggregate_progress.bytes_total += progress.bytes_total;
+                    aggregate_progress.heatmap_mtime =
+                        std::cmp::max(aggregate_progress.heatmap_mtime, progress.heatmap_mtime);
+                    aggregate_status = match aggregate_status {
+                        None => Some(status_code),
+                        Some(StatusCode::OK) => Some(status_code),
+                        Some(cur) => {
+                            // Other status codes (e.g. 202) -- do not overwrite.
+                            Some(cur)
+                        }
+                    };
+                }
+            }
         }
 
-        Ok(())
+        // If any of the shards return 202, indicate our result as 202.
+        match aggregate_status {
+            None => {
+                match error {
+                    Some(e) => {
+                        // No successes, and an error: surface it
+                        Err(ApiError::Conflict(format!("Error from pageserver: {e}")))
+                    }
+                    None => {
+                        // No shards found
+                        Err(ApiError::NotFound(
+                            anyhow::anyhow!("Tenant {} not found", tenant_id).into(),
+                        ))
+                    }
+                }
+            }
+            Some(aggregate_status) => Ok((aggregate_status, aggregate_progress)),
+        }
     }
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {

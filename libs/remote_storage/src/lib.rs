@@ -42,6 +42,9 @@ pub use self::{
 };
 use s3_bucket::RequestKind;
 
+/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
+pub use azure_core::Etag;
+
 pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
@@ -293,7 +296,7 @@ pub struct Download {
     /// The last time the file was modified (`last-modified` HTTP header)
     pub last_modified: SystemTime,
     /// A way to identify this specific version of the resource (`etag` HTTP header)
-    pub etag: String,
+    pub etag: Etag,
     /// Extra key-value data, associated with the current remote file.
     pub metadata: Option<StorageMetadata>,
 }
