@@ -912,6 +912,8 @@ impl LayerInner {
 
         match result {
             Ok(size) => {
+                assert_eq!(size, self.desc.file_size);
+
                 match self.needs_download().await {
                     Ok(Some(reason)) => {
                         // this is really a bug in needs_download or remote timeline client
@@ -926,7 +928,9 @@ impl LayerInner {
                 }
 
                 tracing::info!(size=%self.desc.file_size, "on-demand download successful");
-                timeline.metrics.resident_physical_size_add(size);
+                timeline
+                    .metrics
+                    .resident_physical_size_add(self.desc.file_size);
                 self.consecutive_failures.store(0, Ordering::Relaxed);
 
                 let since_last_eviction = self
