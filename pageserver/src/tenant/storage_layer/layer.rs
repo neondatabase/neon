@@ -1300,12 +1300,7 @@ impl LayerInner {
     ) -> Result<(), EvictionCancelled> {
         // now accesses to `self.inner.get_or_init*` wait on the semaphore or the `_permit`
 
-        self.access_stats.record_residence_event(
-            LayerResidenceStatus::Evicted,
-            LayerResidenceEventReason::ResidenceChange,
-        );
-
-        let res = match capture_mtime_and_remove(&self.path) {
+        match capture_mtime_and_remove(&self.path) {
             Ok(local_layer_mtime) => {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
@@ -1329,28 +1324,30 @@ impl LayerInner {
                 timeline
                     .metrics
                     .resident_physical_size_sub(self.desc.file_size);
-
-                Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::error!(
                     layer_size = %self.desc.file_size,
                     "failed to evict layer from disk, it was already gone (metrics will be inaccurate)"
                 );
-                Err(EvictionCancelled::FileNotFound)
+                return Err(EvictionCancelled::FileNotFound);
             }
             Err(e) => {
                 tracing::error!("failed to evict file from disk: {e:#}");
-                Err(EvictionCancelled::RemoveFailed)
+                return Err(EvictionCancelled::RemoveFailed);
             }
-        };
+        }
 
-        // we are still holding the permit, so no new spawn_download_and_wait can happen
+        self.access_stats.record_residence_event(
+            LayerResidenceStatus::Evicted,
+            LayerResidenceEventReason::ResidenceChange,
+        );
+
         self.status.as_ref().unwrap().send_replace(Status::Evicted);
 
         *self.last_evicted_at.lock().unwrap() = Some(std::time::Instant::now());
 
-        res
+        Ok(())
     }
 
     fn metadata(&self) -> LayerFileMetadata {
