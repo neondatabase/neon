@@ -491,28 +491,27 @@ impl SpawnBlockingPoolHelper {
         assert_ne!(threads, 0);
 
         let (completion, barrier) = completion::channel();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (started, starts_completed) = completion::channel();
 
         let mut blocking_tasks = JoinSet::new();
 
         for _ in 0..threads {
             let barrier = barrier.clone();
-            let tx = tx.clone();
+            let started = started.clone();
             blocking_tasks.spawn_blocking_on(
                 move || {
-                    tx.blocking_send(()).unwrap();
-                    drop(tx);
+                    drop(started);
                     tokio::runtime::Handle::current().block_on(barrier.wait());
                 },
                 handle,
             );
         }
 
-        drop(barrier);
+        drop(started);
 
-        for _ in 0..assumed_max_blocking_threads {
-            rx.recv().await.unwrap();
-        }
+        starts_completed.wait().await;
+
+        drop(barrier);
 
         tracing::trace!("consumed all threads");
 
