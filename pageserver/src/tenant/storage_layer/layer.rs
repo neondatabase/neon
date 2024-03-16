@@ -1900,7 +1900,7 @@ impl LayerImplMetrics {
     }
 }
 
-#[derive(Debug, enum_map::Enum)]
+#[derive(Debug, Clone, Copy, enum_map::Enum)]
 enum EvictionCancelled {
     LayerGone,
     TimelineGone,
