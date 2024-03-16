@@ -573,7 +573,7 @@ impl Drop for LayerInner {
         let meta = self.metadata();
         let status = self.status.take();
 
-        crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
+        Self::spawn_blocking(move || {
             let _g = span.entered();
 
             // carry this until we are finished for [`Layer::wait_drop`] support
@@ -918,7 +918,7 @@ impl LayerInner {
             .enter()
             .map_err(|_| DownloadError::DownloadCancelled)?;
 
-        tokio::task::spawn(
+        Self::spawn(
             async move {
                 let _guard = guard;
 
@@ -1180,7 +1180,7 @@ impl LayerInner {
             };
 
             // first we spawn off the async part, then it will spawn_blocking the blocking part
-            crate::task_mgr::BACKGROUND_RUNTIME.spawn(start_evicting.instrument(span));
+            Self::spawn(start_evicting.instrument(span));
         }
     }
 
@@ -1278,7 +1278,7 @@ impl LayerInner {
         //
         // eviction completion reporting is the only thing hinging on this, and it can be just as
         // well from a spawn_blocking thread.
-        crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
+        Self::spawn_blocking(move || {
             let _span = span.entered();
 
             let res = self.evict_blocking(&timeline, permit);
