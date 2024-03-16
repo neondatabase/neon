@@ -512,7 +512,13 @@ struct LayerInner {
     /// `ResidentOrWantedEvicted::WantedEvicted`.
     version: AtomicUsize,
 
-    /// Allow subscribing to when the layer actually gets evicted.
+    /// Allow subscribing to when the layer actually gets evicted, a non-cancellable download
+    /// starts or completes.
+    ///
+    /// Updates must only be posted while holding the InitPermit, which is the only time we can do
+    /// state transitions.
+    ///
+    /// The sender is wrapped in an Option to facilitate moving it out on [`LayerInner::drop`].
     status: Option<tokio::sync::watch::Sender<Status>>,
 
     /// Counter for exponential backoff with the download
