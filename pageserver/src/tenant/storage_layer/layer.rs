@@ -542,6 +542,9 @@ struct LayerInner {
     /// a shard split since the layer was originally written.
     shard: ShardIndex,
 
+    /// When the Layer was last evicted but has not been downloaded since.
+    ///
+    /// This is used solely for updating metrics. See [`LayerImplMetrics::redownload_after`].
     last_evicted_at: std::sync::Mutex<Option<std::time::Instant>>,
 
     #[cfg(test)]
