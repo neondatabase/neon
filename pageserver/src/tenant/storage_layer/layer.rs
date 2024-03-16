@@ -573,9 +573,8 @@ enum Status {
 impl Drop for LayerInner {
     fn drop(&mut self) {
         if !*self.wanted_deleted.get_mut() {
-            // should we try to evict if the last wish was for eviction?
-            // feels like there's some hazard of overcrowding near shutdown near by, but we don't
-            // run drops during shutdown (yet)
+            // should we try to evict if the last wish was for eviction? seems more like a hazard
+            // than a clear win.
             return;
         }
 
