@@ -775,8 +775,7 @@ impl LayerInner {
             // get_or_maybe_download. alternatively we might be running without remote storage.
             LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
-            let res = self.initialize_after_layer_is_on_disk(permit);
-            return Ok(res);
+            return Ok(self.initialize_after_layer_is_on_disk(permit));
         };
 
         if let NeedsDownload::NotFile(ft) = reason {
@@ -945,8 +944,7 @@ impl LayerInner {
                     LayerResidenceEventReason::ResidenceChange,
                 );
 
-                let res = self.initialize_after_layer_is_on_disk(permit);
-                Ok(res)
+                Ok(self.initialize_after_layer_is_on_disk(permit))
             }
             Err(e) => {
                 let consecutive_failures =
