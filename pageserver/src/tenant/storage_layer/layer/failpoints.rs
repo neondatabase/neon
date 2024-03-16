@@ -9,15 +9,18 @@ impl LayerInner {
     ///
     /// Calls to this method need to be `#[cfg(test)]` guarded.
     pub(super) async fn failpoint(&self, kind: FailpointKind) -> Result<(), FailpointHit> {
-        let fp = {
-            let fps = self.failpoints.lock().unwrap();
-            fps.iter().find(|x| x.kind() == kind).cloned()
+        let fut = {
+            let mut fps = self.failpoints.lock().unwrap();
+            let fp = fps.iter_mut().find(|x| x.kind() == kind);
+
+            let Some(fp) = fp else {
+                return Ok(());
+            };
+
+            fp.hit()
         };
-        if let Some(fp) = fp {
-            fp.hit().await
-        } else {
-            Ok(())
-        }
+
+        fut.await
     }
 
     /// Enable a failpoint from a unit test.
@@ -52,14 +55,26 @@ impl Failpoint {
         }
     }
 
-    async fn hit(&self) -> Result<(), FailpointHit> {
+    fn hit(&mut self) -> impl std::future::Future<Output = Result<(), FailpointHit>> + 'static {
+        use futures::future::FutureExt;
+
+        // use boxed futures to avoid Either hurdles
         match self {
-            Failpoint::AfterDeterminingLayerNeedsNoDownload => Err(FailpointHit(self.kind())),
+            Failpoint::AfterDeterminingLayerNeedsNoDownload => {
+                let kind = self.kind();
+
+                async move { Err(FailpointHit(kind)) }.boxed()
+            }
             Failpoint::WaitBeforeStartingEvicting(b) => {
-                tracing::trace!("waiting on a failpoint barrier");
-                b.clone().wait().await;
-                tracing::trace!("done waiting on a failpoint barrier");
-                Ok(())
+                let b = b.clone();
+
+                async move {
+                    tracing::trace!("waiting on a failpoint barrier");
+                    b.wait().await;
+                    tracing::trace!("done waiting on a failpoint barrier");
+                    Ok(())
+                }
+                .boxed()
             }
         }
     }
