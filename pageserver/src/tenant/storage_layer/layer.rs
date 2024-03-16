@@ -480,6 +480,9 @@ struct LayerInner {
     desc: PersistentLayerDesc,
 
     /// Timeline access is needed for remote timeline client and metrics.
+    ///
+    /// There should not be an access to timeline for any reason without entering the
+    /// [`Timeline::gate`] at the same time.
     timeline: Weak<Timeline>,
 
     /// Cached knowledge of [`Timeline::remote_client`] being `Some`.
