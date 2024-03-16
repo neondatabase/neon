@@ -837,8 +837,11 @@ impl LayerInner {
         // count cancellations, which currently remain largely unexpected
         let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
 
-        // check if we really need to be downloaded; could have been already downloaded by a
-        // cancelled previous attempt.
+        // check if we really need to be downloaded: this can happen if a read access won the
+        // semaphore before eviction.
+        //
+        // if we are cancelled while doing this `stat` the `self.inner` will be uninitialized. a
+        // pending eviction will try to evict even upon finding an uninitialized `self.inner`.
         let needs_download = self
             .needs_download()
             .await
