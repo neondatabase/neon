@@ -479,14 +479,23 @@ impl SpawnBlockingPoolHelper {
     ///
     /// This should be no issue nowdays, because nextest runs each test in it's own process.
     async fn consume_all_spawn_blocking_threads(handle: &tokio::runtime::Handle) -> Self {
+        let default_max_blocking_threads = 512;
+
+        Self::consume_all_spawn_blocking_threads0(handle, default_max_blocking_threads).await
+    }
+
+    async fn consume_all_spawn_blocking_threads0(
+        handle: &tokio::runtime::Handle,
+        threads: usize,
+    ) -> Self {
+        assert_ne!(threads, 0);
+
         let (completion, barrier) = completion::channel();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
 
-        let assumed_max_blocking_threads = 512;
-
         let mut blocking_tasks = JoinSet::new();
 
-        for _ in 0..assumed_max_blocking_threads {
+        for _ in 0..threads {
             let barrier = barrier.clone();
             let tx = tx.clone();
             blocking_tasks.spawn_blocking_on(
@@ -533,7 +542,14 @@ impl SpawnBlockingPoolHelper {
     /// runtimes `spawn_blocking` has completed, because it must've been scheduled and completed
     /// before our tasks have a chance to schedule and complete.
     async fn consume_and_release_all_of_spawn_blocking_threads(handle: &tokio::runtime::Handle) {
-        Self::consume_all_spawn_blocking_threads(handle)
+        Self::consume_and_release_all_of_spawn_blocking_threads0(handle, 512).await
+    }
+
+    async fn consume_and_release_all_of_spawn_blocking_threads0(
+        handle: &tokio::runtime::Handle,
+        threads: usize,
+    ) {
+        Self::consume_all_spawn_blocking_threads0(handle, threads)
             .await
             .release()
             .await
@@ -547,7 +563,7 @@ fn spawn_blocking_pool_helper_actually_works() {
     // because the amount is not configurable for our helper, expect the same amount as
     // BACKGROUND_RUNTIME using the tokio defaults would have.
     let rt = tokio::runtime::Builder::new_current_thread()
-        .max_blocking_threads(512)
+        .max_blocking_threads(1)
         .enable_all()
         .build()
         .unwrap();
@@ -557,7 +573,8 @@ fn spawn_blocking_pool_helper_actually_works() {
     rt.block_on(async move {
         // this will not return until all threads are spun up and actually executing the code
         // waiting on `consumed` to be `SpawnBlockingPoolHelper::release`'d.
-        let consumed = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
+        let consumed =
+            SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads0(handle, 1).await;
 
         println!("consumed");
 
