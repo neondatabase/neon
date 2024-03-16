@@ -1242,7 +1242,8 @@ impl LayerInner {
 
             let waited = loop {
                 // we must race to the Downloading starting, otherwise we would have to wait until the
-                // completion of the download
+                // completion of the download. waiting for download could be long and hinder our
+                // efforts to alert on "hanging" evictions.
                 tokio::select! {
                     res = &mut wait => break res,
                     _ = rx.changed() => {
