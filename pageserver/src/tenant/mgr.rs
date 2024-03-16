@@ -2729,7 +2729,7 @@ use {
     utils::http::error::ApiError,
 };
 
-pub(crate) async fn immediate_gc(
+pub(crate) fn immediate_gc(
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
@@ -2751,6 +2751,8 @@ pub(crate) async fn immediate_gc(
     // Run in task_mgr to avoid race with tenant_detach operation
     let ctx = ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
     let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
+    let span = info_span!("manual_gc", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
+
     // TODO: spawning is redundant now, need to hold the gate
     task_mgr::spawn(
         &tokio::runtime::Handle::current(),
@@ -2765,16 +2767,15 @@ pub(crate) async fn immediate_gc(
             #[allow(unused_mut)]
             let mut result = tenant
                 .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
-                .instrument(info_span!("manual_gc", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
                 // better once the types support it.
 
             #[cfg(feature = "testing")]
             {
+                // we need to synchronize with drop completion for python tests without polling for
+                // log messages
                 if let Ok(result) = result.as_mut() {
-                    // why not futures unordered? it seems it needs very much the same task structure
-                    // but would only run on single task.
                     let mut js = tokio::task::JoinSet::new();
                     for layer in std::mem::take(&mut result.doomed_layers) {
                         js.spawn(layer.wait_drop());
@@ -2790,7 +2791,7 @@ pub(crate) async fn immediate_gc(
 
                 if let Some(rtc) = rtc {
                     // layer drops schedule actions on remote timeline client to actually do the
-                    // deletions; don't care just exit fast about the shutdown error
+                    // deletions; don't care about the shutdown error, just exit fast
                     drop(rtc.wait_completion().await);
                 }
             }
@@ -2801,6 +2802,7 @@ pub(crate) async fn immediate_gc(
             }
             Ok(())
         }
+        .instrument(span)
     );
 
     // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task
