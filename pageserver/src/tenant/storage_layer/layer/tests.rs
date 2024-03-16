@@ -8,7 +8,7 @@ use utils::{
 };
 
 use super::*;
-use crate::{context::DownloadBehavior, task_mgr::BACKGROUND_RUNTIME};
+use crate::context::DownloadBehavior;
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
 
 /// Used in tests to advance a future to wanted await point, and not futher.
@@ -21,7 +21,7 @@ const FOREVER: std::time::Duration = std::time::Duration::from_secs(ADVANCE.as_s
 /// Demonstrate the API and resident -> evicted -> resident -> deleted transitions.
 #[tokio::test]
 async fn smoke_test() {
-    let handle = BACKGROUND_RUNTIME.handle();
+    let handle = tokio::runtime::Handle::current();
 
     let h = TenantHarness::create("smoke_test").unwrap();
     let span = h.span();
@@ -88,7 +88,7 @@ async fn smoke_test() {
     //
     // ZERO for timeout does not work reliably, so first take up all spawn_blocking slots to
     // artificially slow it down.
-    let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
+    let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(&handle).await;
 
     match layer
         .evict_and_wait(std::time::Duration::ZERO)
@@ -99,7 +99,7 @@ async fn smoke_test() {
             // expected, but note that the eviction is "still ongoing"
             helper.release().await;
             // exhaust spawn_blocking pool to ensure it is now complete
-            SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle)
+            SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle)
                 .await;
         }
         other => unreachable!("{other:?}"),
@@ -174,7 +174,7 @@ async fn smoke_test() {
 #[tokio::test(start_paused = true)]
 async fn evict_and_wait_on_wanted_deleted() {
     // this is the runtime on which Layer spawns the blocking tasks on
-    let handle = BACKGROUND_RUNTIME.handle();
+    let handle = tokio::runtime::Handle::current();
 
     let h = TenantHarness::create("evict_and_wait_on_wanted_deleted").unwrap();
     utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
@@ -213,7 +213,7 @@ async fn evict_and_wait_on_wanted_deleted() {
         drop(resident);
 
         // make sure the eviction task gets to run
-        SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle).await;
+        SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle).await;
 
         let resident = layer.keep_resident().await;
         assert!(
@@ -235,7 +235,7 @@ async fn evict_and_wait_on_wanted_deleted() {
         layers.finish_gc_timeline(&[layer]);
     }
 
-    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle).await;
+    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle).await;
 
     assert_eq!(1, LAYER_IMPL_METRICS.started_deletes.get());
     assert_eq!(1, LAYER_IMPL_METRICS.completed_deletes.get());
