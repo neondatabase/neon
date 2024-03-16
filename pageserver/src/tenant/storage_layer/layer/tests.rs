@@ -1,7 +1,5 @@
-use futures::StreamExt;
 use pageserver_api::key::CONTROLFILE_KEY;
 use tokio::task::JoinSet;
-use tracing::Instrument;
 use utils::{
     completion::{self, Completion},
     id::TimelineId,
@@ -38,7 +36,7 @@ async fn smoke_test() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.resident_layers().collect::<Vec<_>>().await
+            layers.likely_resident_layers().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -108,7 +106,7 @@ async fn smoke_test() {
     // only way to query if a layer is resident is to acquire a ResidentLayer instance.
     // Layer::keep_resident never downloads, but it might initialize if the layer file is found
     // downloaded locally.
-    let none = layer.keep_resident().await.unwrap();
+    let none = layer.keep_resident().await;
     assert!(
         none.is_none(),
         "Expected none, because eviction removed the local file, found: {none:?}"
@@ -188,7 +186,7 @@ async fn evict_and_wait_on_wanted_deleted() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.resident_layers().collect::<Vec<_>>().await
+            layers.likely_resident_layers().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -217,7 +215,7 @@ async fn evict_and_wait_on_wanted_deleted() {
 
         let resident = layer.keep_resident().await;
         assert!(
-            matches!(resident, Ok(None)),
+            resident.is_none(),
             "keep_resident should not have re-initialized: {resident:?}"
         );
 
@@ -270,7 +268,7 @@ fn read_wins_pending_eviction() {
         let layer = {
             let mut layers = {
                 let layers = timeline.layers.read().await;
-                layers.resident_layers().collect::<Vec<_>>().await
+                layers.likely_resident_layers().collect::<Vec<_>>()
             };
 
             assert_eq!(layers.len(), 1);
@@ -403,7 +401,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         let layer = {
             let mut layers = {
                 let layers = timeline.layers.read().await;
-                layers.resident_layers().collect::<Vec<_>>().await
+                layers.likely_resident_layers().collect::<Vec<_>>()
             };
 
             assert_eq!(layers.len(), 1);
@@ -571,7 +569,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.resident_layers().collect::<Vec<_>>().await
+            layers.likely_resident_layers().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);

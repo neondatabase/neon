@@ -2,7 +2,6 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
-use futures::stream::StreamExt;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::ShardParameters;
@@ -1662,9 +1661,9 @@ impl TenantManager {
                     .layers
                     .read()
                     .await
-                    .resident_layers()
-                    .collect::<Vec<_>>()
-                    .await;
+                    .likely_resident_layers()
+                    .collect::<Vec<_>>();
+
                 for layer in timeline_layers {
                     let relative_path = layer
                         .local_path()

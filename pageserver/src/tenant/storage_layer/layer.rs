@@ -214,8 +214,7 @@ impl Layer {
     ///
     /// Timeout is mandatory, because waiting for eviction is only needed for our tests; eviction
     /// will happen regardless the future returned by this method completing unless there is a
-    /// read access (currently including [`Layer::keep_resident`]) before eviction gets to
-    /// complete.
+    /// read access before eviction gets to complete.
     ///
     /// Technically cancellation safe, but cancelling might shift the viewpoint of what generation
     /// of download-evict cycle on retry.
@@ -311,22 +310,18 @@ impl Layer {
     /// while the guard exists.
     ///
     /// Returns None if the layer is currently evicted or becoming evicted.
-    // FIXME: get rid of the error at last
-    pub(crate) async fn keep_resident(&self) -> anyhow::Result<Option<ResidentLayer>> {
-        let Some(downloaded) = self.0.inner.get().and_then(|rowe| rowe.get()) else {
-            return Ok(None);
-        };
+    #[cfg(test)]
+    pub(crate) async fn keep_resident(&self) -> Option<ResidentLayer> {
+        let downloaded = self.0.inner.get().and_then(|rowe| rowe.get())?;
 
-        Ok(Some(ResidentLayer {
+        Some(ResidentLayer {
             downloaded,
             owner: self.clone(),
-        }))
+        })
     }
 
     /// Weak indicator of is the layer resident or not. Good enough for eviction, which can deal
     /// with `EvictionError::NotFound`.
-    ///
-    /// Compared to [`Layer::keep_resident`] this method avoids acquiring new strong references.
     ///
     /// Returns `true` if this layer might be resident, or `false`, if it most likely evicted or
     /// will be unless a read happens soon.
@@ -416,6 +411,7 @@ impl ResidentOrWantedEvicted {
     /// This is not used on the read path (anything that calls
     /// [`LayerInner::get_or_maybe_download`]) because it was decided that reads always win
     /// evictions, and part of that winning is using [`ResidentOrWantedEvicted::get_and_upgrade`].
+    #[cfg(test)]
     fn get(&self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
@@ -424,7 +420,7 @@ impl ResidentOrWantedEvicted {
     }
 
     /// Best-effort query for residency right now, not as strong guarantee as receiving a strong
-    /// reference from [`ResidentOrWantedEvicted::get`].
+    /// reference from `ResidentOrWantedEvicted::get`.
     fn is_likely_resident(&self) -> bool {
         match self {
             ResidentOrWantedEvicted::Resident(_) => true,

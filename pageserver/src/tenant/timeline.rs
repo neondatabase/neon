@@ -13,7 +13,6 @@ use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
 use fail::fail_point;
-use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::AUX_FILES_KEY,
@@ -2442,7 +2441,7 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
-        let resident = guard.resident_layers().map(|layer| {
+        let resident = guard.likely_resident_layers().map(|layer| {
             let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
             HeatMapLayer::new(
@@ -2452,7 +2451,7 @@ impl Timeline {
             )
         });
 
-        let layers = resident.collect().await;
+        let layers = resident.collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
@@ -4302,7 +4301,7 @@ impl Timeline {
         let mut max_layer_size: Option<u64> = None;
 
         let resident_layers = guard
-            .resident_layers()
+            .likely_resident_layers()
             .map(|layer| {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
@@ -4315,8 +4314,7 @@ impl Timeline {
                     relative_last_activity: finite_f32::FiniteF32::ZERO,
                 }
             })
-            .collect()
-            .await;
+            .collect();
 
         DiskUsageEvictionInfo {
             max_layer_size,
@@ -4713,7 +4711,6 @@ mod tests {
             .keep_resident()
             .await
             .expect("no download => no downloading errors")
-            .expect("should had been resident")
             .drop_eviction_guard();
 
         let forever = std::time::Duration::from_secs(120);
@@ -4724,7 +4721,7 @@ mod tests {
         let (first, second) = tokio::join!(first, second);
 
         let res = layer.keep_resident().await;
-        assert!(matches!(res, Ok(None)), "{res:?}");
+        assert!(res.is_none(), "{res:?}");
 
         match (first, second) {
             (Ok(()), Ok(())) => {
