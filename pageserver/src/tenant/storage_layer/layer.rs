@@ -1366,6 +1366,30 @@ impl LayerInner {
     fn metadata(&self) -> LayerFileMetadata {
         LayerFileMetadata::new(self.desc.file_size, self.generation, self.shard)
     }
+
+    /// Needed to use entered runtime in tests, but otherwise use BACKGROUND_RUNTIME.
+    ///
+    /// Synchronizing with spawned tasks is very complicated otherwise.
+    fn spawn<F>(fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        #[cfg(test)]
+        tokio::task::spawn(fut);
+        #[cfg(not(test))]
+        crate::task_mgr::BACKGROUND_RUNTIME.spawn(fut);
+    }
+
+    /// Needed to use entered runtime in tests, but otherwise use BACKGROUND_RUNTIME.
+    fn spawn_blocking<F>(f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        #[cfg(test)]
+        tokio::task::spawn_blocking(f);
+        #[cfg(not(test))]
+        crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(f);
+    }
 }
 
 fn capture_mtime_and_remove(path: &Utf8Path) -> Result<SystemTime, std::io::Error> {
