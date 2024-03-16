@@ -377,7 +377,7 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 /// disk but the layer internal state says it has not been initialized.
 #[tokio::test(start_paused = true)]
 async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
-    let handle = BACKGROUND_RUNTIME.handle();
+    let handle = tokio::runtime::Handle::current();
     let h =
         TenantHarness::create("cancelled_get_or_maybe_download_does_not_cancel_eviction").unwrap();
     let (tenant, ctx) = h.load().await;
@@ -398,22 +398,27 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         layers.swap_remove(0)
     };
 
-    let helper = SpawnBlockingPoolHelper::consume_all_spawn_blocking_threads(handle).await;
-
     layer
         .0
         .enable_failpoint(failpoints::Failpoint::AfterDeterminingLayerNeedsNoDownload);
 
     let (completion, barrier) = utils::completion::channel();
+    let (arrival, arrived_at_barrier) = utils::completion::channel();
 
     layer
         .0
-        .enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(barrier));
+        .enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(
+            Some(arrival),
+            barrier,
+        ));
 
     tokio::time::timeout(ADVANCE, layer.evict_and_wait(FOREVER))
         .await
         .expect_err("should had advanced to waiting on channel");
 
+    arrived_at_barrier.wait().await;
+
+    // simulate a cancelled read which is cancelled before it gets to re-initialize
     let e = layer
         .0
         .get_or_maybe_download(false, None)
@@ -430,16 +435,18 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     );
 
     assert!(
-        // cannot use tokio::fs version while spawn_blocking is clogged
-        layer.0.needs_download_blocking().unwrap().is_none(),
+        layer.0.needs_download().await.unwrap().is_none(),
         "file is still on disk"
     );
 
+    // release the eviction task
     drop(completion);
 
-    helper.release().await;
+    // run pending tasks to completion, namely, to spawn blocking the eviction
+    tokio::time::sleep(ADVANCE).await;
 
-    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(handle).await;
+    // synchronize with the spawn_blocking from eviction
+    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle).await;
 
     // failpoint is still enabled, but it is not hit
     let e = layer

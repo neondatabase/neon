@@ -41,8 +41,11 @@ pub(crate) enum FailpointKind {
 pub(crate) enum Failpoint {
     /// Failpoint acts as an accurate cancelled by drop here; see the only site of use.
     AfterDeterminingLayerNeedsNoDownload,
-    /// Failpoint for stalling eviction starting
-    WaitBeforeStartingEvicting(utils::completion::Barrier),
+    /// Failpoint for stalling eviction starting.
+    WaitBeforeStartingEvicting(
+        Option<utils::completion::Completion>,
+        utils::completion::Barrier,
+    ),
 }
 
 impl Failpoint {
@@ -51,7 +54,7 @@ impl Failpoint {
             Failpoint::AfterDeterminingLayerNeedsNoDownload => {
                 FailpointKind::AfterDeterminingLayerNeedsNoDownload
             }
-            Failpoint::WaitBeforeStartingEvicting(_) => FailpointKind::WaitBeforeStartingEvicting,
+            Failpoint::WaitBeforeStartingEvicting(..) => FailpointKind::WaitBeforeStartingEvicting,
         }
     }
 
@@ -65,7 +68,10 @@ impl Failpoint {
 
                 async move { Err(FailpointHit(kind)) }.boxed()
             }
-            Failpoint::WaitBeforeStartingEvicting(b) => {
+            Failpoint::WaitBeforeStartingEvicting(arrival, b) => {
+                // first one signals arrival
+                drop(arrival.take());
+
                 let b = b.clone();
 
                 async move {
