@@ -852,15 +852,19 @@ impl LayerInner {
         let needs_download = needs_download?;
 
         let Some(reason) = needs_download else {
+            // the file is present locally because eviction has not had a chance to run yet
+
             #[cfg(test)]
             self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload)
                 .await?;
 
-            // the file is present locally because eviction has not had a chance to run yet
             LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
             return Ok(self.initialize_after_layer_is_on_disk(permit));
         };
+
+        // we must download; getting cancelled before spawning the download is not an issue as
+        // any still running eviction would not find anything to evict.
 
         if let NeedsDownload::NotFile(ft) = reason {
             return Err(DownloadError::NotFile(ft));
@@ -875,8 +879,7 @@ impl LayerInner {
         }
 
         if !allow_download {
-            // this does look weird, but for LayerInner the "downloading" means also changing
-            // internal once related state ...
+            // this is only used from tests, but it is hard to test without the boolean
             return Err(DownloadError::DownloadRequired);
         }
 
