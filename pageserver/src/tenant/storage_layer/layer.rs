@@ -766,17 +766,11 @@ impl LayerInner {
             .await
             .map_err(DownloadError::PreStatFailed);
 
-        let needs_download = match needs_download {
-            Ok(reason) => reason,
-            Err(e) => {
-                scopeguard::ScopeGuard::into_inner(init_cancelled);
-                return Err(e);
-            }
-        };
+        scopeguard::ScopeGuard::into_inner(init_cancelled);
+
+        let needs_download = needs_download?;
 
         let Some(reason) = needs_download else {
-            scopeguard::ScopeGuard::into_inner(init_cancelled);
-
             // the file is present locally, probably by a previous but cancelled call to
             // get_or_maybe_download. alternatively we might be running without remote storage.
             LAYER_IMPL_METRICS.inc_init_needed_no_download();
@@ -786,33 +780,27 @@ impl LayerInner {
         };
 
         if let NeedsDownload::NotFile(ft) = reason {
-            scopeguard::ScopeGuard::into_inner(init_cancelled);
             return Err(DownloadError::NotFile(ft));
         }
 
         if timeline.remote_client.as_ref().is_none() {
-            scopeguard::ScopeGuard::into_inner(init_cancelled);
             return Err(DownloadError::NoRemoteStorage);
         }
 
         if let Some(ctx) = ctx {
-            let res = self.check_expected_download(ctx);
-            if let Err(e) = res {
-                scopeguard::ScopeGuard::into_inner(init_cancelled);
-                return Err(e);
-            }
+            self.check_expected_download(ctx)?;
         }
 
         if !allow_download {
             // this does look weird, but for LayerInner the "downloading" means also changing
             // internal once related state ...
-            scopeguard::ScopeGuard::into_inner(init_cancelled);
             return Err(DownloadError::DownloadRequired);
         }
 
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
+            let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
             let res = self.download_init_and_wait(timeline, permit).await?;
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)
