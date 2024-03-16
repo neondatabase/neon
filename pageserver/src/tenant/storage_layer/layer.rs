@@ -1244,6 +1244,8 @@ impl LayerInner {
 
             let res = self.evict_blocking(&timeline, permit);
 
+            tracing::debug!(?res, "eviction completed");
+
             match res {
                 Ok(()) => LAYER_IMPL_METRICS.inc_completed_evictions(),
                 Err(e) => LAYER_IMPL_METRICS.inc_eviction_cancelled(e),
