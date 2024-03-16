@@ -764,7 +764,8 @@ impl LayerInner {
 
         match &*current {
             Status::Evicted => Ok(()),
-            // it surely was evicted in between, but then there was a new access
+            // it surely was evicted in between, but then there was a new access now; we can't know
+            // if it'll succeed so lets just call it evicted
             Status::Downloading => Ok(()),
             // either the download which was started after eviction completed already, or it was
             // never evicted
