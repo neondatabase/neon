@@ -1187,18 +1187,18 @@ impl<'a> DatadirModification<'a> {
         origin_lsn: Lsn,
     ) -> anyhow::Result<()> {
         let mut repl_origins = self.tline.repl_origins.lock().await;
-        let origins = repl_origins.get_or_insert_with(|| ReplOrigins::default());
+        let origins = repl_origins.get_or_insert_with(ReplOrigins::default);
         origins.map.insert(origin_id, origin_lsn);
-        let buf = ReplOrigins::ser(&origins)?;
+        let buf = ReplOrigins::ser(origins)?;
         self.put(REPL_ORIGIN_KEY, Value::Image(Bytes::from(buf)));
         Ok(())
     }
 
     pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> anyhow::Result<()> {
         let mut repl_origins = self.tline.repl_origins.lock().await;
-        let origins = repl_origins.get_or_insert_with(|| ReplOrigins::default());
+        let origins = repl_origins.get_or_insert_with(ReplOrigins::default);
         origins.map.remove(&origin_id);
-        let buf = ReplOrigins::ser(&origins)?;
+        let buf = ReplOrigins::ser(origins)?;
         self.put(REPL_ORIGIN_KEY, Value::Image(Bytes::from(buf)));
         Ok(())
     }
