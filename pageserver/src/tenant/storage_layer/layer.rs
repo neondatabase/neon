@@ -808,7 +808,7 @@ impl LayerInner {
                     return Ok(strong);
                 }
                 Ok(Err(guard)) => {
-                    // path to here: the evict_blocking is stuck on spawn_blocking queue.
+                    // path to here: we won the eviction, the file should still be on the disk.
                     //
                     // reset the contents, deactivating the eviction and causing a
                     // EvictionCancelled::LostToDownload or EvictionCancelled::VersionCheckFailed.
