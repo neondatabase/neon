@@ -693,6 +693,7 @@ impl LayerInner {
 
     /// Cancellation safe, however dropping the future and calling this method again might result
     /// in a new attempt to evict OR join the previously started attempt.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, ret, err(level = tracing::Level::DEBUG), fields(layer=%self))]
     pub(crate) async fn evict_and_wait(&self, timeout: Duration) -> Result<(), EvictionError> {
         assert!(self.have_remote_client);
 
