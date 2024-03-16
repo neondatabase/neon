@@ -1009,7 +1009,7 @@ impl LayerInner {
 
         let waiters = self.inner.initializer_count();
         if waiters > 0 {
-            tracing::info!(waiters, "completing the on-demand download for other tasks");
+            tracing::info!(waiters, "completing layer init for other tasks");
         }
 
         let value = ResidentOrWantedEvicted::Resident(res.clone());
