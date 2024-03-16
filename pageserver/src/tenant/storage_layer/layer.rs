@@ -521,7 +521,10 @@ struct LayerInner {
     /// The sender is wrapped in an Option to facilitate moving it out on [`LayerInner::drop`].
     status: Option<tokio::sync::watch::Sender<Status>>,
 
-    /// Counter for exponential backoff with the download
+    /// Counter for exponential backoff with the download.
+    ///
+    /// This is atomic only for the purposes of having additional data only accessed while holding
+    /// the InitPermit.
     consecutive_failures: AtomicUsize,
 
     /// The generation of this Layer.
