@@ -1333,6 +1333,7 @@ impl LayerInner {
         Ok(())
     }
 
+    /// This is blocking only to do just one spawn_blocking hop compared to multiple via tokio::fs.
     fn evict_blocking(
         &self,
         timeline: &Timeline,
