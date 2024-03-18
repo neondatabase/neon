@@ -81,10 +81,12 @@ impl PartialBackup {
         XLogFileName(PG_TLI, segno, self.wal_seg_size)
     }
 
-    fn remote_segment_name(&self, segno: u64, flush_lsn: Lsn) -> String {
+    fn remote_segment_name(&self, segno: u64, term: u64, commit_lsn: Lsn, flush_lsn: Lsn) -> String {
         format!(
-            "{}_{:016X}_sk{}.partial",
+            "{}_{}_{:016X}_{:016X}_sk{}.partial",
             self.segment_name(segno),
+            term,
+            commit_lsn.0,
             flush_lsn.0,
             self.conf.my_id.0,
         )
@@ -104,7 +106,7 @@ impl PartialBackup {
         let term = sk_info.term;
         let segno = self.segno(flush_lsn);
 
-        let name = self.remote_segment_name(segno, flush_lsn);
+        let name = self.remote_segment_name(segno, term, commit_lsn, flush_lsn);
 
         PartialRemoteSegment {
             status: UploadStatus::InProgress,
