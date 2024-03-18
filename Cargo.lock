@@ -277,6 +277,7 @@ dependencies = [
  "anyhow",
  "aws-config",
  "aws-sdk-secretsmanager",
+ "bytes",
  "camino",
  "clap",
  "control_plane",
@@ -288,6 +289,7 @@ dependencies = [
  "hex",
  "humantime",
  "hyper",
+ "measured",
  "metrics",
  "once_cell",
  "pageserver_api",
@@ -2879,6 +2881,34 @@ name = "md5"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
+
+[[package]]
+name = "measured"
+version = "0.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f246648d027839a34b420e27c7de1165ace96e19ef894985d0a6ff89a7840a9f"
+dependencies = [
+ "bytes",
+ "hashbrown 0.14.0",
+ "itoa",
+ "measured-derive",
+ "memchr",
+ "parking_lot 0.12.1",
+ "rustc-hash",
+ "ryu",
+]
+
+[[package]]
+name = "measured-derive"
+version = "0.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edaa5cc22d99d5d6d7d99c3b5b5f7e7f8034c22f1b5d62a1adecd2ed005d9b80"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.52",
+]
 
 [[package]]
 name = "memchr"

@@ -1,5 +1,6 @@
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
@@ -14,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use utils::auth::{Scope, SwappableJwtAuth};
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::{
-    auth_middleware, check_permission_with, prometheus_metrics_handler, request_span,
+    auth_middleware, check_permission_with, request_span,
 };
 use utils::http::request::{must_get_query_param, parse_query_param, parse_request_param};
 use utils::id::{TenantId, TimelineId};
@@ -533,6 +534,18 @@ fn check_permissions(request: &Request<Body>, required_scope: Scope) -> Result<(
     })
 }
 
+pub async fn measured_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    pub const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
+
+    let payload = crate::metrics::METRICS_REGISTRY.encode();
+    let response = Response::builder()
+        .status(200)
+        .header(CONTENT_TYPE, TEXT_FORMAT)
+        .body(payload.into())
+        .unwrap();
+
+    Ok(response)
+}
 pub fn make_router(
     service: Arc<Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
@@ -551,7 +564,7 @@ pub fn make_router(
 
     router
         .data(Arc::new(HttpState::new(service, auth)))
-        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/metrics", |r| request_span(r, measured_metrics_handler))
         // Non-prefixed generic endpoints (status, metrics)
         .get("/status", |r| request_span(r, handle_status))
         .get("/ready", |r| request_span(r, handle_ready))
