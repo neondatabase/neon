@@ -1492,7 +1492,7 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 		{
 			Assert(value_len == sizeof(int64));
 			ps_feedback->currentClusterSize = pq_getmsgint64(reply_message);
-			psfeedback_log("%lu", key, ps_feedback->currentClusterSize);
+			psfeedback_log(UINT64_FORMAT, key, ps_feedback->currentClusterSize);
 		}
 		else if ((strcmp(key, "ps_writelsn") == 0) || (strcmp(key, "last_received_lsn") == 0))
 		{
@@ -1516,15 +1516,7 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 		{
 			Assert(value_len == sizeof(int64));
 			ps_feedback->replytime = pq_getmsgint64(reply_message);
-			{
-				char	   *replyTimeStr;
-
-				/* Copy because timestamptz_to_str returns a static buffer */
-				replyTimeStr = pstrdup(timestamptz_to_str(ps_feedback->replytime));
-				psfeedback_log("%s", key, replyTimeStr);
-
-				pfree(replyTimeStr);
-			}
+			psfeedback_log("%s", key, timestamptz_to_str(ps_feedback->replytime));
 		}
 		else if (strcmp(key, "shard_number") == 0)
 		{
@@ -1815,7 +1807,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 				msg->hs.ts = pq_getmsgint64_le(&s);
 				msg->hs.xmin.value = pq_getmsgint64_le(&s);
 				msg->hs.catalog_xmin.value = pq_getmsgint64_le(&s);
-				if (buf_size > APPENDRESPONSE_FIXEDPART_SIZE)
+				if (s.len > s.cursor)
 					ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
 				else
 					msg->ps_feedback.present = false;
