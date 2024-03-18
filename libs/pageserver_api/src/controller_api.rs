@@ -6,7 +6,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use utils::id::NodeId;
 
-use crate::{models::ShardParameters, shard::TenantShardId};
+use crate::{
+    models::{ShardParameters, TenantConfig},
+    shard::{ShardStripeSize, TenantShardId},
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantCreateResponseShard {
@@ -55,6 +58,31 @@ pub struct TenantLocateResponseShard {
 pub struct TenantLocateResponse {
     pub shards: Vec<TenantLocateResponseShard>,
     pub shard_params: ShardParameters,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantDescribeResponse {
+    pub shards: Vec<TenantDescribeResponseShard>,
+    pub stripe_size: ShardStripeSize,
+    pub policy: PlacementPolicy,
+    pub config: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantDescribeResponseShard {
+    pub tenant_shard_id: TenantShardId,
+
+    pub node_attached: Option<NodeId>,
+    pub node_secondary: Vec<NodeId>,
+
+    pub last_error: String,
+
+    /// A task is currently running to reconcile this tenant's intent state with the state on pageservers
+    pub is_reconciling: bool,
+    /// This shard failed in sending a compute notification to the cloud control plane, and a retry is pending.
+    pub is_pending_compute_notification: bool,
+    /// A shard split is currently underway
+    pub is_splitting: bool,
 }
 
 /// Explicitly migrating a particular shard is a low level operation

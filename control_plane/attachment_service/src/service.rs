@@ -20,8 +20,9 @@ use hyper::StatusCode;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
-        TenantShardMigrateRequest, TenantShardMigrateResponse, UtilizationScore,
+        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
+        TenantDescribeResponseShard, TenantLocateResponse, TenantShardMigrateRequest,
+        TenantShardMigrateResponse, UtilizationScore,
     },
     models::{SecondaryProgress, TenantConfigRequest},
 };
@@ -2564,9 +2565,6 @@ impl Service {
         let locked = self.inner.read().unwrap();
         tracing::info!("Locating shards for tenant {tenant_id}");
 
-        // Take a snapshot of pageservers
-        let pageservers = locked.nodes.clone();
-
         let mut result = Vec::new();
         let mut shard_params: Option<ShardParameters> = None;
 
@@ -2580,7 +2578,8 @@ impl Service {
                         "Cannot locate a tenant that is not attached"
                     )))?;
 
-            let node = pageservers
+            let node = locked
+                .nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while referenced");
 
@@ -2625,6 +2624,47 @@ impl Service {
         Ok(TenantLocateResponse {
             shards: result,
             shard_params,
+        })
+    }
+
+    pub(crate) fn tenant_describe(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantDescribeResponse, ApiError> {
+        let locked = self.inner.read().unwrap();
+
+        let mut shard_zero = None;
+        let mut shards = Vec::new();
+
+        for (tenant_shard_id, shard) in locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+        {
+            if tenant_shard_id.is_zero() {
+                shard_zero = Some(shard);
+            }
+
+            let response_shard = TenantDescribeResponseShard {
+                tenant_shard_id: *tenant_shard_id,
+                node_attached: *shard.intent.get_attached(),
+                node_secondary: shard.intent.get_secondary().to_vec(),
+                last_error: shard.last_error.lock().unwrap().clone(),
+                is_reconciling: shard.reconciler.is_some(),
+                is_pending_compute_notification: shard.pending_compute_notification,
+                is_splitting: matches!(shard.splitting, SplitState::Splitting),
+            };
+            shards.push(response_shard);
+        }
+
+        let Some(shard_zero) = shard_zero else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+            ));
+        };
+
+        Ok(TenantDescribeResponse {
+            shards,
+            stripe_size: shard_zero.shard.stripe_size,
+            policy: shard_zero.policy.clone(),
+            config: shard_zero.config.clone(),
         })
     }
 

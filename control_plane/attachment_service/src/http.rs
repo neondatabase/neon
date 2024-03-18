@@ -353,6 +353,16 @@ async fn handle_tenant_locate(
     json_response(StatusCode::OK, service.tenant_locate(tenant_id)?)
 }
 
+async fn handle_tenant_describe(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
+}
+
 async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -585,6 +595,9 @@ pub fn make_router(
         })
         .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
             tenant_service_handler(r, handle_tenant_shard_split)
+        })
+        .get("/control/v1/tenant/:tenant_id", |r| {
+            tenant_service_handler(r, handle_tenant_describe)
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into

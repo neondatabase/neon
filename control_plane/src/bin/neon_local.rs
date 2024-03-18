@@ -586,9 +586,8 @@ async fn handle_tenant(
             let tenant_id = get_tenant_id(matches, env)?;
             let shard_count: u8 = matches.get_one::<u8>("shard-count").cloned().unwrap_or(0);
             let shard_stripe_size: Option<ShardStripeSize> = matches
-                .get_one::<Option<ShardStripeSize>>("shard-stripe-size")
-                .cloned()
-                .unwrap();
+                .get_one::<ShardStripeSize>("shard-stripe-size")
+                .cloned();
 
             let storage_controller = StorageController::from_env(env);
             let result = storage_controller
