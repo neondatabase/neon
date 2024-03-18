@@ -2849,7 +2849,7 @@ impl Service {
                 .map(|(shard_id, _)| *shard_id)
                 .collect::<Vec<_>>();
 
-            let (_nodes, tenants, scheduler) = locked.parts_mut();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
@@ -2916,6 +2916,8 @@ impl Service {
                         // find a secondary (e.g. because cluster is overloaded).
                         tracing::warn!("Failed to schedule child shard {child}: {e}");
                     }
+                    // In the background, attach secondary locations for the new shards
+                    self.maybe_reconcile_shard(&mut child_state, nodes);
 
                     tenants.insert(child, child_state);
                     response.new_shards.push(child);
