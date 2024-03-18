@@ -1405,8 +1405,6 @@ static bool
 RecvAppendResponses(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
-	XLogRecPtr	newCommitLsn;
-	bool		commitLsnUpdated = false;
 	bool		readAnything = false;
 
 	while (true)
