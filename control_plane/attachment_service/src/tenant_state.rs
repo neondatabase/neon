@@ -7,6 +7,7 @@ use std::{
 use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
+    scheduler::ScheduleContext,
 };
 use pageserver_api::controller_api::{PlacementPolicy, ShardSchedulingPolicy};
 use pageserver_api::{
@@ -430,6 +431,7 @@ impl TenantState {
     fn schedule_attached(
         &mut self,
         scheduler: &mut Scheduler,
+        context: &ScheduleContext,
     ) -> Result<(bool, NodeId), ScheduleError> {
         // No work to do if we already have an attached tenant
         if let Some(node_id) = self.intent.attached {
@@ -443,14 +445,29 @@ impl TenantState {
             Ok((true, promote_secondary))
         } else {
             // Pick a fresh node: either we had no secondaries or none were schedulable
-            let node_id = scheduler.schedule_shard(&self.intent.secondary)?;
+            let node_id = scheduler.schedule_shard(&self.intent.secondary, context)?;
             tracing::debug!("Selected {} as attached", node_id);
             self.intent.set_attached(scheduler, Some(node_id));
             Ok((true, node_id))
         }
     }
 
-    pub(crate) fn schedule(&mut self, scheduler: &mut Scheduler) -> Result<(), ScheduleError> {
+    pub(crate) fn schedule(
+        &mut self,
+        scheduler: &mut Scheduler,
+        context: &mut ScheduleContext,
+    ) -> Result<(), ScheduleError> {
+        let r = self.do_schedule(scheduler, context);
+        context.avoid(&self.intent.all_pageservers());
+
+        r
+    }
+
+    pub(crate) fn do_schedule(
+        &mut self,
+        scheduler: &mut Scheduler,
+        context: &ScheduleContext,
+    ) -> Result<(), ScheduleError> {
         // TODO: before scheduling new nodes, check if any existing content in
         // self.intent refers to pageservers that are offline, and pick other
         // pageservers if so.
@@ -494,12 +511,13 @@ impl TenantState {
                 }
 
                 // Should have exactly one attached, and N secondaries
-                let (modified_attached, attached_node_id) = self.schedule_attached(scheduler)?;
+                let (modified_attached, attached_node_id) =
+                    self.schedule_attached(scheduler, context)?;
                 modified |= modified_attached;
 
                 let mut used_pageservers = vec![attached_node_id];
                 while self.intent.secondary.len() < secondary_count {
-                    let node_id = scheduler.schedule_shard(&used_pageservers)?;
+                    let node_id = scheduler.schedule_shard(&used_pageservers, context)?;
                     self.intent.push_secondary(scheduler, node_id);
                     used_pageservers.push(node_id);
                     modified = true;
@@ -512,7 +530,7 @@ impl TenantState {
                     modified = true;
                 } else if self.intent.secondary.is_empty() {
                     // Populate secondary by scheduling a fresh node
-                    let node_id = scheduler.schedule_shard(&[])?;
+                    let node_id = scheduler.schedule_shard(&[], context)?;
                     self.intent.push_secondary(scheduler, node_id);
                     modified = true;
                 }
@@ -962,10 +980,11 @@ pub(crate) mod tests {
         let mut nodes = make_test_nodes(3);
 
         let mut scheduler = Scheduler::new(nodes.values());
+        let mut context = ScheduleContext::default();
 
         let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
         tenant_state
-            .schedule(&mut scheduler)
+            .schedule(&mut scheduler, &mut context)
             .expect("we have enough nodes, scheduling should work");
 
         // Expect to initially be schedule on to different nodes
@@ -991,7 +1010,7 @@ pub(crate) mod tests {
 
         // Scheduling the node should promote the still-available secondary node to attached
         tenant_state
-            .schedule(&mut scheduler)
+            .schedule(&mut scheduler, &mut context)
             .expect("active nodes are available");
         assert_eq!(tenant_state.intent.attached.unwrap(), secondary_node_id);
 
@@ -1065,12 +1084,16 @@ pub(crate) mod tests {
 
         // In pause mode, schedule() shouldn't do anything
         tenant_state.scheduling_policy = ShardSchedulingPolicy::Pause;
-        assert!(tenant_state.schedule(&mut scheduler).is_ok());
+        assert!(tenant_state
+            .schedule(&mut scheduler, &mut ScheduleContext::default())
+            .is_ok());
         assert!(tenant_state.intent.all_pageservers().is_empty());
 
         // In active mode, schedule() works
         tenant_state.scheduling_policy = ShardSchedulingPolicy::Active;
-        assert!(tenant_state.schedule(&mut scheduler).is_ok());
+        assert!(tenant_state
+            .schedule(&mut scheduler, &mut ScheduleContext::default())
+            .is_ok());
         assert!(!tenant_state.intent.all_pageservers().is_empty());
 
         tenant_state.intent.clear(&mut scheduler);

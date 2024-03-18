@@ -11,6 +11,7 @@ use crate::{
     id_lock_map::IdLockMap,
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::ReconcileError,
+    scheduler::ScheduleContext,
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -345,9 +346,15 @@ impl Service {
             }
 
             // Populate each tenant's intent state
+            let mut schedule_context = ScheduleContext::default();
             for (tenant_shard_id, tenant_state) in tenants.iter_mut() {
+                if tenant_shard_id.shard_number == ShardNumber(0) {
+                    // Reset scheduling context each time we advance to the next Tenant
+                    schedule_context = ScheduleContext::default();
+                }
+
                 tenant_state.intent_from_observed(scheduler);
-                if let Err(e) = tenant_state.schedule(scheduler) {
+                if let Err(e) = tenant_state.schedule(scheduler, &mut schedule_context) {
                     // Non-fatal error: we are unable to properly schedule the tenant, perhaps because
                     // not enough pageservers are available.  The tenant may well still be available
                     // to clients.
@@ -1627,6 +1634,8 @@ impl Service {
             Err(e) => return Err(ApiError::InternalServerError(anyhow::anyhow!(e))),
         };
 
+        let mut schedule_context = ScheduleContext::default();
+
         let (waiters, response_shards) = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
@@ -1648,11 +1657,14 @@ impl Service {
                         // attached and secondary locations (independently) away frorm those
                         // pageservers also holding a shard for this tenant.
 
-                        entry.get_mut().schedule(scheduler).map_err(|e| {
-                            ApiError::Conflict(format!(
-                                "Failed to schedule shard {tenant_shard_id}: {e}"
-                            ))
-                        })?;
+                        entry
+                            .get_mut()
+                            .schedule(scheduler, &mut schedule_context)
+                            .map_err(|e| {
+                                ApiError::Conflict(format!(
+                                    "Failed to schedule shard {tenant_shard_id}: {e}"
+                                ))
+                            })?;
 
                         if let Some(node_id) = entry.get().intent.get_attached() {
                             let generation = entry
@@ -1680,7 +1692,7 @@ impl Service {
 
                         state.generation = initial_generation;
                         state.config = create_req.config.clone();
-                        if let Err(e) = state.schedule(scheduler) {
+                        if let Err(e) = state.schedule(scheduler, &mut schedule_context) {
                             schcedule_error = Some(e);
                         }
 
@@ -1888,6 +1900,7 @@ impl Service {
                 // Persist updates
                 // Ordering: write to the database before applying changes in-memory, so that
                 // we will not appear time-travel backwards on a restart.
+                let mut schedule_context = ScheduleContext::default();
                 for ShardUpdate {
                     tenant_shard_id,
                     placement_policy,
@@ -1935,7 +1948,7 @@ impl Service {
                             shard.generation = Some(generation);
                         }
 
-                        shard.schedule(scheduler)?;
+                        shard.schedule(scheduler, &mut schedule_context)?;
 
                         let maybe_waiter = self.maybe_reconcile_shard(shard, nodes);
                         if let Some(waiter) = maybe_waiter {
@@ -2095,7 +2108,7 @@ impl Service {
             let scheduler = &locked.scheduler;
             // Right now we only perform the operation on a single node without parallelization
             // TODO fan out the operation to multiple nodes for better performance
-            let node_id = scheduler.schedule_shard(&[])?;
+            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
             let node = locked
                 .nodes
                 .get(&node_id)
@@ -2364,6 +2377,7 @@ impl Service {
             )
             .await?;
 
+        let mut schedule_context = ScheduleContext::default();
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, scheduler) = locked.parts_mut();
         for (shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
@@ -2382,7 +2396,7 @@ impl Service {
             }
 
             // In case scheduling is being switched back on, try it now.
-            shard.schedule(scheduler).ok();
+            shard.schedule(scheduler, &mut schedule_context).ok();
             self.maybe_reconcile_shard(shard, nodes);
         }
 
@@ -2846,7 +2860,7 @@ impl Service {
 
                 tracing::info!("Restoring parent shard {tenant_shard_id}");
                 shard.splitting = SplitState::Idle;
-                if let Err(e) = shard.schedule(scheduler) {
+                if let Err(e) = shard.schedule(scheduler, &mut ScheduleContext::default()) {
                     // If this shard can't be scheduled now (perhaps due to offline nodes or
                     // capacity issues), that must not prevent us rolling back a split.  In this
                     // case it should be eventually scheduled in the background.
@@ -2970,6 +2984,7 @@ impl Service {
                     )
                 };
 
+                let mut schedule_context = ScheduleContext::default();
                 for child in child_ids {
                     let mut child_shard = parent_ident;
                     child_shard.number = child.shard_number;
@@ -3005,7 +3020,7 @@ impl Service {
 
                     child_locations.push((child, pageserver, child_shard.stripe_size));
 
-                    if let Err(e) = child_state.schedule(scheduler) {
+                    if let Err(e) = child_state.schedule(scheduler, &mut schedule_context) {
                         // This is not fatal, because we've implicitly already got an attached
                         // location for the child shard.  Failure here just means we couldn't
                         // find a secondary (e.g. because cluster is overloaded).
@@ -3869,6 +3884,7 @@ impl Service {
             AvailabilityTransition::ToOffline => {
                 tracing::info!("Node {} transition to offline", node_id);
                 let mut tenants_affected: usize = 0;
+
                 for (tenant_shard_id, tenant_state) in tenants {
                     if let Some(observed_loc) = tenant_state.observed.locations.get_mut(&node_id) {
                         // When a node goes offline, we set its observed configuration to None, indicating unknown: we will
@@ -3885,7 +3901,13 @@ impl Service {
 
                     if tenant_state.intent.demote_attached(node_id) {
                         tenant_state.sequence = tenant_state.sequence.next();
-                        match tenant_state.schedule(scheduler) {
+
+                        // TODO: populate a ScheduleContext including all shards in the same tenant_id (only matters
+                        // for tenants without secondary locations: if they have a secondary location, then this
+                        // schedule() call is just promoting an existing secondary)
+                        let mut schedule_context = ScheduleContext::default();
+
+                        match tenant_state.schedule(scheduler, &mut schedule_context) {
                             Err(e) => {
                                 // It is possible that some tenants will become unschedulable when too many pageservers
                                 // go offline: in this case there isn't much we can do other than make the issue observable.
@@ -3947,8 +3969,9 @@ impl Service {
         let mut waiters = Vec::new();
         let (nodes, tenants, scheduler) = locked.parts_mut();
 
+        let mut schedule_context = ScheduleContext::default();
         for (_tenant_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
-            shard.schedule(scheduler)?;
+            shard.schedule(scheduler, &mut schedule_context)?;
 
             if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
                 waiters.push(waiter);
