@@ -7,7 +7,7 @@ use std::{
 use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
-    scheduler::ScheduleContext,
+    scheduler::{AffinityScore, MaySchedule, ScheduleContext},
 };
 use pageserver_api::controller_api::{PlacementPolicy, ShardSchedulingPolicy};
 use pageserver_api::{
@@ -251,8 +251,13 @@ impl IntentState {
 
 impl Drop for IntentState {
     fn drop(&mut self) {
-        // Must clear before dropping, to avoid leaving stale refcounts in the Scheduler
-        debug_assert!(self.attached.is_none() && self.secondary.is_empty());
+        // Must clear before dropping, to avoid leaving stale refcounts in the Scheduler.
+        // We do not check this while panicking, to avoid polluting unit test failures or
+        // other assertions with this assertion's output.  It's still wrong to leak these,
+        // but if we already have a panic then we don't need to independently flag this case.
+        if !(std::thread::panicking()) {
+            debug_assert!(self.attached.is_none() && self.secondary.is_empty());
+        }
     }
 }
 
@@ -295,6 +300,26 @@ pub enum ReconcileWaitError {
     Shutdown,
     #[error("Reconcile error on shard {0}: {1}")]
     Failed(TenantShardId, String),
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub(crate) struct ReplaceSecondary {
+    old_node_id: NodeId,
+    new_node_id: NodeId,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub(crate) struct MigrateAttachment {
+    old_attached_node_id: NodeId,
+    new_attached_node_id: NodeId,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub(crate) enum ScheduleOptimization {
+    // Replace one of our secondary locations with a different node
+    ReplaceSecondary(ReplaceSecondary),
+    // Migrate attachment to an existing secondary location
+    MigrateAttachment(MigrateAttachment),
 }
 
 impl ReconcilerWaiter {
@@ -458,7 +483,11 @@ impl TenantState {
         context: &mut ScheduleContext,
     ) -> Result<(), ScheduleError> {
         let r = self.do_schedule(scheduler, context);
+
         context.avoid(&self.intent.all_pageservers());
+        if let Some(attached) = self.intent.get_attached() {
+            context.push_attached(*attached);
+        }
 
         r
     }
@@ -555,6 +584,162 @@ impl TenantState {
         }
 
         Ok(())
+    }
+
+    /// Optimize attachments: if a shard has a secondary location that is preferable to
+    /// its primary location based on soft constraints, switch that secondary location
+    /// to be attached.
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
+    pub(crate) fn optimize_attachment(
+        &self,
+        nodes: &HashMap<NodeId, Node>,
+        schedule_context: &ScheduleContext,
+    ) -> Option<ScheduleOptimization> {
+        let attached = (*self.intent.get_attached())?;
+        if self.intent.secondary.is_empty() {
+            // We can only do useful work if we have both attached and secondary locations: this
+            // function doesn't schedule new locations, only swaps between attached and secondaries.
+            return None;
+        }
+
+        let current_affinity_score = schedule_context.get_node_affinity(attached);
+        let current_attachment_count = schedule_context.get_node_attachments(attached);
+
+        // Generate score for each node, dropping any un-schedulable nodes.
+        let all_pageservers = self.intent.all_pageservers();
+        let mut scores = all_pageservers
+            .iter()
+            .flat_map(|node_id| {
+                if matches!(
+                    nodes
+                        .get(node_id)
+                        .map(|n| n.may_schedule())
+                        .unwrap_or(MaySchedule::No),
+                    MaySchedule::No
+                ) {
+                    None
+                } else {
+                    let affinity_score = schedule_context.get_node_affinity(*node_id);
+                    let attachment_count = schedule_context.get_node_attachments(*node_id);
+                    Some((*node_id, affinity_score, attachment_count))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // Sort precedence:
+        //  1st - prefer nodes with the lowest total affinity score
+        //  2nd - prefer nodes with the lowest number of attachments in this context
+        //  3rd - if all else is equal, sort by node ID for determinism in tests.
+        scores.sort_by_key(|i| (i.1, i.2, i.0));
+
+        if let Some((preferred_node, preferred_affinity_score, preferred_attachment_count)) =
+            scores.first()
+        {
+            if attached != *preferred_node {
+                // The best alternative must be more than 1 better than us, otherwise we could end
+                // up flapping back next time we're called (e.g. there's no point migrating from
+                // a location with score 1 to a score zero, because on next location the situation
+                // would be the same, but in reverse).
+                if current_affinity_score > *preferred_affinity_score + AffinityScore(1)
+                    || current_attachment_count > *preferred_attachment_count + 1
+                {
+                    tracing::info!(
+                        "Identified optimization: migrate attachment {attached}->{preferred_node} (secondaries {:?})",
+                        self.intent.get_secondary()
+                    );
+                    return Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
+                        old_attached_node_id: attached,
+                        new_attached_node_id: *preferred_node,
+                    }));
+                }
+            } else {
+                tracing::debug!(
+                    "Node {} is already preferred (score {:?})",
+                    preferred_node,
+                    preferred_affinity_score
+                );
+            }
+        }
+
+        // Fall-through: we didn't find an optimization
+        None
+    }
+
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
+    pub(crate) fn optimize_secondary(
+        &self,
+        scheduler: &Scheduler,
+        schedule_context: &ScheduleContext,
+    ) -> Option<ScheduleOptimization> {
+        if self.intent.secondary.is_empty() {
+            // We can only do useful work if we have both attached and secondary locations: this
+            // function doesn't schedule new locations, only swaps between attached and secondaries.
+            return None;
+        }
+
+        for secondary in self.intent.get_secondary() {
+            let Some(affinity_score) = schedule_context.nodes.get(secondary) else {
+                // We're already on a node unaffected any affinity constraints,
+                // so we won't change it.
+                continue;
+            };
+
+            // Let the scheduler suggest a node, where it would put us if we were scheduling afresh
+            // This implicitly limits the choice to nodes that are available, and prefers nodes
+            // with lower utilization.
+            let Ok(candidate_node) =
+                scheduler.schedule_shard(&self.intent.all_pageservers(), schedule_context)
+            else {
+                // A scheduling error means we have no possible candidate replacements
+                continue;
+            };
+
+            let candidate_affinity_score = schedule_context
+                .nodes
+                .get(&candidate_node)
+                .unwrap_or(&AffinityScore::FREE);
+
+            // The best alternative must be more than 1 better than us, otherwise we could end
+            // up flapping back next time we're called.
+            if *candidate_affinity_score + AffinityScore(1) < *affinity_score {
+                // If some other node is available and has a lower score than this node, then
+                // that other node is a good place to migrate to.
+                tracing::info!(
+                    "Identified optimization: replace secondary {secondary}->{candidate_node} (current secondaries {:?})",
+                    self.intent.get_secondary()
+                );
+                return Some(ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
+                    old_node_id: *secondary,
+                    new_node_id: candidate_node,
+                }));
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn apply_optimization(
+        &mut self,
+        scheduler: &mut Scheduler,
+        optimization: ScheduleOptimization,
+    ) {
+        match optimization {
+            ScheduleOptimization::MigrateAttachment(MigrateAttachment {
+                old_attached_node_id,
+                new_attached_node_id,
+            }) => {
+                self.intent.demote_attached(old_attached_node_id);
+                self.intent
+                    .promote_attached(scheduler, new_attached_node_id);
+            }
+            ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
+                old_node_id,
+                new_node_id,
+            }) => {
+                self.intent.remove_secondary(scheduler, old_node_id);
+                self.intent.push_secondary(scheduler, new_node_id);
+            }
+        }
     }
 
     /// Query whether the tenant's observed state for attached node matches its intent state, and if so,
@@ -971,6 +1156,32 @@ pub(crate) mod tests {
         )
     }
 
+    fn make_test_tenant(policy: PlacementPolicy, shard_count: ShardCount) -> Vec<TenantState> {
+        let tenant_id = TenantId::generate();
+
+        (0..shard_count.count())
+            .map(|i| {
+                let shard_number = ShardNumber(i);
+
+                let tenant_shard_id = TenantShardId {
+                    tenant_id,
+                    shard_number,
+                    shard_count,
+                };
+                TenantState::new(
+                    tenant_shard_id,
+                    ShardIdentity::new(
+                        shard_number,
+                        shard_count,
+                        pageserver_api::shard::ShardStripeSize(32768),
+                    )
+                    .unwrap(),
+                    policy.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// Test the scheduling behaviors used when a tenant configured for HA is subject
     /// to nodes being marked offline.
     #[test]
@@ -1097,6 +1308,196 @@ pub(crate) mod tests {
         assert!(!tenant_state.intent.all_pageservers().is_empty());
 
         tenant_state.intent.clear(&mut scheduler);
+        Ok(())
+    }
+
+    #[test]
+    fn optimize_attachment() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(3);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let mut shard_a = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        let mut shard_b = make_test_tenant_shard(PlacementPolicy::Attached(1));
+
+        // Initially: both nodes attached on shard 1, and both have secondary locations
+        // on different nodes.
+        shard_a.intent.set_attached(&mut scheduler, Some(NodeId(1)));
+        shard_a.intent.push_secondary(&mut scheduler, NodeId(2));
+        shard_b.intent.set_attached(&mut scheduler, Some(NodeId(1)));
+        shard_b.intent.push_secondary(&mut scheduler, NodeId(3));
+
+        let mut schedule_context = ScheduleContext::default();
+        schedule_context.avoid(&shard_a.intent.all_pageservers());
+        schedule_context.push_attached(shard_a.intent.get_attached().unwrap());
+        schedule_context.avoid(&shard_b.intent.all_pageservers());
+        schedule_context.push_attached(shard_b.intent.get_attached().unwrap());
+
+        let optimization_a = shard_a.optimize_attachment(&nodes, &schedule_context);
+
+        // Either shard should recognize that it has the option to switch to a secondary location where there
+        // would be no other shards from the same tenant, and request to do so.
+        assert_eq!(
+            optimization_a,
+            Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
+                old_attached_node_id: NodeId(1),
+                new_attached_node_id: NodeId(2)
+            }))
+        );
+
+        // Note that these optimizing two shards in the same tenant with the same ScheduleContext is
+        // mutually exclusive (the optimization of one invalidates the stats) -- it is the responsibility
+        // of [`Service::optimize_all`] to avoid trying
+        // to do optimizations for multiple shards in the same tenant at the same time.  Generating
+        // both optimizations is just done for test purposes
+        let optimization_b = shard_b.optimize_attachment(&nodes, &schedule_context);
+        assert_eq!(
+            optimization_b,
+            Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
+                old_attached_node_id: NodeId(1),
+                new_attached_node_id: NodeId(3)
+            }))
+        );
+
+        // Applying these optimizations should result in the end state proposed
+        shard_a.apply_optimization(&mut scheduler, optimization_a.unwrap());
+        assert_eq!(shard_a.intent.get_attached(), &Some(NodeId(2)));
+        assert_eq!(shard_a.intent.get_secondary(), &vec![NodeId(1)]);
+        shard_b.apply_optimization(&mut scheduler, optimization_b.unwrap());
+        assert_eq!(shard_b.intent.get_attached(), &Some(NodeId(3)));
+        assert_eq!(shard_b.intent.get_secondary(), &vec![NodeId(1)]);
+
+        shard_a.intent.clear(&mut scheduler);
+        shard_b.intent.clear(&mut scheduler);
+
+        Ok(())
+    }
+
+    #[test]
+    fn optimize_secondary() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(4);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let mut shard_a = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        let mut shard_b = make_test_tenant_shard(PlacementPolicy::Attached(1));
+
+        // Initially: both nodes attached on shard 1, and both have secondary locations
+        // on different nodes.
+        shard_a.intent.set_attached(&mut scheduler, Some(NodeId(1)));
+        shard_a.intent.push_secondary(&mut scheduler, NodeId(3));
+        shard_b.intent.set_attached(&mut scheduler, Some(NodeId(2)));
+        shard_b.intent.push_secondary(&mut scheduler, NodeId(3));
+
+        let mut schedule_context = ScheduleContext::default();
+        schedule_context.avoid(&shard_a.intent.all_pageservers());
+        schedule_context.push_attached(shard_a.intent.get_attached().unwrap());
+        schedule_context.avoid(&shard_b.intent.all_pageservers());
+        schedule_context.push_attached(shard_b.intent.get_attached().unwrap());
+
+        let optimization_a = shard_a.optimize_secondary(&scheduler, &schedule_context);
+
+        // Since there is a node with no locations available, the node with two locations for the
+        // same tenant should generate an optimization to move one away
+        assert_eq!(
+            optimization_a,
+            Some(ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
+                old_node_id: NodeId(3),
+                new_node_id: NodeId(4)
+            }))
+        );
+
+        shard_a.apply_optimization(&mut scheduler, optimization_a.unwrap());
+        assert_eq!(shard_a.intent.get_attached(), &Some(NodeId(1)));
+        assert_eq!(shard_a.intent.get_secondary(), &vec![NodeId(4)]);
+
+        shard_a.intent.clear(&mut scheduler);
+        shard_b.intent.clear(&mut scheduler);
+
+        Ok(())
+    }
+
+    // Optimize til quiescent: this emulates what Service::optimize_all does, when
+    // called repeatedly in the background.
+    fn optimize_til_idle(
+        nodes: &HashMap<NodeId, Node>,
+        scheduler: &mut Scheduler,
+        shards: &mut [TenantState],
+    ) {
+        let mut loop_n = 0;
+        loop {
+            let mut schedule_context = ScheduleContext::default();
+            let mut any_changed = false;
+
+            for shard in shards.iter() {
+                schedule_context.avoid(&shard.intent.all_pageservers());
+                if let Some(attached) = shard.intent.get_attached() {
+                    schedule_context.push_attached(*attached);
+                }
+            }
+
+            for shard in shards.iter_mut() {
+                let optimization = shard.optimize_attachment(nodes, &schedule_context);
+                if let Some(optimization) = optimization {
+                    shard.apply_optimization(scheduler, optimization);
+                    any_changed = true;
+                    break;
+                }
+
+                let optimization = shard.optimize_secondary(scheduler, &schedule_context);
+                if let Some(optimization) = optimization {
+                    shard.apply_optimization(scheduler, optimization);
+                    any_changed = true;
+                    break;
+                }
+            }
+
+            if !any_changed {
+                break;
+            }
+
+            // Assert no infinite loop
+            loop_n += 1;
+            assert!(loop_n < 1000);
+        }
+    }
+
+    /// Test the balancing behavior of shard scheduling: that it achieves a balance, and
+    /// that it converges.
+    #[test]
+    fn optimize_add_nodes() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(4);
+
+        // Only show the scheduler a couple of nodes
+        let mut scheduler = Scheduler::new([].iter());
+        scheduler.node_upsert(nodes.get(&NodeId(1)).unwrap());
+        scheduler.node_upsert(nodes.get(&NodeId(2)).unwrap());
+
+        let mut shards = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4));
+        let mut schedule_context = ScheduleContext::default();
+        for shard in &mut shards {
+            assert!(shard
+                .schedule(&mut scheduler, &mut schedule_context)
+                .is_ok());
+        }
+
+        // We should see equal number of locations on the two nodes.
+        assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 4);
+        assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 4);
+
+        // Add another two nodes: we should see the shards spread out when their optimize
+        // methods are called
+        scheduler.node_upsert(nodes.get(&NodeId(3)).unwrap());
+        scheduler.node_upsert(nodes.get(&NodeId(4)).unwrap());
+        optimize_til_idle(&nodes, &mut scheduler, &mut shards);
+
+        assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 2);
+        assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 2);
+        assert_eq!(scheduler.get_node_shard_count(NodeId(3)), 2);
+        assert_eq!(scheduler.get_node_shard_count(NodeId(4)), 2);
+
+        for shard in shards.iter_mut() {
+            shard.intent.clear(&mut scheduler);
+        }
+
         Ok(())
     }
 }

@@ -63,16 +63,24 @@ pub(crate) struct Scheduler {
 /// For example, we may set an affinity score based on the number of shards from the same
 /// tenant already on a node, to implicitly prefer to balance out shards.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub(crate) struct AffinityScore(usize);
+pub(crate) struct AffinityScore(pub(crate) usize);
 
 impl AffinityScore {
     /// If we have no anti-affinity at all toward a node, this is its score.  It means
     /// the scheduler has a free choice amongst nodes with this score, and may pick a node
     /// based on other information such as total utilization.
-    const FREE: Self = Self(0);
+    pub(crate) const FREE: Self = Self(0);
 
-    fn inc(&mut self) {
+    pub(crate) fn inc(&mut self) {
         self.0 += 1;
+    }
+}
+
+impl std::ops::Add for AffinityScore {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
     }
 }
 
@@ -82,6 +90,9 @@ impl AffinityScore {
 pub(crate) struct ScheduleContext {
     /// Sparse map of nodes: omitting a node implicitly makes its affinity [`AffinityScore::FREE`]
     pub(crate) nodes: HashMap<NodeId, AffinityScore>,
+
+    /// Specifically how many _attached_ locations are on each node
+    pub(crate) attached_nodes: HashMap<NodeId, usize>,
 }
 
 impl ScheduleContext {
@@ -92,6 +103,22 @@ impl ScheduleContext {
             let entry = self.nodes.entry(*node_id).or_insert(AffinityScore::FREE);
             entry.inc()
         }
+    }
+
+    pub(crate) fn push_attached(&mut self, node_id: NodeId) {
+        let entry = self.attached_nodes.entry(node_id).or_default();
+        *entry += 1;
+    }
+
+    pub(crate) fn get_node_affinity(&self, node_id: NodeId) -> AffinityScore {
+        self.nodes
+            .get(&node_id)
+            .copied()
+            .unwrap_or(AffinityScore::FREE)
+    }
+
+    pub(crate) fn get_node_attachments(&self, node_id: NodeId) -> usize {
+        self.attached_nodes.get(&node_id).copied().unwrap_or(0)
     }
 }
 
@@ -321,6 +348,12 @@ impl Scheduler {
         // is IntentState's job when the scheduled location is used.
 
         Ok(node_id)
+    }
+
+    /// Unit test access to internal state
+    #[cfg(test)]
+    pub(crate) fn get_node_shard_count(&self, node_id: NodeId) -> usize {
+        self.nodes.get(&node_id).unwrap().shard_count
     }
 }
 

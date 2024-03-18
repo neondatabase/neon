@@ -678,7 +678,13 @@ impl Service {
         let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
         while !self.cancel.is_cancelled() {
             tokio::select! {
-              _ = interval.tick() => { self.reconcile_all(); }
+              _ = interval.tick() => {
+                let reconciles_spawned = self.reconcile_all();
+                if reconciles_spawned == 0 {
+                    // Run optimizer only when we didn't find any other work to do
+                    self.optimize_all();
+                }
+            }
               _ = self.cancel.cancelled() => return
             }
         }
@@ -4035,8 +4041,131 @@ impl Service {
         let (nodes, tenants, _scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
 
+        let mut schedule_context = ScheduleContext::default();
+
         let mut reconciles_spawned = 0;
-        for (_tenant_shard_id, shard) in tenants.iter_mut() {
+        for (tenant_shard_id, shard) in tenants.iter_mut() {
+            if tenant_shard_id.is_zero() {
+                schedule_context = ScheduleContext::default();
+            }
+
+            // Eventual consistency: if an earlier reconcile job failed, and the shard is still
+            // dirty, spawn another rone
+            if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
+                reconciles_spawned += 1;
+            }
+
+            schedule_context.avoid(&shard.intent.all_pageservers());
+        }
+
+        reconciles_spawned
+    }
+
+    /// `optimize` in this context means identifying shards which have valid scheduled locations, but
+    /// could be scheduled somewhere better:
+    /// - Cutting over to a secondary if the node with the secondary is more lightly loaded
+    ///    * e.g. after a node fails then recovers, to move some work back to it
+    /// - Cutting over to a secondary if it improves the spread of shard attachments within a tenant
+    ///    * e.g. after a shard split, the initial attached locations will all be on the node where
+    ///      we did the split, but are probably better placed elsewhere.
+    /// - Creating new secondary locations if it improves the spreading of a sharded tenant
+    ///    * e.g. after a shard split, some locations will be on the same node (where the split
+    ///     happened), and will probably be better placed elsewhere.
+    ///
+    /// To put it more briefly: whereas the scheduler respects soft constraints in a ScheduleContext at
+    /// the time of scheduling, this function looks for cases where a better-scoring location is available
+    /// according to those same soft constraints.
+    fn optimize_all(&self) -> usize {
+        let mut locked = self.inner.write().unwrap();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let pageservers = nodes.clone();
+
+        let mut schedule_context = ScheduleContext::default();
+
+        let mut reconciles_spawned = 0;
+
+        let mut tenant_shards: Vec<&TenantState> = Vec::new();
+
+        // Limit on how many shards' optmizations each call to this function will execute.  Combined
+        // with the frequency of background calls, this acts as an implicit rate limit that runs a small
+        // trickle of optimizations in the background, rather than executing a large number in parallel
+        // when a change occurs.
+        const MAX_OPTIMIZATIONS_PER_PASS: usize = 2;
+
+        let mut work = Vec::new();
+
+        for (tenant_shard_id, shard) in tenants.iter() {
+            if tenant_shard_id.is_zero() {
+                // Reset accumulators on the first shard in a tenant
+                schedule_context = ScheduleContext::default();
+                tenant_shards.clear();
+            }
+
+            if work.len() >= MAX_OPTIMIZATIONS_PER_PASS {
+                break;
+            }
+
+            // Accumulate the schedule context for all the shards in a tenant: we must have
+            // the total view of all shards before we can try to optimize any of them.
+            schedule_context.avoid(&shard.intent.all_pageservers());
+            if let Some(attached) = shard.intent.get_attached() {
+                schedule_context.push_attached(*attached);
+            }
+            tenant_shards.push(shard);
+
+            // Once we have seen the last shard in the tenant, proceed to search across all shards
+            // in the tenant for optimizations
+            if shard.shard.number.0 == shard.shard.count.count() - 1 {
+                if tenant_shards.iter().any(|s| s.reconciler.is_some()) {
+                    // Do not start any optimizations while another change to the tenant is ongoing: this
+                    // is not necessary for correctness, but simplifies operations and implicitly throttles
+                    // optimization changes to happen in a "trickle" over time.
+                    continue;
+                }
+
+                if tenant_shards
+                    .iter()
+                    .any(|s| !matches!(s.splitting, SplitState::Idle))
+                {
+                    // Never attempt to optimize a tenant that is currently being split
+                    continue;
+                }
+
+                // TODO: optimization calculations are relatively expensive: create some fast-path for
+                // the common idle case (avoiding the search on tenants that we have recently checked)
+
+                for shard in &tenant_shards {
+                    if let Some(optimization) =
+                        // If idle, maybe ptimize attachments: if a shard has a secondary location that is preferable to
+                        // its primary location based on soft constraints, cut it over.
+                        shard.optimize_attachment(nodes, &schedule_context)
+                    {
+                        work.push((shard.tenant_shard_id, optimization));
+                        break;
+                    } else if let Some(optimization) =
+                        // If idle, maybe optimize secondary locations: if a shard has a secondary location that would be
+                        // better placed on another node, based on ScheduleContext, then adjust it.  This
+                        // covers cases like after a shard split, where we might have too many shards
+                        // in the same tenant with secondary locations on the node where they originally split.
+                        shard.optimize_secondary(scheduler, &schedule_context)
+                    {
+                        work.push((shard.tenant_shard_id, optimization));
+                        break;
+                    }
+
+                    // TODO: extend this mechanism to prefer attaching on nodes with fewer attached
+                    // tenants (i.e. extend schedule state to distinguish attached from secondary counts),
+                    // for the total number of attachments on a node (not just within a tenant.)
+                }
+            }
+        }
+
+        for (tenant_shard_id, optimization) in work {
+            let shard = tenants
+                .get_mut(&tenant_shard_id)
+                .expect("We held lock from place we got this ID");
+            shard.apply_optimization(scheduler, optimization);
+
             if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
                 reconciles_spawned += 1;
             }
@@ -4049,7 +4178,11 @@ impl Service {
     /// also wait for any generated Reconcilers to complete.  Calling this until it returns zero should
     /// put the system into a quiescent state where future background reconciliations won't do anything.
     pub(crate) async fn reconcile_all_now(&self) -> Result<usize, ReconcileWaitError> {
-        self.reconcile_all();
+        let reconciles_spawned = self.reconcile_all();
+        if reconciles_spawned == 0 {
+            // Only optimize when we are otherwise idle
+            self.optimize_all();
+        }
 
         let waiters = {
             let mut waiters = Vec::new();
