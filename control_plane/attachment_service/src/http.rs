@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::auth::{Scope, SwappableJwtAuth};
 use utils::failpoint_support::failpoints_handler;
-use utils::http::endpoint::{auth_middleware, check_permission_with, request_span};
+use utils::http::endpoint::{
+    auth_middleware, check_permission_with, prometheus_metrics_handler, request_span,
+};
 use utils::http::request::{must_get_query_param, parse_query_param, parse_request_param};
 use utils::id::{TenantId, TimelineId};
 
@@ -549,6 +551,7 @@ pub fn make_router(
 
     router
         .data(Arc::new(HttpState::new(service, auth)))
+        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         // Non-prefixed generic endpoints (status, metrics)
         .get("/status", |r| request_span(r, handle_status))
         .get("/ready", |r| request_span(r, handle_ready))
