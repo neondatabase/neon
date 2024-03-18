@@ -1,14 +1,64 @@
 use bytes::Bytes;
-use measured::MetricGroup;
+use measured::{
+    label::{LabelValue, StaticLabelSet},
+    FixedCardinalityLabel, MetricGroup,
+};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
-#[derive(measured::FixedCardinalityLabel)]
+#[derive(FixedCardinalityLabel)]
 pub(crate) enum ReconcileOutcome {
     #[label(rename = "ok")]
     Success,
     Error,
     Cancel,
+}
+
+#[derive(FixedCardinalityLabel)]
+pub(crate) enum Method {
+    Get,
+    Put,
+    Post,
+    Delete,
+    Other,
+}
+
+impl From<hyper::Method> for Method {
+    fn from(value: hyper::Method) -> Self {
+        if value == hyper::Method::GET {
+            Method::Get
+        } else if value == hyper::Method::PUT {
+            Method::Put
+        } else if value == hyper::Method::POST {
+            Method::Post
+        } else if value == hyper::Method::DELETE {
+            Method::Delete
+        } else {
+            Method::Other
+        }
+    }
+}
+
+pub(crate) struct StatusCode(pub(crate) hyper::http::StatusCode);
+
+impl LabelValue for StatusCode {
+    fn visit<V: measured::label::LabelVisitor>(&self, v: V) -> V::Output {
+        v.write_int(self.0.as_u16() as u64)
+    }
+}
+
+impl FixedCardinalityLabel for StatusCode {
+    fn cardinality() -> usize {
+        (100..1000).len()
+    }
+
+    fn encode(&self) -> usize {
+        self.0.as_u16() as usize
+    }
+
+    fn decode(value: usize) -> Self {
+        Self(hyper::http::StatusCode::from_u16(u16::try_from(value).unwrap()).unwrap())
+    }
 }
 
 #[derive(measured::LabelGroup)]
@@ -17,14 +67,70 @@ pub(crate) struct ReconcileCompleteLabelGroup {
     pub(crate) status: ReconcileOutcome,
 }
 
+#[derive(measured::LabelGroup)]
+#[label(set = HttpRequestStatusLabelGroupSet)]
+pub(crate) struct HttpRequestStatusLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo)]
+    pub(crate) path: &'a str,
+    pub(crate) method: Method,
+    pub(crate) status: StatusCode,
+}
+
+#[derive(measured::LabelGroup)]
+#[label(set = HttpRequestLatencyLabelGroupSet)]
+pub(crate) struct HttpRequestLatencyLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo)]
+    pub(crate) path: &'a str,
+    pub(crate) method: Method,
+}
+
+impl Default for HttpRequestLatencyLabelGroupSet {
+    fn default() -> Self {
+        Self {
+            path: lasso::ThreadedRodeo::new(),
+            method: StaticLabelSet::new(),
+        }
+    }
+}
+
 #[derive(measured::MetricGroup)]
-#[metric(new())]
 pub(crate) struct StorageControllerMetricGroup {
     /// Count of how many times we spawn a reconcile task
     pub(crate) storage_controller_reconcile_spawn: measured::Counter,
     /// Reconciler tasks completed, broken down by success/failure/cancelled
     pub(crate) storage_controller_reconcile_complete:
         measured::CounterVec<ReconcileCompleteLabelGroupSet>,
+
+    /// HTTP request status counters for handled requests
+    pub(crate) storage_controller_http_request_status:
+        measured::CounterVec<HttpRequestStatusLabelGroupSet>,
+    /// HTTP request handler latency across all status codes
+    pub(crate) storage_controller_http_request_latency:
+        measured::HistogramVec<HttpRequestLatencyLabelGroupSet, 5>,
+}
+
+impl StorageControllerMetricGroup {
+    pub(crate) fn new() -> Self {
+        Self {
+            storage_controller_reconcile_spawn: measured::Counter::new(),
+            storage_controller_reconcile_complete: measured::CounterVec::new(
+                ReconcileCompleteLabelGroupSet {
+                    status: StaticLabelSet::new(),
+                },
+            ),
+            storage_controller_http_request_status: measured::CounterVec::new(
+                HttpRequestStatusLabelGroupSet {
+                    path: lasso::ThreadedRodeo::new(),
+                    method: StaticLabelSet::new(),
+                    status: StaticLabelSet::new(),
+                },
+            ),
+
+            storage_controller_http_request_latency: measured::HistogramVec::new(
+                measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
+            ),
+        }
+    }
 }
 
 pub(crate) struct StorageControllerMetrics {
