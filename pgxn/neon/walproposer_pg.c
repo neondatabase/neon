@@ -509,9 +509,10 @@ walprop_pg_init_standalone_sync_safekeepers(void)
 static void
 walprop_sigusr2(SIGNAL_ARGS)
 {
+	int			save_errno = errno;
 	got_SIGUSR2 = true;
-
 	SetLatch(MyLatch);
+	errno = save_errno;
 }
 
 static void
