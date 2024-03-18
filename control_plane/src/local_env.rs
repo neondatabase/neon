@@ -127,7 +127,7 @@ pub struct PageServerConf {
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
 
-    pub(crate) virtual_file_io_engine: String,
+    pub(crate) virtual_file_io_engine: Option<String>,
     pub(crate) get_vectored_impl: String,
 }
 
@@ -139,8 +139,7 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
-            // FIXME: use the ones exposed by pageserver crate
-            virtual_file_io_engine: "tokio-epoll-uring".to_owned(),
+            virtual_file_io_engine: None,
             get_vectored_impl: "sequential".to_owned(),
         }
     }
