@@ -201,6 +201,7 @@ async def run_restarts_under_load(
         stats.check_progress()
 
         # testing #6530, temporary here
+        # TODO: remove afer partial backup is enabled by default
         victim.start(extra_opts=["--partial-backup-enabled", "--partial-backup-timeout=2s"])
 
     log.info("Iterations are finished, exiting coroutines...")

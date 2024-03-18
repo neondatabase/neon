@@ -81,7 +81,13 @@ impl PartialBackup {
         XLogFileName(PG_TLI, segno, self.wal_seg_size)
     }
 
-    fn remote_segment_name(&self, segno: u64, term: u64, commit_lsn: Lsn, flush_lsn: Lsn) -> String {
+    fn remote_segment_name(
+        &self,
+        segno: u64,
+        term: u64,
+        commit_lsn: Lsn,
+        flush_lsn: Lsn,
+    ) -> String {
         format!(
             "{}_{}_{:016X}_{:016X}_sk{}.partial",
             self.segment_name(segno),
@@ -100,6 +106,7 @@ impl PartialBackup {
 impl PartialBackup {
     /// Takes a lock to read actual safekeeper state and returns a segment that should be uploaded.
     async fn prepare_upload(&self) -> PartialRemoteSegment {
+        // this operation takes a lock to get the actual state
         let sk_info = self.tli.get_safekeeper_info(&self.conf).await;
         let flush_lsn = Lsn(sk_info.flush_lsn);
         let commit_lsn = Lsn(sk_info.commit_lsn);
@@ -288,7 +295,7 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
         remote_prefix,
     };
 
-    info!("state: {:?}", backup.state);
+    debug!("state: {:?}", backup.state);
 
     loop {
         // wait until we have something to upload
@@ -353,7 +360,7 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
 
         match backup.do_upload(&prepared).await {
             Ok(()) => {
-                info!(
+                debug!(
                     "uploaded {} up to flush_lsn {}",
                     prepared.name, prepared.flush_lsn
                 );
