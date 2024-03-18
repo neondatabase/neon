@@ -6,7 +6,7 @@
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
 use std::sync::atomic::AtomicU32;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -24,23 +24,36 @@ struct ThreadLocalState(Arc<ThreadLocalStateInner>);
 struct ThreadLocalStateInner {
     cell: tokio::sync::OnceCell<SystemHandle>,
     launch_attempts: AtomicU32,
+    weak_self: Weak<ThreadLocalStateInner>,
 }
 
 impl ThreadLocalState {
     pub fn new() -> Self {
-        Self(Arc::new(ThreadLocalStateInner {
+        Self(Arc::new_cyclic(|weak| ThreadLocalStateInner {
             cell: tokio::sync::OnceCell::default(),
             launch_attempts: AtomicU32::new(0),
+            weak_self: Weak::clone(weak),
         }))
-    }
-    pub fn make_id_string(&self) -> String {
-        format!("0x{:p}", Arc::as_ptr(&self.0))
     }
 }
 
-impl Drop for ThreadLocalState {
+impl ThreadLocalStateInner {
+    pub fn make_id_string(&self) -> String {
+        format!("0x{:p}", self.weak_self.as_ptr())
+    }
+}
+
+impl Drop for ThreadLocalStateInner {
     fn drop(&mut self) {
-        info!(parent: None, id=%self.make_id_string(), "tokio-epoll-uring_ext: ThreadLocalState is being dropped and id might be re-used in the future");
+        info!(parent: None, id=%self.make_id_string(), "tokio_epoll_uring_ext: thread-local state is being dropped and id might be re-used in the future");
+    }
+}
+
+impl std::ops::Deref for ThreadLocalState {
+    type Target = ThreadLocalStateInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
