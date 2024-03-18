@@ -2156,7 +2156,7 @@ class NeonStorageController(MetricsGetter):
         """
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/locate",
+            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()

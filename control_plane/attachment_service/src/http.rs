@@ -569,6 +569,9 @@ pub fn make_router(
             request_span(r, handle_node_drop)
         })
         .get("/debug/v1/tenant", |r| request_span(r, handle_tenants_dump))
+        .get("/debug/v1/tenant/:tenant_id/locate", |r| {
+            tenant_service_handler(r, handle_tenant_locate)
+        })
         .get("/debug/v1/scheduler", |r| {
             request_span(r, handle_scheduler_dump)
         })
@@ -577,9 +580,6 @@ pub fn make_router(
         })
         .put("/debug/v1/failpoints", |r| {
             request_span(r, |r| failpoints_handler(r, CancellationToken::new()))
-        })
-        .get("/control/v1/tenant/:tenant_id/locate", |r| {
-            tenant_service_handler(r, handle_tenant_locate)
         })
         // Node operations
         .post("/control/v1/node", |r| {
