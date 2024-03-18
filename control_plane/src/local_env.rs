@@ -128,7 +128,7 @@ pub struct PageServerConf {
     pub http_auth_type: AuthType,
 
     pub(crate) virtual_file_io_engine: Option<String>,
-    pub(crate) get_vectored_impl: String,
+    pub(crate) get_vectored_impl: Option<String>,
 }
 
 impl Default for PageServerConf {
@@ -140,7 +140,7 @@ impl Default for PageServerConf {
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
             virtual_file_io_engine: None,
-            get_vectored_impl: "sequential".to_owned(),
+            get_vectored_impl: None,
         }
     }
 }

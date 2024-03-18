@@ -106,7 +106,11 @@ impl PageServerNode {
         } else {
             String::new()
         };
-        let get_vectored_impl = format!("get_vectored_impl='{get_vectored_impl}'");
+        let get_vectored_impl = if let Some(get_vectored_impl) = get_vectored_impl {
+            format!("get_vectored_impl='{get_vectored_impl}'")
+        } else {
+            String::new()
+        };
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
