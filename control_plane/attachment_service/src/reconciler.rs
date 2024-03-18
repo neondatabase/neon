@@ -149,9 +149,16 @@ impl Reconciler {
         };
         tracing::info!("location_config({node}) complete: {:?}", config);
 
-        self.observed
-            .locations
-            .insert(node.get_id(), ObservedStateLocation { conf: Some(config) });
+        match config.mode {
+            LocationConfigMode::Detached => {
+                self.observed.locations.remove(&node.get_id());
+            }
+            _ => {
+                self.observed
+                    .locations
+                    .insert(node.get_id(), ObservedStateLocation { conf: Some(config) });
+            }
+        }
 
         Ok(())
     }
