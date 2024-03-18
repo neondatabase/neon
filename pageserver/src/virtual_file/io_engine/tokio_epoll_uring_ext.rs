@@ -5,8 +5,8 @@
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
-use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -24,38 +24,25 @@ struct ThreadLocalState(Arc<ThreadLocalStateInner>);
 struct ThreadLocalStateInner {
     cell: tokio::sync::OnceCell<SystemHandle>,
     launch_attempts: AtomicU32,
-    weak_self: Weak<ThreadLocalStateInner>,
+    /// populated through fetch_add from [`THREAD_LOCAL_STATE_ID`]
+    thread_local_state_id: u64,
 }
 
 impl ThreadLocalState {
     pub fn new() -> Self {
-        Self(Arc::new_cyclic(|weak| ThreadLocalStateInner {
+        Self(Arc::new(ThreadLocalStateInner {
             cell: tokio::sync::OnceCell::default(),
             launch_attempts: AtomicU32::new(0),
-            weak_self: Weak::clone(weak),
+            thread_local_state_id: THREAD_LOCAL_STATE_ID.fetch_add(1, Ordering::Relaxed),
         }))
     }
-}
 
-impl ThreadLocalStateInner {
     pub fn make_id_string(&self) -> String {
-        format!("0x{:p}", self.weak_self.as_ptr())
+        format!("{}", self.0.thread_local_state_id)
     }
 }
 
-impl Drop for ThreadLocalStateInner {
-    fn drop(&mut self) {
-        info!(parent: None, id=%self.make_id_string(), "tokio_epoll_uring_ext: thread-local state is being dropped and id might be re-used in the future");
-    }
-}
-
-impl std::ops::Deref for ThreadLocalState {
-    type Target = ThreadLocalStateInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+static THREAD_LOCAL_STATE_ID: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static THREAD_LOCAL: ThreadLocalState = ThreadLocalState::new();
