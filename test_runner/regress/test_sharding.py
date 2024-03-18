@@ -264,7 +264,7 @@ def test_sharding_split_smoke(
         destination = migrate_to_pageserver_ids.pop()
 
         log.info(f"Migrating shard {migrate_shard} from {ps_id} to {destination}")
-        env.neon_cli.tenant_migrate(migrate_shard, destination, timeout_secs=10)
+        env.storage_controller.tenant_shard_migrate(migrate_shard, destination)
 
     workload.validate()
 
@@ -299,7 +299,7 @@ def test_sharding_split_smoke(
         locations = pageserver.http_client().tenant_list_locations()
         shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
 
-    log.info("Shards after split: {shards_exist}")
+    log.info(f"Shards after split: {shards_exist}")
     assert len(shards_exist) == split_shard_count
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
