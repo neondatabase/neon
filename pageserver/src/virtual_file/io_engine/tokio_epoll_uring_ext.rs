@@ -5,8 +5,8 @@
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
-use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -24,38 +24,31 @@ struct ThreadLocalState(Arc<ThreadLocalStateInner>);
 struct ThreadLocalStateInner {
     cell: tokio::sync::OnceCell<SystemHandle>,
     launch_attempts: AtomicU32,
-    weak_self: Weak<ThreadLocalStateInner>,
+    /// populated lazily through fetch_add from [`THREAD_LOCAL_STATE_ID`]
+    thread_local_state_id: once_cell::sync::OnceCell<u64>,
 }
 
 impl ThreadLocalState {
     pub fn new() -> Self {
-        Self(Arc::new_cyclic(|weak| ThreadLocalStateInner {
+        Self(Arc::new(ThreadLocalStateInner {
             cell: tokio::sync::OnceCell::default(),
             launch_attempts: AtomicU32::new(0),
-            weak_self: Weak::clone(weak),
+            // NB: don't initialize from THREAD_LOCAL_STATE_ID here,
+            // there is apparently no guarantee that the thread-local initializer
+            // runs on the thread for which it's intended.
+            thread_local_state_id: once_cell::sync::OnceCell::new(),
         }))
     }
-}
 
-impl ThreadLocalStateInner {
     pub fn make_id_string(&self) -> String {
-        format!("0x{:p}", self.weak_self.as_ptr())
+        match self.0.thread_local_state_id.get() {
+            Some(id) => format!("{id}"),
+            None => "???".to_string(),
+        }
     }
 }
 
-impl Drop for ThreadLocalStateInner {
-    fn drop(&mut self) {
-        info!(parent: None, id=%self.make_id_string(), "tokio_epoll_uring_ext: thread-local state is being dropped and id might be re-used in the future");
-    }
-}
-
-impl std::ops::Deref for ThreadLocalState {
-    type Target = ThreadLocalStateInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+static THREAD_LOCAL_STATE_ID: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static THREAD_LOCAL: ThreadLocalState = ThreadLocalState::new();
@@ -70,6 +63,11 @@ pub async fn thread_local_system() -> Handle {
         let get_or_init_res = inner
             .cell
             .get_or_try_init(|| async {
+                // so that `make_id_string()` below works
+                inner.thread_local_state_id.get_or_init(|| {
+                    THREAD_LOCAL_STATE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                });
+
                 let attempt_no = inner
                     .launch_attempts
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
