@@ -3054,8 +3054,6 @@ impl Service {
                         .get(&node_id)
                         .expect("Pageservers may not be deleted while referenced");
 
-                    // TODO: if any reconciliation is currently in progress for this shard, wait for it.
-
                     targets.push(ShardSplitTarget {
                         parent_id: *tenant_shard_id,
                         node: node.clone(),
@@ -3124,10 +3122,47 @@ impl Service {
             old_shard_count,
             new_shard_count,
             new_stripe_size,
-            targets,
+            mut targets,
             policy,
             shard_ident,
         } = params;
+
+        // Drop any secondary locations: pageservers do not support splitting these, and in any case the
+        // end-state for a split tenant will usually be to have secondary locations on different nodes.
+        // The reconciliation calls in this block also implicitly cancel+barrier wrt any ongoing reconciliation
+        // at the time of split.
+        let waiters = {
+            let mut locked = self.inner.write().unwrap();
+            let mut waiters = Vec::new();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
+            for target in &mut targets {
+                let Some(shard) = tenants.get_mut(&target.parent_id) else {
+                    // Paranoia check: this shouldn't happen: we have the oplock for this tenant ID.
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Shard {} not found",
+                        target.parent_id
+                    )));
+                };
+
+                if shard.intent.get_attached() != &Some(target.node.get_id()) {
+                    // Paranoia check: this shouldn't happen: we have the oplock for this tenant ID.
+                    return Err(ApiError::Conflict(format!(
+                        "Shard {} unexpectedly rescheduled during split",
+                        target.parent_id
+                    )));
+                }
+
+                // Irrespective of PlacementPolicy, clear secondary locations from intent
+                shard.intent.clear_secondary(scheduler);
+
+                // Run Reconciler to execute detach fo secondary locations.
+                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                    waiters.push(waiter);
+                }
+            }
+            waiters
+        };
+        self.await_waiters(waiters, RECONCILE_TIMEOUT).await?;
 
         // Before creating any new child shards in memory or on the pageservers, persist them: this
         // enables us to ensure that we will always be able to clean up if something goes wrong.  This also
