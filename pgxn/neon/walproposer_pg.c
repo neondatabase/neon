@@ -1969,6 +1969,7 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 	{
 		PageserverFeedback min_feedback = record_pageserver_feedback(&sk->appendResponse.ps_feedback);
 
+		/* Only one main shard sends non-zero currentClusterSize */
 		if (sk->appendResponse.ps_feedback.currentClusterSize > 0)
 			SetZenithCurrentClusterSize(sk->appendResponse.ps_feedback.currentClusterSize);
 

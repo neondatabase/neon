@@ -70,7 +70,7 @@ static bool SendAppendRequests(Safekeeper *sk);
 static bool RecvAppendResponses(Safekeeper *sk);
 static XLogRecPtr CalculateMinFlushLsn(WalProposer *wp);
 static XLogRecPtr GetAcknowledgedByQuorumWALPosition(WalProposer *wp);
-static void HandleSafekeeperResponse(WalProposer *wp);
+static void HandleSafekeeperResponse(WalProposer *wp, Safekeeper *sk);
 static bool AsyncRead(Safekeeper *sk, char **buf, int *buf_size);
 static bool AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg);
 static bool BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState success_state);
@@ -1441,27 +1441,11 @@ RecvAppendResponses(Safekeeper *sk)
 				   sk->appendResponse.term, wp->propTerm);
 		}
 
-		newCommitLsn = GetAcknowledgedByQuorumWALPosition(wp);
-		if (newCommitLsn > wp->commitLsn)
-		{
-			wp->commitLsn = newCommitLsn;
-			commitLsnUpdated = true;
-		}
-
-		// Unlock syncrep waiters, update ps_feedback, etc.
-		wp->api.process_safekeeper_feedback(wp, sk);
+		HandleSafekeeperResponse(wp, sk);
 	}
 
 	if (!readAnything)
 		return sk->state == SS_ACTIVE;
-
-	/*
-	 * Send the new value to all safekeepers.
-	 */
-	if (commitLsnUpdated)
-		BroadcastAppendRequest(wp);
-
-	HandleSafekeeperResponse(wp);
 
 	return sk->state == SS_ACTIVE;
 }
@@ -1476,7 +1460,7 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 	uint8		nkeys;
 	int			i;
 
-	// initialize the struct before parsing
+	/* initialize the struct before parsing */
 	memset(ps_feedback, 0, sizeof(PageserverFeedback));
 	ps_feedback->present = true;
 
@@ -1628,10 +1612,30 @@ GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 	return donor;
 }
 
+/*
+ * Process AppendResponse message from safekeeper.
+ */
 static void
-HandleSafekeeperResponse(WalProposer *wp)
+HandleSafekeeperResponse(WalProposer *wp, Safekeeper *sk)
 {
 	XLogRecPtr	candidateTruncateLsn;
+	XLogRecPtr  newCommitLsn;
+
+	newCommitLsn = GetAcknowledgedByQuorumWALPosition(wp);
+	if (newCommitLsn > wp->commitLsn)
+	{
+		wp->commitLsn = newCommitLsn;
+		/* Send new value to all safekeepers. */
+		BroadcastAppendRequest(wp);
+	}
+
+	/* 
+	 * Unlock syncrep waiters, update ps_feedback, CheckGracefulShutdown().
+	 * The last one will terminate the process if the shutdown is requested
+	 * and WAL is committed by the quorum. BroadcastAppendRequest() should be
+	 * called to notify safekeepers about the new commitLsn.
+	 */
+	wp->api.process_safekeeper_feedback(wp, sk);
 
 	/*
 	 * Try to advance truncateLsn -- the last record flushed to all
