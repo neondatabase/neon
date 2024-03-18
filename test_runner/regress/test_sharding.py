@@ -146,7 +146,7 @@ def test_sharding_split_smoke(
     # 8 shards onto separate pageservers
     shard_count = 4
     split_shard_count = 8
-    neon_env_builder.num_pageservers = split_shard_count
+    neon_env_builder.num_pageservers = split_shard_count * 2
 
     # 1MiB stripes: enable getting some meaningful data distribution without
     # writing large quantities of data in this test.  The stripe size is given
@@ -174,6 +174,7 @@ def test_sharding_split_smoke(
         placement_policy='{"Attached": 1}',
         conf=non_default_tenant_config,
     )
+
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
 
@@ -265,26 +266,13 @@ def test_sharding_split_smoke(
         pageserver.http_client().timeline_gc(tenant_shard_id, timeline_id, None)
     workload.validate()
 
-    migrate_to_pageserver_ids = list(
-        set(p.id for p in env.pageservers) - set(pre_split_pageserver_ids)
-    )
-    assert len(migrate_to_pageserver_ids) == split_shard_count - shard_count
+    # Enough background reconciliations should result in the shards being properly distributed
+    env.storage_controller.reconcile_until_idle()
 
-    # Migrate shards away from the node where the split happened
-    for ps_id in pre_split_pageserver_ids:
-        shards_here = [
-            tenant_shard_id
-            for (tenant_shard_id, pageserver) in all_shards
-            if pageserver.id == ps_id
-        ]
-        assert len(shards_here) == 2
-        migrate_shard = shards_here[0]
-        destination = migrate_to_pageserver_ids.pop()
-
-        log.info(f"Migrating shard {migrate_shard} from {ps_id} to {destination}")
-        env.storage_controller.tenant_shard_migrate(migrate_shard, destination)
-
-    workload.validate()
+    # We have 8 shards and 16 nodes
+    # Initially I expect 4 nodes to have 2 attached locations each, and another 8 nodes to have
+    # 1 secondary location each
+    # 2 2 2 2 1 1 1 1 1 1 1 1 0 0 0 0
 
     # Assert on how many reconciles happened during the process.  This is something of an
     # implementation detail, but it is useful to detect any bugs that might generate spurious
@@ -294,8 +282,9 @@ def test_sharding_split_smoke(
     # - shard_count reconciles for the original setup of the tenant
     # - shard_count reconciles for detaching the original secondary locations during split
     # - split_shard_count reconciles during shard splitting, for setting up secondaries.
-    # - shard_count reconciles for the migrations we did to move child shards away from their split location
-    expect_reconciles = shard_count * 2 + split_shard_count + shard_count
+    # - shard_count of the child shards will need to fail over to their secondaries
+    # - shard_count of the child shard secondary locations will get moved to emptier nodes
+    expect_reconciles = shard_count * 2 + split_shard_count + shard_count * 2
     reconcile_ok = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
