@@ -311,12 +311,9 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
         oldstate.server.pg_version = 140005;
 
         return Ok(oldstate);
-    }
-    if version == 7 {
+    } else if version == 7 {
         info!("reading safekeeper control file version {}", version);
         let oldstate = SafeKeeperStateV7::des(&buf[..buf.len()])?;
-
-        // TODO: persist the file back to the disk
 
         return Ok(TimelinePersistentState {
             tenant_id: oldstate.tenant_id,
@@ -334,6 +331,9 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             partial_backup: wal_backup_partial::State::default(),
         });
     }
+
+    // TODO: persist the file back to the disk after upgrade
+    // TODO: think about backward compatibility and rollbacks
 
     bail!("unsupported safekeeper control file version {}", version)
 }
