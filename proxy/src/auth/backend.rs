@@ -254,7 +254,7 @@ async fn authenticate_with_secret(
     config: &'static AuthenticationConfig,
 ) -> auth::Result<ComputeCredentials> {
     if let Some(password) = unauthenticated_password {
-        let auth_outcome = validate_password_and_exchange(&password, secret)?;
+        let auth_outcome = validate_password_and_exchange(&password, secret).await?;
         let keys = match auth_outcome {
             crate::sasl::Outcome::Success(key) => key,
             crate::sasl::Outcome::Failure(reason) => {
