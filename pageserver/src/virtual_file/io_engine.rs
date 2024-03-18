@@ -9,6 +9,7 @@
 //!
 //!
 
+#[cfg(target_os = "linux")]
 pub(super) mod tokio_epoll_uring_ext;
 
 use tokio_epoll_uring::{IoBuf, Slice};
