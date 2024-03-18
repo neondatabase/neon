@@ -6,7 +6,7 @@
 /libs/safekeeper_api/ @neondatabase/safekeepers
 /libs/vm_monitor/ @neondatabase/autoscaling
 /pageserver/ @neondatabase/storage
-/pgxn/ @neondatabase/compute
+/pgxn/ @neondatabase/compute @neondatabase/safekeepers
 /proxy/ @neondatabase/proxy
 /safekeeper/ @neondatabase/safekeepers
 /vendor/ @neondatabase/compute
