@@ -523,87 +523,6 @@ async fn handle_tenant(
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
             println!("tenant {tenant_id} successfully configured on the pageserver");
         }
-        Some(("migrate", matches)) => {
-            let tenant_shard_id = get_tenant_shard_id(matches, env)?;
-            let new_pageserver = get_pageserver(env, matches)?;
-            let new_pageserver_id = new_pageserver.conf.id;
-
-            let storage_controller = StorageController::from_env(env);
-            storage_controller
-                .tenant_migrate(tenant_shard_id, new_pageserver_id)
-                .await?;
-
-            println!("tenant {tenant_shard_id} migrated to {}", new_pageserver_id);
-        }
-        Some(("status", matches)) => {
-            let tenant_id = get_tenant_id(matches, env)?;
-
-            let mut shard_table = comfy_table::Table::new();
-            shard_table.set_header(["Shard", "Pageserver", "Physical Size"]);
-
-            let mut tenant_synthetic_size = None;
-
-            let storage_controller = StorageController::from_env(env);
-            for shard in storage_controller.tenant_locate(tenant_id).await?.shards {
-                let pageserver =
-                    PageServerNode::from_env(env, env.get_pageserver_conf(shard.node_id)?);
-
-                let size = pageserver
-                    .http_client
-                    .tenant_details(shard.shard_id)
-                    .await?
-                    .tenant_info
-                    .current_physical_size
-                    .unwrap();
-
-                shard_table.add_row([
-                    format!("{}", shard.shard_id.shard_slug()),
-                    format!("{}", shard.node_id.0),
-                    format!("{} MiB", size / (1024 * 1024)),
-                ]);
-
-                if shard.shard_id.is_zero() {
-                    tenant_synthetic_size =
-                        Some(pageserver.tenant_synthetic_size(shard.shard_id).await?);
-                }
-            }
-
-            let Some(synthetic_size) = tenant_synthetic_size else {
-                bail!("Shard 0 not found")
-            };
-
-            let mut tenant_table = comfy_table::Table::new();
-            tenant_table.add_row(["Tenant ID".to_string(), tenant_id.to_string()]);
-            tenant_table.add_row([
-                "Synthetic size".to_string(),
-                format!("{} MiB", synthetic_size.size.unwrap_or(0) / (1024 * 1024)),
-            ]);
-
-            println!("{tenant_table}");
-            println!("{shard_table}");
-        }
-        Some(("shard-split", matches)) => {
-            let tenant_id = get_tenant_id(matches, env)?;
-            let shard_count: u8 = matches.get_one::<u8>("shard-count").cloned().unwrap_or(0);
-            let shard_stripe_size: Option<ShardStripeSize> = matches
-                .get_one::<ShardStripeSize>("shard-stripe-size")
-                .cloned();
-
-            let storage_controller = StorageController::from_env(env);
-            let result = storage_controller
-                .tenant_split(tenant_id, shard_count, shard_stripe_size)
-                .await?;
-            println!(
-                "Split tenant {} into shards {}",
-                tenant_id,
-                result
-                    .new_shards
-                    .iter()
-                    .map(|s| format!("{:?}", s))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-        }
 
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
         None => bail!("no tenant subcommand provided"),
@@ -1577,19 +1496,6 @@ fn cli() -> Command {
             .subcommand(Command::new("config")
                 .arg(tenant_id_arg.clone())
                 .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false)))
-            .subcommand(Command::new("migrate")
-                .about("Migrate a tenant from one pageserver to another")
-                .arg(tenant_id_arg.clone())
-                .arg(pageserver_id_arg.clone()))
-            .subcommand(Command::new("status")
-                .about("Human readable summary of the tenant's shards and attachment locations")
-                .arg(tenant_id_arg.clone()))
-            .subcommand(Command::new("shard-split")
-                .about("Increase the number of shards in the tenant")
-                .arg(tenant_id_arg.clone())
-                .arg(Arg::new("shard-count").value_parser(value_parser!(u8)).long("shard-count").action(ArgAction::Set).help("Number of shards in the new tenant (default 1)"))
-                .arg(Arg::new("shard-stripe-size").value_parser(value_parser!(u32)).long("shard-stripe-size").action(ArgAction::Set).help("Sharding stripe size in pages"))
-                )
         )
         .subcommand(
             Command::new("pageserver")
