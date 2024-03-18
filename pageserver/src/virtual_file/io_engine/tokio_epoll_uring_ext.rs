@@ -5,7 +5,7 @@
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -24,8 +24,8 @@ struct ThreadLocalState(Arc<ThreadLocalStateInner>);
 struct ThreadLocalStateInner {
     cell: tokio::sync::OnceCell<SystemHandle>,
     launch_attempts: AtomicU32,
-    /// populated lazily through fetch_add from [`THREAD_LOCAL_STATE_ID`]
-    thread_local_state_id: once_cell::sync::OnceCell<u64>,
+    /// populated through fetch_add from [`THREAD_LOCAL_STATE_ID`]
+    thread_local_state_id: u64,
 }
 
 impl ThreadLocalState {
@@ -33,18 +33,12 @@ impl ThreadLocalState {
         Self(Arc::new(ThreadLocalStateInner {
             cell: tokio::sync::OnceCell::default(),
             launch_attempts: AtomicU32::new(0),
-            // NB: don't initialize from THREAD_LOCAL_STATE_ID here,
-            // there is apparently no guarantee that the thread-local initializer
-            // runs on the thread for which it's intended.
-            thread_local_state_id: once_cell::sync::OnceCell::new(),
+            thread_local_state_id: THREAD_LOCAL_STATE_ID.fetch_add(1, Ordering::Relaxed),
         }))
     }
 
     pub fn make_id_string(&self) -> String {
-        match self.0.thread_local_state_id.get() {
-            Some(id) => format!("{id}"),
-            None => "???".to_string(),
-        }
+        format!("{}", self.0.thread_local_state_id)
     }
 }
 
@@ -63,11 +57,6 @@ pub async fn thread_local_system() -> Handle {
         let get_or_init_res = inner
             .cell
             .get_or_try_init(|| async {
-                // so that `make_id_string()` below works
-                inner.thread_local_state_id.get_or_init(|| {
-                    THREAD_LOCAL_STATE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                });
-
                 let attempt_no = inner
                     .launch_attempts
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
