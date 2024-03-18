@@ -202,6 +202,29 @@ enum TenantCreateOrUpdate {
     Update(Vec<ShardUpdate>),
 }
 
+struct ShardSplitParams {
+    old_shard_count: ShardCount,
+    new_shard_count: ShardCount,
+    new_stripe_size: Option<ShardStripeSize>,
+    targets: Vec<ShardSplitTarget>,
+    policy: PlacementPolicy,
+    shard_ident: ShardIdentity,
+}
+
+// When preparing for a shard split, we may either choose to proceed with the split,
+// or find that the work is already done and return NoOp.
+enum ShardSplitAction {
+    Split(ShardSplitParams),
+    NoOp(TenantShardSplitResponse),
+}
+
+// A parent shard which will be split
+struct ShardSplitTarget {
+    parent_id: TenantShardId,
+    node: Node,
+    child_ids: Vec<TenantShardId>,
+}
+
 /// When we tenant shard split operation fails, we may not be able to clean up immediately, because nodes
 /// might not be available.  We therefore use a queue of abort operations processed in the background.
 struct TenantShardSplitAbort {
@@ -2875,17 +2898,23 @@ impl Service {
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
 
-        let r = self.do_tenant_shard_split(tenant_id, split_req).await;
+        // Validate the request and construct parameters.  This phase is fallible, but does not require
+        // rollback on errors, as it does no I/O and mutates no state.
+        let shard_split_params = match self.prepare_tenant_shard_split(tenant_id, split_req)? {
+            ShardSplitAction::NoOp(resp) => return Ok(resp),
+            ShardSplitAction::Split(params) => params,
+        };
+
+        // Execute this split: this phase mutates state and does remote I/O on pageservers.  If it fails,
+        // we must roll back.
+        let r = self
+            .do_tenant_shard_split(tenant_id, shard_split_params)
+            .await;
 
         match r {
             Ok(r) => Ok(r),
-            Err(ApiError::BadRequest(_)) => {
-                // A request validation error does not require rollback: we rejected it before we started making any changes: just
-                // return the error
-                r
-            }
             Err(e) => {
-                // General case error handling: split might be part-done, we must do work to abort it.
+                // Split might be part-done, we must do work to abort it.
                 tracing::warn!("Enqueuing background abort of split on {tenant_id}");
                 self.abort_tx
                     .send(TenantShardSplitAbort {
@@ -2901,25 +2930,17 @@ impl Service {
         }
     }
 
-    pub(crate) async fn do_tenant_shard_split(
+    fn prepare_tenant_shard_split(
         &self,
         tenant_id: TenantId,
         split_req: TenantShardSplitRequest,
-    ) -> Result<TenantShardSplitResponse, ApiError> {
-        let mut policy = None;
-        let mut shard_ident = None;
-
-        // A parent shard which will be split
-        struct SplitTarget {
-            parent_id: TenantShardId,
-            node: Node,
-            child_ids: Vec<TenantShardId>,
-        }
-
+    ) -> Result<ShardSplitAction, ApiError> {
         fail::fail_point!("shard-split-validation", |_| Err(ApiError::BadRequest(
             anyhow::anyhow!("failpoint")
         )));
 
+        let mut policy = None;
+        let mut shard_ident = None;
         // Validate input, and calculate which shards we will create
         let (old_shard_count, targets) =
             {
@@ -2995,7 +3016,7 @@ impl Service {
 
                     // TODO: if any reconciliation is currently in progress for this shard, wait for it.
 
-                    targets.push(SplitTarget {
+                    targets.push(ShardSplitTarget {
                         parent_id: *tenant_shard_id,
                         node: node.clone(),
                         child_ids: tenant_shard_id
@@ -3005,9 +3026,9 @@ impl Service {
 
                 if targets.is_empty() {
                     if children_found.len() == split_req.new_shard_count as usize {
-                        return Ok(TenantShardSplitResponse {
+                        return Ok(ShardSplitAction::NoOp(TenantShardSplitResponse {
                             new_shards: children_found,
-                        });
+                        }));
                     } else {
                         // No shards found to split, and no existing children found: the
                         // tenant doesn't exist at all.
@@ -3038,11 +3059,35 @@ impl Service {
         };
         let policy = policy.unwrap();
 
+        Ok(ShardSplitAction::Split(ShardSplitParams {
+            old_shard_count,
+            new_shard_count: ShardCount::new(split_req.new_shard_count),
+            new_stripe_size: split_req.new_stripe_size,
+            targets,
+            policy,
+            shard_ident,
+        }))
+    }
+
+    async fn do_tenant_shard_split(
+        &self,
+        tenant_id: TenantId,
+        params: ShardSplitParams,
+    ) -> Result<TenantShardSplitResponse, ApiError> {
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
         // request could occur here, deleting or mutating the tenant.  begin_shard_split checks that the
         // parent shards exist as expected, but it would be neater to do the above pre-checks within the
         // same database transaction rather than pre-check in-memory and then maybe-fail the database write.
         // (https://github.com/neondatabase/neon/issues/6676)
+
+        let ShardSplitParams {
+            old_shard_count,
+            new_shard_count,
+            new_stripe_size,
+            targets,
+            policy,
+            shard_ident,
+        } = params;
 
         // Before creating any new child shards in memory or on the pageservers, persist them: this
         // enables us to ensure that we will always be able to clean up if something goes wrong.  This also
@@ -3125,7 +3170,7 @@ impl Service {
         // N>1 shards into M shards -- initially we're usually splitting 1 shard into N).
 
         for target in &targets {
-            let SplitTarget {
+            let ShardSplitTarget {
                 parent_id,
                 node,
                 child_ids,
@@ -3135,8 +3180,8 @@ impl Service {
                 .tenant_shard_split(
                     *parent_id,
                     TenantShardSplitRequest {
-                        new_shard_count: split_req.new_shard_count,
-                        new_stripe_size: split_req.new_stripe_size,
+                        new_shard_count: new_shard_count.literal(),
+                        new_stripe_size,
                     },
                 )
                 .await
@@ -3185,11 +3230,8 @@ impl Service {
         ));
 
         // Replace all the shards we just split with their children: this phase is infallible.
-        let (response, child_locations) = self.tenant_shard_split_commit_inmem(
-            tenant_id,
-            ShardCount::new(split_req.new_shard_count),
-            split_req.new_stripe_size,
-        );
+        let (response, child_locations) =
+            self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
