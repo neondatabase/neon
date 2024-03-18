@@ -475,7 +475,7 @@ impl Reconciler {
             }
         }
 
-        // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Single, then
+        // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
         // this location will be deleted in the general case reconciliation that runs after this.
         let origin_secondary_conf = build_location_config(
             &self.shard,

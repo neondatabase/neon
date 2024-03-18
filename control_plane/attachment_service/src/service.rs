@@ -1095,7 +1095,7 @@ impl Service {
                 shard_stripe_size: 0,
                 generation: Some(0),
                 generation_pageserver: None,
-                placement_policy: serde_json::to_string(&PlacementPolicy::Single).unwrap(),
+                placement_policy: serde_json::to_string(&PlacementPolicy::Attached(0)).unwrap(),
                 config: serde_json::to_string(&TenantConfig::default()).unwrap(),
                 splitting: SplitState::default(),
             };
@@ -1122,7 +1122,7 @@ impl Service {
                         TenantState::new(
                             attach_req.tenant_shard_id,
                             ShardIdentity::unsharded(),
-                            PlacementPolicy::Single,
+                            PlacementPolicy::Attached(0),
                         ),
                     );
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
@@ -1151,7 +1151,7 @@ impl Service {
                     self.persistence
                         .update_tenant_shard(
                             attach_req.tenant_shard_id,
-                            PlacementPolicy::Single,
+                            PlacementPolicy::Attached(0),
                             conf,
                             None,
                         )
@@ -1176,7 +1176,7 @@ impl Service {
 
         if let Some(new_generation) = new_generation {
             tenant_state.generation = Some(new_generation);
-            tenant_state.policy = PlacementPolicy::Single;
+            tenant_state.policy = PlacementPolicy::Attached(0);
         } else {
             // This is a detach notification.  We must update placement policy to avoid re-attaching
             // during background scheduling/reconciliation, or during storage controller restart.
@@ -1529,11 +1529,11 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<(TenantCreateResponse, Vec<ReconcilerWaiter>), ApiError> {
-        // As a default, single is convenient for tests that don't choose a policy.
         let placement_policy = create_req
             .placement_policy
             .clone()
-            .unwrap_or(PlacementPolicy::Single);
+            // As a default, zero secondaries is convenient for tests that don't choose a policy.
+            .unwrap_or(PlacementPolicy::Attached(0));
 
         // This service expects to handle sharding itself: it is an error to try and directly create
         // a particular shard here.
@@ -1743,11 +1743,11 @@ impl Service {
             | LocationConfigMode::AttachedSingle
             | LocationConfigMode::AttachedStale => {
                 if nodes.len() > 1 {
-                    PlacementPolicy::Double(1)
+                    PlacementPolicy::Attached(1)
                 } else {
                     // Convenience for dev/test: if we just have one pageserver, import
-                    // tenants into Single mode so that scheduling will succeed.
-                    PlacementPolicy::Single
+                    // tenants into non-HA mode so that scheduling will succeed.
+                    PlacementPolicy::Attached(0)
                 }
             }
         };
@@ -2891,7 +2891,7 @@ impl Service {
                                 generation,
                                 &child_shard,
                                 &config,
-                                matches!(policy, PlacementPolicy::Double(n) if n > 0),
+                                matches!(policy, PlacementPolicy::Attached(n) if n > 0),
                             )),
                         },
                     );
@@ -3336,11 +3336,7 @@ impl Service {
                 let old_attached = *shard.intent.get_attached();
 
                 match shard.policy {
-                    PlacementPolicy::Single => {
-                        shard.intent.clear_secondary(scheduler);
-                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
-                    }
-                    PlacementPolicy::Double(_n) => {
+                    PlacementPolicy::Attached(_n) => {
                         // If our new attached node was a secondary, it no longer should be.
                         shard.intent.remove_secondary(scheduler, migrate_req.node_id);
 

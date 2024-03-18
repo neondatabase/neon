@@ -209,11 +209,8 @@ impl From<NodeSchedulingPolicy> for String {
 /// to create secondary locations.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum PlacementPolicy {
-    /// Cheapest way to attach a tenant: just one pageserver, no secondary
-    Single,
-    /// Production-ready way to attach a tenant: one attached pageserver and
-    /// some number of secondaries.
-    Double(usize),
+    /// Normal live state: one attached pageserver and zero or more secondaries.
+    Attached(usize),
     /// Create one secondary mode locations. This is useful when onboarding
     /// a tenant, or for an idle tenant that we might want to bring online quickly.
     Secondary,
@@ -235,14 +232,14 @@ mod test {
     /// Check stability of PlacementPolicy's serialization
     #[test]
     fn placement_policy_encoding() -> anyhow::Result<()> {
-        let v = PlacementPolicy::Double(1);
+        let v = PlacementPolicy::Attached(1);
         let encoded = serde_json::to_string(&v)?;
-        assert_eq!(encoded, "{\"Double\":1}");
+        assert_eq!(encoded, "{\"Attached\":1}");
         assert_eq!(serde_json::from_str::<PlacementPolicy>(&encoded)?, v);
 
-        let v = PlacementPolicy::Single;
+        let v = PlacementPolicy::Detached;
         let encoded = serde_json::to_string(&v)?;
-        assert_eq!(encoded, "\"Single\"");
+        assert_eq!(encoded, "\"Detached\"");
         assert_eq!(serde_json::from_str::<PlacementPolicy>(&encoded)?, v);
         Ok(())
     }

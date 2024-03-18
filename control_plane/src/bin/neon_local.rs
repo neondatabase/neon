@@ -437,7 +437,7 @@ async fn handle_tenant(
 
             let placement_policy = match create_match.get_one::<String>("placement-policy") {
                 Some(s) if !s.is_empty() => serde_json::from_str::<PlacementPolicy>(s)?,
-                _ => PlacementPolicy::Single,
+                _ => PlacementPolicy::Attached(0),
             };
 
             let tenant_conf = PageServerNode::parse_config(tenant_conf)?;

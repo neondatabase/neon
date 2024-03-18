@@ -218,7 +218,7 @@ impl Persistence {
                 tenant.tenant_id = tenant_id.to_string();
                 tenant.config = serde_json::to_string(&TenantConfig::default())
                     .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
-                tenant.placement_policy = serde_json::to_string(&PlacementPolicy::Single)
+                tenant.placement_policy = serde_json::to_string(&PlacementPolicy::Attached(0))
                     .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
             }
         }
