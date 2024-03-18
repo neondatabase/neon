@@ -3336,13 +3336,15 @@ impl Service {
                 let old_attached = *shard.intent.get_attached();
 
                 match shard.policy {
-                    PlacementPolicy::Attached(_n) => {
+                    PlacementPolicy::Attached(n) => {
                         // If our new attached node was a secondary, it no longer should be.
                         shard.intent.remove_secondary(scheduler, migrate_req.node_id);
 
                         // If we were already attached to something, demote that to a secondary
                         if let Some(old_attached) = old_attached {
-                            shard.intent.push_secondary(scheduler, old_attached);
+                            if n > 0 {
+                                shard.intent.push_secondary(scheduler, old_attached);
+                            }
                         }
 
                         shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
