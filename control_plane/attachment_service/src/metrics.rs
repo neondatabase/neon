@@ -14,7 +14,7 @@ pub(crate) enum ReconcileOutcome {
     Cancel,
 }
 
-#[derive(FixedCardinalityLabel)]
+#[derive(FixedCardinalityLabel, Clone)]
 pub(crate) enum Method {
     Get,
     Put,
@@ -93,6 +93,26 @@ impl Default for HttpRequestLatencyLabelGroupSet {
     }
 }
 
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = PageserverRequestLabelGroupSet)]
+pub(crate) struct PageserverRequestLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo)]
+    pub(crate) pageserver_id: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo)]
+    pub(crate) path: &'a str,
+    pub(crate) method: Method,
+}
+
+impl Default for PageserverRequestLabelGroupSet {
+    fn default() -> Self {
+        Self {
+            pageserver_id: lasso::ThreadedRodeo::new(),
+            path: lasso::ThreadedRodeo::new(),
+            method: StaticLabelSet::new(),
+        }
+    }
+}
+
 #[derive(measured::MetricGroup)]
 pub(crate) struct StorageControllerMetricGroup {
     /// Count of how many times we spawn a reconcile task
@@ -107,12 +127,24 @@ pub(crate) struct StorageControllerMetricGroup {
     /// HTTP request handler latency across all status codes
     pub(crate) storage_controller_http_request_latency:
         measured::HistogramVec<HttpRequestLatencyLabelGroupSet, 5>,
+
+    /// Count of HTTP requests to the pageserver that resulted in an error,
+    /// broken down by the pageserver node id, request name and method
+    pub(crate) storage_controller_pageserver_request_error:
+        measured::CounterVec<PageserverRequestLabelGroupSet>,
+
+    /// Latency of HTTP requests to the pageserver, broken down by pageserver
+    /// node id, request name and method. This include both successful and unsuccessful
+    /// requests.
+    pub(crate) storage_controller_pageserver_request_latency:
+        measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
 }
 
 impl StorageControllerMetricGroup {
     pub(crate) fn new() -> Self {
         Self {
             storage_controller_reconcile_spawn: measured::Counter::new(),
+
             storage_controller_reconcile_complete: measured::CounterVec::new(
                 ReconcileCompleteLabelGroupSet {
                     status: StaticLabelSet::new(),
@@ -127,6 +159,17 @@ impl StorageControllerMetricGroup {
             ),
 
             storage_controller_http_request_latency: measured::HistogramVec::new(
+                measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
+            ),
+
+            storage_controller_pageserver_request_error: measured::CounterVec::new(
+                PageserverRequestLabelGroupSet {
+                    pageserver_id: lasso::ThreadedRodeo::new(),
+                    path: lasso::ThreadedRodeo::new(),
+                    method: StaticLabelSet::new(),
+                },
+            ),
+            storage_controller_pageserver_request_latency: measured::HistogramVec::new(
                 measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
             ),
         }

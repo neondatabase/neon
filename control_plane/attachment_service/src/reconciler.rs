@@ -1,3 +1,4 @@
+use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::service;
 use hyper::StatusCode;
@@ -243,8 +244,11 @@ impl Reconciler {
         tenant_shard_id: TenantShardId,
         node: &Node,
     ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
-        let client =
-            mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
+        let client = PageserverClient::new(
+            node.get_id(),
+            node.base_url(),
+            self.service_config.jwt_token.as_deref(),
+        );
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;
         Ok(timelines

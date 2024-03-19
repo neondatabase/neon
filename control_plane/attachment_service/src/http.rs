@@ -327,6 +327,7 @@ async fn handle_tenant_timeline_passthrough(
     let tenant_shard_str = format!("{}", tenant_shard_id);
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
+    // TODO: add a separate metric for tenant/timeline passthrough outgoing requests
     let client = mgmt_api::Client::new(base_url, service.get_config().jwt_token.as_deref());
     let resp = client.get_raw(path).await.map_err(|_e|
         // FIXME: give APiError a proper Unavailable variant.  We return 503 here because

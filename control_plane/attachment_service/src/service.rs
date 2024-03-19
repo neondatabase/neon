@@ -27,6 +27,7 @@ use pageserver_api::{
     models::{SecondaryProgress, TenantConfigRequest},
 };
 
+use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
@@ -551,7 +552,11 @@ impl Service {
                 break;
             }
 
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            let client = PageserverClient::new(
+                node.get_id(),
+                node.base_url(),
+                self.config.jwt_token.as_deref(),
+            );
             match client
                 .location_config(
                     tenant_shard_id,
@@ -2096,8 +2101,11 @@ impl Service {
                 })
                 .collect::<Vec<_>>();
             for tenant_shard_id in shard_ids {
-                let client =
-                    mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+                let client = PageserverClient::new(
+                    node.get_id(),
+                    node.base_url(),
+                    self.config.jwt_token.as_deref(),
+                );
 
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
 
@@ -2149,7 +2157,11 @@ impl Service {
         // Issue concurrent requests to all shards' locations
         let mut futs = FuturesUnordered::new();
         for (tenant_shard_id, node) in targets {
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            let client = PageserverClient::new(
+                node.get_id(),
+                node.base_url(),
+                self.config.jwt_token.as_deref(),
+            );
             futs.push(async move {
                 let result = client
                     .tenant_secondary_download(tenant_shard_id, wait)
@@ -2242,7 +2254,11 @@ impl Service {
         // Phase 1: delete on the pageservers
         let mut any_pending = false;
         for (tenant_shard_id, node) in targets {
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            let client = PageserverClient::new(
+                node.get_id(),
+                node.base_url(),
+                self.config.jwt_token.as_deref(),
+            );
             // TODO: this, like many other places, requires proper retry handling for 503, timeout: those should not
             // surface immediately as an error to our caller.
             let status = client.tenant_delete(tenant_shard_id).await.map_err(|e| {
@@ -2354,7 +2370,7 @@ impl Service {
                 tenant_shard_id,
                 create_req.new_timeline_id,
             );
-            let client = mgmt_api::Client::new(node.base_url(), jwt.as_deref());
+            let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
 
             client
                 .timeline_create(tenant_shard_id, &create_req)
@@ -2478,7 +2494,7 @@ impl Service {
                 "Deleting timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
             );
 
-            let client = mgmt_api::Client::new(node.base_url(), jwt.as_deref());
+            let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
             client
                 .timeline_delete(tenant_shard_id, timeline_id)
                 .await
@@ -3215,7 +3231,11 @@ impl Service {
                 node,
                 child_ids,
             } = target;
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            let client = PageserverClient::new(
+                node.get_id(),
+                node.base_url(),
+                self.config.jwt_token.as_deref(),
+            );
             let response = client
                 .tenant_shard_split(
                     *parent_id,
