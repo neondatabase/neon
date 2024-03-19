@@ -2539,7 +2539,7 @@ impl Service {
     pub(crate) fn tenant_shard0_baseurl(
         &self,
         tenant_id: TenantId,
-    ) -> Result<(String, TenantShardId), ApiError> {
+    ) -> Result<(Node, TenantShardId), ApiError> {
         let locked = self.inner.read().unwrap();
         let Some((tenant_shard_id, shard)) = locked
             .tenants
@@ -2571,7 +2571,7 @@ impl Service {
             )));
         };
 
-        Ok((node.base_url(), *tenant_shard_id))
+        Ok((node.clone(), *tenant_shard_id))
     }
 
     pub(crate) fn tenant_locate(

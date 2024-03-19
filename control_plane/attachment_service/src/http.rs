@@ -1,4 +1,7 @@
-use crate::metrics::{HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup};
+use crate::metrics::{
+    HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, PageserverRequestLabelGroup,
+    METRICS_REGISTRY,
+};
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
 use futures::Future;
@@ -318,7 +321,7 @@ async fn handle_tenant_timeline_passthrough(
     tracing::info!("Proxying request for tenant {} ({})", tenant_id, path);
 
     // Find the node that holds shard zero
-    let (base_url, tenant_shard_id) = service.tenant_shard0_baseurl(tenant_id)?;
+    let (node, tenant_shard_id) = service.tenant_shard0_baseurl(tenant_id)?;
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
     // rewrite this to a shard-aware shard zero ID.
@@ -327,12 +330,38 @@ async fn handle_tenant_timeline_passthrough(
     let tenant_shard_str = format!("{}", tenant_shard_id);
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
-    // TODO: add a separate metric for tenant/timeline passthrough outgoing requests
-    let client = mgmt_api::Client::new(base_url, service.get_config().jwt_token.as_deref());
+    let latency = &METRICS_REGISTRY
+        .metrics_group
+        .storage_controller_passthrough_request_latency;
+
+    // This is a bit awkward. We remove the param from the request
+    // and join the words by '_' to get a label for the request.
+    let just_path = path.replace(&tenant_shard_str, "");
+    let path_label = just_path
+        .split('/')
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    let labels = PageserverRequestLabelGroup {
+        pageserver_id: &node.get_id().to_string(),
+        path: &path_label,
+        method: crate::metrics::Method::Get,
+    };
+
+    latency.start_timer(labels.clone());
+
+    let client = mgmt_api::Client::new(node.base_url(), service.get_config().jwt_token.as_deref());
     let resp = client.get_raw(path).await.map_err(|_e|
         // FIXME: give APiError a proper Unavailable variant.  We return 503 here because
         // if we can't successfully send a request to the pageserver, we aren't available.
         ApiError::ShuttingDown)?;
+
+    if !resp.status().is_success() {
+        let error_counter = &METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_passthrough_request_error;
+        error_counter.inc(labels);
+    }
 
     // We have a reqest::Response, would like a http::Response
     let mut builder = hyper::Response::builder()

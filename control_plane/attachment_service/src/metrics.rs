@@ -138,6 +138,17 @@ pub(crate) struct StorageControllerMetricGroup {
     /// requests.
     pub(crate) storage_controller_pageserver_request_latency:
         measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
+
+    /// Count of pass-through HTTP requests to the pageserver that resulted in an error,
+    /// broken down by the pageserver node id, request name and method
+    pub(crate) storage_controller_passthrough_request_error:
+        measured::CounterVec<PageserverRequestLabelGroupSet>,
+
+    /// Latency of pass-through HTTP requests to the pageserver, broken down by pageserver
+    /// node id, request name and method. This include both successful and unsuccessful
+    /// requests.
+    pub(crate) storage_controller_passthrough_request_latency:
+        measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
 }
 
 impl StorageControllerMetricGroup {
@@ -169,7 +180,20 @@ impl StorageControllerMetricGroup {
                     method: StaticLabelSet::new(),
                 },
             ),
+
             storage_controller_pageserver_request_latency: measured::HistogramVec::new(
+                measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
+            ),
+
+            storage_controller_passthrough_request_error: measured::CounterVec::new(
+                PageserverRequestLabelGroupSet {
+                    pageserver_id: lasso::ThreadedRodeo::new(),
+                    path: lasso::ThreadedRodeo::new(),
+                    method: StaticLabelSet::new(),
+                },
+            ),
+
+            storage_controller_passthrough_request_latency: measured::HistogramVec::new(
                 measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
             ),
         }
