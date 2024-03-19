@@ -353,6 +353,16 @@ async fn handle_tenant_locate(
     json_response(StatusCode::OK, service.tenant_locate(tenant_id)?)
 }
 
+async fn handle_tenant_describe(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
+}
+
 async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -559,6 +569,9 @@ pub fn make_router(
             request_span(r, handle_node_drop)
         })
         .get("/debug/v1/tenant", |r| request_span(r, handle_tenants_dump))
+        .get("/debug/v1/tenant/:tenant_id/locate", |r| {
+            tenant_service_handler(r, handle_tenant_locate)
+        })
         .get("/debug/v1/scheduler", |r| {
             request_span(r, handle_scheduler_dump)
         })
@@ -567,9 +580,6 @@ pub fn make_router(
         })
         .put("/debug/v1/failpoints", |r| {
             request_span(r, |r| failpoints_handler(r, CancellationToken::new()))
-        })
-        .get("/control/v1/tenant/:tenant_id/locate", |r| {
-            tenant_service_handler(r, handle_tenant_locate)
         })
         // Node operations
         .post("/control/v1/node", |r| {
@@ -585,6 +595,9 @@ pub fn make_router(
         })
         .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
             tenant_service_handler(r, handle_tenant_shard_split)
+        })
+        .get("/control/v1/tenant/:tenant_id", |r| {
+            tenant_service_handler(r, handle_tenant_describe)
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into

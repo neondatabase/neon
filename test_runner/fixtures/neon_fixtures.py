@@ -1892,19 +1892,6 @@ class NeonCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=True)
 
-    def tenant_migrate(
-        self, tenant_shard_id: TenantShardId, new_pageserver: int, timeout_secs: Optional[int]
-    ):
-        args = [
-            "tenant",
-            "migrate",
-            "--tenant-id",
-            str(tenant_shard_id),
-            "--id",
-            str(new_pageserver),
-        ]
-        return self.raw_cli(args, check_return_code=True, timeout=timeout_secs)
-
     def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
         return self.raw_cli(["start"], check_return_code=check_return_code)
 
@@ -2156,7 +2143,7 @@ class NeonStorageController(MetricsGetter):
         """
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/locate",
+            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()

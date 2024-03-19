@@ -576,7 +576,7 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
     timeline_id = TimelineId.generate()
 
     env.neon_cli.create_tenant(
-        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Double":1}'
+        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}'
     )
 
     attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]

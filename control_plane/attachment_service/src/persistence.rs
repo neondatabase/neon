@@ -211,15 +211,10 @@ impl Persistence {
 
         let mut decoded = serde_json::from_slice::<JsonPersistence>(&bytes)
             .map_err(|e| DatabaseError::Logical(format!("Deserialization error: {e}")))?;
-        for (tenant_id, tenant) in &mut decoded.tenants {
-            // Backward compat: an old attachments.json from before PR #6251, replace
-            // empty strings with proper defaults.
-            if tenant.tenant_id.is_empty() {
-                tenant.tenant_id = tenant_id.to_string();
-                tenant.config = serde_json::to_string(&TenantConfig::default())
-                    .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
-                tenant.placement_policy = serde_json::to_string(&PlacementPolicy::Single)
-                    .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
+        for shard in decoded.tenants.values_mut() {
+            if shard.placement_policy == "\"Single\"" {
+                // Backward compat for test data after PR https://github.com/neondatabase/neon/pull/7165
+                shard.placement_policy = "{\"Attached\":0}".to_string();
             }
         }
 
