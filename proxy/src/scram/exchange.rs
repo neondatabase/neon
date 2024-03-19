@@ -86,14 +86,7 @@ pub async fn exchange(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let sent = match init.transition(secret, &tls_server_end_point, client_first)? {
         Continue(sent, server_first) => {
-            // `client.update` might perform `pbkdf2(pw)`, best to spawn it in a blocking thread.
-            // TODO(conrad): take this code from tokio-postgres and make an async-aware pbkdf2 impl
-            client = tokio::task::spawn_blocking(move || {
-                client.update(server_first.as_bytes())?;
-                Ok::<ScramSha256, std::io::Error>(client)
-            })
-            .await
-            .expect("should not panic while performing password hash")?;
+            client.update(server_first.as_bytes()).await?;
             sent
         }
         Success(x, _) => match x {},

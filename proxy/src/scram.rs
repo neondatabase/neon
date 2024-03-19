@@ -114,7 +114,7 @@ mod tests {
     }
 
     async fn run_round_trip_test(server_password: &str, client_password: &str) {
-        let scram_secret = ServerSecret::build(server_password).unwrap();
+        let scram_secret = ServerSecret::build(server_password).await.unwrap();
         let sasl_client =
             ScramSha256::new(client_password.as_bytes(), ChannelBinding::unsupported());
 
