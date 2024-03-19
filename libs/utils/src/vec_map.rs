@@ -85,18 +85,7 @@ impl<K: Ord, V> VecMap<K, V> {
     /// If `key` is less than or equal to the current maximum key
     /// the pair will not be added and InvalidKey error will be returned.
     pub fn append(&mut self, key: K, value: V) -> Result<usize, VecMapError> {
-        if let Some((last_key, _last_value)) = self.data.last() {
-            match (&self.ordering, &key.cmp(last_key)) {
-                (VecMapOrdering::Greater, Ordering::Less | Ordering::Equal) => {
-                    return Err(VecMapError::InvalidKey);
-                }
-                (VecMapOrdering::Greater, Ordering::Greater) => {}
-                (VecMapOrdering::GreaterOrEqual, Ordering::Less) => {
-                    return Err(VecMapError::InvalidKey);
-                }
-                (VecMapOrdering::GreaterOrEqual, Ordering::Equal | Ordering::Greater) => {}
-            }
-        }
+        self.validate_key_order(&key)?;
 
         let delta_size = self.instrument_vec_op(|vec| vec.push((key, value)));
         Ok(delta_size)
@@ -161,11 +150,19 @@ impl<K: Ord, V> VecMap<K, V> {
         {
             return Err(VecMapError::ExtendOrderingError);
         }
-        let self_last_opt = self.data.last().map(extract_key);
-        let other_first_opt = other.data.last().map(extract_key);
 
-        if let (Some(self_last), Some(other_first)) = (self_last_opt, other_first_opt) {
-            match (&self.ordering, &other_first.cmp(self_last)) {
+        let other_first_opt = other.data.last().map(extract_key);
+        if let Some(other_first) = other_first_opt {
+            self.validate_key_order(other_first)?;
+        }
+
+        let delta_size = self.instrument_vec_op(|vec| vec.append(&mut other.data));
+        Ok(delta_size)
+    }
+
+    fn validate_key_order(&self, key: &K) -> Result<(), VecMapError> {
+        if let Some(last_key) = self.data.last().map(extract_key) {
+            match (&self.ordering, &key.cmp(last_key)) {
                 (VecMapOrdering::Greater, Ordering::Less | Ordering::Equal) => {
                     return Err(VecMapError::InvalidKey);
                 }
@@ -177,8 +174,7 @@ impl<K: Ord, V> VecMap<K, V> {
             }
         }
 
-        let delta_size = self.instrument_vec_op(|vec| vec.append(&mut other.data));
-        Ok(delta_size)
+        Ok(())
     }
 
     /// Instrument an operation on the underlying [`Vec`].
