@@ -18,7 +18,7 @@ use std::time::Duration;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use remote_storage::{GenericRemoteStorage, RemotePath, StorageMetadata};
 use tokio::fs::File;
 
 use tokio::select;
@@ -500,7 +500,27 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
     res
 }
 
-pub async fn backup_object(
+async fn backup_object(
+    source_file: &Utf8Path,
+    target_file: &RemotePath,
+    size: usize,
+) -> Result<()> {
+    let storage = get_configured_remote_storage();
+
+    let file = File::open(&source_file)
+        .await
+        .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
+
+    let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
+
+    let cancel = CancellationToken::new();
+
+    storage
+        .upload_storage_object(file, size, target_file, &cancel)
+        .await
+}
+
+pub(crate) async fn backup_partial_segment(
     source_file: &Utf8Path,
     target_file: &RemotePath,
     size: usize,
@@ -519,7 +539,13 @@ pub async fn backup_object(
     let cancel = CancellationToken::new();
 
     storage
-        .upload_storage_object(file, size, target_file, &cancel)
+        .upload(
+            file,
+            size,
+            target_file,
+            Some(StorageMetadata::from([("sk_type", "partial_segment")])),
+            &cancel,
+        )
         .await
 }
 

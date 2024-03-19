@@ -136,7 +136,7 @@ impl PartialBackup {
         let remote_path = RemotePath::new(self.remote_prefix.join(&prepared.name).as_ref())?;
 
         // Upload first `backup_bytes` bytes of the segment to the remote storage.
-        wal_backup::backup_object(&local_path, &remote_path, backup_bytes).await?;
+        wal_backup::backup_partial_segment(&local_path, &remote_path, backup_bytes).await?;
         PARTIAL_BACKUP_UPLOADED_BYTES.inc_by(backup_bytes as u64);
 
         // We uploaded the segment, now let's verify that the data is still actual.
