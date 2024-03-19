@@ -834,8 +834,7 @@ impl LayerInner {
             self.failpoint(failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload)
                 .await?;
 
-            // the file is present locally, probably by a previous but cancelled call to
-            // get_or_maybe_download. alternatively we might be running without remote storage.
+            // the file is present locally because eviction has not had a chance to run yet
             LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
             return Ok(self.initialize_after_layer_is_on_disk(permit));
