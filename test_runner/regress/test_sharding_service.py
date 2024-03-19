@@ -847,7 +847,7 @@ def test_sharding_service_heartbeats(
     env = neon_env_builder.init_configs()
     env.start()
 
-    # Default log allow list permitr connection errors, but this test will use error responses on
+    # Default log allow list permits connection errors, but this test will use error responses on
     # the utilization endpoint.
     env.storage_controller.allowed_errors.append(
         ".*Call to node.*management API.*failed.*failpoint.*"
