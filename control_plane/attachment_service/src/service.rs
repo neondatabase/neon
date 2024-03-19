@@ -3380,6 +3380,11 @@ impl Service {
                         // If we were already attached to something, demote that to a secondary
                         if let Some(old_attached) = old_attached {
                             if n > 0 {
+                                // Remove other secondaries to make room for the location we'll demote
+                                while shard.intent.get_secondary().len() >= n {
+                                    shard.intent.pop_secondary(scheduler);
+                                }
+
                                 shard.intent.push_secondary(scheduler, old_attached);
                             }
                         }
