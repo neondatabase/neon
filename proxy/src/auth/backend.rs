@@ -217,12 +217,29 @@ async fn auth_quirks(
     };
     let (cached_entry, secret) = cached_secret.take_value();
 
+    let hash_iter_count = match &secret {
+        #[cfg(any(test, feature = "testing"))]
+        Some(AuthSecret::Md5(_)) => 1,
+        Some(AuthSecret::Scram(s)) => s.iterations,
+        None => 0,
+    };
+    // only count the full hash count if password hack or websocket flow.
+    // in other words, if proxy needs to run the hashing
+    let password_weight = if unauthenticated_password.is_some() || allow_cleartext {
+        hash_iter_count
+    } else {
+        1
+    };
+
     let secret = match secret {
         Some(secret) => {
             // we have validated the endpoint exists, so let's intern it.
             let endpoint = EndpointIdInt::from(&info.endpoint);
 
-            if config.rate_limiter.check((endpoint, ctx.peer_addr)) {
+            if config
+                .rate_limiter
+                .check((endpoint, ctx.peer_addr), password_weight)
+            {
                 secret
             } else {
                 // If we don't have an authentication secret, we mock one to

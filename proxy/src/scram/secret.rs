@@ -52,7 +52,10 @@ impl ServerSecret {
     /// See `auth-scram.c : mock_scram_secret` for details.
     pub fn mock(nonce: [u8; 32]) -> Self {
         Self {
-            iterations: 4096,
+            // this doesn't reveal much information as we're going to use
+            // iteration count 1 for our generated passwords going forward.
+            // PG16 users can set iteration count=1 already today.
+            iterations: 1,
             salt_base64: base64::encode(nonce),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),

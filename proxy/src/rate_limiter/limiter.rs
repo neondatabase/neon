@@ -50,11 +50,11 @@ impl RedisRateLimiter {
             .data
             .iter_mut()
             .zip(self.info)
-            .all(|(bucket, info)| bucket.should_allow_request(info, now));
+            .all(|(bucket, info)| bucket.should_allow_request(info, now, 1));
 
         if should_allow_request {
             // only increment the bucket counts if the request will actually be accepted
-            self.data.iter_mut().for_each(RateBucket::inc);
+            self.data.iter_mut().for_each(|b| b.inc(1));
         }
 
         should_allow_request
@@ -91,9 +91,9 @@ struct RateBucket {
 }
 
 impl RateBucket {
-    fn should_allow_request(&mut self, info: &RateBucketInfo, now: Instant) -> bool {
+    fn should_allow_request(&mut self, info: &RateBucketInfo, now: Instant, n: u32) -> bool {
         if now - self.start < info.interval {
-            self.count < info.max_rpi
+            self.count + n <= info.max_rpi
         } else {
             // bucket expired, reset
             self.count = 0;
@@ -103,8 +103,8 @@ impl RateBucket {
         }
     }
 
-    fn inc(&mut self) {
-        self.count += 1;
+    fn inc(&mut self, n: u32) {
+        self.count += n;
     }
 }
 
@@ -147,11 +147,18 @@ impl RateBucketInfo {
         Self::new(200, Duration::from_secs(60)),
         Self::new(100, Duration::from_secs(600)),
     ];
-    /// very aggressive defaults for wrong passwords
+
+    /// All of these are per endpoint-ip pair.
+    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
+    ///
+    /// First bucket: 300mcpus total per endpoint-ip pair
+    /// * 1228800 requests per second with 1 hash rounds. (endpoint rate limiter will catch this first)
+    /// * 300 requests per second with 4096 hash rounds.
+    /// * 2 requests per second with 600000 hash rounds.
     pub const DEFAULT_AUTH_SET: [Self; 3] = [
-        Self::new(5, Duration::from_secs(1)),
-        Self::new(2, Duration::from_secs(60)),
-        Self::new(1, Duration::from_secs(600)),
+        Self::new(300 * 4096, Duration::from_secs(1)),
+        Self::new(200 * 4096, Duration::from_secs(60)),
+        Self::new(100 * 4096, Duration::from_secs(600)),
     ];
 
     pub fn validate(info: &mut [Self]) -> anyhow::Result<()> {
@@ -174,7 +181,7 @@ impl RateBucketInfo {
     pub const fn new(max_rps: u32, interval: Duration) -> Self {
         Self {
             interval,
-            max_rpi: max_rps * interval.as_millis() as u32 / 1000,
+            max_rpi: ((max_rps as u64) * (interval.as_millis() as u64) / 1000) as u32,
         }
     }
 }
@@ -197,7 +204,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
-    pub fn check(&self, key: K) -> bool {
+    pub fn check(&self, key: K, n: u32) -> bool {
         // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
@@ -220,11 +227,11 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         let should_allow_request = entry
             .iter_mut()
             .zip(self.info)
-            .all(|(bucket, info)| bucket.should_allow_request(info, now));
+            .all(|(bucket, info)| bucket.should_allow_request(info, now, n));
 
         if should_allow_request {
             // only increment the bucket counts if the request will actually be accepted
-            entry.iter_mut().for_each(RateBucket::inc);
+            entry.iter_mut().for_each(|b| b.inc(n));
         }
 
         should_allow_request
@@ -712,35 +719,35 @@ mod tests {
         time::pause();
 
         for _ in 0..100 {
-            assert!(limiter.check(endpoint.clone()));
+            assert!(limiter.check(endpoint.clone(), 1));
         }
         // more connections fail
-        assert!(!limiter.check(endpoint.clone()));
+        assert!(!limiter.check(endpoint.clone(), 1));
 
         // fail even after 500ms as it's in the same bucket
         time::advance(time::Duration::from_millis(500)).await;
-        assert!(!limiter.check(endpoint.clone()));
+        assert!(!limiter.check(endpoint.clone(), 1));
 
         // after a full 1s, 100 requests are allowed again
         time::advance(time::Duration::from_millis(500)).await;
         for _ in 1..6 {
             for _ in 0..100 {
-                assert!(limiter.check(endpoint.clone()));
+                assert!(limiter.check(endpoint.clone(), 1));
             }
             time::advance(time::Duration::from_millis(1000)).await;
         }
 
         // more connections after 600 will exceed the 20rps@30s limit
-        assert!(!limiter.check(endpoint.clone()));
+        assert!(!limiter.check(endpoint.clone(), 1));
 
         // will still fail before the 30 second limit
         time::advance(time::Duration::from_millis(30_000 - 6_000 - 1)).await;
-        assert!(!limiter.check(endpoint.clone()));
+        assert!(!limiter.check(endpoint.clone(), 1));
 
         // after the full 30 seconds, 100 requests are allowed again
         time::advance(time::Duration::from_millis(1)).await;
         for _ in 0..100 {
-            assert!(limiter.check(endpoint.clone()));
+            assert!(limiter.check(endpoint.clone(), 1));
         }
     }
 
@@ -756,7 +763,7 @@ mod tests {
             hasher,
         );
         for i in 0..1_000_000 {
-            limiter.check(i);
+            limiter.check(i, 1);
         }
         assert!(limiter.map.len() < 150_000);
     }
