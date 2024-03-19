@@ -16,6 +16,7 @@ mod util {
 mod cmd {
     pub(super) mod basebackup;
     pub(super) mod getpage_latest_lsn;
+    pub(super) mod ondemand_download_churn;
     pub(super) mod trigger_initial_size_calculation;
 }
 
@@ -25,6 +26,7 @@ enum Args {
     Basebackup(cmd::basebackup::Args),
     GetPageLatestLsn(cmd::getpage_latest_lsn::Args),
     TriggerInitialSizeCalculation(cmd::trigger_initial_size_calculation::Args),
+    OndemandDownloadChurn(cmd::ondemand_download_churn::Args),
 }
 
 fn main() {
@@ -43,6 +45,7 @@ fn main() {
         Args::TriggerInitialSizeCalculation(args) => {
             cmd::trigger_initial_size_calculation::main(args)
         }
+        Args::OndemandDownloadChurn(args) => cmd::ondemand_download_churn::main(args),
     }
     .unwrap()
 }

@@ -577,7 +577,12 @@ impl TenantState {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf = attached_location_conf(generation, &self.shard, &self.config);
+            let wanted_conf = attached_location_conf(
+                generation,
+                &self.shard,
+                &self.config,
+                !self.intent.secondary.is_empty(),
+            );
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -617,7 +622,7 @@ impl TenantState {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn maybe_reconcile(
         &mut self,
-        result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
         compute_hook: &Arc<ComputeHook>,
         service_config: &service::Config,
@@ -729,6 +734,7 @@ impl TenantState {
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
                                                         shard_id=%reconciler.tenant_shard_id.shard_slug());
         metrics::RECONCILER.spawned.inc();
+        let result_tx = result_tx.clone();
         let join_handle = tokio::task::spawn(
             async move {
                 // Wait for any previous reconcile task to complete before we start

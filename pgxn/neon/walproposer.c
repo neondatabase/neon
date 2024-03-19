@@ -1220,7 +1220,7 @@ PrepareAppendRequest(WalProposer *wp, AppendRequestHeader *req, XLogRecPtr begin
 	req->epochStartLsn = wp->propEpochStartLsn;
 	req->beginLsn = beginLsn;
 	req->endLsn = endLsn;
-	req->commitLsn = GetAcknowledgedByQuorumWALPosition(wp);
+	req->commitLsn = wp->commitLsn;
 	req->truncateLsn = wp->truncateLsn;
 	req->proposerId = wp->greetRequest.proposerId;
 }
@@ -1405,7 +1405,7 @@ static bool
 RecvAppendResponses(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
-	XLogRecPtr	minQuorumLsn;
+	XLogRecPtr	newCommitLsn;
 	bool		readAnything = false;
 
 	while (true)
@@ -1444,17 +1444,18 @@ RecvAppendResponses(Safekeeper *sk)
 	if (!readAnything)
 		return sk->state == SS_ACTIVE;
 
-	HandleSafekeeperResponse(wp);
-
+	/* update commit_lsn */
+	newCommitLsn = GetAcknowledgedByQuorumWALPosition(wp);
 	/*
-	 * Also send the new commit lsn to all the safekeepers.
+	 * Send the new value to all safekeepers.
 	 */
-	minQuorumLsn = GetAcknowledgedByQuorumWALPosition(wp);
-	if (minQuorumLsn > wp->lastSentCommitLsn)
+	if (newCommitLsn > wp->commitLsn)
 	{
+		wp->commitLsn = newCommitLsn;
 		BroadcastAppendRequest(wp);
-		wp->lastSentCommitLsn = minQuorumLsn;
 	}
+
+	HandleSafekeeperResponse(wp);
 
 	return sk->state == SS_ACTIVE;
 }
@@ -1632,11 +1633,9 @@ GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 static void
 HandleSafekeeperResponse(WalProposer *wp)
 {
-	XLogRecPtr	minQuorumLsn;
 	XLogRecPtr	candidateTruncateLsn;
 
-	minQuorumLsn = GetAcknowledgedByQuorumWALPosition(wp);
-	wp->api.process_safekeeper_feedback(wp, minQuorumLsn);
+	wp->api.process_safekeeper_feedback(wp);
 
 	/*
 	 * Try to advance truncateLsn -- the last record flushed to all
@@ -1649,7 +1648,7 @@ HandleSafekeeperResponse(WalProposer *wp)
 	 * can't commit entries from previous term' in Raft); 2)
 	 */
 	candidateTruncateLsn = CalculateMinFlushLsn(wp);
-	candidateTruncateLsn = Min(candidateTruncateLsn, minQuorumLsn);
+	candidateTruncateLsn = Min(candidateTruncateLsn, wp->commitLsn);
 	if (candidateTruncateLsn > wp->truncateLsn)
 	{
 		wp->truncateLsn = candidateTruncateLsn;

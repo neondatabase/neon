@@ -535,9 +535,9 @@ async fn timeline_create_handler(
                 )
             }
             Err(
-                tenant::CreateTimelineError::Conflict
-                | tenant::CreateTimelineError::AlreadyCreating,
-            ) => json_response(StatusCode::CONFLICT, ()),
+                e @ tenant::CreateTimelineError::Conflict
+                | e @ tenant::CreateTimelineError::AlreadyCreating,
+            ) => json_response(StatusCode::CONFLICT, HttpErrorBody::from_msg(e.to_string())),
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => json_response(
                 StatusCode::NOT_ACCEPTABLE,
                 HttpErrorBody::from_msg(format!("{err:#}")),
@@ -1151,7 +1151,12 @@ async fn tenant_shard_split_handler(
 
     let new_shards = state
         .tenant_manager
-        .shard_split(tenant_shard_id, ShardCount::new(req.new_shard_count), &ctx)
+        .shard_split(
+            tenant_shard_id,
+            ShardCount::new(req.new_shard_count),
+            req.new_stripe_size,
+            &ctx,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1982,13 +1987,42 @@ async fn secondary_download_handler(
 ) -> Result<Response<Body>, ApiError> {
     let state = get_state(&request);
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
-    state
-        .secondary_controller
-        .download_tenant(tenant_shard_id)
-        .await
-        .map_err(ApiError::InternalServerError)?;
+    let wait = parse_query_param(&request, "wait_ms")?.map(Duration::from_millis);
 
-    json_response(StatusCode::OK, ())
+    // We don't need this to issue the download request, but:
+    // - it enables us to cleanly return 404 if we get a request for an absent shard
+    // - we will use this to provide status feedback in the response
+    let Some(secondary_tenant) = state
+        .tenant_manager
+        .get_secondary_tenant_shard(tenant_shard_id)
+    else {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Shard {} not found", tenant_shard_id).into(),
+        ));
+    };
+
+    let timeout = wait.unwrap_or(Duration::MAX);
+
+    let status = match tokio::time::timeout(
+        timeout,
+        state.secondary_controller.download_tenant(tenant_shard_id),
+    )
+    .await
+    {
+        // Download job ran to completion.
+        Ok(Ok(())) => StatusCode::OK,
+        // Edge case: downloads aren't usually fallible: things like a missing heatmap are considered
+        // okay.  We could get an error here in the unlikely edge case that the tenant
+        // was detached between our check above and executing the download job.
+        Ok(Err(e)) => return Err(ApiError::InternalServerError(e)),
+        // A timeout is not an error: we have started the download, we're just not done
+        // yet.  The caller will get a response body indicating status.
+        Err(_) => StatusCode::ACCEPTED,
+    };
+
+    let progress = secondary_tenant.progress.lock().unwrap().clone();
+
+    json_response(status, progress)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -2048,6 +2082,10 @@ async fn get_utilization(
     r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    fail::fail_point!("get-utilization-http-handler", |_| {
+        Err(ApiError::ResourceUnavailable("failpoint".into()))
+    });
+
     // this probably could be completely public, but lets make that change later.
     check_permission(&r, None)?;
 
@@ -2103,6 +2141,16 @@ where
     R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
     H: FnOnce(Request<Body>, CancellationToken) -> R + Send + Sync + 'static,
 {
+    if request.uri() != &"/v1/failpoints".parse::<Uri>().unwrap() {
+        fail::fail_point!("api-503", |_| Err(ApiError::ResourceUnavailable(
+            "failpoint".into()
+        )));
+
+        fail::fail_point!("api-500", |_| Err(ApiError::InternalServerError(
+            anyhow::anyhow!("failpoint")
+        )));
+    }
+
     // Spawn a new task to handle the request, to protect the handler from unexpected
     // async cancellations. Most pageserver functions are not async cancellation safe.
     // We arm a drop-guard, so that if Hyper drops the Future, we signal the task
@@ -2247,7 +2295,7 @@ pub fn make_router(
         .get("/v1/location_config", |r| {
             api_handler(r, list_location_config_handler)
         })
-        .get("/v1/location_config/:tenant_id", |r| {
+        .get("/v1/location_config/:tenant_shard_id", |r| {
             api_handler(r, get_location_config_handler)
         })
         .put(

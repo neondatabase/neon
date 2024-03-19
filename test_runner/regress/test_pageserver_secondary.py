@@ -1,4 +1,5 @@
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -157,7 +158,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                 workload.churn_rows(rng.randint(128, 256), pageserver.id)
                 workload.validate(pageserver.id)
             elif last_state_ps[0].startswith("Attached"):
-                # The `attachment_service` will only re-attach on startup when a pageserver was the
+                # The `storage_controller` will only re-attach on startup when a pageserver was the
                 # holder of the latest generation: otherwise the pageserver will revert to detached
                 # state if it was running attached with a stale generation
                 last_state[pageserver.id] = ("Detached", None)
@@ -182,12 +183,12 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                         generation = last_state_ps[1]
                     else:
                         # Switch generations, while also jumping between attached states
-                        generation = env.attachment_service.attach_hook_issue(
+                        generation = env.storage_controller.attach_hook_issue(
                             tenant_id, pageserver.id
                         )
                         latest_attached = pageserver.id
                 else:
-                    generation = env.attachment_service.attach_hook_issue(tenant_id, pageserver.id)
+                    generation = env.storage_controller.attach_hook_issue(tenant_id, pageserver.id)
                     latest_attached = pageserver.id
             else:
                 generation = None
@@ -273,7 +274,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     # Encourage the new location to download while still in secondary mode
     pageserver_b.http_client().tenant_secondary_download(tenant_id)
 
-    migrated_generation = env.attachment_service.attach_hook_issue(tenant_id, pageserver_b.id)
+    migrated_generation = env.storage_controller.attach_hook_issue(tenant_id, pageserver_b.id)
     log.info(f"Acquired generation {migrated_generation} for destination pageserver")
     assert migrated_generation == initial_generation + 1
 
@@ -436,7 +437,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
-    assert env.attachment_service is not None
+    assert env.storage_controller is not None
     assert isinstance(env.pageserver_remote_storage, S3Storage)  # Satisfy linter
 
     tenant_id = env.initial_tenant
@@ -553,3 +554,103 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
             )
         ),
     )
+
+
+@pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
+@pytest.mark.parametrize("via_controller", [True, False])
+def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controller: bool):
+    """
+    Test use of secondary download API for slow downloads, where slow means either a healthy
+    system with a large capacity shard, or some unhealthy remote storage.
+
+    The download API is meant to respect a client-supplied time limit, and return 200 or 202
+    selectively based on whether the download completed.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.enable_pageserver_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+    )
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+
+    env.neon_cli.create_tenant(
+        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Double":1}'
+    )
+
+    attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+    ps_attached = env.get_pageserver(attached_to_id)
+    ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+    # Generate a bunch of small layers (we will apply a slowdown failpoint that works on a per-layer basis)
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(128)
+    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+    workload.write_rows(128)
+    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+    workload.write_rows(128)
+    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+    workload.write_rows(128)
+    ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
+
+    # Expect lots of layers
+    assert len(list_layers(ps_attached, tenant_id, timeline_id)) > 10
+
+    # Simulate large data by making layer downloads artifically slow
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "return(1000)")])
+
+    # Upload a heatmap, so that secondaries have something to download
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+
+    if via_controller:
+        http_client = env.storage_controller.pageserver_api()
+        http_client.tenant_location_conf(
+            tenant_id,
+            {
+                "mode": "Secondary",
+                "secondary_conf": {"warm": True},
+                "tenant_conf": {},
+                "generation": None,
+            },
+        )
+    else:
+        http_client = ps_secondary.http_client()
+
+    # This has no chance to succeed: we have lots of layers and each one takes at least 1000ms
+    (status, progress_1) = http_client.tenant_secondary_download(tenant_id, wait_ms=4000)
+    assert status == 202
+    assert progress_1["heatmap_mtime"] is not None
+    assert progress_1["layers_downloaded"] > 0
+    assert progress_1["bytes_downloaded"] > 0
+    assert progress_1["layers_total"] > progress_1["layers_downloaded"]
+    assert progress_1["bytes_total"] > progress_1["bytes_downloaded"]
+
+    # Multiple polls should work: use a shorter wait period this time
+    (status, progress_2) = http_client.tenant_secondary_download(tenant_id, wait_ms=1000)
+    assert status == 202
+    assert progress_2["heatmap_mtime"] is not None
+    assert progress_2["layers_downloaded"] > 0
+    assert progress_2["bytes_downloaded"] > 0
+    assert progress_2["layers_total"] > progress_2["layers_downloaded"]
+    assert progress_2["bytes_total"] > progress_2["bytes_downloaded"]
+
+    # Progress should be >= the first poll: this can only go backward if we see a new heatmap,
+    # and the heatmap period on the attached node is much longer than the runtime of this test, so no
+    # new heatmap should have been uploaded.
+    assert progress_2["layers_downloaded"] >= progress_1["layers_downloaded"]
+    assert progress_2["bytes_downloaded"] >= progress_1["bytes_downloaded"]
+    assert progress_2["layers_total"] == progress_1["layers_total"]
+    assert progress_2["bytes_total"] == progress_1["bytes_total"]
+
+    # Make downloads fast again: when the download completes within this last request, we
+    # get a 200 instead of a 202
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "off")])
+    (status, progress_3) = http_client.tenant_secondary_download(tenant_id, wait_ms=20000)
+    assert status == 200
+    assert progress_3["heatmap_mtime"] is not None
+    assert progress_3["layers_total"] == progress_3["layers_downloaded"]
+    assert progress_3["bytes_total"] == progress_3["bytes_downloaded"]

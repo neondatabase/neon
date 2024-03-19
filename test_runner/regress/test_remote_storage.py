@@ -169,7 +169,7 @@ def test_remote_storage_backup_and_restore(
     # Ensure that even though the tenant is broken, retrying the attachment fails
     with pytest.raises(Exception, match="Tenant state is Broken"):
         # Use same generation as in previous attempt
-        gen_state = env.attachment_service.inspect(tenant_id)
+        gen_state = env.storage_controller.inspect(tenant_id)
         assert gen_state is not None
         generation = gen_state[0]
         env.pageserver.tenant_attach(tenant_id, generation=generation)
@@ -355,7 +355,7 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    # We are about to forcibly drop local dirs.  Attachment service will increment generation in re-attach before
+    # We are about to forcibly drop local dirs.  Storage controller will increment generation in re-attach before
     # we later increment when actually attaching it again, leading to skipping a generation and potentially getting
     # these warnings if there was a durable but un-executed deletion list at time of restart.
     env.pageserver.allowed_errors.extend(

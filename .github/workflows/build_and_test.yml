@@ -461,6 +461,7 @@ jobs:
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
+        timeout-minutes: 60
         with:
           build_type: ${{ matrix.build_type }}
           test_selection: regress
@@ -474,7 +475,7 @@ jobs:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
-          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           PAGESERVER_GET_VECTORED_IMPL: vectored
 
       # Temporary disable this step until we figure out why it's so flaky
@@ -554,7 +555,7 @@ jobs:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
-          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: std-fs
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 

@@ -37,23 +37,18 @@ def test_pageserver_init_node_id(
     assert (
         bad_init.returncode == 1
     ), "pageserver should not be able to init new config without the node id"
-    assert "missing id" in bad_init.stderr
+    assert 'missing config value "id"' in bad_init.stderr
     assert not pageserver_config.exists(), "config file should not be created after init error"
 
-    completed_init = run_pageserver(
-        ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
-    )
+    good_init_cmd = ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
+    completed_init = run_pageserver(good_init_cmd)
     assert (
         completed_init.returncode == 0
     ), "pageserver should be able to create a new config with the node id given"
     assert pageserver_config.exists(), "config file should be created successfully"
 
-    bad_reinit = run_pageserver(
-        ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
-    )
-    assert (
-        bad_reinit.returncode == 1
-    ), "pageserver should not be able to init new config without the node id"
+    bad_reinit = run_pageserver(good_init_cmd)
+    assert bad_reinit.returncode == 1, "pageserver refuses to init if already exists"
     assert "already exists, cannot init it" in bad_reinit.stderr
 
     bad_update = run_pageserver(["--update-config", "-c", "id = 3"])
@@ -73,7 +68,7 @@ def check_client(env: NeonEnv, client: PageserverHttpClient):
     # create new tenant and check it is also there
     tenant_id = TenantId.generate()
     client.tenant_create(
-        tenant_id, generation=env.attachment_service.attach_hook_issue(tenant_id, env.pageserver.id)
+        tenant_id, generation=env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id)
     )
     assert tenant_id in {TenantId(t["id"]) for t in client.tenant_list()}
 

@@ -536,6 +536,18 @@ impl Drop for LayerInner {
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
 
+            let Some(timeline) = timeline.upgrade() else {
+                // no need to nag that timeline is gone: under normal situation on
+                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            };
+
+            let Ok(_guard) = timeline.gate.enter() else {
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            };
+
             let removed = match std::fs::remove_file(path) {
                 Ok(()) => true,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -554,32 +566,26 @@ impl Drop for LayerInner {
                 }
             };
 
-            if let Some(timeline) = timeline.upgrade() {
-                if removed {
-                    timeline.metrics.resident_physical_size_sub(file_size);
-                }
-                if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
+            if removed {
+                timeline.metrics.resident_physical_size_sub(file_size);
+            }
+            if let Some(remote_client) = timeline.remote_client.as_ref() {
+                let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
-                    if let Err(e) = res {
-                        // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
-                        // demonstrating this deadlock (without spawn_blocking): stop will drop
-                        // queued items, which will have ResidentLayer's, and those drops would try
-                        // to re-entrantly lock the RemoteTimelineClient inner state.
-                        if !timeline.is_active() {
-                            tracing::info!("scheduling deletion on drop failed: {e:#}");
-                        } else {
-                            tracing::warn!("scheduling deletion on drop failed: {e:#}");
-                        }
-                        LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                if let Err(e) = res {
+                    // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
+                    // demonstrating this deadlock (without spawn_blocking): stop will drop
+                    // queued items, which will have ResidentLayer's, and those drops would try
+                    // to re-entrantly lock the RemoteTimelineClient inner state.
+                    if !timeline.is_active() {
+                        tracing::info!("scheduling deletion on drop failed: {e:#}");
                     } else {
-                        LAYER_IMPL_METRICS.inc_completed_deletes();
+                        tracing::warn!("scheduling deletion on drop failed: {e:#}");
                     }
+                    LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                } else {
+                    LAYER_IMPL_METRICS.inc_completed_deletes();
                 }
-            } else {
-                // no need to nag that timeline is gone: under normal situation on
-                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
             }
         });
     }
@@ -704,10 +710,6 @@ impl LayerInner {
                     // disable any scheduled but not yet running eviction deletions for this
                     let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
-                    // count cancellations, which currently remain largely unexpected
-                    let init_cancelled =
-                        scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-
                     // no need to make the evict_and_wait wait for the actual download to complete
                     drop(self.status.send(Status::Downloaded));
 
@@ -716,7 +718,9 @@ impl LayerInner {
                         .upgrade()
                         .ok_or_else(|| DownloadError::TimelineShutdown)?;
 
-                    // FIXME: grab a gate
+                    // count cancellations, which currently remain largely unexpected
+                    let init_cancelled =
+                        scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
 
                     let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
@@ -725,9 +729,17 @@ impl LayerInner {
                     let needs_download = self
                         .needs_download()
                         .await
-                        .map_err(DownloadError::PreStatFailed)?;
+                        .map_err(DownloadError::PreStatFailed);
 
-                    let permit = if let Some(reason) = needs_download {
+                    let needs_download = match needs_download {
+                        Ok(reason) => reason,
+                        Err(e) => {
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
+                            return Err(e);
+                        }
+                    };
+
+                    let (permit, downloaded) = if let Some(reason) = needs_download {
                         if let NeedsDownload::NotFile(ft) = reason {
                             return Err(DownloadError::NotFile(ft));
                         }
@@ -738,36 +750,59 @@ impl LayerInner {
                         self.wanted_evicted.store(false, Ordering::Release);
 
                         if !can_ever_evict {
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
                             return Err(DownloadError::NoRemoteStorage);
                         }
 
                         if let Some(ctx) = ctx {
-                            self.check_expected_download(ctx)?;
+                            let res = self.check_expected_download(ctx);
+                            if let Err(e) = res {
+                                scopeguard::ScopeGuard::into_inner(init_cancelled);
+                                return Err(e);
+                            }
                         }
 
                         if !allow_download {
                             // this does look weird, but for LayerInner the "downloading" means also changing
                             // internal once related state ...
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
                             return Err(DownloadError::DownloadRequired);
                         }
 
                         tracing::info!(%reason, "downloading on-demand");
 
-                        self.spawn_download_and_wait(timeline, permit).await?
+                        let permit = self.spawn_download_and_wait(timeline, permit).await;
+
+                        let permit = match permit {
+                            Ok(permit) => permit,
+                            Err(e) => {
+                                scopeguard::ScopeGuard::into_inner(init_cancelled);
+                                return Err(e);
+                            }
+                        };
+
+                        (permit, true)
                     } else {
                         // the file is present locally, probably by a previous but cancelled call to
                         // get_or_maybe_download. alternatively we might be running without remote storage.
                         LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
-                        permit
+                        (permit, false)
                     };
 
-                    let since_last_eviction =
-                        self.last_evicted_at.lock().unwrap().map(|ts| ts.elapsed());
-                    if let Some(since_last_eviction) = since_last_eviction {
-                        // FIXME: this will not always be recorded correctly until #6028 (the no
-                        // download needed branch above)
-                        LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+                    scopeguard::ScopeGuard::into_inner(init_cancelled);
+
+                    if downloaded {
+                        let since_last_eviction = self
+                            .last_evicted_at
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .map(|ts| ts.elapsed());
+
+                        if let Some(since_last_eviction) = since_last_eviction {
+                            LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+                        }
                     }
 
                     let res = Arc::new(DownloadedLayer {
@@ -788,8 +823,6 @@ impl LayerInner {
                             "completing the on-demand download for other tasks"
                         );
                     }
-
-                    scopeguard::ScopeGuard::into_inner(init_cancelled);
 
                     Ok((ResidentOrWantedEvicted::Resident(res), permit))
                 }
@@ -1092,6 +1125,10 @@ impl LayerInner {
     fn evict_blocking(&self, only_version: usize) -> Result<(), EvictionCancelled> {
         // deleted or detached timeline, don't do anything.
         let Some(timeline) = self.timeline.upgrade() else {
+            return Err(EvictionCancelled::TimelineGone);
+        };
+
+        let Ok(_gate) = timeline.gate.enter() else {
             return Err(EvictionCancelled::TimelineGone);
         };
 

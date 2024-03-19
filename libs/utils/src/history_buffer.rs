@@ -47,9 +47,10 @@ impl<T, const L: usize> ops::Deref for HistoryBufferWithDropCounter<T, L> {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct SerdeRepr<T> {
     buffer: Vec<T>,
+    buffer_size: usize,
     drop_count: u64,
 }
 
@@ -61,6 +62,7 @@ where
         let HistoryBufferWithDropCounter { buffer, drop_count } = value;
         SerdeRepr {
             buffer: buffer.iter().cloned().collect(),
+            buffer_size: L,
             drop_count: *drop_count,
         }
     }
@@ -78,19 +80,52 @@ where
     }
 }
 
+impl<'de, T, const L: usize> serde::de::Deserialize<'de> for HistoryBufferWithDropCounter<T, L>
+where
+    T: Clone + serde::Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let SerdeRepr {
+            buffer: des_buffer,
+            drop_count,
+            buffer_size,
+        } = SerdeRepr::<T>::deserialize(deserializer)?;
+        if buffer_size != L {
+            use serde::de::Error;
+            return Err(D::Error::custom(format!(
+                "invalid buffer_size, expecting {L} got {buffer_size}"
+            )));
+        }
+        let mut buffer = HistoryBuffer::new();
+        buffer.extend(des_buffer);
+        Ok(HistoryBufferWithDropCounter { buffer, drop_count })
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::HistoryBufferWithDropCounter;
 
     #[test]
     fn test_basics() {
-        let mut b = HistoryBufferWithDropCounter::<_, 2>::default();
+        let mut b = HistoryBufferWithDropCounter::<usize, 2>::default();
         b.write(1);
         b.write(2);
         b.write(3);
         assert!(b.iter().any(|e| *e == 2));
         assert!(b.iter().any(|e| *e == 3));
         assert!(!b.iter().any(|e| *e == 1));
+
+        // round-trip serde
+        let round_tripped: HistoryBufferWithDropCounter<usize, 2> =
+            serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+        assert_eq!(
+            round_tripped.iter().cloned().collect::<Vec<_>>(),
+            b.iter().cloned().collect::<Vec<_>>()
+        );
     }
 
     #[test]

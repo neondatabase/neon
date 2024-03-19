@@ -118,7 +118,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     // A little check to ensure that our clock is not too far off from the S3 clock
     {
         let dl = retry(|| ctx.client.download(&path2, &cancel)).await?;
-        let last_modified = dl.last_modified.unwrap();
+        let last_modified = dl.last_modified;
         let half_wt = WAIT_TIME.mul_f32(0.5);
         let t0_hwt = t0 + half_wt;
         let t1_hwt = t1 - half_wt;

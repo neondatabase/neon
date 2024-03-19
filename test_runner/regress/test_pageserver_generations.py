@@ -203,13 +203,18 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     env.broker.try_start()
     for sk in env.safekeepers:
         sk.start()
-    env.attachment_service.start()
+    env.storage_controller.start()
+
+    # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
+    env.storage_controller.node_register(env.pageserver)
 
     env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
+    env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
     env.neon_cli.create_tenant(
         tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
     )
+
     generate_uploads_and_deletions(env, pageserver=env.pageserver)
 
     def parse_generation_suffix(key):
@@ -285,7 +290,7 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
-    attached_to_id = env.attachment_service.locate(env.initial_tenant)[0]["node_id"]
+    attached_to_id = env.storage_controller.locate(env.initial_tenant)[0]["node_id"]
     main_pageserver = env.get_pageserver(attached_to_id)
     other_pageserver = [p for p in env.pageservers if p.id != attached_to_id][0]
 
@@ -310,7 +315,7 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
 
     # Now advance the generation in the control plane: subsequent validations
     # from the running pageserver will fail.  No more deletions should happen.
-    env.attachment_service.attach_hook_issue(env.initial_tenant, other_pageserver.id)
+    env.storage_controller.attach_hook_issue(env.initial_tenant, other_pageserver.id)
     generate_uploads_and_deletions(env, init=False, pageserver=main_pageserver)
 
     assert_deletion_queue(ps_http, lambda n: n > 0)
@@ -366,7 +371,7 @@ def test_deletion_queue_recovery(
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
-    attached_to_id = env.attachment_service.locate(env.initial_tenant)[0]["node_id"]
+    attached_to_id = env.storage_controller.locate(env.initial_tenant)[0]["node_id"]
     main_pageserver = env.get_pageserver(attached_to_id)
     other_pageserver = [p for p in env.pageservers if p.id != attached_to_id][0]
 
@@ -428,7 +433,7 @@ def test_deletion_queue_recovery(
 
     if keep_attachment == KeepAttachment.LOSE:
         some_other_pageserver = other_pageserver.id
-        env.attachment_service.attach_hook_issue(env.initial_tenant, some_other_pageserver)
+        env.storage_controller.attach_hook_issue(env.initial_tenant, some_other_pageserver)
 
     main_pageserver.start()
 
@@ -494,7 +499,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     )
 
     # Simulate a major incident: the control plane goes offline
-    env.attachment_service.stop()
+    env.storage_controller.stop()
 
     # Remember how many validations had happened before the control plane went offline
     validated = get_deletion_queue_validated(ps_http)
@@ -511,7 +516,6 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
     env.pageserver.start(
         overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
-        register=False,
     )
 
     # The pageserver should provide service to clients
@@ -525,7 +529,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     assert get_deletion_queue_executed(ps_http) == 0
 
     # When the control plane comes back up, normal service should resume
-    env.attachment_service.start()
+    env.storage_controller.start()
 
     ps_http.deletion_queue_flush(execute=True)
     assert get_deletion_queue_depth(ps_http) == 0

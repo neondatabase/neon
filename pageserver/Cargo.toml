@@ -89,6 +89,9 @@ enumset = { workspace = true, features = ["serde"]}
 strum.workspace = true
 strum_macros.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 hex-literal.workspace = true

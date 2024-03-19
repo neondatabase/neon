@@ -55,8 +55,8 @@ use self::mgr::GetTenantError;
 use self::mgr::TenantsMap;
 use self::remote_timeline_client::upload::upload_index_part;
 use self::remote_timeline_client::RemoteTimelineClient;
+use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
-use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
@@ -565,9 +565,8 @@ impl Tenant {
             // avoiding holding it across awaits
             let mut timelines_accessor = self.timelines.lock().unwrap();
             match timelines_accessor.entry(timeline_id) {
+                // We should never try and load the same timeline twice during startup
                 Entry::Occupied(_) => {
-                    // The uninit mark file acts as a lock that prevents another task from
-                    // initializing the timeline at the same time.
                     unreachable!(
                         "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
                     );
@@ -1064,8 +1063,7 @@ impl Tenant {
             let entry_path = entry.path();
 
             let purge = if crate::is_temporary(entry_path)
-                // TODO: uninit_mark isn't needed any more, since uninitialized timelines are already
-                // covered by the check that the timeline must exist in remote storage.
+                // TODO: remove uninit mark code (https://github.com/neondatabase/neon/issues/5718)
                 || is_uninit_mark(entry_path)
                 || crate::is_delete_mark(entry_path)
             {
@@ -1298,11 +1296,6 @@ impl Tenant {
     /// Until that happens, the on-disk state is invalid (disk_consistent_lsn=Lsn(0))
     /// and the timeline will fail to load at a restart.
     ///
-    /// That's why we add an uninit mark file, and wrap it together witht the Timeline
-    /// in-memory object into UninitializedTimeline.
-    /// Once the caller is done setting up the timeline, they should call
-    /// `UninitializedTimeline::initialize_with_lock` to remove the uninit mark.
-    ///
     /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
     /// minimum amount of keys required to get a writable timeline.
     /// (Without it, `put` might fail due to `repartition` failing.)
@@ -1318,7 +1311,9 @@ impl Tenant {
             "Cannot create empty timelines on inactive tenant"
         );
 
-        let timeline_uninit_mark = self.create_timeline_uninit_mark(new_timeline_id)?;
+        // Protect against concurrent attempts to use this TimelineId
+        let create_guard = self.create_timeline_create_guard(new_timeline_id)?;
+
         let new_metadata = TimelineMetadata::new(
             // Initialize disk_consistent LSN to 0, The caller must import some data to
             // make it valid, before calling finish_creation()
@@ -1333,7 +1328,7 @@ impl Tenant {
         self.prepare_new_timeline(
             new_timeline_id,
             &new_metadata,
-            timeline_uninit_mark,
+            create_guard,
             initdb_lsn,
             None,
         )
@@ -1421,9 +1416,8 @@ impl Tenant {
             .map_err(|_| CreateTimelineError::ShuttingDown)?;
 
         // Get exclusive access to the timeline ID: this ensures that it does not already exist,
-        // and that no other creation attempts will be allowed in while we are working.  The
-        // uninit_mark is a guard.
-        let uninit_mark = match self.create_timeline_uninit_mark(new_timeline_id) {
+        // and that no other creation attempts will be allowed in while we are working.
+        let create_guard = match self.create_timeline_create_guard(new_timeline_id) {
             Ok(m) => m,
             Err(TimelineExclusionError::AlreadyCreating) => {
                 // Creation is in progress, we cannot create it again, and we cannot
@@ -1465,6 +1459,8 @@ impl Tenant {
                 return Ok(existing);
             }
         };
+
+        pausable_failpoint!("timeline-creation-after-uninit");
 
         let loaded_timeline = match ancestor_timeline_id {
             Some(ancestor_timeline_id) => {
@@ -1513,7 +1509,7 @@ impl Tenant {
                     &ancestor_timeline,
                     new_timeline_id,
                     ancestor_start_lsn,
-                    uninit_mark,
+                    create_guard,
                     ctx,
                 )
                 .await?
@@ -1523,7 +1519,7 @@ impl Tenant {
                     new_timeline_id,
                     pg_version,
                     load_existing_initdb,
-                    uninit_mark,
+                    create_guard,
                     ctx,
                 )
                 .await?
@@ -1845,6 +1841,8 @@ impl Tenant {
 
         // Wait for any in-flight operations to complete
         self.gate.close().await;
+
+        remove_tenant_metrics(&self.tenant_shard_id);
 
         Ok(())
     }
@@ -2868,9 +2866,9 @@ impl Tenant {
         start_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        let uninit_mark = self.create_timeline_uninit_mark(dst_id).unwrap();
+        let create_guard = self.create_timeline_create_guard(dst_id).unwrap();
         let tl = self
-            .branch_timeline_impl(src_timeline, dst_id, start_lsn, uninit_mark, ctx)
+            .branch_timeline_impl(src_timeline, dst_id, start_lsn, create_guard, ctx)
             .await?;
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -2884,10 +2882,10 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        timeline_uninit_mark: TimelineUninitMark<'_>,
+        timeline_create_guard: TimelineCreateGuard<'_>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_uninit_mark, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_create_guard, ctx)
             .await
     }
 
@@ -2896,7 +2894,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        timeline_uninit_mark: TimelineUninitMark<'_>,
+        timeline_create_guard: TimelineCreateGuard<'_>,
         _ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
@@ -2980,7 +2978,7 @@ impl Tenant {
             .prepare_new_timeline(
                 dst_id,
                 &metadata,
-                timeline_uninit_mark,
+                timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
             )
@@ -3012,12 +3010,12 @@ impl Tenant {
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let uninit_mark = self.create_timeline_uninit_mark(timeline_id).unwrap();
+        let create_guard = self.create_timeline_create_guard(timeline_id).unwrap();
         self.bootstrap_timeline(
             timeline_id,
             pg_version,
             load_existing_initdb,
-            uninit_mark,
+            create_guard,
             ctx,
         )
         .await
@@ -3081,7 +3079,7 @@ impl Tenant {
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
-        timeline_uninit_mark: TimelineUninitMark<'_>,
+        timeline_create_guard: TimelineCreateGuard<'_>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
@@ -3093,13 +3091,14 @@ impl Tenant {
             TEMP_FILE_SUFFIX,
         );
 
-        // an uninit mark was placed before, nothing else can access this timeline files
-        // current initdb was not run yet, so remove whatever was left from the previous runs
+        // Remove whatever was left from the previous runs: safe because TimelineCreateGuard guarantees
+        // we won't race with other creations or existent timelines with the same path.
         if pgdata_path.exists() {
             fs::remove_dir_all(&pgdata_path).with_context(|| {
                 format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
         }
+
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&pgdata_path) {
@@ -3176,7 +3175,7 @@ impl Tenant {
             .prepare_new_timeline(
                 timeline_id,
                 &new_metadata,
-                timeline_uninit_mark,
+                timeline_create_guard,
                 pgdata_lsn,
                 None,
             )
@@ -3248,13 +3247,12 @@ impl Tenant {
     ///
     /// An empty layer map is initialized, and new data and WAL can be imported starting
     /// at 'disk_consistent_lsn'. After any initial data has been imported, call
-    /// `finish_creation` to insert the Timeline into the timelines map and to remove the
-    /// uninit mark file.
+    /// `finish_creation` to insert the Timeline into the timelines map.
     async fn prepare_new_timeline<'a>(
         &'a self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
-        uninit_mark: TimelineUninitMark<'a>,
+        create_guard: TimelineCreateGuard<'a>,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
     ) -> anyhow::Result<UninitializedTimeline> {
@@ -3277,9 +3275,12 @@ impl Tenant {
 
         timeline_struct.init_empty_layer_map(start_lsn);
 
-        if let Err(e) = self.create_timeline_files(&uninit_mark.timeline_path).await {
+        if let Err(e) = self
+            .create_timeline_files(&create_guard.timeline_path)
+            .await
+        {
             error!("Failed to create initial files for timeline {tenant_shard_id}/{new_timeline_id}, cleaning up: {e:?}");
-            cleanup_timeline_directory(uninit_mark);
+            cleanup_timeline_directory(create_guard);
             return Err(e);
         }
 
@@ -3290,41 +3291,31 @@ impl Tenant {
         Ok(UninitializedTimeline::new(
             self,
             new_timeline_id,
-            Some((timeline_struct, uninit_mark)),
+            Some((timeline_struct, create_guard)),
         ))
     }
 
     async fn create_timeline_files(&self, timeline_path: &Utf8Path) -> anyhow::Result<()> {
         crashsafe::create_dir(timeline_path).context("Failed to create timeline directory")?;
 
-        fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
-            anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
+        fail::fail_point!("after-timeline-dir-creation", |_| {
+            anyhow::bail!("failpoint after-timeline-dir-creation");
         });
 
         Ok(())
     }
 
-    /// Attempts to create an uninit mark file for the timeline initialization.
-    /// Bails, if the timeline is already loaded into the memory (i.e. initialized before), or the uninit mark file already exists.
-    ///
-    /// This way, we need to hold the timelines lock only for small amount of time during the mark check/creation per timeline init.
-    fn create_timeline_uninit_mark(
+    /// Get a guard that provides exclusive access to the timeline directory, preventing
+    /// concurrent attempts to create the same timeline.
+    fn create_timeline_create_guard(
         &self,
         timeline_id: TimelineId,
-    ) -> Result<TimelineUninitMark, TimelineExclusionError> {
+    ) -> Result<TimelineCreateGuard, TimelineExclusionError> {
         let tenant_shard_id = self.tenant_shard_id;
 
-        let uninit_mark_path = self
-            .conf
-            .timeline_uninit_mark_file_path(tenant_shard_id, timeline_id);
         let timeline_path = self.conf.timeline_path(&tenant_shard_id, &timeline_id);
 
-        let uninit_mark = TimelineUninitMark::new(
-            self,
-            timeline_id,
-            uninit_mark_path.clone(),
-            timeline_path.clone(),
-        )?;
+        let create_guard = TimelineCreateGuard::new(self, timeline_id, timeline_path.clone())?;
 
         // At this stage, we have got exclusive access to in-memory state for this timeline ID
         // for creation.
@@ -3340,23 +3331,7 @@ impl Tenant {
             )));
         }
 
-        // Create the on-disk uninit mark _after_ the in-memory acquisition of the tenant ID: guarantees
-        // that during process runtime, colliding creations will be caught in-memory without getting
-        // as far as failing to write a file.
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&uninit_mark_path)
-            .context("Failed to create uninit mark file")
-            .and_then(|_| {
-                crashsafe::fsync_file_and_parent(&uninit_mark_path)
-                    .context("Failed to fsync uninit mark file")
-            })
-            .with_context(|| {
-                format!("Failed to crate uninit mark for timeline {tenant_shard_id}/{timeline_id}")
-            })?;
-
-        Ok(uninit_mark)
+        Ok(create_guard)
     }
 
     /// Gathers inputs from all of the timelines to produce a sizing model input.
@@ -3557,11 +3532,6 @@ async fn run_initdb(
     Ok(())
 }
 
-impl Drop for Tenant {
-    fn drop(&mut self) {
-        remove_tenant_metrics(&self.tenant_shard_id);
-    }
-}
 /// Dump contents of a layer file to stdout.
 pub async fn dump_layerfile_from_path(
     path: &Utf8Path,
@@ -4628,10 +4598,7 @@ mod tests {
         drop(guard);
 
         // Pick a big LSN such that we query over all the changes.
-        // Technically, u64::MAX - 1 is the largest LSN supported by the read path,
-        // but there seems to be a bug on the non-vectored search path which surfaces
-        // in that case.
-        let reads_lsn = Lsn(u64::MAX - 1000);
+        let reads_lsn = Lsn(u64::MAX - 1);
 
         for read in reads {
             info!("Doing vectored read on {:?}", read);
@@ -5105,15 +5072,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_uninit_mark_crash() -> anyhow::Result<()> {
-        let name = "test_uninit_mark_crash";
+    async fn test_create_guard_crash() -> anyhow::Result<()> {
+        let name = "test_create_guard_crash";
         let harness = TenantHarness::create(name)?;
         {
             let (tenant, ctx) = harness.load().await;
             let tline = tenant
                 .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
                 .await?;
-            // Keeps uninit mark in place
+            // Leave the timeline ID in [`Tenant::timelines_creating`] to exclude attempting to create it again
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
                 .shutdown()
@@ -5141,10 +5108,24 @@ mod tests {
             .timeline_path(&tenant.tenant_shard_id, &TIMELINE_ID)
             .exists());
 
-        assert!(!harness
-            .conf
-            .timeline_uninit_mark_file_path(tenant.tenant_shard_id, TIMELINE_ID)
-            .exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_at_max_lsn() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_read_at_max_lsn")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let lsn = Lsn(0x10);
+        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+
+        let test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let read_lsn = Lsn(u64::MAX - 1);
+
+        assert!(tline.get(test_key, read_lsn, &ctx).await.is_ok());
 
         Ok(())
     }

@@ -123,6 +123,12 @@ impl PageserverFeedback {
                         rf.replytime = *PG_EPOCH - Duration::from_micros(-raw_time as u64);
                     }
                 }
+                b"shard_number" => {
+                    let len = buf.get_i32();
+                    // TODO: this will be implemented in the next update,
+                    //  for now, we just skip the value.
+                    buf.advance(len as usize);
+                }
                 _ => {
                     let len = buf.get_i32();
                     warn!(

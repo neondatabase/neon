@@ -6,7 +6,9 @@ use futures::stream::StreamExt;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::ShardParameters;
-use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
+use pageserver_api::shard::{
+    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -100,7 +102,7 @@ pub(crate) enum TenantsMap {
     /// [`init_tenant_mgr`] is done, all on-disk tenants have been loaded.
     /// New tenants can be added using [`tenant_map_acquire_slot`].
     Open(BTreeMap<TenantShardId, TenantSlot>),
-    /// The pageserver has entered shutdown mode via [`shutdown_all_tenants`].
+    /// The pageserver has entered shutdown mode via [`TenantManager::shutdown`].
     /// Existing tenants are still accessible, but no new tenants can be created.
     ShuttingDown(BTreeMap<TenantShardId, TenantSlot>),
 }
@@ -259,6 +261,12 @@ pub struct TenantManager {
     // See https://github.com/neondatabase/neon/issues/5796
     tenants: &'static std::sync::RwLock<TenantsMap>,
     resources: TenantSharedResources,
+
+    // Long-running operations that happen outside of a [`Tenant`] lifetime should respect this token.
+    // This is for edge cases like tenant deletion.  In normal cases (within a Tenant lifetime),
+    // tenants have their own cancellation tokens, which we fire individually in [`Self::shutdown`], or
+    // when the tenant detaches.
+    cancel: CancellationToken,
 }
 
 fn emergency_generations(
@@ -295,7 +303,7 @@ async fn init_load_generations(
     } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-        match client.re_attach().await {
+        match client.re_attach(conf).await {
             Ok(tenants) => tenants,
             Err(RetryForeverError::ShuttingDown) => {
                 anyhow::bail!("Shut down while waiting for control plane re-attach response")
@@ -618,6 +626,7 @@ pub async fn init_tenant_mgr(
         conf,
         tenants: &TENANTS,
         resources,
+        cancel: CancellationToken::new(),
     })
 }
 
@@ -676,21 +685,6 @@ pub(crate) fn tenant_spawn(
     };
 
     Ok(tenant)
-}
-
-///
-/// Shut down all tenants. This runs as part of pageserver shutdown.
-///
-/// NB: We leave the tenants in the map, so that they remain accessible through
-/// the management API until we shut it down. If we removed the shut-down tenants
-/// from the tenants map, the management API would return 404 for these tenants,
-/// because TenantsMap::get() now returns `None`.
-/// That could be easily misinterpreted by control plane, the consumer of the
-/// management API. For example, it could attach the tenant on a different pageserver.
-/// We would then be in split-brain once this pageserver restarts.
-#[instrument(skip_all)]
-pub(crate) async fn shutdown_all_tenants() {
-    shutdown_all_tenants0(&TENANTS).await
 }
 
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
@@ -1426,6 +1420,7 @@ impl TenantManager {
             self.resources.remote_storage.clone(),
             &TENANTS,
             tenant,
+            &self.cancel,
         )
         .await;
 
@@ -1439,11 +1434,41 @@ impl TenantManager {
         &self,
         tenant_shard_id: TenantShardId,
         new_shard_count: ShardCount,
+        new_stripe_size: Option<ShardStripeSize>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<TenantShardId>> {
+        let r = self
+            .do_shard_split(tenant_shard_id, new_shard_count, new_stripe_size, ctx)
+            .await;
+        if r.is_err() {
+            // Shard splitting might have left the original shard in a partially shut down state (it
+            // stops the shard's remote timeline client).  Reset it to ensure we leave things in
+            // a working state.
+            if self.get(tenant_shard_id).is_some() {
+                tracing::warn!("Resetting {tenant_shard_id} after shard split failure");
+                if let Err(e) = self.reset_tenant(tenant_shard_id, false, ctx).await {
+                    // Log this error because our return value will still be the original error, not this one.  This is
+                    // a severe error: if this happens, we might be leaving behind a tenant that is not fully functional
+                    // (e.g. has uploads disabled).  We can't do anything else: if reset fails then shutting the tenant down or
+                    // setting it broken probably won't help either.
+                    tracing::error!("Failed to reset {tenant_shard_id}: {e}");
+                }
+            }
+        }
+
+        r
+    }
+
+    pub(crate) async fn do_shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        new_shard_count: ShardCount,
+        new_stripe_size: Option<ShardStripeSize>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<TenantShardId>> {
         let tenant = get_tenant(tenant_shard_id, true)?;
 
-        // Plan: identify what the new child shards will be
+        // Validate the incoming request
         if new_shard_count.count() <= tenant_shard_id.shard_count.count() {
             anyhow::bail!("Requested shard count is not an increase");
         }
@@ -1452,10 +1477,18 @@ impl TenantManager {
             anyhow::bail!("Requested split is not a power of two");
         }
 
-        let parent_shard_identity = tenant.shard_identity;
-        let parent_tenant_conf = tenant.get_tenant_conf();
-        let parent_generation = tenant.generation;
+        if let Some(new_stripe_size) = new_stripe_size {
+            if tenant.get_shard_stripe_size() != new_stripe_size
+                && tenant_shard_id.shard_count.count() > 1
+            {
+                // This tenant already has multiple shards, it is illegal to try and change its stripe size
+                anyhow::bail!(
+                    "Shard stripe size may not be modified once tenant has multiple shards"
+                );
+            }
+        }
 
+        // Plan: identify what the new child shards will be
         let child_shards = tenant_shard_id.split(new_shard_count);
         tracing::info!(
             "Shard {} splits into: {}",
@@ -1466,6 +1499,14 @@ impl TenantManager {
                 .join(",")
         );
 
+        fail::fail_point!("shard-split-pre-prepare", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
+
+        let parent_shard_identity = tenant.shard_identity;
+        let parent_tenant_conf = tenant.get_tenant_conf();
+        let parent_generation = tenant.generation;
+
         // Phase 1: Write out child shards' remote index files, in the parent tenant's current generation
         if let Err(e) = tenant.split_prepare(&child_shards).await {
             // If [`Tenant::split_prepare`] fails, we must reload the tenant, because it might
@@ -1474,6 +1515,10 @@ impl TenantManager {
             self.reset_tenant(tenant_shard_id, false, ctx).await?;
             return Err(e);
         }
+
+        fail::fail_point!("shard-split-post-prepare", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
 
         self.resources.deletion_queue_client.flush_advisory();
 
@@ -1496,11 +1541,16 @@ impl TenantManager {
                 anyhow::bail!("Detached parent shard in the middle of split!")
             }
         };
-
+        fail::fail_point!("shard-split-pre-hardlink", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
         // Optimization: hardlink layers from the parent into the children, so that they don't have to
         // re-download & duplicate the data referenced in their initial IndexPart
         self.shard_split_hardlink(parent, child_shards.clone())
             .await?;
+        fail::fail_point!("shard-split-post-hardlink", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
 
         // Take a snapshot of where the parent's WAL ingest had got to: we will wait for
         // child shards to reach this point.
@@ -1515,6 +1565,9 @@ impl TenantManager {
         // Phase 3: Spawn the child shards
         for child_shard in &child_shards {
             let mut child_shard_identity = parent_shard_identity;
+            if let Some(new_stripe_size) = new_stripe_size {
+                child_shard_identity.stripe_size = new_stripe_size;
+            }
             child_shard_identity.count = child_shard.shard_count;
             child_shard_identity.number = child_shard.shard_number;
 
@@ -1536,6 +1589,10 @@ impl TenantManager {
             )
             .await?;
         }
+
+        fail::fail_point!("shard-split-post-child-conf", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
 
         // Phase 4: wait for child chards WAL ingest to catch up to target LSN
         for child_shard_id in &child_shards {
@@ -1569,6 +1626,10 @@ impl TenantManager {
                         timeline.timeline_id,
                         target_lsn
                     );
+
+                    fail::fail_point!("shard-split-lsn-wait", |_| Err(anyhow::anyhow!(
+                        "failpoint"
+                    )));
                     if let Err(e) = timeline.wait_lsn(*target_lsn, ctx).await {
                         // Failure here might mean shutdown, in any case this part is an optimization
                         // and we shouldn't hold up the split operation.
@@ -1613,6 +1674,10 @@ impl TenantManager {
                     .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
             },
         );
+
+        fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
+            "failpoint"
+        )));
 
         parent_slot_guard.drop_old_value()?;
 
@@ -1744,6 +1809,23 @@ impl TenantManager {
         }
 
         Ok(())
+    }
+
+    ///
+    /// Shut down all tenants. This runs as part of pageserver shutdown.
+    ///
+    /// NB: We leave the tenants in the map, so that they remain accessible through
+    /// the management API until we shut it down. If we removed the shut-down tenants
+    /// from the tenants map, the management API would return 404 for these tenants,
+    /// because TenantsMap::get() now returns `None`.
+    /// That could be easily misinterpreted by control plane, the consumer of the
+    /// management API. For example, it could attach the tenant on a different pageserver.
+    /// We would then be in split-brain once this pageserver restarts.
+    #[instrument(skip_all)]
+    pub(crate) async fn shutdown(&self) {
+        self.cancel.cancel();
+
+        shutdown_all_tenants0(self.tenants).await
     }
 }
 
