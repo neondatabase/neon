@@ -78,18 +78,31 @@ impl PageServerNode {
     ///
     /// These all end up on the command line of the `pageserver` binary.
     fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
-        let id = format!("id={}", self.conf.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let http_auth_type_param = format!("http_auth_type='{}'", self.conf.http_auth_type);
-        let listen_http_addr_param = format!("listen_http_addr='{}'", self.conf.listen_http_addr);
+        let PageServerConf {
+            id,
+            listen_pg_addr,
+            listen_http_addr,
+            pg_auth_type,
+            http_auth_type,
+            virtual_file_io_engine,
+            get_vectored_impl,
+        } = &self.conf;
 
-        let pg_auth_type_param = format!("pg_auth_type='{}'", self.conf.pg_auth_type);
-        let listen_pg_addr_param = format!("listen_pg_addr='{}'", self.conf.listen_pg_addr);
+        let id = format!("id={}", id);
+
+        let http_auth_type_param = format!("http_auth_type='{}'", http_auth_type);
+        let listen_http_addr_param = format!("listen_http_addr='{}'", listen_http_addr);
+
+        let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
+        let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
+        let virtual_file_io_engine = format!("virtual_file_io_engine='{virtual_file_io_engine}'");
+        let get_vectored_impl = format!("get_vectored_impl='{get_vectored_impl}'");
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -101,6 +114,8 @@ impl PageServerNode {
             listen_http_addr_param,
             listen_pg_addr_param,
             broker_endpoint_param,
+            virtual_file_io_engine,
+            get_vectored_impl,
         ];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
@@ -111,7 +126,7 @@ impl PageServerNode {
 
             // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
-            if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
+            if matches!(http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
                     .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
@@ -129,8 +144,7 @@ impl PageServerNode {
             ));
         }
 
-        if self.conf.http_auth_type != AuthType::Trust || self.conf.pg_auth_type != AuthType::Trust
-        {
+        if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
@@ -552,13 +566,6 @@ impl PageServerNode {
         tenant_shard_id: &TenantShardId,
     ) -> anyhow::Result<Vec<TimelineInfo>> {
         Ok(self.http_client.list_timelines(*tenant_shard_id).await?)
-    }
-
-    pub async fn tenant_secondary_download(&self, tenant_id: &TenantShardId) -> anyhow::Result<()> {
-        Ok(self
-            .http_client
-            .tenant_secondary_download(*tenant_id)
-            .await?)
     }
 
     pub async fn timeline_create(

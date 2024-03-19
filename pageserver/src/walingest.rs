@@ -109,6 +109,8 @@ impl WalIngest {
             self.checkpoint_modified = true;
         }
 
+        failpoint_support::sleep_millis_async!("wal-ingest-record-sleep");
+
         match decoded.xl_rmid {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages

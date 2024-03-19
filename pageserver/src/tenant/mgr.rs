@@ -102,7 +102,7 @@ pub(crate) enum TenantsMap {
     /// [`init_tenant_mgr`] is done, all on-disk tenants have been loaded.
     /// New tenants can be added using [`tenant_map_acquire_slot`].
     Open(BTreeMap<TenantShardId, TenantSlot>),
-    /// The pageserver has entered shutdown mode via [`shutdown_all_tenants`].
+    /// The pageserver has entered shutdown mode via [`TenantManager::shutdown`].
     /// Existing tenants are still accessible, but no new tenants can be created.
     ShuttingDown(BTreeMap<TenantShardId, TenantSlot>),
 }
@@ -261,6 +261,12 @@ pub struct TenantManager {
     // See https://github.com/neondatabase/neon/issues/5796
     tenants: &'static std::sync::RwLock<TenantsMap>,
     resources: TenantSharedResources,
+
+    // Long-running operations that happen outside of a [`Tenant`] lifetime should respect this token.
+    // This is for edge cases like tenant deletion.  In normal cases (within a Tenant lifetime),
+    // tenants have their own cancellation tokens, which we fire individually in [`Self::shutdown`], or
+    // when the tenant detaches.
+    cancel: CancellationToken,
 }
 
 fn emergency_generations(
@@ -620,13 +626,14 @@ pub async fn init_tenant_mgr(
         conf,
         tenants: &TENANTS,
         resources,
+        cancel: CancellationToken::new(),
     })
 }
 
 /// Wrapper for Tenant::spawn that checks invariants before running, and inserts
 /// a broken tenant in the map if Tenant::spawn fails.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tenant_spawn(
+fn tenant_spawn(
     conf: &'static PageServerConf,
     tenant_shard_id: TenantShardId,
     tenant_path: &Utf8Path,
@@ -678,21 +685,6 @@ pub(crate) fn tenant_spawn(
     };
 
     Ok(tenant)
-}
-
-///
-/// Shut down all tenants. This runs as part of pageserver shutdown.
-///
-/// NB: We leave the tenants in the map, so that they remain accessible through
-/// the management API until we shut it down. If we removed the shut-down tenants
-/// from the tenants map, the management API would return 404 for these tenants,
-/// because TenantsMap::get() now returns `None`.
-/// That could be easily misinterpreted by control plane, the consumer of the
-/// management API. For example, it could attach the tenant on a different pageserver.
-/// We would then be in split-brain once this pageserver restarts.
-#[instrument(skip_all)]
-pub(crate) async fn shutdown_all_tenants() {
-    shutdown_all_tenants0(&TENANTS).await
 }
 
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
@@ -831,40 +823,6 @@ pub(crate) enum SetNewTenantConfigError {
     Persist(anyhow::Error),
     #[error(transparent)]
     Other(anyhow::Error),
-}
-
-pub(crate) async fn set_new_tenant_config(
-    conf: &'static PageServerConf,
-    new_tenant_conf: TenantConfOpt,
-    tenant_id: TenantId,
-) -> Result<(), SetNewTenantConfigError> {
-    // Legacy API: does not support sharding
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-
-    info!("configuring tenant {tenant_id}");
-    let tenant = get_tenant(tenant_shard_id, true)?;
-
-    if !tenant.tenant_shard_id().shard_count.is_unsharded() {
-        // Note that we use ShardParameters::default below.
-        return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
-            "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
-        )));
-    }
-
-    // This is a legacy API that only operates on attached tenants: the preferred
-    // API to use is the location_config/ endpoint, which lets the caller provide
-    // the full LocationConf.
-    let location_conf = LocationConf::attached_single(
-        new_tenant_conf.clone(),
-        tenant.generation,
-        &ShardParameters::default(),
-    );
-
-    Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf)
-        .await
-        .map_err(SetNewTenantConfigError::Persist)?;
-    tenant.set_new_tenant_config(new_tenant_conf);
-    Ok(())
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1428,6 +1386,7 @@ impl TenantManager {
             self.resources.remote_storage.clone(),
             &TENANTS,
             tenant,
+            &self.cancel,
         )
         .await;
 
@@ -1668,19 +1627,7 @@ impl TenantManager {
         let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
             .await
             .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
-        task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
-            TaskKind::MgmtRequest,
-            None,
-            None,
-            "tenant_files_delete",
-            false,
-            async move {
-                fs::remove_dir_all(tmp_path.as_path())
-                    .await
-                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
-            },
-        );
+        self.spawn_background_purge(tmp_path);
 
         fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
             "failpoint"
@@ -1815,6 +1762,151 @@ impl TenantManager {
             }
         }
 
+        Ok(())
+    }
+
+    ///
+    /// Shut down all tenants. This runs as part of pageserver shutdown.
+    ///
+    /// NB: We leave the tenants in the map, so that they remain accessible through
+    /// the management API until we shut it down. If we removed the shut-down tenants
+    /// from the tenants map, the management API would return 404 for these tenants,
+    /// because TenantsMap::get() now returns `None`.
+    /// That could be easily misinterpreted by control plane, the consumer of the
+    /// management API. For example, it could attach the tenant on a different pageserver.
+    /// We would then be in split-brain once this pageserver restarts.
+    #[instrument(skip_all)]
+    pub(crate) async fn shutdown(&self) {
+        self.cancel.cancel();
+
+        shutdown_all_tenants0(self.tenants).await
+    }
+
+    /// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
+    /// the background, and thereby avoid blocking any API requests on this deletion completing.
+    fn spawn_background_purge(&self, tmp_path: Utf8PathBuf) {
+        // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
+        // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
+        let task_tenant_id = None;
+
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            TaskKind::MgmtRequest,
+            task_tenant_id,
+            None,
+            "tenant_files_delete",
+            false,
+            async move {
+                fs::remove_dir_all(tmp_path.as_path())
+                    .await
+                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
+            },
+        );
+    }
+
+    pub(crate) async fn detach_tenant(
+        &self,
+        conf: &'static PageServerConf,
+        tenant_shard_id: TenantShardId,
+        detach_ignored: bool,
+        deletion_queue_client: &DeletionQueueClient,
+    ) -> Result<(), TenantStateError> {
+        let tmp_path = self
+            .detach_tenant0(
+                conf,
+                &TENANTS,
+                tenant_shard_id,
+                detach_ignored,
+                deletion_queue_client,
+            )
+            .await?;
+        self.spawn_background_purge(tmp_path);
+
+        Ok(())
+    }
+
+    async fn detach_tenant0(
+        &self,
+        conf: &'static PageServerConf,
+        tenants: &std::sync::RwLock<TenantsMap>,
+        tenant_shard_id: TenantShardId,
+        detach_ignored: bool,
+        deletion_queue_client: &DeletionQueueClient,
+    ) -> Result<Utf8PathBuf, TenantStateError> {
+        let tenant_dir_rename_operation = |tenant_id_to_clean: TenantShardId| async move {
+            let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
+            safe_rename_tenant_dir(&local_tenant_directory)
+                .await
+                .with_context(|| {
+                    format!("local tenant directory {local_tenant_directory:?} rename")
+                })
+        };
+
+        let removal_result = remove_tenant_from_memory(
+            tenants,
+            tenant_shard_id,
+            tenant_dir_rename_operation(tenant_shard_id),
+        )
+        .await;
+
+        // Flush pending deletions, so that they have a good chance of passing validation
+        // before this tenant is potentially re-attached elsewhere.
+        deletion_queue_client.flush_advisory();
+
+        // Ignored tenants are not present in memory and will bail the removal from memory operation.
+        // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
+        if detach_ignored
+            && matches!(
+                removal_result,
+                Err(TenantStateError::SlotError(TenantSlotError::NotFound(_)))
+            )
+        {
+            let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
+            if tenant_ignore_mark.exists() {
+                info!("Detaching an ignored tenant");
+                let tmp_path = tenant_dir_rename_operation(tenant_shard_id)
+                    .await
+                    .with_context(|| {
+                        format!("Ignored tenant {tenant_shard_id} local directory rename")
+                    })?;
+                return Ok(tmp_path);
+            }
+        }
+
+        removal_result
+    }
+
+    pub(crate) async fn set_new_tenant_config(
+        &self,
+        new_tenant_conf: TenantConfOpt,
+        tenant_id: TenantId,
+    ) -> Result<(), SetNewTenantConfigError> {
+        // Legacy API: does not support sharding
+        let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
+        info!("configuring tenant {tenant_id}");
+        let tenant = get_tenant(tenant_shard_id, true)?;
+
+        if !tenant.tenant_shard_id().shard_count.is_unsharded() {
+            // Note that we use ShardParameters::default below.
+            return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
+            "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
+        )));
+        }
+
+        // This is a legacy API that only operates on attached tenants: the preferred
+        // API to use is the location_config/ endpoint, which lets the caller provide
+        // the full LocationConf.
+        let location_conf = LocationConf::attached_single(
+            new_tenant_conf.clone(),
+            tenant.generation,
+            &ShardParameters::default(),
+        );
+
+        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &location_conf)
+            .await
+            .map_err(SetNewTenantConfigError::Persist)?;
+        tenant.set_new_tenant_config(new_tenant_conf);
         Ok(())
     }
 }
@@ -2016,87 +2108,6 @@ pub(crate) enum TenantStateError {
     SlotUpsertError(#[from] TenantSlotUpsertError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
-}
-
-pub(crate) async fn detach_tenant(
-    conf: &'static PageServerConf,
-    tenant_shard_id: TenantShardId,
-    detach_ignored: bool,
-    deletion_queue_client: &DeletionQueueClient,
-) -> Result<(), TenantStateError> {
-    let tmp_path = detach_tenant0(
-        conf,
-        &TENANTS,
-        tenant_shard_id,
-        detach_ignored,
-        deletion_queue_client,
-    )
-    .await?;
-    // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
-    // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
-    let task_tenant_id = None;
-    task_mgr::spawn(
-        task_mgr::BACKGROUND_RUNTIME.handle(),
-        TaskKind::MgmtRequest,
-        task_tenant_id,
-        None,
-        "tenant_files_delete",
-        false,
-        async move {
-            fs::remove_dir_all(tmp_path.as_path())
-                .await
-                .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
-        },
-    );
-    Ok(())
-}
-
-async fn detach_tenant0(
-    conf: &'static PageServerConf,
-    tenants: &std::sync::RwLock<TenantsMap>,
-    tenant_shard_id: TenantShardId,
-    detach_ignored: bool,
-    deletion_queue_client: &DeletionQueueClient,
-) -> Result<Utf8PathBuf, TenantStateError> {
-    let tenant_dir_rename_operation = |tenant_id_to_clean: TenantShardId| async move {
-        let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
-        safe_rename_tenant_dir(&local_tenant_directory)
-            .await
-            .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))
-    };
-
-    let removal_result = remove_tenant_from_memory(
-        tenants,
-        tenant_shard_id,
-        tenant_dir_rename_operation(tenant_shard_id),
-    )
-    .await;
-
-    // Flush pending deletions, so that they have a good chance of passing validation
-    // before this tenant is potentially re-attached elsewhere.
-    deletion_queue_client.flush_advisory();
-
-    // Ignored tenants are not present in memory and will bail the removal from memory operation.
-    // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
-    if detach_ignored
-        && matches!(
-            removal_result,
-            Err(TenantStateError::SlotError(TenantSlotError::NotFound(_)))
-        )
-    {
-        let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
-        if tenant_ignore_mark.exists() {
-            info!("Detaching an ignored tenant");
-            let tmp_path = tenant_dir_rename_operation(tenant_shard_id)
-                .await
-                .with_context(|| {
-                    format!("Ignored tenant {tenant_shard_id} local directory rename")
-                })?;
-            return Ok(tmp_path);
-        }
-    }
-
-    removal_result
 }
 
 pub(crate) async fn load_tenant(
@@ -2719,7 +2730,7 @@ use {
     utils::http::error::ApiError,
 };
 
-pub(crate) async fn immediate_gc(
+pub(crate) fn immediate_gc(
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
@@ -2741,6 +2752,8 @@ pub(crate) async fn immediate_gc(
     // Run in task_mgr to avoid race with tenant_detach operation
     let ctx = ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
     let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
+    let span = info_span!("manual_gc", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
+
     // TODO: spawning is redundant now, need to hold the gate
     task_mgr::spawn(
         &tokio::runtime::Handle::current(),
@@ -2755,16 +2768,15 @@ pub(crate) async fn immediate_gc(
             #[allow(unused_mut)]
             let mut result = tenant
                 .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
-                .instrument(info_span!("manual_gc", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
                 // better once the types support it.
 
             #[cfg(feature = "testing")]
             {
+                // we need to synchronize with drop completion for python tests without polling for
+                // log messages
                 if let Ok(result) = result.as_mut() {
-                    // why not futures unordered? it seems it needs very much the same task structure
-                    // but would only run on single task.
                     let mut js = tokio::task::JoinSet::new();
                     for layer in std::mem::take(&mut result.doomed_layers) {
                         js.spawn(layer.wait_drop());
@@ -2780,7 +2792,7 @@ pub(crate) async fn immediate_gc(
 
                 if let Some(rtc) = rtc {
                     // layer drops schedule actions on remote timeline client to actually do the
-                    // deletions; don't care just exit fast about the shutdown error
+                    // deletions; don't care about the shutdown error, just exit fast
                     drop(rtc.wait_completion().await);
                 }
             }
@@ -2791,6 +2803,7 @@ pub(crate) async fn immediate_gc(
             }
             Ok(())
         }
+        .instrument(span)
     );
 
     // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task

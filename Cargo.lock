@@ -1346,6 +1346,7 @@ dependencies = [
  "futures",
  "git-version",
  "hex",
+ "humantime",
  "hyper",
  "nix 0.27.1",
  "once_cell",
@@ -3529,6 +3530,7 @@ dependencies = [
  "postgres_connection",
  "postgres_ffi",
  "pq_proto",
+ "procfs",
  "rand 0.8.5",
  "regex",
  "remote_storage",
@@ -5886,7 +5888,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#868d2c42b5d54ca82fead6e8f2f233b69a540d3e"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#342ddd197a060a8354e8f11f4d12994419fff939"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6423,7 +6425,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#868d2c42b5d54ca82fead6e8f2f233b69a540d3e"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#342ddd197a060a8354e8f11f4d12994419fff939"
 dependencies = [
  "bytes",
  "io-uring",

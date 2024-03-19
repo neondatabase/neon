@@ -1525,6 +1525,7 @@ class NeonCli(AbstractNeonCli):
         conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
+        placement_policy: Optional[str] = None,
         set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
@@ -1557,6 +1558,9 @@ class NeonCli(AbstractNeonCli):
 
         if shard_stripe_size is not None:
             args.extend(["--shard-stripe-size", str(shard_stripe_size)])
+
+        if placement_policy is not None:
+            args.extend(["--placement-policy", str(placement_policy)])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -2084,6 +2088,14 @@ class NeonStorageController(MetricsGetter):
         response = self.request(
             "GET",
             f"{self.env.storage_controller_api}/control/v1/node",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def tenant_list(self):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/debug/v1/tenant",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()

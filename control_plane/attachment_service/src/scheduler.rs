@@ -1,4 +1,5 @@
 use crate::{node::Node, tenant_state::TenantState};
+use pageserver_api::controller_api::UtilizationScore;
 use serde::Serialize;
 use std::collections::HashMap;
 use utils::{http::error::ApiError, id::NodeId};
@@ -19,14 +20,33 @@ impl From<ScheduleError> for ApiError {
 }
 
 #[derive(Serialize, Eq, PartialEq)]
+pub enum MaySchedule {
+    Yes(UtilizationScore),
+    No,
+}
+
+#[derive(Serialize)]
 struct SchedulerNode {
     /// How many shards are currently scheduled on this node, via their [`crate::tenant_state::IntentState`].
     shard_count: usize,
 
     /// Whether this node is currently elegible to have new shards scheduled (this is derived
     /// from a node's availability state and scheduling policy).
-    may_schedule: bool,
+    may_schedule: MaySchedule,
 }
+
+impl PartialEq for SchedulerNode {
+    fn eq(&self, other: &Self) -> bool {
+        let may_schedule_matches = matches!(
+            (&self.may_schedule, &other.may_schedule),
+            (MaySchedule::Yes(_), MaySchedule::Yes(_)) | (MaySchedule::No, MaySchedule::No)
+        );
+
+        may_schedule_matches && self.shard_count == other.shard_count
+    }
+}
+
+impl Eq for SchedulerNode {}
 
 /// This type is responsible for selecting which node is used when a tenant shard needs to choose a pageserver
 /// on which to run.
@@ -186,13 +206,15 @@ impl Scheduler {
             return None;
         }
 
+        // TODO: When the utilization score returned by the pageserver becomes meaningful,
+        // schedule based on that instead of the shard count.
         let node = nodes
             .iter()
             .map(|node_id| {
                 let may_schedule = self
                     .nodes
                     .get(node_id)
-                    .map(|n| n.may_schedule)
+                    .map(|n| n.may_schedule != MaySchedule::No)
                     .unwrap_or(false);
                 (*node_id, may_schedule)
             })
@@ -211,7 +233,7 @@ impl Scheduler {
             .nodes
             .iter()
             .filter_map(|(k, v)| {
-                if hard_exclude.contains(k) || !v.may_schedule {
+                if hard_exclude.contains(k) || v.may_schedule == MaySchedule::No {
                     None
                 } else {
                     Some((*k, v.shard_count))
@@ -230,7 +252,7 @@ impl Scheduler {
             for (node_id, node) in &self.nodes {
                 tracing::info!(
                     "Node {node_id}: may_schedule={} shards={}",
-                    node.may_schedule,
+                    node.may_schedule != MaySchedule::No,
                     node.shard_count
                 );
             }
@@ -255,6 +277,7 @@ impl Scheduler {
 pub(crate) mod test_utils {
 
     use crate::node::Node;
+    use pageserver_api::controller_api::{NodeAvailability, UtilizationScore};
     use std::collections::HashMap;
     use utils::id::NodeId;
     /// Test helper: synthesize the requested number of nodes, all in active state.
@@ -264,13 +287,14 @@ pub(crate) mod test_utils {
         (1..n + 1)
             .map(|i| {
                 (NodeId(i), {
-                    let node = Node::new(
+                    let mut node = Node::new(
                         NodeId(i),
                         format!("httphost-{i}"),
                         80 + i as u16,
                         format!("pghost-{i}"),
                         5432 + i as u16,
                     );
+                    node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
                     assert!(node.is_available());
                     node
                 })

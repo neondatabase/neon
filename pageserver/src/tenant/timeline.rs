@@ -3784,8 +3784,11 @@ impl Timeline {
                         // The timestamp is in the future. That sounds impossible,
                         // but what it really means is that there hasn't been
                         // any commits since the cutoff timestamp.
+                        //
+                        // In this case we should use the LSN of the most recent commit,
+                        // which is implicitly the last LSN in the log.
                         debug!("future({})", lsn);
-                        cutoff_horizon
+                        self.get_last_record_lsn()
                     }
                     LsnForTimestamp::Past(lsn) => {
                         debug!("past({})", lsn);

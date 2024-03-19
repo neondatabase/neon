@@ -209,10 +209,12 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.node_register(env.pageserver)
 
     env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
+    env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
     env.neon_cli.create_tenant(
         tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
     )
+
     generate_uploads_and_deletions(env, pageserver=env.pageserver)
 
     def parse_generation_suffix(key):

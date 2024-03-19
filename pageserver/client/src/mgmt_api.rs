@@ -169,7 +169,7 @@ impl Client {
         self.request(Method::GET, uri, ()).await
     }
 
-    async fn request<B: serde::Serialize, U: reqwest::IntoUrl>(
+    async fn request_noerror<B: serde::Serialize, U: reqwest::IntoUrl>(
         &self,
         method: Method,
         uri: U,
@@ -181,7 +181,16 @@ impl Client {
         } else {
             req
         };
-        let res = req.json(&body).send().await.map_err(Error::ReceiveBody)?;
+        req.json(&body).send().await.map_err(Error::ReceiveBody)
+    }
+
+    async fn request<B: serde::Serialize, U: reqwest::IntoUrl>(
+        &self,
+        method: Method,
+        uri: U,
+        body: B,
+    ) -> Result<reqwest::Response> {
+        let res = self.request_noerror(method, uri, body).await?;
         let response = res.error_from_body().await?;
         Ok(response)
     }
@@ -240,13 +249,26 @@ impl Client {
         Ok(())
     }
 
-    pub async fn tenant_secondary_download(&self, tenant_id: TenantShardId) -> Result<()> {
-        let uri = format!(
+    pub async fn tenant_secondary_download(
+        &self,
+        tenant_id: TenantShardId,
+        wait: Option<std::time::Duration>,
+    ) -> Result<(StatusCode, SecondaryProgress)> {
+        let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/secondary/download",
             self.mgmt_api_endpoint, tenant_id
-        );
-        self.request(Method::POST, &uri, ()).await?;
-        Ok(())
+        ))
+        .expect("Cannot build URL");
+
+        if let Some(wait) = wait {
+            path.query_pairs_mut()
+                .append_pair("wait_ms", &format!("{}", wait.as_millis()));
+        }
+
+        let response = self.request(Method::POST, path, ()).await?;
+        let status = response.status();
+        let progress: SecondaryProgress = response.json().await.map_err(Error::ReceiveBody)?;
+        Ok((status, progress))
     }
 
     pub async fn location_config(
@@ -415,5 +437,78 @@ impl Client {
             .json()
             .await
             .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn get_utilization(&self) -> Result<PageserverUtilization> {
+        let uri = format!("{}/v1/utilization", self.mgmt_api_endpoint);
+        self.get(uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn layer_map_info(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<LayerMapInfo> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/layer",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id,
+        );
+        self.get(&uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn layer_evict(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        layer_file_name: &str,
+    ) -> Result<bool> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/layer/{}",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id, layer_file_name
+        );
+        let resp = self.request_noerror(Method::DELETE, &uri, ()).await?;
+        match resp.status() {
+            StatusCode::OK => Ok(true),
+            StatusCode::NOT_MODIFIED => Ok(false),
+            // TODO: dedupe this pattern / introduce separate error variant?
+            status => Err(match resp.json::<HttpErrorBody>().await {
+                Ok(HttpErrorBody { msg }) => Error::ApiError(status, msg),
+                Err(_) => {
+                    Error::ReceiveErrorBody(format!("Http error ({}) at {}.", status.as_u16(), uri))
+                }
+            }),
+        }
+    }
+
+    pub async fn layer_ondemand_download(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        layer_file_name: &str,
+    ) -> Result<bool> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/layer/{}",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id, layer_file_name
+        );
+        let resp = self.request_noerror(Method::GET, &uri, ()).await?;
+        match resp.status() {
+            StatusCode::OK => Ok(true),
+            StatusCode::NOT_MODIFIED => Ok(false),
+            // TODO: dedupe this pattern / introduce separate error variant?
+            status => Err(match resp.json::<HttpErrorBody>().await {
+                Ok(HttpErrorBody { msg }) => Error::ApiError(status, msg),
+                Err(_) => {
+                    Error::ReceiveErrorBody(format!("Http error ({}) at {}.", status.as_u16(), uri))
+                }
+            }),
+        }
     }
 }

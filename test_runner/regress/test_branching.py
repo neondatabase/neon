@@ -347,6 +347,64 @@ def test_non_uploaded_branch_is_deleted_after_restart(neon_env_builder: NeonEnvB
         ps_http.timeline_detail(env.initial_tenant, branch_id)
 
 
+def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+    env.pageserver.tenant_create(env.initial_tenant)
+
+    success_timeline = TimelineId.generate()
+    log.info(f"Creating timeline {success_timeline}")
+    ps_http = env.pageserver.http_client()
+    success_result = ps_http.timeline_create(
+        env.pg_version, env.initial_tenant, success_timeline, timeout=60
+    )
+
+    ps_http.configure_failpoints(("timeline-creation-after-uninit", "pause"))
+
+    def start_creating_timeline():
+        log.info(f"Creating (expect failure) timeline {env.initial_timeline}")
+        with pytest.raises(RequestException):
+            ps_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
+            )
+
+    t = threading.Thread(target=start_creating_timeline)
+    try:
+        t.start()
+
+        wait_until_paused(env, "timeline-creation-after-uninit")
+
+        # While timeline creation is in progress, trying to create a timeline
+        # again with the same ID should return 409
+        with pytest.raises(
+            PageserverApiException, match="creation of timeline with the given ID is in progress"
+        ):
+            ps_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
+            )
+
+        # Creation of a timeline already successfully created is idempotent, and is not impeded by some
+        # other timeline creation with a different TimelineId being stuck.
+        repeat_result = ps_http.timeline_create(
+            env.pg_version, env.initial_tenant, success_timeline, timeout=60
+        )
+        assert repeat_result == success_result
+    finally:
+        env.pageserver.stop(immediate=True)
+        t.join()
+
+    # now without a failpoint
+    env.pageserver.start()
+
+    wait_until_tenant_active(ps_http, env.initial_tenant)
+
+    with pytest.raises(PageserverApiException, match="not found"):
+        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    # The one successfully created timeline should still be there.
+    assert len(ps_http.timeline_list(tenant_id=env.initial_tenant)) == 1
+
+
 def wait_until_paused(env: NeonEnv, failpoint: str):
     found = False
     msg = f"at failpoint {failpoint}"
