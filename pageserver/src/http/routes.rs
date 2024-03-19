@@ -535,9 +535,9 @@ async fn timeline_create_handler(
                 )
             }
             Err(
-                tenant::CreateTimelineError::Conflict
-                | tenant::CreateTimelineError::AlreadyCreating,
-            ) => json_response(StatusCode::CONFLICT, ()),
+                e @ tenant::CreateTimelineError::Conflict
+                | e @ tenant::CreateTimelineError::AlreadyCreating,
+            ) => json_response(StatusCode::CONFLICT, HttpErrorBody::from_msg(e.to_string())),
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => json_response(
                 StatusCode::NOT_ACCEPTABLE,
                 HttpErrorBody::from_msg(format!("{err:#}")),
@@ -885,14 +885,16 @@ async fn tenant_detach_handler(
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(
-        conf,
-        tenant_shard_id,
-        detach_ignored.unwrap_or(false),
-        &state.deletion_queue_client,
-    )
-    .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
-    .await?;
+    state
+        .tenant_manager
+        .detach_tenant(
+            conf,
+            tenant_shard_id,
+            detach_ignored.unwrap_or(false),
+            &state.deletion_queue_client,
+        )
+        .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
+        .await?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1403,7 +1405,9 @@ async fn update_tenant_config_handler(
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let state = get_state(&request);
-    mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
+    state
+        .tenant_manager
+        .set_new_tenant_config(tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", %tenant_id))
         .await?;
 
@@ -1428,13 +1432,14 @@ async fn put_tenant_location_config_handler(
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
     if let LocationConfigMode::Detached = request_data.config.mode {
-        if let Err(e) =
-            mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
-                .instrument(info_span!("tenant_detach",
-                    tenant_id = %tenant_shard_id.tenant_id,
-                    shard_id = %tenant_shard_id.shard_slug()
-                ))
-                .await
+        if let Err(e) = state
+            .tenant_manager
+            .detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
+            .instrument(info_span!("tenant_detach",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug()
+            ))
+            .await
         {
             match e {
                 TenantStateError::SlotError(TenantSlotError::NotFound(_)) => {
@@ -1648,8 +1653,7 @@ async fn timeline_gc_handler(
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let wait_task_done =
-        mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx).await?;
+    let wait_task_done = mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx)?;
     let gc_result = wait_task_done
         .await
         .context("wait for gc task")
@@ -1987,13 +1991,42 @@ async fn secondary_download_handler(
 ) -> Result<Response<Body>, ApiError> {
     let state = get_state(&request);
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
-    state
-        .secondary_controller
-        .download_tenant(tenant_shard_id)
-        .await
-        .map_err(ApiError::InternalServerError)?;
+    let wait = parse_query_param(&request, "wait_ms")?.map(Duration::from_millis);
 
-    json_response(StatusCode::OK, ())
+    // We don't need this to issue the download request, but:
+    // - it enables us to cleanly return 404 if we get a request for an absent shard
+    // - we will use this to provide status feedback in the response
+    let Some(secondary_tenant) = state
+        .tenant_manager
+        .get_secondary_tenant_shard(tenant_shard_id)
+    else {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Shard {} not found", tenant_shard_id).into(),
+        ));
+    };
+
+    let timeout = wait.unwrap_or(Duration::MAX);
+
+    let status = match tokio::time::timeout(
+        timeout,
+        state.secondary_controller.download_tenant(tenant_shard_id),
+    )
+    .await
+    {
+        // Download job ran to completion.
+        Ok(Ok(())) => StatusCode::OK,
+        // Edge case: downloads aren't usually fallible: things like a missing heatmap are considered
+        // okay.  We could get an error here in the unlikely edge case that the tenant
+        // was detached between our check above and executing the download job.
+        Ok(Err(e)) => return Err(ApiError::InternalServerError(e)),
+        // A timeout is not an error: we have started the download, we're just not done
+        // yet.  The caller will get a response body indicating status.
+        Err(_) => StatusCode::ACCEPTED,
+    };
+
+    let progress = secondary_tenant.progress.lock().unwrap().clone();
+
+    json_response(status, progress)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {

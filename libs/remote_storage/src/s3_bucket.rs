@@ -289,7 +289,8 @@ impl S3Bucket {
         let metadata = object_output.metadata().cloned().map(StorageMetadata);
         let etag = object_output
             .e_tag
-            .ok_or(DownloadError::Other(anyhow::anyhow!("Missing ETag header")))?;
+            .ok_or(DownloadError::Other(anyhow::anyhow!("Missing ETag header")))?
+            .into();
         let last_modified = object_output
             .last_modified
             .ok_or(DownloadError::Other(anyhow::anyhow!(

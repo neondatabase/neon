@@ -113,7 +113,7 @@ mod tests {
         );
     }
 
-    fn run_round_trip_test(server_password: &str, client_password: &str) {
+    async fn run_round_trip_test(server_password: &str, client_password: &str) {
         let scram_secret = ServerSecret::build(server_password).unwrap();
         let sasl_client =
             ScramSha256::new(client_password.as_bytes(), ChannelBinding::unsupported());
@@ -123,6 +123,7 @@ mod tests {
             sasl_client,
             crate::config::TlsServerEndPoint::Undefined,
         )
+        .await
         .unwrap();
 
         match outcome {
@@ -131,14 +132,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn round_trip() {
-        run_round_trip_test("pencil", "pencil")
+    #[tokio::test]
+    async fn round_trip() {
+        run_round_trip_test("pencil", "pencil").await
     }
 
-    #[test]
+    #[tokio::test]
     #[should_panic(expected = "password doesn't match")]
-    fn failure() {
-        run_round_trip_test("pencil", "eraser")
+    async fn failure() {
+        run_round_trip_test("pencil", "eraser").await
     }
 }

@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use utils::auth::{Scope, SwappableJwtAuth};
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::{auth_middleware, check_permission_with, request_span};
-use utils::http::request::{must_get_query_param, parse_request_param};
+use utils::http::request::{must_get_query_param, parse_query_param, parse_request_param};
 use utils::id::{TenantId, TimelineId};
 
 use utils::{
@@ -248,8 +248,10 @@ async fn handle_tenant_secondary_download(
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
-    service.tenant_secondary_download(tenant_id).await?;
-    json_response(StatusCode::OK, ())
+    let wait = parse_query_param(&req, "wait_ms")?.map(Duration::from_millis);
+
+    let (status, progress) = service.tenant_secondary_download(tenant_id, wait).await?;
+    json_response(status, progress)
 }
 
 async fn handle_tenant_delete(

@@ -568,13 +568,6 @@ impl PageServerNode {
         Ok(self.http_client.list_timelines(*tenant_shard_id).await?)
     }
 
-    pub async fn tenant_secondary_download(&self, tenant_id: &TenantShardId) -> anyhow::Result<()> {
-        Ok(self
-            .http_client
-            .tenant_secondary_download(*tenant_id)
-            .await?)
-    }
-
     pub async fn timeline_create(
         &self,
         tenant_shard_id: TenantShardId,

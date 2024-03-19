@@ -1528,6 +1528,7 @@ class NeonCli(AbstractNeonCli):
         conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
+        placement_policy: Optional[str] = None,
         set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
@@ -1560,6 +1561,9 @@ class NeonCli(AbstractNeonCli):
 
         if shard_stripe_size is not None:
             args.extend(["--shard-stripe-size", str(shard_stripe_size)])
+
+        if placement_policy is not None:
+            args.extend(["--placement-policy", str(placement_policy)])
 
         res = self.raw_cli(args)
         res.check_returncode()

@@ -448,6 +448,7 @@ pub(super) async fn handle_walreceiver_connection(
                 disk_consistent_lsn,
                 remote_consistent_lsn,
                 replytime: ts,
+                shard_number: timeline.tenant_shard_id.shard_number.0 as u32,
             };
 
             debug!("neon_status_update {status_update:?}");

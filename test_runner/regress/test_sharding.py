@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Dict, List, Optional, Union
 
 import pytest
@@ -851,3 +852,130 @@ def test_sharding_split_failures(
         assert_split_done()
 
     env.storage_controller.consistency_check()
+
+
+def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
+    """
+    Check a scenario when one of the shards is much slower than others.
+    Without backpressure, this would lead to the slow shard falling behind
+    and eventually causing WAL timeouts.
+    """
+
+    shard_count = 4
+    neon_env_builder.num_pageservers = shard_count
+
+    # 256KiB stripes: enable getting some meaningful data distribution without
+    # writing large quantities of data in this test.  The stripe size is given
+    # in number of 8KiB pages.
+    stripe_size = 32
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=shard_count, initial_tenant_shard_stripe_size=stripe_size
+    )
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+    shards = env.storage_controller.locate(tenant_id)
+
+    # Slow down one of the shards, around ~1MB/s
+    pageservers[4].http_client().configure_failpoints(("wal-ingest-record-sleep", "5%sleep(1)"))
+
+    def shards_info():
+        infos = []
+        for shard in shards:
+            node_id = int(shard["node_id"])
+            pageserver = pageservers[node_id]
+            shard_info = pageserver.http_client().timeline_detail(shard["shard_id"], timeline_id)
+            infos.append(shard_info)
+            last_record_lsn = shard_info["last_record_lsn"]
+            current_physical_size = shard_info["current_physical_size"]
+            log.info(
+                f"Shard on pageserver {node_id}: lsn={last_record_lsn}, size={current_physical_size}"
+            )
+        return infos
+
+    shards_info()
+
+    workload = Workload(
+        env,
+        tenant_id,
+        timeline_id,
+        branch_name="main",
+        endpoint_opts={
+            "config_lines": [
+                # Tip: set to 100MB to make the test fail
+                "max_replication_write_lag=1MB",
+            ],
+        },
+    )
+    workload.init()
+
+    endpoint = workload.endpoint()
+
+    # on 2024-03-05, the default config on prod was [15MB, 10GB, null]
+    res = endpoint.safe_psql_many(
+        [
+            "SHOW max_replication_write_lag",
+            "SHOW max_replication_flush_lag",
+            "SHOW max_replication_apply_lag",
+        ]
+    )
+    log.info(f"backpressure config: {res}")
+
+    last_flush_lsn = None
+    last_timestamp = None
+
+    def update_write_lsn():
+        nonlocal last_flush_lsn
+        nonlocal last_timestamp
+
+        res = endpoint.safe_psql(
+            """
+            SELECT
+                pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag,
+                received_lsn,
+                pg_current_wal_flush_lsn() as flush_lsn,
+                neon.backpressure_throttling_time() as throttling_time
+            FROM neon.backpressure_lsns();
+            """,
+            dbname="postgres",
+        )[0]
+        log.info(
+            f"received_lsn_lag = {res[0]}, received_lsn = {res[1]}, flush_lsn = {res[2]}, throttling_time = {res[3]}"
+        )
+
+        lsn = Lsn(res[2])
+        now = time.time()
+
+        if last_timestamp is not None:
+            delta = now - last_timestamp
+            delta_bytes = lsn - last_flush_lsn
+            avg_speed = delta_bytes / delta / 1024 / 1024
+            log.info(
+                f"flush_lsn {lsn}, written {delta_bytes/1024}kb for {delta:.3f}s, avg_speed {avg_speed:.3f} MiB/s"
+            )
+
+        last_flush_lsn = lsn
+        last_timestamp = now
+
+    update_write_lsn()
+
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.write_rows(4096, upload=False)
+    workload.validate()
+
+    update_write_lsn()
+    shards_info()
+
+    for _write_iter in range(30):
+        # approximately 1MB of data
+        workload.write_rows(8000, upload=False)
+        update_write_lsn()
+        infos = shards_info()
+        min_lsn = min(Lsn(info["last_record_lsn"]) for info in infos)
+        max_lsn = max(Lsn(info["last_record_lsn"]) for info in infos)
+        diff = max_lsn - min_lsn
+        assert diff < 2 * 1024 * 1024, f"LSN diff={diff}, expected diff < 2MB due to backpressure"

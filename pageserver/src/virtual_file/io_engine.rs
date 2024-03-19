@@ -6,6 +6,11 @@
 //! Initialize using [`init`].
 //!
 //! Then use [`get`] and  [`super::OpenOptions`].
+//!
+//!
+
+#[cfg(target_os = "linux")]
+pub(super) mod tokio_epoll_uring_ext;
 
 use tokio_epoll_uring::{IoBuf, Slice};
 use tracing::Instrument;
@@ -145,7 +150,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.read(file_guard, offset, buf).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
@@ -160,7 +165,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.fsync(file_guard).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
@@ -178,7 +183,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.fdatasync(file_guard).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
@@ -197,7 +202,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.statx(file_guard).await;
                 (
                     resources,
@@ -220,7 +225,7 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                let system = tokio_epoll_uring::thread_local_system().await;
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
                 let (resources, res) = system.write(file_guard, offset, buf).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
@@ -252,4 +257,83 @@ impl IoEngine {
             IoEngine::TokioEpollUring => work.await,
         }
     }
+}
+
+pub enum FeatureTestResult {
+    PlatformPreferred(IoEngineKind),
+    Worse {
+        engine: IoEngineKind,
+        remark: String,
+    },
+}
+
+impl FeatureTestResult {
+    #[cfg(target_os = "linux")]
+    const PLATFORM_PREFERRED: IoEngineKind = IoEngineKind::TokioEpollUring;
+    #[cfg(not(target_os = "linux"))]
+    const PLATFORM_PREFERRED: IoEngineKind = IoEngineKind::StdFs;
+}
+
+impl From<FeatureTestResult> for IoEngineKind {
+    fn from(val: FeatureTestResult) -> Self {
+        match val {
+            FeatureTestResult::PlatformPreferred(e) => e,
+            FeatureTestResult::Worse { engine, .. } => engine,
+        }
+    }
+}
+
+/// Somewhat costly under the hood, do only once.
+/// Panics if we can't set up the feature test.
+pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
+    std::thread::spawn(|| {
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(FeatureTestResult::PlatformPreferred(
+                FeatureTestResult::PLATFORM_PREFERRED,
+            ))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            Ok(match rt.block_on(tokio_epoll_uring::System::launch()) {
+                Ok(_) => FeatureTestResult::PlatformPreferred({
+                    assert!(matches!(
+                        IoEngineKind::TokioEpollUring,
+                        FeatureTestResult::PLATFORM_PREFERRED
+                    ));
+                    FeatureTestResult::PLATFORM_PREFERRED
+                }),
+                Err(tokio_epoll_uring::LaunchResult::IoUringBuild(e)) => {
+                    let remark = match e.raw_os_error() {
+                        Some(nix::libc::EPERM) => {
+                            // fall back
+                            "creating tokio-epoll-uring fails with EPERM, assuming it's admin-disabled "
+                                .to_string()
+                        }
+                    Some(nix::libc::EFAULT) => {
+                            // fail feature test
+                            anyhow::bail!(
+                                "creating tokio-epoll-uring fails with EFAULT, might have corrupted memory"
+                            );
+                        }
+                        Some(_) | None => {
+                            // fall back
+                            format!("creating tokio-epoll-uring fails with error: {e:#}")
+                        }
+                };
+                    FeatureTestResult::Worse {
+                        engine: IoEngineKind::StdFs,
+                        remark,
+                    }
+                }
+            })
+        }
+    })
+    .join()
+    .unwrap()
 }
