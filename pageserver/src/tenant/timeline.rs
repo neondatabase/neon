@@ -4574,7 +4574,7 @@ impl<'a> TimelineWriter<'a> {
 
     /// Put a batch of keys at the specified Lsns.
     ///
-    /// The batch is sorted by Lsn (enforced by usage of [`utils::VecMap`].
+    /// The batch is sorted by Lsn (enforced by usage of [`utils::vec_map::VecMap`].
     pub(crate) async fn put_batch(
         &mut self,
         batch: VecMap<Lsn, (Key, Value)>,
