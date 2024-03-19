@@ -6,14 +6,14 @@ use rand::Rng;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 
-use tracing::{debug, info, instrument};
+use tracing::{debug, error, info, instrument};
 use utils::lsn::Lsn;
 
 use crate::{
+    metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
     safekeeper::Term,
     timeline::Timeline,
-    wal_backup::{self},
-    SafeKeeperConf,
+    wal_backup, SafeKeeperConf,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -137,7 +137,7 @@ impl PartialBackup {
 
         // Upload first `backup_bytes` bytes of the segment to the remote storage.
         wal_backup::backup_object(&local_path, &remote_path, backup_bytes).await?;
-        // TODO: metrics
+        PARTIAL_BACKUP_UPLOADED_BYTES.inc_by(backup_bytes as u64);
 
         // We uploaded the segment, now let's verify that the data is still actual.
         // If the term changed, we cannot guarantee the validity of the uploaded data.
@@ -281,7 +281,7 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
     let remote_prefix = match tli.timeline_dir.strip_prefix(&conf.workdir) {
         Ok(path) => path.to_owned(),
         Err(e) => {
-            info!("failed to strip workspace dir prefix: {:?}", e);
+            error!("failed to strip workspace dir prefix: {:?}", e);
             return;
         }
     };
@@ -364,9 +364,11 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
                     "uploaded {} up to flush_lsn {}",
                     prepared.name, prepared.flush_lsn
                 );
+                PARTIAL_BACKUP_UPLOADS.with_label_values(&["ok"]).inc();
             }
             Err(e) => {
                 info!("failed to upload {}: {:#}", prepared.name, e);
+                PARTIAL_BACKUP_UPLOADS.with_label_values(&["error"]).inc();
             }
         }
     }
