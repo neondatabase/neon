@@ -947,10 +947,8 @@ def test_sharding_service_re_attach(neon_env_builder: NeonEnvBuilder):
     """
 
     neon_env_builder.num_pageservers = 2
-    env = neon_env_builder.init_start()
-
-    # Don't want the default tenant: we'll use explicitly created tenants with a known placement policy
-    env.storage_controller.pageserver_api().tenant_delete(env.initial_tenant)
+    env = neon_env_builder.init_configs()
+    env.start()
 
     # We'll have two tenants.
     tenant_a = TenantId.generate()
