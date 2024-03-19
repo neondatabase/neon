@@ -1,6 +1,6 @@
 use std::{alloc::Layout, cmp::Ordering, ops::RangeBounds};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VecMapOrdering {
     Greater,
     GreaterOrEqual,
@@ -25,11 +25,21 @@ impl<K, V> Default for VecMap<K, V> {
 }
 
 #[derive(Debug)]
-pub struct InvalidKey;
+pub enum VecMapError {
+    InvalidKey,
+    ExtendOrderingError,
+}
 
 impl<K: Ord, V> VecMap<K, V> {
+    pub fn new(ordering: VecMapOrdering) -> Self {
+        Self {
+            data: Vec::new(),
+            ordering,
+        }
+    }
+
     pub fn with_capacity(capacity: usize, ordering: VecMapOrdering) -> Self {
-        VecMap {
+        Self {
             data: Vec::with_capacity(capacity),
             ordering,
         }
@@ -74,15 +84,15 @@ impl<K: Ord, V> VecMap<K, V> {
     /// Add a key value pair to the map.
     /// If `key` is less than or equal to the current maximum key
     /// the pair will not be added and InvalidKey error will be returned.
-    pub fn append(&mut self, key: K, value: V) -> Result<usize, InvalidKey> {
+    pub fn append(&mut self, key: K, value: V) -> Result<usize, VecMapError> {
         if let Some((last_key, _last_value)) = self.data.last() {
             match (&self.ordering, &key.cmp(last_key)) {
                 (VecMapOrdering::Greater, Ordering::Less | Ordering::Equal) => {
-                    return Err(InvalidKey);
+                    return Err(VecMapError::InvalidKey);
                 }
                 (VecMapOrdering::Greater, Ordering::Greater) => {}
                 (VecMapOrdering::GreaterOrEqual, Ordering::Less) => {
-                    return Err(InvalidKey);
+                    return Err(VecMapError::InvalidKey);
                 }
                 (VecMapOrdering::GreaterOrEqual, Ordering::Equal | Ordering::Greater) => {}
             }
@@ -99,10 +109,10 @@ impl<K: Ord, V> VecMap<K, V> {
         &mut self,
         key: K,
         mut value: V,
-    ) -> Result<(Option<V>, usize), InvalidKey> {
+    ) -> Result<(Option<V>, usize), VecMapError> {
         if let Some((last_key, last_value)) = self.data.last_mut() {
             match key.cmp(last_key) {
-                Ordering::Less => return Err(InvalidKey),
+                Ordering::Less => return Err(VecMapError::InvalidKey),
                 Ordering::Equal => {
                     std::mem::swap(last_value, &mut value);
                     const DELTA_SIZE: usize = 0;
@@ -145,18 +155,23 @@ impl<K: Ord, V> VecMap<K, V> {
     /// Move items from `other` to the end of `self`, leaving `other` empty.
     /// If any keys in `other` is less than or equal to any key in `self`,
     /// `InvalidKey` error will be returned and no mutation will occur.
-    pub fn extend(&mut self, other: &mut Self) -> Result<usize, InvalidKey> {
+    pub fn extend(&mut self, other: &mut Self) -> Result<usize, VecMapError> {
+        if self.ordering == VecMapOrdering::Greater
+            && other.ordering == VecMapOrdering::GreaterOrEqual
+        {
+            return Err(VecMapError::ExtendOrderingError);
+        }
         let self_last_opt = self.data.last().map(extract_key);
         let other_first_opt = other.data.last().map(extract_key);
 
         if let (Some(self_last), Some(other_first)) = (self_last_opt, other_first_opt) {
             match (&self.ordering, &other_first.cmp(self_last)) {
                 (VecMapOrdering::Greater, Ordering::Less | Ordering::Equal) => {
-                    return Err(InvalidKey);
+                    return Err(VecMapError::InvalidKey);
                 }
                 (VecMapOrdering::Greater, Ordering::Greater) => {}
                 (VecMapOrdering::GreaterOrEqual, Ordering::Less) => {
-                    return Err(InvalidKey);
+                    return Err(VecMapError::InvalidKey);
                 }
                 (VecMapOrdering::GreaterOrEqual, Ordering::Equal | Ordering::Greater) => {}
             }
@@ -377,6 +392,32 @@ mod tests {
         left.extend(&mut one_map).unwrap_err();
         assert_eq!(left.as_slice(), &[(0, ()), (1, ())]);
         assert_eq!(one_map.as_slice(), &[(1, ())]);
+
+        let mut map_greater_or_equal = VecMap::new(VecMapOrdering::GreaterOrEqual);
+        map_greater_or_equal.append(2, ()).unwrap();
+        map_greater_or_equal.append(2, ()).unwrap();
+
+        left.extend(&mut map_greater_or_equal).unwrap_err();
+        assert_eq!(left.as_slice(), &[(0, ()), (1, ())]);
+        assert_eq!(map_greater_or_equal.as_slice(), &[(2, ()), (2, ())]);
+    }
+
+    #[test]
+    fn extend_with_ordering() {
+        let mut left = VecMap::new(VecMapOrdering::GreaterOrEqual);
+        left.append(0, ()).unwrap();
+        assert_eq!(left.as_slice(), &[(0, ())]);
+
+        let mut greater_right = VecMap::new(VecMapOrdering::Greater);
+        greater_right.append(0, ()).unwrap();
+        left.extend(&mut greater_right).unwrap();
+        assert_eq!(left.as_slice(), &[(0, ()), (0, ())]);
+
+        let mut greater_or_equal_right = VecMap::new(VecMapOrdering::GreaterOrEqual);
+        greater_or_equal_right.append(2, ()).unwrap();
+        greater_or_equal_right.append(2, ()).unwrap();
+        left.extend(&mut greater_or_equal_right).unwrap();
+        assert_eq!(left.as_slice(), &[(0, ()), (0, ()), (2, ()), (2, ())]);
     }
 
     #[test]
