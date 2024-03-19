@@ -725,6 +725,20 @@ def test_sharding_split_failures(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    env.storage_controller.allowed_errors.extend(
+        [
+            # All split failures log a warning when then enqueue the abort operation
+            ".*Enqueuing background abort.*",
+            # We exercise failure cases where abort itself will also fail (node offline)
+            ".*abort_tenant_shard_split.*",
+            ".*Failed to abort.*",
+            # Tolerate any error lots that mention a failpoint
+            ".*failpoint.*",
+            # Node offline cases will fail to send requests
+            ".*Reconcile error: receive body: error sending request for url.*",
+        ]
+    )
+
     for ps in env.pageservers:
         # When we do node failures and abandon a shard, it will de-facto have old generation and
         # thereby be unable to publish remote consistent LSN updates

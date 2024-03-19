@@ -89,6 +89,16 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
 )
 
 
+DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
+    # Many tests will take pageservers offline, resulting in log warnings on the controller
+    # failing to connect to them.
+    ".*Call to node.*management API.*failed.*receive body.*",
+    ".*Call to node.*management API.*failed.*ReceiveBody.*",
+    # Many tests will start up with a node offline
+    ".*startup_reconcile: Could not scan node.*",
+]
+
+
 def _check_allowed_errors(input):
     allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
