@@ -212,7 +212,7 @@ impl Persistence {
         let mut decoded = serde_json::from_slice::<JsonPersistence>(&bytes)
             .map_err(|e| DatabaseError::Logical(format!("Deserialization error: {e}")))?;
         for shard in decoded.tenants.values_mut() {
-            if shard.placement_policy == "Single" {
+            if shard.placement_policy == "\"Single\"" {
                 // Backward compat for test data after PR https://github.com/neondatabase/neon/pull/7165
                 shard.placement_policy = "{\"Attached\":0}".to_string();
             }
