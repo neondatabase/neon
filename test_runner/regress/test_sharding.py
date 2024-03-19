@@ -1,5 +1,6 @@
 import os
 import time
+from collections import defaultdict
 from typing import Dict, List, Optional, Union
 
 import pytest
@@ -13,7 +14,7 @@ from fixtures.neon_fixtures import (
     tenant_get_shards,
 )
 from fixtures.remote_storage import s3_storage
-from fixtures.types import Lsn, TenantShardId, TimelineId
+from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 from pytest_httpserver import HTTPServer
@@ -159,11 +160,17 @@ def test_sharding_split_smoke(
 
     neon_env_builder.preserve_database_files = True
 
-    env = neon_env_builder.init_start(
-        initial_tenant_shard_count=shard_count, initial_tenant_shard_stripe_size=stripe_size
+    env = neon_env_builder.init_configs(True)
+    neon_env_builder.start()
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(
+        tenant_id,
+        timeline_id,
+        shard_count=shard_count,
+        shard_stripe_size=stripe_size,
+        placement_policy='{"Attached": 1}',
     )
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
 
@@ -223,6 +230,14 @@ def test_sharding_split_smoke(
     # Before split, old shards exist
     assert shards_on_disk(old_shard_ids)
 
+    # Before split, we have done one reconcile for each shard
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+        )
+        == shard_count
+    )
+
     env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
     post_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
@@ -268,13 +283,20 @@ def test_sharding_split_smoke(
 
     workload.validate()
 
-    # Check that we didn't do any spurious reconciliations.
-    # Total number of reconciles should have been one per original shard, plus
-    # one for each shard that was migrated.
+    # Assert on how many reconciles happened during the process.  This is something of an
+    # implementation detail, but it is useful to detect any bugs that might generate spurious
+    # extra reconcile iterations.
+    #
+    # We'll have:
+    # - shard_count reconciles for the original setup of the tenant
+    # - shard_count reconciles for detaching the original secondary locations during split
+    # - split_shard_count reconciles during shard splitting, for setting up secondaries.
+    # - shard_count reconciles for the migrations we did to move child shards away from their split location
+    expect_reconciles = shard_count * 2 + split_shard_count + shard_count
     reconcile_ok = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
-    assert reconcile_ok == shard_count + split_shard_count // 2
+    assert reconcile_ok == expect_reconciles
 
     # Check that no cancelled or errored reconciliations occurred: this test does no
     # failure injection and should run clean.
@@ -293,14 +315,25 @@ def test_sharding_split_smoke(
 
     env.storage_controller.consistency_check()
 
-    # Validate pageserver state
-    shards_exist: list[TenantShardId] = []
-    for pageserver in env.pageservers:
-        locations = pageserver.http_client().tenant_list_locations()
-        shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
+    def get_node_shard_counts(env: NeonEnv, tenant_ids):
+        total: defaultdict[int, int] = defaultdict(int)
+        attached: defaultdict[int, int] = defaultdict(int)
+        for tid in tenant_ids:
+            for shard in env.storage_controller.tenant_describe(tid)["shards"]:
+                log.info(
+                    f"{shard['tenant_shard_id']}: attached={shard["node_attached"]}, secondary={shard["node_secondary"]} "
+                )
+                for node in shard["node_secondary"]:
+                    total[int(node)] += 1
+                attached[int(shard["node_attached"])] += 1
+                total[int(shard["node_attached"])] += 1
 
-    log.info(f"Shards after split: {shards_exist}")
-    assert len(shards_exist) == split_shard_count
+        return total, attached
+
+    # Validate pageserver state: expect every child shard to have an attached and secondary location
+    (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
+    assert sum(attached.values()) == split_shard_count
+    assert sum(total.values()) == split_shard_count * 2
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
@@ -309,13 +342,10 @@ def test_sharding_split_smoke(
         pageserver.stop()
         pageserver.start()
 
-    shards_exist = []
-    for pageserver in env.pageservers:
-        locations = pageserver.http_client().tenant_list_locations()
-        shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
-
-    log.info("Shards after restart: {shards_exist}")
-    assert len(shards_exist) == split_shard_count
+    # Validate pageserver state: expect every child shard to have an attached and secondary location
+    (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
+    assert sum(attached.values()) == split_shard_count
+    assert sum(total.values()) == split_shard_count * 2
 
     workload.validate()
 
