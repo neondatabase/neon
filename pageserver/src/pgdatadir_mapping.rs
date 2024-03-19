@@ -34,7 +34,7 @@ use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
-use utils::vec_map::VecMap;
+use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
 const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -1547,12 +1547,13 @@ impl<'a> DatadirModification<'a> {
         if !self.pending_updates.is_empty() {
             // The put_batch call below expects expects the inputs to be sorted by Lsn,
             // so we do that first.
-            let lsn_ordered_batch: VecMap<Lsn, (Key, Value)> = self
-                .pending_updates
-                .drain()
-                .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (lsn, (key, val))))
-                .kmerge_by(|lhs, rhs| lhs.0 < rhs.0)
-                .collect();
+            let lsn_ordered_batch: VecMap<Lsn, (Key, Value)> = VecMap::from_iter(
+                self.pending_updates
+                    .drain()
+                    .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (lsn, (key, val))))
+                    .kmerge_by(|lhs, rhs| lhs.0 < rhs.0),
+                VecMapOrdering::GreaterOrEqual,
+            );
 
             writer.put_batch(lsn_ordered_batch, ctx).await?;
         }

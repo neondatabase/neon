@@ -1,14 +1,26 @@
 use std::{alloc::Layout, cmp::Ordering, ops::RangeBounds};
 
+#[derive(Clone, Copy, Debug)]
+pub enum VecMapOrdering {
+    Greater,
+    GreaterOrEqual,
+}
+
 /// Ordered map datastructure implemented in a Vec.
 /// Append only - can only add keys that are larger than the
 /// current max key.
 #[derive(Clone, Debug)]
-pub struct VecMap<K, V>(Vec<(K, V)>);
+pub struct VecMap<K, V> {
+    data: Vec<(K, V)>,
+    ordering: VecMapOrdering,
+}
 
 impl<K, V> Default for VecMap<K, V> {
     fn default() -> Self {
-        VecMap(Default::default())
+        VecMap {
+            data: Default::default(),
+            ordering: VecMapOrdering::Greater,
+        }
     }
 }
 
@@ -16,16 +28,19 @@ impl<K, V> Default for VecMap<K, V> {
 pub struct InvalidKey;
 
 impl<K: Ord, V> VecMap<K, V> {
-    pub fn with_capacity(capacity: usize) -> Self {
-        VecMap(Vec::with_capacity(capacity))
+    pub fn with_capacity(capacity: usize, ordering: VecMapOrdering) -> Self {
+        VecMap {
+            data: Vec::with_capacity(capacity),
+            ordering,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.data.is_empty()
     }
 
     pub fn as_slice(&self) -> &[(K, V)] {
-        self.0.as_slice()
+        self.data.as_slice()
     }
 
     /// This function may panic if given a range where the lower bound is
@@ -33,7 +48,7 @@ impl<K: Ord, V> VecMap<K, V> {
     pub fn slice_range<R: RangeBounds<K>>(&self, range: R) -> &[(K, V)] {
         use std::ops::Bound::*;
 
-        let binary_search = |k: &K| self.0.binary_search_by_key(&k, extract_key);
+        let binary_search = |k: &K| self.data.binary_search_by_key(&k, extract_key);
 
         let start_idx = match range.start_bound() {
             Unbounded => 0,
@@ -45,7 +60,7 @@ impl<K: Ord, V> VecMap<K, V> {
         };
 
         let end_idx = match range.end_bound() {
-            Unbounded => self.0.len(),
+            Unbounded => self.data.len(),
             Included(k) => match binary_search(k) {
                 Ok(idx) => idx + 1,
                 Err(idx) => idx,
@@ -53,16 +68,23 @@ impl<K: Ord, V> VecMap<K, V> {
             Excluded(k) => binary_search(k).unwrap_or_else(std::convert::identity),
         };
 
-        &self.0[start_idx..end_idx]
+        &self.data[start_idx..end_idx]
     }
 
     /// Add a key value pair to the map.
     /// If `key` is less than or equal to the current maximum key
     /// the pair will not be added and InvalidKey error will be returned.
     pub fn append(&mut self, key: K, value: V) -> Result<usize, InvalidKey> {
-        if let Some((last_key, _last_value)) = self.0.last() {
-            if &key <= last_key {
-                return Err(InvalidKey);
+        if let Some((last_key, _last_value)) = self.data.last() {
+            match (&self.ordering, &key.cmp(last_key)) {
+                (VecMapOrdering::Greater, Ordering::Less | Ordering::Equal) => {
+                    return Err(InvalidKey);
+                }
+                (VecMapOrdering::Greater, Ordering::Greater) => {}
+                (VecMapOrdering::GreaterOrEqual, Ordering::Less) => {
+                    return Err(InvalidKey);
+                }
+                (VecMapOrdering::GreaterOrEqual, Ordering::Equal | Ordering::Greater) => {}
             }
         }
 
@@ -78,7 +100,7 @@ impl<K: Ord, V> VecMap<K, V> {
         key: K,
         mut value: V,
     ) -> Result<(Option<V>, usize), InvalidKey> {
-        if let Some((last_key, last_value)) = self.0.last_mut() {
+        if let Some((last_key, last_value)) = self.data.last_mut() {
             match key.cmp(last_key) {
                 Ordering::Less => return Err(InvalidKey),
                 Ordering::Equal => {
@@ -104,13 +126,19 @@ impl<K: Ord, V> VecMap<K, V> {
         V: Clone,
     {
         let split_idx = self
-            .0
+            .data
             .binary_search_by_key(&cutoff, extract_key)
             .unwrap_or_else(std::convert::identity);
 
         (
-            VecMap(self.0[..split_idx].to_vec()),
-            VecMap(self.0[split_idx..].to_vec()),
+            VecMap {
+                data: self.data[..split_idx].to_vec(),
+                ordering: self.ordering,
+            },
+            VecMap {
+                data: self.data[split_idx..].to_vec(),
+                ordering: self.ordering,
+            },
         )
     }
 
@@ -118,16 +146,23 @@ impl<K: Ord, V> VecMap<K, V> {
     /// If any keys in `other` is less than or equal to any key in `self`,
     /// `InvalidKey` error will be returned and no mutation will occur.
     pub fn extend(&mut self, other: &mut Self) -> Result<usize, InvalidKey> {
-        let self_last_opt = self.0.last().map(extract_key);
-        let other_first_opt = other.0.last().map(extract_key);
+        let self_last_opt = self.data.last().map(extract_key);
+        let other_first_opt = other.data.last().map(extract_key);
 
         if let (Some(self_last), Some(other_first)) = (self_last_opt, other_first_opt) {
-            if self_last >= other_first {
-                return Err(InvalidKey);
+            match (&self.ordering, &other_first.cmp(self_last)) {
+                (VecMapOrdering::Greater, Ordering::Less | Ordering::Equal) => {
+                    return Err(InvalidKey);
+                }
+                (VecMapOrdering::Greater, Ordering::Greater) => {}
+                (VecMapOrdering::GreaterOrEqual, Ordering::Less) => {
+                    return Err(InvalidKey);
+                }
+                (VecMapOrdering::GreaterOrEqual, Ordering::Equal | Ordering::Greater) => {}
             }
         }
 
-        let delta_size = self.instrument_vec_op(|vec| vec.append(&mut other.0));
+        let delta_size = self.instrument_vec_op(|vec| vec.append(&mut other.data));
         Ok(delta_size)
     }
 
@@ -135,9 +170,9 @@ impl<K: Ord, V> VecMap<K, V> {
     /// Will panic if the operation decreases capacity.
     /// Returns the increase in memory usage caused by the op.
     fn instrument_vec_op(&mut self, op: impl FnOnce(&mut Vec<(K, V)>)) -> usize {
-        let old_cap = self.0.capacity();
-        op(&mut self.0);
-        let new_cap = self.0.capacity();
+        let old_cap = self.data.capacity();
+        op(&mut self.data);
+        let new_cap = self.data.capacity();
 
         match old_cap.cmp(&new_cap) {
             Ordering::Less => {
@@ -149,10 +184,8 @@ impl<K: Ord, V> VecMap<K, V> {
             Ordering::Greater => panic!("VecMap capacity shouldn't ever decrease"),
         }
     }
-}
 
-impl<K: Ord, V> FromIterator<(K, V)> for VecMap<K, V> {
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+    pub fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I, ordering: VecMapOrdering) -> Self {
         let iter = iter.into_iter();
         let initial_capacity = {
             match iter.size_hint() {
@@ -161,7 +194,7 @@ impl<K: Ord, V> FromIterator<(K, V)> for VecMap<K, V> {
             }
         };
 
-        let mut vec_map = VecMap::with_capacity(initial_capacity);
+        let mut vec_map = VecMap::with_capacity(initial_capacity, ordering);
         for (key, value) in iter {
             vec_map
                 .append(key, value)
@@ -177,7 +210,7 @@ impl<K: Ord, V> IntoIterator for VecMap<K, V> {
     type IntoIter = std::vec::IntoIter<(K, V)>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        self.data.into_iter()
     }
 }
 
@@ -189,7 +222,7 @@ fn extract_key<K, V>(entry: &(K, V)) -> &K {
 mod tests {
     use std::{collections::BTreeMap, ops::Bound};
 
-    use super::VecMap;
+    use super::{VecMap, VecMapOrdering};
 
     #[test]
     fn unbounded_range() {
@@ -349,15 +382,29 @@ mod tests {
     #[test]
     fn vec_map_from_sorted() {
         let vec = vec![(1, ()), (2, ()), (3, ()), (6, ())];
-        let vec_map = VecMap::from_iter(vec);
+        let vec_map = VecMap::from_iter(vec, VecMapOrdering::Greater);
 
         assert_eq!(vec_map.as_slice(), &[(1, ()), (2, ()), (3, ()), (6, ())]);
+
+        let vec = vec![(1, ()), (2, ()), (3, ()), (3, ()), (6, ()), (6, ())];
+        let vec_map = VecMap::from_iter(vec, VecMapOrdering::GreaterOrEqual);
+        assert_eq!(
+            vec_map.as_slice(),
+            &[(1, ()), (2, ()), (3, ()), (3, ()), (6, ()), (6, ())]
+        );
     }
 
     #[test]
     #[should_panic]
-    fn vec_map_from_unsorted() {
-        let vec = vec![(5, ()), (2, ()), (3, ()), (6, ())];
-        let _ = VecMap::from_iter(vec);
+    fn vec_map_from_unsorted_greater() {
+        let vec = vec![(1, ()), (2, ()), (2, ()), (3, ()), (6, ())];
+        let _ = VecMap::from_iter(vec, VecMapOrdering::Greater);
+    }
+
+    #[test]
+    #[should_panic]
+    fn vec_map_from_unsorted_greater_or_equal() {
+        let vec = vec![(1, ()), (2, ()), (3, ()), (6, ()), (5, ())];
+        let _ = VecMap::from_iter(vec, VecMapOrdering::GreaterOrEqual);
     }
 }
