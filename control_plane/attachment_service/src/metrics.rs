@@ -6,6 +6,8 @@ use measured::{
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
+use crate::persistence::{DatabaseError, DatabaseOperation};
+
 #[derive(FixedCardinalityLabel)]
 pub(crate) enum ReconcileOutcome {
     #[label(rename = "ok")]
@@ -61,6 +63,25 @@ impl FixedCardinalityLabel for StatusCode {
     }
 }
 
+#[derive(FixedCardinalityLabel)]
+pub(crate) enum DatabaseErrorLabel {
+    Query,
+    Connection,
+    ConnectionPool,
+    Logical,
+}
+
+impl DatabaseError {
+    pub(crate) fn error_label(&self) -> DatabaseErrorLabel {
+        match self {
+            Self::Query(_) => DatabaseErrorLabel::Query,
+            Self::Connection(_) => DatabaseErrorLabel::Connection,
+            Self::ConnectionPool(_) => DatabaseErrorLabel::ConnectionPool,
+            Self::Logical(_) => DatabaseErrorLabel::Logical,
+        }
+    }
+}
+
 #[derive(measured::LabelGroup)]
 #[label(set = ReconcileCompleteLabelGroupSet)]
 pub(crate) struct ReconcileCompleteLabelGroup {
@@ -113,6 +134,19 @@ impl Default for PageserverRequestLabelGroupSet {
     }
 }
 
+#[derive(measured::LabelGroup)]
+#[label(set = DatabaseQueryErrorLabelGroupSet)]
+pub(crate) struct DatabaseQueryErrorLabelGroup {
+    pub(crate) error_type: DatabaseErrorLabel,
+    pub(crate) operation: DatabaseOperation,
+}
+
+#[derive(measured::LabelGroup)]
+#[label(set = DatabaseQueryLatencyLabelGroupSet)]
+pub(crate) struct DatabaseQueryLatencyLabelGroup {
+    pub(crate) operation: DatabaseOperation,
+}
+
 #[derive(measured::MetricGroup)]
 pub(crate) struct StorageControllerMetricGroup {
     /// Count of how many times we spawn a reconcile task
@@ -149,6 +183,14 @@ pub(crate) struct StorageControllerMetricGroup {
     /// requests.
     pub(crate) storage_controller_passthrough_request_latency:
         measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
+
+    /// Count of errors in database queries, broken down by error type and operation.
+    pub(crate) storage_controller_database_query_error:
+        measured::CounterVec<DatabaseQueryErrorLabelGroupSet>,
+
+    /// Latency of database queries, broken down by operation.
+    pub(crate) storage_controller_database_query_latency:
+        measured::HistogramVec<DatabaseQueryLatencyLabelGroupSet, 5>,
 }
 
 impl StorageControllerMetricGroup {
@@ -194,6 +236,17 @@ impl StorageControllerMetricGroup {
             ),
 
             storage_controller_passthrough_request_latency: measured::HistogramVec::new(
+                measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
+            ),
+
+            storage_controller_database_query_error: measured::CounterVec::new(
+                DatabaseQueryErrorLabelGroupSet {
+                    operation: StaticLabelSet::new(),
+                    error_type: StaticLabelSet::new(),
+                },
+            ),
+
+            storage_controller_database_query_latency: measured::HistogramVec::new(
                 measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
             ),
         }
