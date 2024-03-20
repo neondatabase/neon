@@ -2725,7 +2725,7 @@ impl Service {
         let detach_locations: Vec<(Node, TenantShardId)> = {
             let mut detach_locations = Vec::new();
             let mut locked = self.inner.write().unwrap();
-            let (nodes, tenants, _scheduler) = locked.parts_mut();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
 
             for (tenant_shard_id, shard) in
                 tenants.range_mut(TenantShardId::tenant_range(op.tenant_id))
@@ -2758,6 +2758,13 @@ impl Service {
 
                 tracing::info!("Restoring parent shard {tenant_shard_id}");
                 shard.splitting = SplitState::Idle;
+                if let Err(e) = shard.schedule(scheduler) {
+                    // If this shard can't be scheduled now (perhaps due to offline nodes or
+                    // capacity issues), that must not prevent us rolling back a split.  In this
+                    // case it should be eventually scheduled in the background.
+                    tracing::warn!("Failed to schedule {tenant_shard_id} during shard abort: {e}")
+                }
+
                 self.maybe_reconcile_shard(shard, nodes);
             }
 
