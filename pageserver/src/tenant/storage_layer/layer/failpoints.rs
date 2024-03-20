@@ -39,13 +39,17 @@ pub(crate) enum FailpointKind {
     AfterDeterminingLayerNeedsNoDownload,
     /// Failpoint for stalling eviction starting
     WaitBeforeStartingEvicting,
+    /// Failpoint hit in the spawned task
+    WaitBeforeDownloading,
 }
 
 pub(crate) enum Failpoint {
-    /// Failpoint acts as an accurate cancelled by drop here; see the only site of use.
     AfterDeterminingLayerNeedsNoDownload,
-    /// Failpoint for stalling eviction starting.
     WaitBeforeStartingEvicting(
+        Option<utils::completion::Completion>,
+        utils::completion::Barrier,
+    ),
+    WaitBeforeDownloading(
         Option<utils::completion::Completion>,
         utils::completion::Barrier,
     ),
@@ -58,6 +62,7 @@ impl Failpoint {
                 FailpointKind::AfterDeterminingLayerNeedsNoDownload
             }
             Failpoint::WaitBeforeStartingEvicting(..) => FailpointKind::WaitBeforeStartingEvicting,
+            Failpoint::WaitBeforeDownloading(..) => FailpointKind::WaitBeforeDownloading,
         }
     }
 
@@ -71,7 +76,8 @@ impl Failpoint {
 
                 async move { Err(FailpointHit(kind)) }.boxed()
             }
-            Failpoint::WaitBeforeStartingEvicting(arrival, b) => {
+            Failpoint::WaitBeforeStartingEvicting(arrival, b)
+            | Failpoint::WaitBeforeDownloading(arrival, b) => {
                 // first one signals arrival
                 drop(arrival.take());
 

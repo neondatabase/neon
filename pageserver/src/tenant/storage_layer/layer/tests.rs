@@ -624,6 +624,94 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     assert!(matches!(e, DownloadError::DownloadRequired), "{e:?}");
 }
 
+#[tokio::test(start_paused = true)]
+async fn evict_and_wait_does_not_wait_for_download() {
+    // let handle = tokio::runtime::Handle::current();
+    let h = TenantHarness::create("evict_and_wait_does_not_wait_for_download").unwrap();
+    let (tenant, ctx) = h.load().await;
+    let span = h.span();
+    let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
+
+    let timeline = tenant
+        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .await
+        .unwrap();
+
+    let layer = {
+        let mut layers = {
+            let layers = timeline.layers.read().await;
+            layers.likely_resident_layers().collect::<Vec<_>>()
+        };
+
+        assert_eq!(layers.len(), 1);
+
+        layers.swap_remove(0)
+    };
+
+    // kind of forced setup: start an eviction but do not allow it progress until we are
+    // downloading
+    let (eviction_can_continue, barrier) = utils::completion::channel();
+    let (arrival, eviction_arrived) = utils::completion::channel();
+    layer.enable_failpoint(Failpoint::WaitBeforeStartingEvicting(
+        Some(arrival),
+        barrier,
+    ));
+
+    let mut evict_and_wait = std::pin::pin!(layer.evict_and_wait(FOREVER));
+
+    // use this once-awaited other_evict to synchronize with the eviction
+    let other_evict = layer.evict_and_wait(FOREVER);
+
+    tokio::time::timeout(ADVANCE, &mut evict_and_wait)
+        .await
+        .expect_err("should had advanced");
+    eviction_arrived.wait().await;
+    drop(eviction_can_continue);
+    other_evict.await.unwrap();
+
+    // now the layer is evicted, and the "evict_and_wait" is waiting on the receiver
+    assert!(!layer.is_likely_resident());
+
+    // following new evict_and_wait will fail until we've completed the download
+    let e = layer.evict_and_wait(FOREVER).await.unwrap_err();
+    assert!(matches!(e, EvictionError::NotFound), "{e:?}");
+
+    let (download_can_continue, barrier) = utils::completion::channel();
+    let (arrival, _download_arrived) = utils::completion::channel();
+    layer.enable_failpoint(Failpoint::WaitBeforeDownloading(Some(arrival), barrier));
+
+    let mut download = std::pin::pin!(layer
+        .0
+        .get_or_maybe_download(true, None)
+        .instrument(download_span));
+
+    assert!(
+        !layer.is_likely_resident(),
+        "during download layer is evicted"
+    );
+
+    tokio::time::timeout(ADVANCE, &mut download)
+        .await
+        .expect_err("should had timed out because of failpoint");
+
+    // now we finally get to continue, and because the latest state is downloading, we deduce that
+    // original eviction succeeded
+    evict_and_wait.await.unwrap();
+
+    // however a new evict_and_wait will fail
+    let e = layer.evict_and_wait(FOREVER).await.unwrap_err();
+    assert!(matches!(e, EvictionError::NotFound), "{e:?}");
+
+    assert!(!layer.is_likely_resident());
+
+    drop(download_can_continue);
+    download.await.expect("download should had succeeded");
+    assert!(layer.is_likely_resident());
+
+    // only now can we evict
+    layer.evict_and_wait(FOREVER).await.unwrap();
+}
+
 #[test]
 fn layer_size() {
     assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);

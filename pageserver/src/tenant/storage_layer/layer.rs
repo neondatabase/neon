@@ -978,6 +978,11 @@ impl LayerInner {
                     .unwrap()
                     .send_replace(Status::Downloading);
 
+                #[cfg(test)]
+                this.failpoint(failpoints::FailpointKind::WaitBeforeDownloading)
+                    .await
+                    .unwrap();
+
                 let res = this.download_and_init(timeline, permit).await;
 
                 if let Err(res) = tx.send(res) {
