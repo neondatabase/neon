@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use aws_sdk_iam::config::ProvideCredentials;
 use futures::FutureExt;
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},

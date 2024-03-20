@@ -169,6 +169,12 @@ struct ProxyCliArgs {
     /// redis port for streaming connections (might be different from the notifications host)
     #[clap(long)]
     redis_port: Option<u16>,
+    /// redis cluster name, used in aws elasticache
+    #[clap(long)]
+    redis_cluster_name: Option<String>,
+    /// redis user_id, used in aws elasticache
+    #[clap(long)]
+    redis_user_id: Option<String>,
     /// cache for `project_info` (use `size=0` to disable)
     #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
     project_info_cache: String,
@@ -259,7 +265,11 @@ async fn main() -> anyhow::Result<()> {
             .or_else("imds", ImdsCredentialsProvider::builder().build())
     };
     let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
-        elasticache::AWSIRSAConfig::default_with_region(config.region.clone()),
+        elasticache::AWSIRSAConfig::new(
+            config.region.clone(),
+            args.redis_cluster_name,
+            args.redis_user_id,
+        ),
         aws_credentials_provider,
     ));
     let redis_notifications_client =

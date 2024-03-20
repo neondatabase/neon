@@ -7,6 +7,7 @@ use aws_sigv4::http_request::{
 };
 use tracing::info;
 
+#[derive(Debug)]
 pub struct AWSIRSAConfig {
     region: String,
     service_name: String,
@@ -17,12 +18,12 @@ pub struct AWSIRSAConfig {
 }
 
 impl AWSIRSAConfig {
-    pub fn default_with_region(region: String) -> Self {
+    pub fn new(region: String, cluster_name: Option<String>, user_id: Option<String>) -> Self {
         AWSIRSAConfig {
             region,
             service_name: "elasticache".to_string(),
-            cluster_name: "regional-control-plane-redis".to_string(),
-            user_id: "neon".to_string(),
+            cluster_name: cluster_name.unwrap_or_default(),
+            user_id: user_id.unwrap_or_default(),
             // "The IAM authentication token is valid for 15 minutes"
             // https://docs.aws.amazon.com/memorydb/latest/devguide/auth-iam.html#auth-iam-limits
             token_ttl: Duration::from_secs(15 * 60),
@@ -56,6 +57,8 @@ impl CredentialsProvider {
             .provide_credentials()
             .await?
             .into();
+        info!("AWS credentials successfully obtained");
+        info!("Connecting to Redis with configuration: {:?}", self.config);
         let mut settings = SigningSettings::default();
         settings.signature_location = SignatureLocation::QueryParams;
         settings.expires_in = Some(self.config.token_ttl);
