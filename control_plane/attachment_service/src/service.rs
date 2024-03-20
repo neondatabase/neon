@@ -2535,8 +2535,8 @@ impl Service {
     }
 
     /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
-    /// function looks it up and returns the url.  If the tenant isn't found, returns Err(ApiError::NotFound)
-    pub(crate) fn tenant_shard0_baseurl(
+    /// function looks up and returns node. If the tenant isn't found, returns Err(ApiError::NotFound)
+    pub(crate) fn tenant_shard0_node(
         &self,
         tenant_id: TenantId,
     ) -> Result<(Node, TenantShardId), ApiError> {
