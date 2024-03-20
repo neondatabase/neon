@@ -5,6 +5,7 @@ use utils::{
     id::TimelineId,
 };
 
+use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
 use crate::context::DownloadBehavior;
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
@@ -290,7 +291,7 @@ fn read_wins_pending_eviction() {
 
         let (completion, barrier) = utils::completion::channel();
         let (arrival, arrived_at_barrier) = utils::completion::channel();
-        layer.enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(
+        layer.enable_failpoint(Failpoint::WaitBeforeStartingEvicting(
             Some(arrival),
             barrier,
         ));
@@ -421,7 +422,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         let (completion1, barrier) = utils::completion::channel();
         let mut completion1 = Some(completion1);
         let (arrival, arrived_at_barrier) = utils::completion::channel();
-        layer.enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(
+        layer.enable_failpoint(Failpoint::WaitBeforeStartingEvicting(
             Some(arrival),
             barrier,
         ));
@@ -470,7 +471,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         // so now that we've reinitialized the inner, we get to run two of them at the same time.
         let (completion2, barrier) = utils::completion::channel();
         let (arrival, arrived_at_barrier) = utils::completion::channel();
-        layer.enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(
+        layer.enable_failpoint(Failpoint::WaitBeforeStartingEvicting(
             Some(arrival),
             barrier,
         ));
@@ -574,12 +575,12 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
 
     // this failpoint will simulate the `get_or_maybe_download` becoming cancelled (by returning an
     // Err) at the right time as in "during" the `LayerInner::needs_download`.
-    layer.enable_failpoint(failpoints::Failpoint::AfterDeterminingLayerNeedsNoDownload);
+    layer.enable_failpoint(Failpoint::AfterDeterminingLayerNeedsNoDownload);
 
     let (completion, barrier) = utils::completion::channel();
     let (arrival, arrived_at_barrier) = utils::completion::channel();
 
-    layer.enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(
+    layer.enable_failpoint(Failpoint::WaitBeforeStartingEvicting(
         Some(arrival),
         barrier,
     ));
@@ -599,9 +600,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     assert!(
         matches!(
             e,
-            DownloadError::Failpoint(
-                failpoints::FailpointKind::AfterDeterminingLayerNeedsNoDownload
-            )
+            DownloadError::Failpoint(FailpointKind::AfterDeterminingLayerNeedsNoDownload)
         ),
         "{e:?}"
     );
