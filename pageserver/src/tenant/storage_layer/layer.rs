@@ -1361,18 +1361,14 @@ impl LayerInner {
             }
 
             let completed_in = spawned_at.elapsed();
-            let elapsed_ms = completed_in.as_millis();
-
-            if completed_in > std::time::Duration::from_secs(1) || waiters > 0 {
-                tracing::warn!(?res, %elapsed_ms, %waiters, "eviction completed but took a long time or we had waiters");
-            } else {
-                tracing::debug!(?res, %elapsed_ms, %waiters, "eviction completed");
-            }
+            LAYER_IMPL_METRICS.record_time_to_evict(completed_in);
 
             match res {
                 Ok(()) => LAYER_IMPL_METRICS.inc_completed_evictions(),
                 Err(e) => LAYER_IMPL_METRICS.inc_eviction_cancelled(e),
             }
+
+            tracing::debug!(?res, elapsed_ms=%completed_in.as_millis(), %waiters, "eviction completed");
         });
 
         Ok(())
@@ -1798,6 +1794,7 @@ pub(crate) struct LayerImplMetrics {
     rare_counters: enum_map::EnumMap<RareEvent, IntCounter>,
     inits_cancelled: metrics::core::GenericCounter<metrics::core::AtomicU64>,
     redownload_after: metrics::Histogram,
+    time_to_evict: metrics::Histogram,
 }
 
 impl Default for LayerImplMetrics {
@@ -1893,6 +1890,13 @@ impl Default for LayerImplMetrics {
             .unwrap()
         };
 
+        let time_to_evict = metrics::register_histogram!(
+            "pageserver_layer_eviction_held_permit_seconds",
+            "Time eviction held the permit.",
+            vec![0.001, 0.010, 0.100, 0.500, 1.000, 5.000]
+        )
+        .unwrap();
+
         Self {
             started_evictions,
             completed_evictions,
@@ -1905,6 +1909,7 @@ impl Default for LayerImplMetrics {
             rare_counters,
             inits_cancelled,
             redownload_after,
+            time_to_evict,
         }
     }
 }
@@ -1979,6 +1984,12 @@ impl LayerImplMetrics {
     /// from other evictions, so this could have noise as well.
     fn inc_evicted_with_waiters(&self) {
         self.rare_counters[RareEvent::EvictedWithWaiters].inc();
+    }
+
+    /// Recorded at least initially as the permit is now acquired in async context before
+    /// spawn_blocking action.
+    fn record_time_to_evict(&self, duration: std::time::Duration) {
+        self.time_to_evict.observe(duration.as_secs_f64())
     }
 }
 
