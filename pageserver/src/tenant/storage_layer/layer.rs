@@ -855,6 +855,8 @@ impl LayerInner {
             async move {
                 let _guard = guard;
 
+                drop(this.status.send(Status::Downloaded));
+
                 let res = this.download_and_init(timeline, permit).await;
 
                 if let Err(res) = tx.send(res) {
@@ -991,7 +993,9 @@ impl LayerInner {
         // we would like to do for prefetching which was not needed.
         self.wanted_evicted.store(false, Ordering::Release);
 
-        // no need to make the evict_and_wait wait for the actual download to complete
+        // re-send the notification we've already sent when we started to download, just so
+        // evict_and_wait does not need to wait for the download to complete. note that this is
+        // sent when initializing after finding the file on the disk.
         drop(self.status.send(Status::Downloaded));
 
         let res = Arc::new(DownloadedLayer {
