@@ -1270,6 +1270,8 @@ impl LayerInner {
 
         let span = tracing::Span::current();
 
+        let spawned_at = std::time::Instant::now();
+
         // this is on purpose a detached spawn; we don't need to wait for it
         //
         // eviction completion reporting is the only thing hinging on this, and it can be just as
@@ -1277,9 +1279,22 @@ impl LayerInner {
         Self::spawn_blocking(move || {
             let _span = span.entered();
 
-            let res = self.evict_blocking(&timeline, permit);
+            let res = self.evict_blocking(&timeline, &permit);
 
-            tracing::debug!(?res, "eviction completed");
+            let waiters = self.inner.initializer_count();
+
+            if waiters > 0 {
+                LAYER_IMPL_METRICS.inc_evicted_with_waiters();
+            }
+
+            let completed_in = spawned_at.elapsed();
+            let elapsed_ms = completed_in.as_millis();
+
+            if completed_in > std::time::Duration::from_secs(1) || waiters > 0 {
+                tracing::warn!(?res, %elapsed_ms, %waiters, "eviction completed but took a long time or we had waiters");
+            } else {
+                tracing::debug!(?res, %elapsed_ms, %waiters, "eviction completed");
+            }
 
             match res {
                 Ok(()) => LAYER_IMPL_METRICS.inc_completed_evictions(),
@@ -1293,7 +1308,7 @@ impl LayerInner {
     fn evict_blocking(
         &self,
         timeline: &Timeline,
-        _permit: heavier_once_cell::InitPermit,
+        _permit: &heavier_once_cell::InitPermit,
     ) -> Result<(), EvictionCancelled> {
         // now accesses to `self.inner.get_or_init*` wait on the semaphore or the `_permit`
 
@@ -1894,6 +1909,13 @@ impl LayerImplMetrics {
     fn record_redownloaded_after(&self, duration: std::time::Duration) {
         self.redownload_after.observe(duration.as_secs_f64())
     }
+
+    /// This would be bad if it ever happened, or mean extreme disk pressure. We should probably
+    /// instead cancel eviction if we would have read waiters. We cannot however separate reads
+    /// from other evictions, so this could have noise as well.
+    fn inc_evicted_with_waiters(&self) {
+        self.rare_counters[RareEvent::EvictedWithWaiters].inc();
+    }
 }
 
 #[derive(Debug, Clone, Copy, enum_map::Enum)]
@@ -1950,6 +1972,7 @@ enum RareEvent {
     UpgradedWantedEvicted,
     InitWithoutDownload,
     PermanentLoadingFailure,
+    EvictedWithWaiters,
 }
 
 impl RareEvent {
@@ -1963,6 +1986,7 @@ impl RareEvent {
             UpgradedWantedEvicted => "raced_wanted_evicted",
             InitWithoutDownload => "init_needed_no_download",
             PermanentLoadingFailure => "permanent_loading_failure",
+            EvictedWithWaiters => "evicted_with_waiters",
         }
     }
 }
