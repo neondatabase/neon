@@ -432,11 +432,9 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         // now the eviction cannot proceed because we are simulating arbitrary long delay for the
         // eviction task start.
         drop(resident);
-
-        // synchronize so we don't have two different possible outcomes for this test
-        arrived_at_barrier.wait().await;
-
         assert!(!layer.is_likely_resident());
+
+        arrived_at_barrier.wait().await;
 
         // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
         layer
