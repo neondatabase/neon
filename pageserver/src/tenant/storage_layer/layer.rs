@@ -1234,6 +1234,9 @@ impl LayerInner {
             // first we spawn off the async part, then it will spawn_blocking the blocking part
             Self::spawn(start_evicting.instrument(span));
         }
+
+        // if can_evict is now false, we must cancel the eviction but get_or_maybe_download has
+        // already done that.
     }
 
     async fn wait_for_turn_and_evict(
@@ -1267,6 +1270,9 @@ impl LayerInner {
         };
 
         let permit = {
+            // we cannot just `std::fs::remove_file` because there might already be an
+            // get_or_maybe_download which will inspect filesystem and reinitialize. filesystem
+            // operations must be done while holding the heavier_once_cell::InitPermit
             let mut wait = std::pin::pin!(self.inner.get_or_init_detached());
 
             let waited = loop {
@@ -1290,6 +1296,9 @@ impl LayerInner {
             // while holding the permit.
             is_good_to_continue(&rx.borrow_and_update())?;
 
+            // the term deinitialize is used here, because we clearing out the Weak will eventually
+            // lead to deallocating the reference counted value, and the value we
+            // `Guard::take_and_deinit` is likely to be the last because the Weak is never cloned.
             let (_weak, permit) = match waited {
                 Ok(guard) => {
                     match &*guard {
@@ -1303,7 +1312,7 @@ impl LayerInner {
                         ResidentOrWantedEvicted::WantedEvicted(_, version) => {
                             // if we were not doing the version check, we would need to try to
                             // upgrade the weak here to see if it really is dropped. version check
-                            // might be cheaper?
+                            // is done instead assuming that it is cheaper.
                             tracing::debug!(
                                 version,
                                 only_version,
@@ -1333,6 +1342,14 @@ impl LayerInner {
         //
         // eviction completion reporting is the only thing hinging on this, and it can be just as
         // well from a spawn_blocking thread.
+        //
+        // important to note that now that we've acquired the permit we have made sure the evicted
+        // file is either the exact `WantedEvicted` we wanted to evict, or uninitialized in case
+        // there are multiple evictions. The rest is not cancellable, and we've now commited to
+        // evicting.
+        //
+        // If spawn_blocking has a queue and maximum number of threads are in use, we could stall
+        // reads. We will need to add cancellation for that if necessary.
         Self::spawn_blocking(move || {
             let _span = span.entered();
 
