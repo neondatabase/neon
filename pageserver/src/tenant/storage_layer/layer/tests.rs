@@ -398,19 +398,15 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         layers.swap_remove(0)
     };
 
-    layer
-        .0
-        .enable_failpoint(failpoints::Failpoint::AfterDeterminingLayerNeedsNoDownload);
+    layer.enable_failpoint(failpoints::Failpoint::AfterDeterminingLayerNeedsNoDownload);
 
     let (completion, barrier) = utils::completion::channel();
     let (arrival, arrived_at_barrier) = utils::completion::channel();
 
-    layer
-        .0
-        .enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(
-            Some(arrival),
-            barrier,
-        ));
+    layer.enable_failpoint(failpoints::Failpoint::WaitBeforeStartingEvicting(
+        Some(arrival),
+        barrier,
+    ));
 
     tokio::time::timeout(ADVANCE, layer.evict_and_wait(FOREVER))
         .await

@@ -4,6 +4,13 @@
 
 use super::*;
 
+impl Layer {
+    /// Enable a failpoint from a unit test.
+    pub(super) fn enable_failpoint(&self, failpoint: Failpoint) {
+        self.0.failpoints.lock().unwrap().push(failpoint);
+    }
+}
+
 impl LayerInner {
     /// Query if this failpoint is enabled, as in, arrive at a failpoint.
     ///
@@ -21,11 +28,6 @@ impl LayerInner {
         };
 
         fut.await
-    }
-
-    /// Enable a failpoint from a unit test.
-    pub(super) fn enable_failpoint(&self, failpoint: Failpoint) {
-        self.failpoints.lock().unwrap().push(failpoint);
     }
 }
 
