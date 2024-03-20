@@ -545,8 +545,10 @@ struct LayerInner {
     /// Allow subscribing to when the layer actually gets evicted, a non-cancellable download
     /// starts, or completes.
     ///
-    /// Updates must only be posted while holding the InitPermit, which is the only time we can do
-    /// state transitions.
+    /// Updates must only be posted while holding the InitPermit or the heavier_once_cell::Guard.
+    /// Holding the InitPermit is the only time we can do state transitions, but we also need to
+    /// cancel a pending eviction on upgrading a [`ResidentOrWantedEvicted::WantedEvicted`] back to
+    /// [`ResidentOrWantedEvicted::Resident`] on access.
     ///
     /// The sender is wrapped in an Option to facilitate moving it out on [`LayerInner::drop`].
     status: Option<tokio::sync::watch::Sender<Status>>,
@@ -824,7 +826,11 @@ impl LayerInner {
                 Ok(Ok((strong, upgraded))) if !upgraded => return Ok(strong),
                 Ok(Ok((strong, _))) => {
                     // when upgraded back, the Arc<DownloadedLayer> is still available, but
-                    // previously a `evict_and_wait` was received.
+                    // previously a `evict_and_wait` was received. this is the only place when we
+                    // send out an update without holding the InitPermit.
+                    //
+                    // note that we also have dropped the Guard; this is fine, because we just made
+                    // a state change and are holding a strong reference to be returned.
                     self.status.as_ref().unwrap().send_replace(Status::Resident);
                     LAYER_IMPL_METRICS
                         .inc_eviction_cancelled(EvictionCancelled::UpgradedBackOnAccess);
