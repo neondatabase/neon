@@ -584,7 +584,7 @@ fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>
             method: req.method().clone(),
             at: Instant::now(),
         };
-        tracing::info!("Set request context meta: {meta:?}");
+
         req.set_context(meta);
 
         Ok(req)
@@ -602,8 +602,6 @@ fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>
         };
 
         if let Some(meta) = req_info.context::<RequestMeta>() {
-            tracing::info!("Got request context meta: {meta:?}");
-
             let status = &crate::metrics::METRICS_REGISTRY
                 .metrics_group
                 .storage_controller_http_request_status;
