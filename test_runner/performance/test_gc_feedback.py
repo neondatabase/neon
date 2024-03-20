@@ -82,7 +82,7 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
         "physical/logical ratio", physical_size / logical_size, "", MetricReport.LOWER_IS_BETTER
     )
 
-    layer_map_path = env.pageserver.timeline_dir(tenant_id, timeline_id) / "layer-map.json"
+    layer_map_path = env.repo_dir / "layer-map.json"
     log.info(f"Writing layer map to {layer_map_path}")
     with layer_map_path.open("w") as f:
         f.write(json.dumps(client.timeline_layer_map_info(tenant_id, timeline_id)))
