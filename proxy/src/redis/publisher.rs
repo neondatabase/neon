@@ -119,7 +119,7 @@ impl RedisPublisherClient {
             Ok(()) => {}
             Err(e) => {
                 tracing::error!("failed to connect to redis: {e}");
-                return Err(e.into());
+                return Err(e);
             }
         }
         Ok(())
