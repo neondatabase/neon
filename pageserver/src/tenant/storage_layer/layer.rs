@@ -49,7 +49,9 @@ mod failpoints;
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN.
 ///
-/// This type models the on-disk layers, which can be evicted and on-demand downloaded.
+/// This type models the on-disk layers, which can be evicted and on-demand downloaded. As a
+/// general goal, read accesses should always win eviction and eviction should not wait for
+/// download.
 ///
 /// ### State transitions
 ///
@@ -78,6 +80,10 @@ mod failpoints;
 ///  | file is present |<---------------------------| WantedEvicted(Weak<DownloadedLayer>) |
 ///  +-----------------+                            +--------------------------------------+
 /// ```
+///
+/// ### Unsupported
+///
+/// - Evicting by the operator deleting files from the filesystem
 ///
 /// [`InMemoryLayer`]: super::inmemory_layer::InMemoryLayer
 #[derive(Clone)]
