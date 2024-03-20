@@ -1555,6 +1555,7 @@ impl Drop for DownloadedLayer {
             owner.on_downloaded_layer_drop(self.version);
         } else {
             // no need to do anything, we are shutting down
+            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
         }
     }
 }
