@@ -30,9 +30,6 @@ macro_rules! measured_request {
             .storage_controller_pageserver_request_latency;
         let _timer_guard = latency.start_timer(labels.clone());
 
-        // The call above always return a `Some`.
-        assert!(_timer_guard.is_some());
-
         let res = $invoke;
 
         if res.is_err() {
