@@ -793,6 +793,7 @@ impl LayerInner {
         let current = rx.borrow_and_update();
 
         match &*current {
+            // the easiest case
             Status::Evicted => Ok(()),
             // it surely was evicted in between, but then there was a new access now; we can't know
             // if it'll succeed so lets just call it evicted
