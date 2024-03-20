@@ -1128,7 +1128,7 @@ impl LayerInner {
             let maybe_downloaded = self.inner.get();
 
             let (_weak, permit) = match maybe_downloaded {
-                Some(mut guard) => {
+                Some(guard) => {
                     if let ResidentOrWantedEvicted::WantedEvicted(_weak, version) = &*guard {
                         if *version == only_version {
                             guard.take_and_deinit()
