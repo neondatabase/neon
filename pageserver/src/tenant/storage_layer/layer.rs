@@ -542,14 +542,14 @@ struct LayerInner {
     /// a task.
     wanted_evicted: AtomicBool,
 
-    /// Version is to make sure we will only evict a specific download of a file.
+    /// Version is to make sure we will only evict a specific initialization of the downloaded file.
     ///
     /// Incremented for each initialization, stored in `DownloadedLayer::version` or
     /// `ResidentOrWantedEvicted::WantedEvicted`.
     version: AtomicUsize,
 
     /// Allow subscribing to when the layer actually gets evicted, a non-cancellable download
-    /// starts or completes.
+    /// starts, or completes.
     ///
     /// Updates must only be posted while holding the InitPermit, which is the only time we can do
     /// state transitions.
