@@ -9,6 +9,8 @@ pub enum VecMapOrdering {
 /// Ordered map datastructure implemented in a Vec.
 /// Append only - can only add keys that are larger than the
 /// current max key.
+/// Ordering can be adjusted using [VecMapOrdering]
+/// during VecMap construction.
 #[derive(Clone, Debug)]
 pub struct VecMap<K, V> {
     data: Vec<(K, V)>,
@@ -24,9 +26,11 @@ impl<K, V> Default for VecMap<K, V> {
     }
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum VecMapError {
+    #[error("Key violates ordering constraint")]
     InvalidKey,
+    #[error("Mismatched ordering constraints")]
     ExtendOrderingError,
 }
 
@@ -82,8 +86,8 @@ impl<K: Ord, V> VecMap<K, V> {
     }
 
     /// Add a key value pair to the map.
-    /// If `key` is less than or equal to the current maximum key
-    /// the pair will not be added and InvalidKey error will be returned.
+    /// If `key` is not respective of the `self` ordering the
+    /// pair will not be added and `InvalidKey` error will be returned.
     pub fn append(&mut self, key: K, value: V) -> Result<usize, VecMapError> {
         self.validate_key_order(&key)?;
 
@@ -92,8 +96,8 @@ impl<K: Ord, V> VecMap<K, V> {
     }
 
     /// Update the maximum key value pair or add a new key value pair to the map.
-    /// If `key` is less than the current maximum key no updates or additions
-    /// will occur and InvalidKey error will be returned.
+    /// If `key` is not respective of the `self` ordering no updates or additions
+    /// will occur and `InvalidKey` error will be returned.
     pub fn append_or_update_last(
         &mut self,
         key: K,
@@ -142,12 +146,12 @@ impl<K: Ord, V> VecMap<K, V> {
     }
 
     /// Move items from `other` to the end of `self`, leaving `other` empty.
-    /// If any keys in `other` is less than or equal to any key in `self`,
-    /// `InvalidKey` error will be returned and no mutation will occur.
+    /// If the `other` ordering is different from `self` ordering
+    /// `ExtendOrderingError` error will be returned.
+    /// If any keys in `other` is not respective of the ordering defined in
+    /// `self`, `InvalidKey` error will be returned and no mutation will occur.
     pub fn extend(&mut self, other: &mut Self) -> Result<usize, VecMapError> {
-        if self.ordering == VecMapOrdering::Greater
-            && other.ordering == VecMapOrdering::GreaterOrEqual
-        {
+        if self.ordering != other.ordering {
             return Err(VecMapError::ExtendOrderingError);
         }
 
@@ -160,6 +164,8 @@ impl<K: Ord, V> VecMap<K, V> {
         Ok(delta_size)
     }
 
+    /// Validate the current last key in `self` and key being
+    /// inserted against the order defined in `self`.
     fn validate_key_order(&self, key: &K) -> Result<(), VecMapError> {
         if let Some(last_key) = self.data.last().map(extract_key) {
             match (&self.ordering, &key.cmp(last_key)) {
@@ -196,6 +202,8 @@ impl<K: Ord, V> VecMap<K, V> {
         }
     }
 
+    /// Similar to `from_iter` defined in `FromIter` trait except
+    /// that it accepts an [VecMapOrdering]
     pub fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I, ordering: VecMapOrdering) -> Self {
         let iter = iter.into_iter();
         let initial_capacity = {
@@ -406,21 +414,20 @@ mod tests {
 
         let mut greater_right = VecMap::new(VecMapOrdering::Greater);
         greater_right.append(0, ()).unwrap();
-        left.extend(&mut greater_right).unwrap();
-        assert_eq!(left.as_slice(), &[(0, ()), (0, ())]);
+        left.extend(&mut greater_right).unwrap_err();
+        assert_eq!(left.as_slice(), &[(0, ())]);
 
         let mut greater_or_equal_right = VecMap::new(VecMapOrdering::GreaterOrEqual);
         greater_or_equal_right.append(2, ()).unwrap();
         greater_or_equal_right.append(2, ()).unwrap();
         left.extend(&mut greater_or_equal_right).unwrap();
-        assert_eq!(left.as_slice(), &[(0, ()), (0, ()), (2, ()), (2, ())]);
+        assert_eq!(left.as_slice(), &[(0, ()), (2, ()), (2, ())]);
     }
 
     #[test]
     fn vec_map_from_sorted() {
         let vec = vec![(1, ()), (2, ()), (3, ()), (6, ())];
         let vec_map = VecMap::from_iter(vec, VecMapOrdering::Greater);
-
         assert_eq!(vec_map.as_slice(), &[(1, ()), (2, ()), (3, ()), (6, ())]);
 
         let vec = vec![(1, ()), (2, ()), (3, ()), (3, ()), (6, ()), (6, ())];
