@@ -160,6 +160,8 @@ def test_sharding_split_smoke(
 
     neon_env_builder.preserve_database_files = True
 
+    non_default_tenant_config = {"gc_horizon": 77 * 1024 * 1024}
+
     env = neon_env_builder.init_configs(True)
     neon_env_builder.start()
     tenant_id = TenantId.generate()
@@ -170,6 +172,7 @@ def test_sharding_split_smoke(
         shard_count=shard_count,
         shard_stripe_size=stripe_size,
         placement_policy='{"Attached": 1}',
+        conf=non_default_tenant_config,
     )
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
@@ -330,10 +333,19 @@ def test_sharding_split_smoke(
 
         return total, attached
 
+    def check_effective_tenant_config():
+        # Expect our custom tenant configs to have survived the split
+        for shard in env.storage_controller.tenant_describe(tenant_id)["shards"]:
+            node = env.get_pageserver(int(shard["node_attached"]))
+            config = node.http_client().tenant_config(TenantShardId.parse(shard["tenant_shard_id"]))
+            for k, v in non_default_tenant_config.items():
+                assert config.effective_config[k] == v
+
     # Validate pageserver state: expect every child shard to have an attached and secondary location
     (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
     assert sum(attached.values()) == split_shard_count
     assert sum(total.values()) == split_shard_count * 2
+    check_effective_tenant_config()
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
@@ -346,6 +358,7 @@ def test_sharding_split_smoke(
     (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
     assert sum(attached.values()) == split_shard_count
     assert sum(total.values()) == split_shard_count * 2
+    check_effective_tenant_config()
 
     workload.validate()
 
