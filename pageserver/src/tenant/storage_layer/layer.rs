@@ -536,12 +536,6 @@ struct LayerInner {
     /// Do we want to delete locally and remotely this when `LayerInner` is dropped
     wanted_deleted: AtomicBool,
 
-    /// Do we want to evict this layer as soon as possible? Only set to `true` by [`Layer::evict_and_wait`].
-    ///
-    /// Exists only for optimization in [`LayerInner::on_downloaded_layer_drop`] to avoid spawning
-    /// a task.
-    wanted_evicted: AtomicBool,
-
     /// Version is to make sure we will only evict a specific initialization of the downloaded file.
     ///
     /// Incremented for each initialization, stored in `DownloadedLayer::version` or
@@ -718,7 +712,6 @@ impl LayerInner {
             have_remote_client: timeline.remote_client.is_some(),
             access_stats,
             wanted_deleted: AtomicBool::new(false),
-            wanted_evicted: AtomicBool::new(false),
             inner,
             version: AtomicUsize::new(version),
             status: Some(tokio::sync::watch::channel(init_status).0),
@@ -764,10 +757,7 @@ impl LayerInner {
 
         let strong = {
             match self.inner.get() {
-                Some(mut either) => {
-                    self.wanted_evicted.store(true, Ordering::Relaxed);
-                    either.downgrade()
-                }
+                Some(mut either) => either.downgrade(),
                 None => {
                     // we already have a scheduled eviction, which just has not gotten to run yet.
                     // it might still race with a read access, but that could also get cancelled,
@@ -835,10 +825,6 @@ impl LayerInner {
                 Ok(Ok((strong, _))) => {
                     // when upgraded back, the Arc<DownloadedLayer> is still available, but
                     // previously a `evict_and_wait` was received.
-                    self.wanted_evicted.store(false, Ordering::Relaxed);
-
-                    // error out any `evict_and_wait` -- note we want to send this unconditionally
-                    // to break out any changed()
                     self.status.as_ref().unwrap().send_replace(Status::Resident);
                     LAYER_IMPL_METRICS
                         .inc_eviction_cancelled(EvictionCancelled::UpgradedBackOnAccess);
@@ -1120,7 +1106,6 @@ impl LayerInner {
 
         // disable any scheduled but not yet running eviction deletions for this initialization
         let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
-        self.wanted_evicted.store(false, Ordering::Release);
         self.status.as_ref().unwrap().send_replace(Status::Resident);
 
         let res = Arc::new(DownloadedLayer {
@@ -1208,37 +1193,40 @@ impl LayerInner {
 
     /// `DownloadedLayer` is being dropped, so it calls this method.
     fn on_downloaded_layer_drop(self: Arc<LayerInner>, only_version: usize) {
-        let evict = self.wanted_evicted.load(Ordering::Acquire);
         let can_evict = self.have_remote_client;
 
-        if can_evict && evict {
-            let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, version=%only_version);
+        // we cannot know without inspecting LayerInner::inner if we should evict or not, even
+        // though here it is very likely
+        let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, version=%only_version);
 
-            // NOTE: this scope *must* never call `self.inner.get` because evict_and_wait might
-            // drop while the `self.inner` is being locked, leading to a deadlock.
-
-            let start_evicting = async move {
-                #[cfg(test)]
-                self.failpoint(failpoints::FailpointKind::WaitBeforeStartingEvicting)
-                    .await
-                    .expect("failpoint should not have errored");
-
-                tracing::debug!("eviction started");
-
-                let res = self.wait_for_turn_and_evict(only_version).await;
-                // metrics: ignore the Ok branch, it is not done yet
-                if let Err(e) = res {
-                    tracing::debug!(res=?Err::<(), _>(&e), "eviction completed");
-                    LAYER_IMPL_METRICS.inc_eviction_cancelled(e);
-                }
-            };
-
-            // first we spawn off the async part, then it will spawn_blocking the blocking part
-            Self::spawn(start_evicting.instrument(span));
+        if !can_evict {
+            // it would be nice to assert this case out, but we are in drop
+            span.in_scope(|| {
+                tracing::error!("bug in struct Layer: ResidentOrWantedEvicted has been downgraded while we have no remote storage");
+            });
+            return;
         }
 
-        // if can_evict is now false, we must cancel the eviction but get_or_maybe_download has
-        // already done that.
+        // NOTE: this scope *must* never call `self.inner.get` because evict_and_wait might
+        // drop while the `self.inner` is being locked, leading to a deadlock.
+
+        let start_evicting = async move {
+            #[cfg(test)]
+            self.failpoint(failpoints::FailpointKind::WaitBeforeStartingEvicting)
+                .await
+                .expect("failpoint should not have errored");
+
+            tracing::debug!("eviction started");
+
+            let res = self.wait_for_turn_and_evict(only_version).await;
+            // metrics: ignore the Ok branch, it is not done yet
+            if let Err(e) = res {
+                tracing::debug!(res=?Err::<(), _>(&e), "eviction completed");
+                LAYER_IMPL_METRICS.inc_eviction_cancelled(e);
+            }
+        };
+
+        Self::spawn(start_evicting.instrument(span));
     }
 
     async fn wait_for_turn_and_evict(
