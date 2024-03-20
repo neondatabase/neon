@@ -769,7 +769,9 @@ impl LayerInner {
                     either.downgrade()
                 }
                 None => {
-                    // FIXME: could this be by mistake?
+                    // we already have a scheduled eviction, which just has not gotten to run yet.
+                    // it might still race with a read access, but that could also get cancelled,
+                    // so let's say this is not evictable.
                     return Err(EvictionError::NotFound);
                 }
             }
