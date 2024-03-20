@@ -1,3 +1,10 @@
+use aws_config::environment::EnvironmentVariableCredentialsProvider;
+use aws_config::imds::credentials::ImdsCredentialsProvider;
+use aws_config::meta::credentials::CredentialsProviderChain;
+use aws_config::meta::region::RegionProviderChain;
+use aws_config::profile::ProfileFileCredentialsProvider;
+use aws_config::provider_config::ProviderConfig;
+use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::MaybeOwned;
@@ -10,9 +17,12 @@ use proxy::config::ProjectInfoCacheOptions;
 use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
+use proxy::metrics::NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
+use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
+use proxy::redis::elasticache;
 use proxy::redis::notifications;
 use proxy::redis::publisher::RedisPublisherClient;
 use proxy::serverless::GlobalConnPoolOptions;
@@ -150,9 +160,15 @@ struct ProxyCliArgs {
     /// disable ip check for http requests. If it is too time consuming, it could be turned off.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_ip_check_for_http: bool,
-    /// redis url for notifications.
+    /// redis url for notifications (if empty, redis_host:port will be used for both notifications and streaming connections)
     #[clap(long)]
     redis_notifications: Option<String>,
+    /// redis host for streaming connections (might be different from the notifications host)
+    #[clap(long)]
+    redis_host: Option<String>,
+    /// redis port for streaming connections (might be different from the notifications host)
+    #[clap(long)]
+    redis_port: Option<u16>,
     /// cache for `project_info` (use `size=0` to disable)
     #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
     project_info_cache: String,
@@ -216,6 +232,57 @@ async fn main() -> anyhow::Result<()> {
     let config = build_config(&args)?;
 
     info!("Authentication backend: {}", config.auth_backend);
+    info!("Using region: {}", config.region);
+
+    let region_provider = RegionProviderChain::default_provider().or_else(&*config.region); // Replace with your Redis region if needed
+    let provider_conf =
+        ProviderConfig::without_region().with_region(region_provider.region().await);
+    let aws_credentials_provider = {
+        // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
+        CredentialsProviderChain::first_try("env", EnvironmentVariableCredentialsProvider::new())
+            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
+            .or_else(
+                "profile-sso",
+                ProfileFileCredentialsProvider::builder()
+                    .configure(&provider_conf)
+                    .build(),
+            )
+            // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
+            // needed to access remote extensions bucket
+            .or_else(
+                "token",
+                WebIdentityTokenCredentialsProvider::builder()
+                    .configure(&provider_conf)
+                    .build(),
+            )
+            // uses imds v2
+            .or_else("imds", ImdsCredentialsProvider::builder().build())
+    };
+    let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
+        elasticache::AWSIRSAConfig::default_with_region(config.region.clone()),
+        aws_credentials_provider,
+    ));
+    let redis_notifications_client =
+        match (args.redis_notifications, (args.redis_host, args.redis_port)) {
+            (Some(url), _) => {
+                info!("Starting redis notifications listener ({url})");
+                Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
+            }
+            (None, (Some(host), Some(port))) => Some(
+                ConnectionWithCredentialsProvider::new_with_credentials_provider(
+                    host,
+                    port,
+                    elasticache_credentials_provider.clone(),
+                ),
+            ),
+            (None, (None, None)) => {
+                warn!("Redis is disabled");
+                None
+            }
+            _ => {
+                bail!("redis-host and redis-port must be specified together");
+            }
+        };
 
     // Check that we can bind to address before further initialization
     let http_address: SocketAddr = args.http.parse()?;
@@ -233,17 +300,22 @@ async fn main() -> anyhow::Result<()> {
 
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
     let cancel_map = CancelMap::default();
-    let redis_publisher = match &args.redis_notifications {
-        Some(url) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
-            url,
+
+    // let redis_notifications_client = redis_notifications_client.map(|x| Box::leak(Box::new(x)));
+    let redis_publisher = match &redis_notifications_client {
+        Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
+            redis_publisher.clone(),
             args.region.clone(),
             &config.redis_rps_limit,
         )?))),
         None => None,
     };
-    let cancellation_handler = Arc::new(CancellationHandler::new(
+    let cancellation_handler = Arc::new(CancellationHandler::<
+        Option<Arc<tokio::sync::Mutex<RedisPublisherClient>>>,
+    >::new(
         cancel_map.clone(),
         redis_publisher,
+        NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT,
     ));
 
     // client facing tasks. these will exit on error or on cancellation
@@ -290,17 +362,16 @@ async fn main() -> anyhow::Result<()> {
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
-            let cache = api.caches.project_info.clone();
-            if let Some(url) = args.redis_notifications {
-                info!("Starting redis notifications listener ({url})");
+            if let Some(redis_notifications_client) = redis_notifications_client {
+                let cache = api.caches.project_info.clone();
                 maintenance_tasks.spawn(notifications::task_main(
-                    url.to_owned(),
+                    redis_notifications_client.clone(),
                     cache.clone(),
                     cancel_map.clone(),
                     args.region.clone(),
                 ));
+                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
             }
-            maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
         }
     }
 
@@ -445,7 +516,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         endpoint_rps_limit,
         redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
-        // TODO: add this argument
         region: args.region.clone(),
     }));
 
