@@ -7038,7 +7038,6 @@ dependencies = [
  "aws-sigv4",
  "aws-smithy-async",
  "aws-smithy-http",
- "aws-smithy-runtime-api",
  "aws-smithy-types",
  "axum",
  "base64 0.21.1",
