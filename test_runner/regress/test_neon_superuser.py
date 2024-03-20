@@ -94,6 +94,6 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
         assert cur.fetchall()[0][0] != "<insufficient privilege>"
         cur.execute("RESET ROLE")
         cur.execute("DROP ROLE not_a_superuser")
-        query = "DROP SUBSCRIPTION sub CASCADE"
-        log.info(f"Dropping subscription: {query}")
-        cur.execute(query)
+        # query = "DROP SUBSCRIPTION sub CASCADE"
+        # log.info(f"Dropping subscription: {query}")
+        # cur.execute(query)
