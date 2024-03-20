@@ -124,11 +124,6 @@ async fn client(
     start.elapsed()
 }
 
-fn pg_record(will_init: bool, bytes: &'static [u8]) -> NeonWalRecord {
-    let rec = Bytes::from_static(bytes);
-    NeonWalRecord::Postgres { will_init, rec }
-}
-
 macro_rules! lsn {
     ($input:expr) => {{
         let input = $input;
@@ -167,8 +162,17 @@ impl Request {
             .await
     }
 
+    fn pg_record(will_init: bool, bytes: &'static [u8]) -> NeonWalRecord {
+        let rec = Bytes::from_static(bytes);
+        NeonWalRecord::Postgres { will_init, rec }
+    }
+
+    /// Short payload, 1132 bytes.
+    // pg_records are copypasted from log, where they are put with Debug impl of Bytes, which uses \0
+    // for null bytes.
     #[allow(clippy::octal_escapes)]
-    fn short_input() -> Request {
+    pub fn short_input() -> Request {
+        let pg_record = Self::pg_record;
         Request {
         key: Key {
             field1: 0,
@@ -197,7 +201,8 @@ impl Request {
     /// Medium sized payload, serializes as 26393 bytes.
     // see [`short`]
     #[allow(clippy::octal_escapes)]
-    fn medium_input() -> Request {
+    pub fn medium_input() -> Request {
+        let pg_record = Self::pg_record;
         Request {
         key: Key {
             field1: 0,
