@@ -536,9 +536,10 @@ struct LayerInner {
     /// Do we want to delete locally and remotely this when `LayerInner` is dropped
     wanted_deleted: AtomicBool,
 
-    /// Do we want to evict this layer as soon as possible? After being set to `true`, all accesses
-    /// will try to downgrade [`ResidentOrWantedEvicted`], which will eventually trigger
-    /// [`LayerInner::on_downloaded_layer_drop`].
+    /// Do we want to evict this layer as soon as possible? Only set to `true` by [`Layer::evict_and_wait`].
+    ///
+    /// Exists only for optimization in [`LayerInner::on_downloaded_layer_drop`] to avoid spawning
+    /// a task.
     wanted_evicted: AtomicBool,
 
     /// Version is to make sure we will only evict a specific download of a file.
