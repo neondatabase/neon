@@ -41,7 +41,6 @@ pub(crate) enum FailpointKind {
     WaitBeforeStartingEvicting,
 }
 
-#[derive(Clone)]
 pub(crate) enum Failpoint {
     /// Failpoint acts as an accurate cancelled by drop here; see the only site of use.
     AfterDeterminingLayerNeedsNoDownload,
