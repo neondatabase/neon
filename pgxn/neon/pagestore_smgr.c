@@ -1003,7 +1003,19 @@ nm_pack_request(NeonRequest *msg)
 	StringInfoData s;
 
 	initStringInfo(&s);
-	pq_sendbyte(&s, msg->tag);
+
+	if (neon_protocol_version >= 2)
+	{
+		pq_sendbyte(&s, msg->tag);
+		pq_sendint64(&s, msg->horizon);
+	}
+	else
+	{
+		/* Old protocol with latest flag */
+		pq_sendbyte(&s, msg->tag - T_NeonExistsRequest); /* old protocol command tags start from zero */
+		pq_sendbyte(&s, msg->horizon == MAX_LSN);
+	}
+	pq_sendint64(&s, msg->lsn);
 
 	switch (messageTag(msg))
 	{
@@ -1012,8 +1024,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonExistsRequest *msg_req = (NeonExistsRequest *) msg;
 
-				pq_sendint64(&s, msg_req->req.horizon);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, NInfoGetSpcOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetDbOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetRelNumber(msg_req->rinfo));
@@ -1025,8 +1035,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonNblocksRequest *msg_req = (NeonNblocksRequest *) msg;
 
-				pq_sendint64(&s, msg_req->req.horizon);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, NInfoGetSpcOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetDbOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetRelNumber(msg_req->rinfo));
@@ -1038,8 +1046,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonDbSizeRequest *msg_req = (NeonDbSizeRequest *) msg;
 
-				pq_sendint64(&s, msg_req->req.horizon);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, msg_req->dbNode);
 
 				break;
@@ -1048,8 +1054,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonGetPageRequest *msg_req = (NeonGetPageRequest *) msg;
 
-				pq_sendint64(&s, msg_req->req.horizon);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, NInfoGetSpcOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetDbOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetRelNumber(msg_req->rinfo));
@@ -1063,8 +1067,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonGetSlruSegmentRequest *msg_req = (NeonGetSlruSegmentRequest *) msg;
 
-				pq_sendint64(&s, msg_req->req.horizon);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendbyte(&s, msg_req->kind);
 				pq_sendint32(&s, msg_req->segno);
 
