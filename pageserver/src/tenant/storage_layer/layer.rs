@@ -525,8 +525,9 @@ struct LayerInner {
     access_stats: LayerAccessStats,
 
     /// This custom OnceCell is backed by std mutex, but only held for short time periods.
-    /// Initialization and deinitialization are done while holding a permit which the
-    /// heavier_once_cell provides.
+    ///
+    /// Filesystem changes (download, evict) are only done while holding a permit which the
+    /// `heavier_once_cell` provides.
     ///
     /// A number of fields in `Layer` are meant to only be updated when holding the InitPermit, but
     /// possibly read while not holding it.
