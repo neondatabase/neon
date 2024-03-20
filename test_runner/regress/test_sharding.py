@@ -321,7 +321,7 @@ def test_sharding_split_smoke(
         for tid in tenant_ids:
             for shard in env.storage_controller.tenant_describe(tid)["shards"]:
                 log.info(
-                    f"{shard['tenant_shard_id']}: attached={shard["node_attached"]}, secondary={shard["node_secondary"]} "
+                    f"{shard['tenant_shard_id']}: attached={shard['node_attached']}, secondary={shard['node_secondary']} "
                 )
                 for node in shard["node_secondary"]:
                     total[int(node)] += 1
