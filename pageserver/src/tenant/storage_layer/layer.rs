@@ -833,9 +833,6 @@ impl LayerInner {
                 }
                 Ok(Err(guard)) => {
                     // path to here: we won the eviction, the file should still be on the disk.
-                    //
-                    // reset the contents, deactivating the eviction and causing a
-                    // EvictionCancelled::LostToDownload or EvictionCancelled::VersionCheckFailed.
                     let (weak, permit) = guard.take_and_deinit();
                     (Some(weak), permit)
                 }
