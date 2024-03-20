@@ -751,9 +751,16 @@ def test_sharding_split_failures(
     initial_shard_count = 2
     split_shard_count = 4
 
-    env = neon_env_builder.init_start(initial_tenant_shard_count=initial_shard_count)
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+
+    # Create a tenant with secondary locations enabled
+    env.neon_cli.create_tenant(
+        tenant_id, timeline_id, shard_count=initial_shard_count, placement_policy='{"Attached":1}'
+    )
 
     env.storage_controller.allowed_errors.extend(
         [
@@ -766,6 +773,8 @@ def test_sharding_split_failures(
             ".*failpoint.*",
             # Node offline cases will fail to send requests
             ".*Reconcile error: receive body: error sending request for url.*",
+            # Node offline cases will fail inside reconciler when detaching secondaries
+            ".*Reconcile error on shard.*: receive body: error sending request for url.*",
         ]
     )
 
@@ -803,7 +812,8 @@ def test_sharding_split_failures(
     # will have succeeded: the net result should be to return to a clean state, including
     # detaching any child shards.
     def assert_rolled_back(exclude_ps_id=None) -> None:
-        count = 0
+        secondary_count = 0
+        attached_count = 0
         for ps in env.pageservers:
             if exclude_ps_id is not None and ps.id == exclude_ps_id:
                 continue
@@ -811,13 +821,25 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id}")
+                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
                 assert tenant_shard_id.shard_count == initial_shard_count
-                count += 1
-        assert count == initial_shard_count
+                if loc[1]["mode"] == "Secondary":
+                    secondary_count += 1
+                else:
+                    attached_count += 1
+
+        if exclude_ps_id is not None:
+            # For a node failure case, we expect there to be a secondary location
+            # scheduled on the offline node, so expect one fewer secondary in total
+            assert secondary_count == initial_shard_count - 1
+        else:
+            assert secondary_count == initial_shard_count
+
+        assert attached_count == initial_shard_count
 
     def assert_split_done(exclude_ps_id=None) -> None:
-        count = 0
+        secondary_count = 0
+        attached_count = 0
         for ps in env.pageservers:
             if exclude_ps_id is not None and ps.id == exclude_ps_id:
                 continue
@@ -825,10 +847,14 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id}")
+                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
                 assert tenant_shard_id.shard_count == split_shard_count
-                count += 1
-        assert count == split_shard_count
+                if loc[1]["mode"] == "Secondary":
+                    secondary_count += 1
+                else:
+                    attached_count += 1
+        assert attached_count == split_shard_count
+        assert secondary_count == split_shard_count
 
     def finish_split():
         # Having failed+rolled back, we should be able to split again
