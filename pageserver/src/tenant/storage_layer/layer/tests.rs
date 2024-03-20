@@ -254,6 +254,8 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     let h = TenantHarness::create("residency_check_while_evict_and_wait_on_clogged_spawn_blocking")
         .unwrap();
     let (tenant, ctx) = h.load().await;
+    let span = h.span();
+    let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
 
     let timeline = tenant
         .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
@@ -292,6 +294,7 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
     // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
     layer
         .keep_resident()
+        .instrument(download_span)
         .await
         .expect("keep_resident should had reinitialized without downloading")
         .expect("ResidentLayer");
