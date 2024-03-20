@@ -1407,6 +1407,7 @@ impl LayerInner {
                 return Err(EvictionCancelled::FileNotFound);
             }
             Err(e) => {
+                // FIXME: this should probably be an abort
                 tracing::error!("failed to evict file from disk: {e:#}");
                 return Err(EvictionCancelled::RemoveFailed);
             }
