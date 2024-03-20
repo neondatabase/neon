@@ -35,10 +35,10 @@ impl AWSIRSAConfig {
 /// Credentials provider for AWS elasticache authentication.
 ///
 /// Official documentation:
-/// https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/auth-iam.html
+/// <https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/auth-iam.html>
 ///
 /// Useful resources:
-/// https://aws.amazon.com/blogs/database/simplify-managing-access-to-amazon-elasticache-for-redis-clusters-with-iam/
+/// <https://aws.amazon.com/blogs/database/simplify-managing-access-to-amazon-elasticache-for-redis-clusters-with-iam/>
 pub struct CredentialsProvider {
     config: AWSIRSAConfig,
     credentials_provider: CredentialsProviderChain,
