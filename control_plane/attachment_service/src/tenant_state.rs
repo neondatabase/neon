@@ -457,22 +457,7 @@ impl TenantState {
         // Add/remove nodes to fulfil policy
         use PlacementPolicy::*;
         match self.policy {
-            Single => {
-                // Should have exactly one attached, and zero secondaries
-                if !self.intent.secondary.is_empty() {
-                    self.intent.clear_secondary(scheduler);
-                    modified = true;
-                }
-
-                let (modified_attached, _attached_node_id) = self.schedule_attached(scheduler)?;
-                modified |= modified_attached;
-
-                if !self.intent.secondary.is_empty() {
-                    self.intent.clear_secondary(scheduler);
-                    modified = true;
-                }
-            }
-            Double(secondary_count) => {
+            Attached(secondary_count) => {
                 let retain_secondaries = if self.intent.attached.is_none()
                     && scheduler.node_preferred(&self.intent.secondary).is_some()
                 {
@@ -577,7 +562,12 @@ impl TenantState {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf = attached_location_conf(generation, &self.shard, &self.config);
+            let wanted_conf = attached_location_conf(
+                generation,
+                &self.shard,
+                &self.config,
+                !self.intent.secondary.is_empty(),
+            );
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -890,7 +880,7 @@ pub(crate) mod tests {
 
         let mut scheduler = Scheduler::new(nodes.values());
 
-        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
         tenant_state
             .schedule(&mut scheduler)
             .expect("we have enough nodes, scheduling should work");
@@ -938,7 +928,7 @@ pub(crate) mod tests {
         let nodes = make_test_nodes(3);
         let mut scheduler = Scheduler::new(nodes.values());
 
-        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
 
         tenant_state.observed.locations.insert(
             NodeId(3),

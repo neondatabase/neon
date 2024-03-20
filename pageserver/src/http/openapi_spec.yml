@@ -567,9 +567,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
-  /v1/tenant/{tenant_id}/location_config:
+  /v1/tenant/{tenant_shard_id}/location_config:
     parameters:
-      - name: tenant_id
+      - name: tenant_shard_id
         in: path
         required: true
         schema:
@@ -965,12 +965,28 @@ paths:
         required: true
         schema:
           type: string
+      - name: wait_ms
+        description: If set, we will wait this long for download to complete, and if it isn't complete then return 202
+        in: query
+        required: false
+        schema:
+          type: integer
     post:
       description: |
         If the location is in secondary mode, download latest heatmap and layers
       responses:
         "200":
           description: Success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecondaryProgress"
+        "202":
+          description: Download has started but not yet finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecondaryProgress"
         "500":
           description: Generic operation error
           content:
@@ -1367,10 +1383,11 @@ components:
     TenantLocationConfigRequest:
       type: object
       required:
-        - tenant_id
+        - mode
       properties:
         tenant_id:
           type: string
+          description: Not used, scheduled for removal.
         mode:
           type: string
           enum: ["AttachedSingle", "AttachedMulti", "AttachedStale", "Secondary", "Detached"]
@@ -1621,6 +1638,37 @@ components:
           description: |
             Lower is better score for how good this pageserver would be for the next tenant.
             The default or maximum value can be returned in situations when a proper score cannot (yet) be calculated.
+
+    SecondaryProgress:
+      type: object
+      required:
+        - heatmap_mtime
+        - layers_downloaded
+        - layers_total
+        - bytes_downloaded
+        - bytes_total
+      properties:
+        heatmap_mtime:
+          type: string
+          format: date-time
+          description: Modification time of the most recently downloaded layer heatmap (RFC 3339 format)
+        layers_downloaded:
+          type: integer
+          format: int64
+          description: How many layers from the latest layer heatmap are present on disk
+        bytes_downloaded:
+          type: integer
+          format: int64
+          description: How many bytes of layer content from the latest layer heatmap are present on disk
+        layers_total:
+          type: integer
+          format: int64
+          description: How many layers were in the latest layer heatmap
+        bytes_total:
+          type: integer
+          format: int64
+          description: How many bytes of layer content were in the latest layer heatmap
+
 
     Error:
       type: object

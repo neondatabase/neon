@@ -51,7 +51,7 @@ from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
     DEFAULT_PAGESERVER_ALLOWED_ERRORS,
-    scan_pageserver_log_for_errors,
+    DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.types import IndexPartDump
@@ -77,6 +77,7 @@ from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     allure_add_grafana_links,
     allure_attach_from_dir,
+    assert_no_errors,
     get_self_dir,
     subprocess_capture,
     wait_until,
@@ -944,6 +945,8 @@ class NeonEnvBuilder:
             for pageserver in self.env.pageservers:
                 pageserver.assert_no_errors()
 
+            self.env.storage_controller.assert_no_errors()
+
         try:
             self.overlay_cleanup_teardown()
         except Exception as e:
@@ -1525,6 +1528,7 @@ class NeonCli(AbstractNeonCli):
         conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
+        placement_policy: Optional[str] = None,
         set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
@@ -1557,6 +1561,9 @@ class NeonCli(AbstractNeonCli):
 
         if shard_stripe_size is not None:
             args.extend(["--shard-stripe-size", str(shard_stripe_size)])
+
+        if placement_policy is not None:
+            args.extend(["--placement-policy", str(placement_policy)])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -1885,19 +1892,6 @@ class NeonCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=True)
 
-    def tenant_migrate(
-        self, tenant_shard_id: TenantShardId, new_pageserver: int, timeout_secs: Optional[int]
-    ):
-        args = [
-            "tenant",
-            "migrate",
-            "--tenant-id",
-            str(tenant_shard_id),
-            "--id",
-            str(new_pageserver),
-        ]
-        return self.raw_cli(args, check_return_code=True, timeout=timeout_secs)
-
     def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
         return self.raw_cli(["start"], check_return_code=check_return_code)
 
@@ -1957,6 +1951,7 @@ class NeonStorageController(MetricsGetter):
         self.env = env
         self.running = False
         self.auth_enabled = auth_enabled
+        self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
 
     def start(self):
         assert not self.running
@@ -1980,6 +1975,11 @@ class NeonStorageController(MetricsGetter):
             except:  # noqa: E722
                 msg = ""
             raise StorageControllerApiException(msg, res.status_code) from e
+
+    def assert_no_errors(self):
+        assert_no_errors(
+            self.env.repo_dir / "storage_controller.log", "storage_controller", self.allowed_errors
+        )
 
     def pageserver_api(self) -> PageserverHttpClient:
         """
@@ -2088,6 +2088,14 @@ class NeonStorageController(MetricsGetter):
         )
         return response.json()
 
+    def tenant_list(self):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/debug/v1/tenant",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
     def node_configure(self, node_id, body: dict[str, Any]):
         log.info(f"node_configure({node_id}, {body})")
         body["node_id"] = node_id
@@ -2135,7 +2143,7 @@ class NeonStorageController(MetricsGetter):
         """
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/locate",
+            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
@@ -2176,6 +2184,23 @@ class NeonStorageController(MetricsGetter):
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info("storage controller passed consistency check")
+
+    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
+        if isinstance(config_strings, tuple):
+            pairs = [config_strings]
+        else:
+            pairs = config_strings
+
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
+
+        res = self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/debug/v1/failpoints",
+            json=[{"name": name, "actions": actions} for name, actions in pairs],
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        log.info(f"Got failpoints request response code {res.status_code}")
+        res.raise_for_status()
 
     def __enter__(self) -> "NeonStorageController":
         return self
@@ -2328,18 +2353,9 @@ class NeonPageserver(PgProtocol):
         return self.env.repo_dir / f"pageserver_{self.id}"
 
     def assert_no_errors(self):
-        logfile = self.workdir / "pageserver.log"
-        if not logfile.exists():
-            log.warning(f"Skipping log check: {logfile} does not exist")
-            return
-
-        with logfile.open("r") as f:
-            errors = scan_pageserver_log_for_errors(f, self.allowed_errors)
-
-        for _lineno, error in errors:
-            log.info(f"not allowed error: {error.strip()}")
-
-        assert not errors
+        assert_no_errors(
+            self.workdir / "pageserver.log", f"pageserver_{self.id}", self.allowed_errors
+        )
 
     def assert_no_metric_errors(self):
         """
@@ -2944,6 +2960,7 @@ class NeonProxy(PgProtocol):
         user = quote(kwargs["user"])
         password = quote(kwargs["password"])
         expected_code = kwargs.get("expected_code")
+        timeout = kwargs.get("timeout")
 
         log.info(f"Executing http query: {query}")
 
@@ -2957,6 +2974,7 @@ class NeonProxy(PgProtocol):
                 "Neon-Pool-Opt-In": "true",
             },
             verify=str(self.test_output_dir / "proxy.crt"),
+            timeout=timeout,
         )
 
         if expected_code is not None:

@@ -1,5 +1,6 @@
 use crate::persistence::Persistence;
 use crate::service;
+use hyper::StatusCode;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
@@ -7,7 +8,7 @@ use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
@@ -17,6 +18,8 @@ use utils::sync::gate::GateGuard;
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
 use crate::tenant_state::{IntentState, ObservedState, ObservedStateLocation};
+
+const DEFAULT_HEATMAP_PERIOD: &str = "60s";
 
 /// Object with the lifetime of the background reconcile task that is created
 /// for tenants which have a difference between their intent and observed states.
@@ -255,22 +258,81 @@ impl Reconciler {
         tenant_shard_id: TenantShardId,
         node: &Node,
     ) -> Result<(), ReconcileError> {
-        match node
-            .with_client_retries(
-                |client| async move { client.tenant_secondary_download(tenant_shard_id).await },
-                &self.service_config.jwt_token,
-                1,
-                1,
-                Duration::from_secs(60),
-                &self.cancel,
-            )
-            .await
-        {
-            None => Err(ReconcileError::Cancel),
-            Some(Ok(_)) => Ok(()),
-            Some(Err(e)) => {
-                tracing::info!("  (skipping destination download: {})", e);
-                Ok(())
+        // This is not the timeout for a request, but the total amount of time we're willing to wait
+        // for a secondary location to get up to date before
+        const TOTAL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+        // This the long-polling interval for the secondary download requests we send to destination pageserver
+        // during a migration.
+        const REQUEST_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+
+        let started_at = Instant::now();
+
+        loop {
+            let (status, progress) = match node
+                .with_client_retries(
+                    |client| async move {
+                        client
+                            .tenant_secondary_download(
+                                tenant_shard_id,
+                                Some(REQUEST_DOWNLOAD_TIMEOUT),
+                            )
+                            .await
+                    },
+                    &self.service_config.jwt_token,
+                    1,
+                    3,
+                    REQUEST_DOWNLOAD_TIMEOUT * 2,
+                    &self.cancel,
+                )
+                .await
+            {
+                None => Err(ReconcileError::Cancel),
+                Some(Ok(v)) => Ok(v),
+                Some(Err(e)) => {
+                    // Give up, but proceed: it's unfortunate if we couldn't freshen the destination before
+                    // attaching, but we should not let an issue with a secondary location stop us proceeding
+                    // with a live migration.
+                    tracing::warn!("Failed to prepare by downloading layers on node {node}: {e})");
+                    return Ok(());
+                }
+            }?;
+
+            if status == StatusCode::OK {
+                tracing::info!(
+                    "Downloads to {} complete: {}/{} layers, {}/{} bytes",
+                    node,
+                    progress.layers_downloaded,
+                    progress.layers_total,
+                    progress.bytes_downloaded,
+                    progress.bytes_total
+                );
+                return Ok(());
+            } else if status == StatusCode::ACCEPTED {
+                let total_runtime = started_at.elapsed();
+                if total_runtime > TOTAL_DOWNLOAD_TIMEOUT {
+                    tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
+                        total_runtime.as_millis(),
+                        progress.layers_downloaded,
+                        progress.layers_total,
+                        progress.bytes_downloaded,
+                        progress.bytes_total
+                    );
+                    // Give up, but proceed: an incompletely warmed destination doesn't prevent migration working,
+                    // it just makes the I/O performance for users less good.
+                    return Ok(());
+                }
+
+                // Log and proceed around the loop to retry.  We don't sleep between requests, because our HTTP call
+                // to the pageserver is a long-poll.
+                tracing::info!(
+                    "Downloads to {} not yet complete: {}/{} layers, {}/{} bytes",
+                    node,
+                    progress.layers_downloaded,
+                    progress.layers_total,
+                    progress.bytes_downloaded,
+                    progress.bytes_total
+                );
             }
         }
     }
@@ -413,7 +475,7 @@ impl Reconciler {
             }
         }
 
-        // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Single, then
+        // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
         // this location will be deleted in the general case reconciliation that runs after this.
         let origin_secondary_conf = build_location_config(
             &self.shard,
@@ -485,17 +547,29 @@ impl Reconciler {
                 )
                 .await
             {
-                Some(Ok(observed)) => observed,
+                Some(Ok(observed)) => Some(observed),
+                Some(Err(mgmt_api::Error::ApiError(status, _msg)))
+                    if status == StatusCode::NOT_FOUND =>
+                {
+                    None
+                }
                 Some(Err(e)) => return Err(e.into()),
                 None => return Err(ReconcileError::Cancel),
             };
             tracing::info!("Scanned location configuration on {attached_node}: {observed_conf:?}");
-            self.observed.locations.insert(
-                attached_node.get_id(),
-                ObservedStateLocation {
-                    conf: observed_conf,
-                },
-            );
+            match observed_conf {
+                Some(conf) => {
+                    // Pageserver returned a state: update it in observed.  This may still be an indeterminate (None) state,
+                    // if internally the pageserver's TenantSlot was being mutated (e.g. some long running API call is still running)
+                    self.observed
+                        .locations
+                        .insert(attached_node.get_id(), ObservedStateLocation { conf });
+                }
+                None => {
+                    // Pageserver returned 404: we have confirmation that there is no state for this shard on that pageserver.
+                    self.observed.locations.remove(&attached_node.get_id());
+                }
+            }
         }
 
         Ok(())
@@ -525,7 +599,12 @@ impl Reconciler {
                 )));
             };
 
-            let mut wanted_conf = attached_location_conf(generation, &self.shard, &self.config);
+            let mut wanted_conf = attached_location_conf(
+                generation,
+                &self.shard,
+                &self.config,
+                !self.intent.secondary.is_empty(),
+            );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
@@ -662,10 +741,26 @@ impl Reconciler {
     }
 }
 
+/// We tweak the externally-set TenantConfig while configuring
+/// locations, using our awareness of whether secondary locations
+/// are in use to automatically enable/disable heatmap uploads.
+fn ha_aware_config(config: &TenantConfig, has_secondaries: bool) -> TenantConfig {
+    let mut config = config.clone();
+    if has_secondaries {
+        if config.heatmap_period.is_none() {
+            config.heatmap_period = Some(DEFAULT_HEATMAP_PERIOD.to_string());
+        }
+    } else {
+        config.heatmap_period = None;
+    }
+    config
+}
+
 pub(crate) fn attached_location_conf(
     generation: Generation,
     shard: &ShardIdentity,
     config: &TenantConfig,
+    has_secondaries: bool,
 ) -> LocationConfig {
     LocationConfig {
         mode: LocationConfigMode::AttachedSingle,
@@ -674,7 +769,7 @@ pub(crate) fn attached_location_conf(
         shard_number: shard.number.0,
         shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
-        tenant_conf: config.clone(),
+        tenant_conf: ha_aware_config(config, has_secondaries),
     }
 }
 
@@ -689,6 +784,6 @@ pub(crate) fn secondary_location_conf(
         shard_number: shard.number.0,
         shard_count: shard.count.literal(),
         shard_stripe_size: shard.stripe_size.0,
-        tenant_conf: config.clone(),
+        tenant_conf: ha_aware_config(config, true),
     }
 }

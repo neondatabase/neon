@@ -13,7 +13,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 
 use crate::{
     metrics::TLS_HANDSHAKE_FAILURES,
@@ -29,24 +29,17 @@ pin_project! {
         tls: TlsAcceptor,
         waiting: JoinSet<Option<TlsStream<A::Conn>>>,
         timeout: Duration,
-        protocol: &'static str,
     }
 }
 
 impl<A: Accept> TlsListener<A> {
     /// Create a `TlsListener` with default options.
-    pub(crate) fn new(
-        tls: TlsAcceptor,
-        listener: A,
-        protocol: &'static str,
-        timeout: Duration,
-    ) -> Self {
+    pub(crate) fn new(tls: TlsAcceptor, listener: A, timeout: Duration) -> Self {
         TlsListener {
             listener,
             tls,
             waiting: JoinSet::new(),
             timeout,
-            protocol,
         }
     }
 }
@@ -73,7 +66,7 @@ where
                 Poll::Ready(Some(Ok(mut conn))) => {
                     let t = *this.timeout;
                     let tls = this.tls.clone();
-                    let protocol = *this.protocol;
+                    let span = conn.span.clone();
                     this.waiting.spawn(async move {
                         let peer_addr = match conn.inner.wait_for_addr().await {
                             Ok(Some(addr)) => addr,
@@ -86,21 +79,24 @@ where
 
                         let accept = tls.accept(conn);
                         match timeout(t, accept).await {
-                            Ok(Ok(conn)) => Some(conn),
+                            Ok(Ok(conn)) => {
+                                info!(%peer_addr, "accepted new TLS connection");
+                                Some(conn)
+                            },
                             // The handshake failed, try getting another connection from the queue
                             Ok(Err(e)) => {
                                 TLS_HANDSHAKE_FAILURES.inc();
-                                warn!(%peer_addr, protocol, "failed to accept TLS connection: {e:?}");
+                                warn!(%peer_addr, "failed to accept TLS connection: {e:?}");
                                 None
                             }
                             // The handshake timed out, try getting another connection from the queue
                             Err(_) => {
                                 TLS_HANDSHAKE_FAILURES.inc();
-                                warn!(%peer_addr, protocol, "failed to accept TLS connection: timeout");
+                                warn!(%peer_addr, "failed to accept TLS connection: timeout");
                                 None
                             }
                         }
-                    });
+                    }.instrument(span));
                 }
                 Poll::Ready(Some(Err(e))) => {
                     tracing::error!("error accepting TCP connection: {e}");
@@ -112,10 +108,7 @@ where
 
         loop {
             return match this.waiting.poll_join_next(cx) {
-                Poll::Ready(Some(Ok(Some(conn)))) => {
-                    info!(protocol = this.protocol, "accepted new TLS connection");
-                    Poll::Ready(Some(Ok(conn)))
-                }
+                Poll::Ready(Some(Ok(Some(conn)))) => Poll::Ready(Some(Ok(conn))),
                 // The handshake failed to complete, try getting another connection from the queue
                 Poll::Ready(Some(Ok(None))) => continue,
                 // The handshake panicked or was cancelled. ignore and get another connection

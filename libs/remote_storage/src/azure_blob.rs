@@ -157,9 +157,8 @@ impl AzureBlobStorage {
             let mut bufs = Vec::new();
             while let Some(part) = response.next().await {
                 let part = part?;
-                let etag_str: &str = part.blob.properties.etag.as_ref();
                 if etag.is_none() {
-                    etag = Some(etag.unwrap_or_else(|| etag_str.to_owned()));
+                    etag = Some(part.blob.properties.etag);
                 }
                 if last_modified.is_none() {
                     last_modified = Some(part.blob.properties.last_modified.into());
@@ -174,6 +173,16 @@ impl AzureBlobStorage {
                     .map_err(|e| DownloadError::Other(e.into()))?;
                 bufs.push(data);
             }
+
+            if bufs.is_empty() {
+                return Err(DownloadError::Other(anyhow::anyhow!(
+                    "Azure GET response contained no buffers"
+                )));
+            }
+            // unwrap safety: if these were None, bufs would be empty and we would have returned an error already
+            let etag = etag.unwrap();
+            let last_modified = last_modified.unwrap();
+
             Ok(Download {
                 download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
                 etag,

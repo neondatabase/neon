@@ -282,8 +282,10 @@ dependencies = [
  "control_plane",
  "diesel",
  "diesel_migrations",
+ "fail",
  "futures",
  "git-version",
+ "hex",
  "humantime",
  "hyper",
  "metrics",
@@ -1344,6 +1346,7 @@ dependencies = [
  "futures",
  "git-version",
  "hex",
+ "humantime",
  "hyper",
  "nix 0.27.1",
  "once_cell",
@@ -3527,6 +3530,7 @@ dependencies = [
  "postgres_connection",
  "postgres_ffi",
  "pq_proto",
+ "procfs",
  "rand 0.8.5",
  "regex",
  "remote_storage",
@@ -5342,13 +5346,23 @@ checksum = "ae1a47186c03a32177042e55dbc5fd5aee900b8e0069a8d70fba96a9375cd012"
 
 [[package]]
 name = "sha2"
-version = "0.10.6"
+version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82e6b795fe2e3b1e845bafcb27aa35405c4d47cdfc92af5fc8d3002f76cebdc0"
+checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
 dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f27ba7066011e3fb30d808b51affff34f0a66d3a03a58edd787c6e420e40e44e"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -5884,7 +5898,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#868d2c42b5d54ca82fead6e8f2f233b69a540d3e"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#342ddd197a060a8354e8f11f4d12994419fff939"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6434,7 +6448,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#868d2c42b5d54ca82fead6e8f2f233b69a540d3e"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#342ddd197a060a8354e8f11f4d12994419fff939"
 dependencies = [
  "bytes",
  "io-uring",
@@ -6477,6 +6491,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "async-compression",
  "async-trait",
  "bincode",
  "byteorder",
@@ -6515,6 +6530,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tokio-tar",
  "tokio-test",
  "tokio-util",
  "tracing",
@@ -6522,6 +6538,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "walkdir",
  "workspace_hack",
 ]
 
@@ -7039,6 +7056,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
  "subtle",
  "syn 1.0.109",

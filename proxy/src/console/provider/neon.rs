@@ -250,6 +250,8 @@ impl super::Api for Api {
         // which means that we might cache it to reduce the load and latency.
         if let Some(cached) = self.caches.node_info.get(&key) {
             info!(key = &*key, "found cached compute node info");
+            info!("cold_start_info=warm");
+            ctx.set_cold_start_info(ColdStartInfo::Warm);
             return Ok(cached);
         }
 
@@ -260,6 +262,7 @@ impl super::Api for Api {
         if permit.should_check_cache() {
             if let Some(cached) = self.caches.node_info.get(&key) {
                 info!(key = &*key, "found cached compute node info");
+                info!("cold_start_info=warm");
                 ctx.set_cold_start_info(ColdStartInfo::Warm);
                 return Ok(cached);
             }

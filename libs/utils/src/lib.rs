@@ -87,6 +87,8 @@ pub mod failpoint_support;
 
 pub mod yielding_loop;
 
+pub mod zstd;
+
 pub mod poison;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages

@@ -710,10 +710,6 @@ impl LayerInner {
                     // disable any scheduled but not yet running eviction deletions for this
                     let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
-                    // count cancellations, which currently remain largely unexpected
-                    let init_cancelled =
-                        scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-
                     // no need to make the evict_and_wait wait for the actual download to complete
                     drop(self.status.send(Status::Downloaded));
 
@@ -722,7 +718,9 @@ impl LayerInner {
                         .upgrade()
                         .ok_or_else(|| DownloadError::TimelineShutdown)?;
 
-                    // FIXME: grab a gate
+                    // count cancellations, which currently remain largely unexpected
+                    let init_cancelled =
+                        scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
 
                     let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
@@ -731,9 +729,17 @@ impl LayerInner {
                     let needs_download = self
                         .needs_download()
                         .await
-                        .map_err(DownloadError::PreStatFailed)?;
+                        .map_err(DownloadError::PreStatFailed);
 
-                    let permit = if let Some(reason) = needs_download {
+                    let needs_download = match needs_download {
+                        Ok(reason) => reason,
+                        Err(e) => {
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
+                            return Err(e);
+                        }
+                    };
+
+                    let (permit, downloaded) = if let Some(reason) = needs_download {
                         if let NeedsDownload::NotFile(ft) = reason {
                             return Err(DownloadError::NotFile(ft));
                         }
@@ -744,36 +750,59 @@ impl LayerInner {
                         self.wanted_evicted.store(false, Ordering::Release);
 
                         if !can_ever_evict {
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
                             return Err(DownloadError::NoRemoteStorage);
                         }
 
                         if let Some(ctx) = ctx {
-                            self.check_expected_download(ctx)?;
+                            let res = self.check_expected_download(ctx);
+                            if let Err(e) = res {
+                                scopeguard::ScopeGuard::into_inner(init_cancelled);
+                                return Err(e);
+                            }
                         }
 
                         if !allow_download {
                             // this does look weird, but for LayerInner the "downloading" means also changing
                             // internal once related state ...
+                            scopeguard::ScopeGuard::into_inner(init_cancelled);
                             return Err(DownloadError::DownloadRequired);
                         }
 
                         tracing::info!(%reason, "downloading on-demand");
 
-                        self.spawn_download_and_wait(timeline, permit).await?
+                        let permit = self.spawn_download_and_wait(timeline, permit).await;
+
+                        let permit = match permit {
+                            Ok(permit) => permit,
+                            Err(e) => {
+                                scopeguard::ScopeGuard::into_inner(init_cancelled);
+                                return Err(e);
+                            }
+                        };
+
+                        (permit, true)
                     } else {
                         // the file is present locally, probably by a previous but cancelled call to
                         // get_or_maybe_download. alternatively we might be running without remote storage.
                         LAYER_IMPL_METRICS.inc_init_needed_no_download();
 
-                        permit
+                        (permit, false)
                     };
 
-                    let since_last_eviction =
-                        self.last_evicted_at.lock().unwrap().map(|ts| ts.elapsed());
-                    if let Some(since_last_eviction) = since_last_eviction {
-                        // FIXME: this will not always be recorded correctly until #6028 (the no
-                        // download needed branch above)
-                        LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+                    scopeguard::ScopeGuard::into_inner(init_cancelled);
+
+                    if downloaded {
+                        let since_last_eviction = self
+                            .last_evicted_at
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .map(|ts| ts.elapsed());
+
+                        if let Some(since_last_eviction) = since_last_eviction {
+                            LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+                        }
                     }
 
                     let res = Arc::new(DownloadedLayer {
@@ -794,8 +823,6 @@ impl LayerInner {
                             "completing the on-demand download for other tasks"
                         );
                     }
-
-                    scopeguard::ScopeGuard::into_inner(init_cancelled);
 
                     Ok((ResidentOrWantedEvicted::Resident(res), permit))
                 }
@@ -1457,7 +1484,7 @@ impl ResidentLayer {
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    #[tracing::instrument(skip_all, fields(layer=%self))]
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
     pub(crate) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,
@@ -1477,9 +1504,9 @@ impl ResidentLayer {
                 // while it's being held.
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await
-                    .context("Layer index is corrupted")
+                    .with_context(|| format!("Layer index is corrupted for {self}"))
             }
-            Image(_) => anyhow::bail!("cannot load_keys on a image layer"),
+            Image(_) => anyhow::bail!(format!("cannot load_keys on a image layer {self}")),
         }
     }
 

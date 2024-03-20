@@ -461,6 +461,7 @@ jobs:
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
+        timeout-minutes: 60
         with:
           build_type: ${{ matrix.build_type }}
           test_selection: regress

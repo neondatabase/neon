@@ -55,7 +55,6 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # FIXME: These need investigation
     ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
     ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
-    ".*Removing intermediate uninit mark file.*",
     # Tenant::delete_timeline() can cause any of the four following errors.
     # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
     ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
@@ -88,6 +87,16 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # distances.
     ".*Flushed oversized open layer with size.*",
 )
+
+
+DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
+    # Many tests will take pageservers offline, resulting in log warnings on the controller
+    # failing to connect to them.
+    ".*Call to node.*management API.*failed.*receive body.*",
+    ".*Call to node.*management API.*failed.*ReceiveBody.*",
+    # Many tests will start up with a node offline
+    ".*startup_reconcile: Could not scan node.*",
+]
 
 
 def _check_allowed_errors(input):

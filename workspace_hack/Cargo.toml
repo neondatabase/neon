@@ -64,6 +64,7 @@ rustls = { version = "0.21", features = ["dangerous_configuration"] }
 scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+sha2 = { version = "0.10", features = ["asm"] }
 smallvec = { version = "1", default-features = false, features = ["write"] }
 subtle = { version = "2" }
 time = { version = "0.3", features = ["local-offset", "macros", "serde-well-known"] }
