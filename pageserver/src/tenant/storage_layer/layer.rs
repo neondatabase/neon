@@ -1400,15 +1400,7 @@ impl LayerInner {
                     .resident_physical_size_sub(self.desc.file_size);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // this used to be an error!, but now it can always happen if there are more than
-                // one pending eviction. we must attempt evicting even if the self.inner is
-                // uninitialized. we must attempt even then, because a get_or_maybe_download was
-                // most likely cancelled.
-                //
-                // important here is not to touch any of the metrics; they've already been dealt
-                // with unless this deletion was caused by operator at filesystem level which is
-                // unsupported.
-                tracing::debug!(
+                tracing::error!(
                     layer_size = %self.desc.file_size,
                     "failed to evict layer from disk, it was already gone"
                 );
