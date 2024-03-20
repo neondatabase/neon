@@ -9,7 +9,7 @@ pub enum VecMapOrdering {
 /// Ordered map datastructure implemented in a Vec.
 /// Append only - can only add keys that are larger than the
 /// current max key.
-/// Ordering can be adjusted using [VecMapOrdering]
+/// Ordering can be adjusted using [`VecMapOrdering`]
 /// during VecMap construction.
 #[derive(Clone, Debug)]
 pub struct VecMap<K, V> {
@@ -203,7 +203,7 @@ impl<K: Ord, V> VecMap<K, V> {
     }
 
     /// Similar to `from_iter` defined in `FromIter` trait except
-    /// that it accepts an [VecMapOrdering]
+    /// that it accepts an [`VecMapOrdering`]
     pub fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I, ordering: VecMapOrdering) -> Self {
         let iter = iter.into_iter();
         let initial_capacity = {
