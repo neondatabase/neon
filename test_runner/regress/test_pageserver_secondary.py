@@ -432,6 +432,10 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
      - Eviction of layers on the attached location results in deletion
        on the secondary location as well.
     """
+
+    # For debug of https://github.com/neondatabase/neon/issues/6966
+    neon_env_builder.rust_log_override = "DEBUG"
+
     neon_env_builder.num_pageservers = 2
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
