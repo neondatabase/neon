@@ -731,8 +731,8 @@ mod tests {
         // after a full 1s, 100 requests are allowed again
         time::advance(time::Duration::from_millis(500)).await;
         for _ in 1..6 {
-            for _ in 0..100 {
-                assert!(limiter.check(endpoint.clone(), 1));
+            for _ in 0..50 {
+                assert!(limiter.check(endpoint.clone(), 2));
             }
             time::advance(time::Duration::from_millis(1000)).await;
         }
