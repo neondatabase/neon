@@ -26,6 +26,7 @@ impl Clone for Credentials {
     }
 }
 
+/// A wrapper around `redis::MultiplexedConnection` that automatically refreshes the token.
 pub struct ConnectionWithCredentialsProvider {
     credentials: Credentials,
     con: Option<MultiplexedConnection>,
