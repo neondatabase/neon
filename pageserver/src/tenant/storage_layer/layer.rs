@@ -51,6 +51,34 @@ mod failpoints;
 ///
 /// This type models the on-disk layers, which can be evicted and on-demand downloaded.
 ///
+/// ### State transitions
+///
+/// The internal state of `Layer` is composed of most importantly the on-filesystem state and the
+/// [`ResidentOrWantedEvicted`] enum. On-filesystem state can be either present (fully downloaded,
+/// right size) or deleted.
+///
+/// Reads will always win requests to evict until `wait_for_turn_and_evict` has acquired the
+/// `heavier_once_cell::InitPermit` and has started to `evict_blocking`. Before the
+/// `heavier_once_cell::InitPermit` has been acquired, any read request
+/// (`get_or_maybe_download`) can "re-initialize" using the existing downloaded file and thus
+/// cancelling the eviction.
+///
+/// ```text
+///  +-----------------+   get_or_maybe_download    +--------------------------------+
+///  | not initialized |--------------------------->| Resident(Arc<DownloadedLayer>) |
+///  |     ENOENT      |                         /->|                                |
+///  +-----------------+                         |  +--------------------------------+
+///                  ^                           |                         |       ^
+///                  |    get_or_maybe_download  |                         |       | get_or_maybe_download, either:
+///   evict_blocking | /-------------------------/                         |       | - upgrade weak to strong
+///                  | |                                                   |       | - re-initialize without download
+///                  | |                                    evict_and_wait |       |
+///  +-----------------+                                                   v       |
+///  | not initialized |  on_downloaded_layer_drop  +--------------------------------------+
+///  | file is present |<---------------------------| WantedEvicted(Weak<DownloadedLayer>) |
+///  +-----------------+                            +--------------------------------------+
+/// ```
+///
 /// [`InMemoryLayer`]: super::inmemory_layer::InMemoryLayer
 #[derive(Clone)]
 pub(crate) struct Layer(Arc<LayerInner>);
