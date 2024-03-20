@@ -980,17 +980,24 @@ impl PagestreamFeMessage {
         // TODO: consider using protobuf or serde bincode for less error prone
         // serialization.
         let mut msg_tag = body.read_u8()?;
+        //
+        // Old version of protocol use commands with tags started with 0 and containing `latest` flag.
+        // New version of protocol shift command tags by 10 and pass LSN range instead of `latest` flag.
+        // Server should be able to handle both protocol version. As far as we are not passing no=w,
+        // protocol version from client to server, we make a decision based on tag range.
+        // So this code actually provides backward compatibility.
+        //
         let horizon = if msg_tag >= 10 {
             // new protocol
-            msg_tag -= 10;
+            msg_tag -= 10; // commands tags in new protocol starts with 10
             Lsn::from(body.read_u64::<BigEndian>()?)
         } else {
             // old_protocol
             let latest = body.read_u8()? != 0;
             if latest {
-                Lsn::MAX
+                Lsn::MAX // get latest version
             } else {
-                Lsn::INVALID
+                Lsn::INVALID // get version on specified LSN
             }
         };
         let lsn = Lsn::from(body.read_u64::<BigEndian>()?);

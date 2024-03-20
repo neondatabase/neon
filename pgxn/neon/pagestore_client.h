@@ -28,6 +28,13 @@
 #define MAX_SHARDS 128
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
 
+/*
+ * Right now protocal version is not set to the server.
+ * So it is ciritical that format of existed commands is not changed.
+ * New protocl versions can just add new commands.
+ */
+#define NEON_PROTOCOL_VERSION  2
+
 typedef enum
 {
 	/* pagestore_client -> pagestore */
@@ -193,6 +200,7 @@ extern int	readahead_buffer_size;
 extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
+extern int  neon_protocol_version;
 
 extern shardno_t get_shard_number(BufferTag* tag);
 

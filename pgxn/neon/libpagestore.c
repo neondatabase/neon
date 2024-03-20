@@ -49,6 +49,8 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
+int         neon_protocol_version;
+
 static int	n_reconnect_attempts = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
@@ -844,6 +846,14 @@ pg_init_libpagestore(void)
 							PGC_USERSET,
 							0,	/* no flags required */
 							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
+	DefineCustomIntVariable("neon.protocol_version",
+							"Version of compute<->page server protocol",
+							NULL,
+							&neon_protocol_version,
+							NEON_PROTOCOL_VERSION, 1, INT_MAX,
+							PGC_USERSET,
+							0,	/* no flags required */
+							NULL, NULL, NULL);
 
 	relsize_hash_init();
 
