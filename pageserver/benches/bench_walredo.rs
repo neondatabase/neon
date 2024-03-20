@@ -24,6 +24,29 @@
 //! is called sampling. Apparently the idea here is to detect outliers.
 //! We're not sure whether the current choice of sampling method makes sense.
 //! See https://bheisler.github.io/criterion.rs/book/user_guide/command_line_output.html#collecting-samples
+//!
+//! # Reference Numbers
+//!
+//! 2024-03-20 on i3en.3xlarge
+//!
+//! ```text
+//! short/1                 time:   [21.612 µs 21.707 µs 21.817 µs]
+//! short/2                 time:   [27.216 µs 27.372 µs 27.557 µs]
+//! short/4                 time:   [44.398 µs 45.858 µs 47.178 µs]
+//! short/8                 time:   [81.236 µs 83.332 µs 85.419 µs]
+//! short/16                time:   [138.29 µs 139.76 µs 141.24 µs]
+//! short/32                time:   [149.67 µs 150.44 µs 151.30 µs]
+//! short/64                time:   [155.31 µs 155.90 µs 156.59 µs]
+//! short/128               time:   [156.33 µs 156.85 µs 157.44 µs]
+//! medium/1                time:   [105.47 µs 105.87 µs 106.36 µs]
+//! medium/2                time:   [157.09 µs 157.68 µs 158.40 µs]
+//! medium/4                time:   [293.69 µs 306.80 µs 318.11 µs]
+//! medium/8                time:   [594.88 µs 614.05 µs 633.18 µs]
+//! medium/16               time:   [848.28 µs 853.06 µs 858.68 µs]
+//! medium/32               time:   [916.31 µs 920.97 µs 926.27 µs]
+//! medium/64               time:   [939.99 µs 945.49 µs 951.30 µs]
+//! medium/128              time:   [918.89 µs 928.75 µs 938.41 µs]
+//! ```
 
 use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};

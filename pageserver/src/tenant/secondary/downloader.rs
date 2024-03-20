@@ -534,7 +534,11 @@ impl<'a> TenantDownloader<'a> {
             .await
             .maybe_fatal_err(&context_msg)?;
 
-        tracing::debug!("Wrote local heatmap to {}", heatmap_path);
+        tracing::debug!(
+            "Wrote local heatmap to {}, with {} timelines",
+            heatmap_path,
+            heatmap.timelines.len()
+        );
 
         // Clean up any local layers that aren't in the heatmap.  We do this first for all timelines, on the general
         // principle that deletions should be done before writes wherever possible, and so that we can use this
@@ -547,6 +551,10 @@ impl<'a> TenantDownloader<'a> {
         // Download the layers in the heatmap
         for timeline in heatmap.timelines {
             if self.secondary_state.cancel.is_cancelled() {
+                tracing::debug!(
+                    "Cancelled before downloading timeline {}",
+                    timeline.timeline_id
+                );
                 return Ok(());
             }
 
@@ -764,10 +772,13 @@ impl<'a> TenantDownloader<'a> {
             }
         };
 
+        tracing::debug!(timeline_id=%timeline.timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
+
         // Download heatmap layers that are not present on local disk, or update their
         // access time if they are already present.
         for layer in timeline.layers {
             if self.secondary_state.cancel.is_cancelled() {
+                tracing::debug!("Cancelled -- dropping out of layer loop");
                 return Ok(());
             }
 
