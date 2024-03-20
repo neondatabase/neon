@@ -147,15 +147,16 @@ jobs:
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "platform": "neon-captest-freetier",   "db_size": "3gb"  },
-                      { "platform": "neon-captest-new",        "db_size": "50gb" },
-                      { "platform": "neonvm-captest-freetier", "db_size": "3gb"  },
-                      { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
+          "include": [{ "platform": "neon-captest-freetier",         "db_size": "3gb"  },
+                      { "platform": "neon-captest-new",              "db_size": "50gb" },
+                      { "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
+                      { "platform": "neonvm-captest-new",            "db_size": "50gb" },
+                      { "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
-                                                   { "platform": "rds-aurora",   "db_size": "50gb"}]')
+                                                     { "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -171,7 +172,7 @@ jobs:
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
-                                                   { "platform": "rds-aurora"   }]')
+                                                     { "platform": "rds-aurora"   }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -190,7 +191,7 @@ jobs:
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
-                                                    { "platform": "rds-aurora",   "scale": "10" }]')
+                                                     { "platform": "rds-aurora",   "scale": "10" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -252,6 +253,9 @@ jobs:
         case "${PLATFORM}" in
           neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
+            ;;
+          neonvm-captest-sharding-reuse)
+            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_SHARDING_CONNSTR }}
             ;;
           neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
