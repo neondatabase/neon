@@ -374,7 +374,8 @@ async fn residency_check_while_evict_and_wait_on_clogged_spawn_blocking() {
 /// a `Layer::keep_resident` call.
 ///
 /// This matters because cancelling the eviction would leave us in a state where the file is on
-/// disk but the layer internal state says it has not been initialized.
+/// disk but the layer internal state says it has not been initialized. Futhermore, it allows us to
+/// have non-repairing `Layer::is_likely_resident`.
 #[tokio::test(start_paused = true)]
 async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     let handle = tokio::runtime::Handle::current();
@@ -398,6 +399,8 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         layers.swap_remove(0)
     };
 
+    // this failpoint will simulate the `get_or_maybe_download` becoming cancelled (by returning an
+    // Err) at the right time as in "during" the `LayerInner::needs_download`.
     layer.enable_failpoint(failpoints::Failpoint::AfterDeterminingLayerNeedsNoDownload);
 
     let (completion, barrier) = utils::completion::channel();
