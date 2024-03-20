@@ -297,10 +297,7 @@ fn read_wins_pending_eviction() {
 
         // now the eviction cannot proceed because the threads are consumed while completion exists
         drop(resident);
-
-        // synchronize so we don't have two different possible outcomes for this test
         arrived_at_barrier.wait().await;
-
         assert!(!layer.is_likely_resident());
 
         // because no actual eviction happened, we get to just reinitialize the DownloadedLayer
@@ -616,11 +613,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
 
     // release the eviction task
     drop(completion);
-
-    // run pending tasks to completion, namely, to spawn blocking the eviction
     tokio::time::sleep(ADVANCE).await;
-
-    // synchronize with the spawn_blocking from eviction
     SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle).await;
 
     // failpoint is still enabled, but it is not hit
