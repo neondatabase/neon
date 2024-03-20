@@ -1,160 +1,133 @@
-//! Simple benchmarking around walredo.
+//! Quantify a single walredo manager's throughput under N concurrent callers.
 //!
-//! Right now they hope to just set a baseline. Later we can try to expand into latency and
-//! throughput after figuring out the coordinated omission problems below.
+//! The benchmark implementation ([`bench_impl`]) is parametrized by
+//! - `redo_work` => [`Request::short_request`] or [`Request::medium_request`]
+//! - `n_redos` => number of times the benchmark shell execute the `redo_work`
+//! - `nclients` => number of clients (more on this shortly).
 //!
-//! There are two sets of inputs; `short` and `medium`. They were collected on postgres v14 by
-//! logging what happens when a sequential scan is requested on a small table, then picking out two
-//! suitable from logs.
+//! The benchmark impl sets up a multi-threaded tokio runtime with default parameters.
+//! It spawns `nclients` times [`client`] tokio tasks.
+//! Each task executes the `redo_work` `n_redos/nclients` times.
 //!
+//! We exercise the following combinations:
+//! - `redo_work = short / medium``
+//! - `nclients = [1, 2, 4, 8, 16, 32, 64, 128]`
 //!
-//! Reference data (git blame to see commit) on an i3en.3xlarge
-// ```text
-//! short/short/1           time:   [39.175 µs 39.348 µs 39.536 µs]
-//! short/short/2           time:   [51.227 µs 51.487 µs 51.755 µs]
-//! short/short/4           time:   [76.048 µs 76.362 µs 76.674 µs]
-//! short/short/8           time:   [128.94 µs 129.82 µs 130.74 µs]
-//! short/short/16          time:   [227.84 µs 229.00 µs 230.28 µs]
-//! short/short/32          time:   [455.97 µs 457.81 µs 459.90 µs]
-//! short/short/64          time:   [902.46 µs 904.84 µs 907.32 µs]
-//! short/short/128         time:   [1.7416 ms 1.7487 ms 1.7561 ms]
-//! ``
-
-use std::sync::Arc;
+//! We let `criterion` determine the `n_redos` using `iter_custom`.
+//! The idea is that for each `(redo_work, nclients)` combination,
+//! criterion will run the `bench_impl` multiple times with different `n_redos`.
+//! The `bench_impl` reports the aggregate wall clock time from the clients' perspective.
+//! Criterion will divide that by `n_redos` to compute the "time per iteration".
+//! In our case, "time per iteration" means "time per redo_work execution".
+//!
+//! NB: the way by which `iter_custom` determines the "number of iterations"
+//! is called sampling. Apparently the idea here is to detect outliers.
+//! We're not sure whether the current choice of sampling method makes sense.
+//! See https://bheisler.github.io/criterion.rs/book/user_guide/command_line_output.html#collecting-samples
 
 use bytes::{Buf, Bytes};
-use pageserver::{
-    config::PageServerConf, repository::Key, walrecord::NeonWalRecord, walredo::PostgresRedoManager,
+use criterion::{BenchmarkId, Criterion};
+use pageserver::{config::PageServerConf, walrecord::NeonWalRecord, walredo::PostgresRedoManager};
+use pageserver_api::{key::Key, shard::TenantShardId};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
 };
-use pageserver_api::shard::TenantShardId;
-use tokio::task::JoinSet;
+use tokio::{sync::Barrier, task::JoinSet};
 use utils::{id::TenantId, lsn::Lsn};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+fn bench(c: &mut Criterion) {
+    {
+        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
+        for nclients in nclients {
+            let mut group = c.benchmark_group("short");
+            group.bench_with_input(
+                BenchmarkId::from_parameter(nclients),
+                &nclients,
+                |b, nclients| {
+                    let redo_work = Arc::new(Request::short_input());
+                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
+                },
+            );
+        }
+    }
 
-fn redo_scenarios(c: &mut Criterion) {
-    // logging should be enabled when adding more inputs, since walredo will only report malformed
-    // input to the stderr.
-    // utils::logging::init(utils::logging::LogFormat::Plain).unwrap();
+    {
+        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
+        for nclients in nclients {
+            let mut group = c.benchmark_group("medium");
+            group.bench_with_input(
+                BenchmarkId::from_parameter(nclients),
+                &nclients,
+                |b, nclients| {
+                    let redo_work = Arc::new(Request::medium_input());
+                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
+                },
+            );
+        }
+    }
+}
+criterion::criterion_group!(benches, bench);
+criterion::criterion_main!(benches);
 
+// Returns the sum of each client's wall-clock time spent executing their share of the n_redos.
+fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration {
     let repo_dir = camino_tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
 
     let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
     let conf = Box::leak(Box::new(conf));
     let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
 
-    let manager = PostgresRedoManager::new(conf, tenant_shard_id);
-
-    let manager = Arc::new(manager);
-
-    {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        tracing::info!("executing first");
-        rt.block_on(short().execute(&manager)).unwrap();
-        tracing::info!("first executed");
-    }
-
-    let thread_counts = [1, 2, 4, 8, 16, 32, 64, 128];
-
-    let mut group = c.benchmark_group("short");
-    group.sampling_mode(criterion::SamplingMode::Flat);
-
-    for thread_count in thread_counts {
-        group.bench_with_input(
-            BenchmarkId::new("short", thread_count),
-            &thread_count,
-            |b, thread_count| {
-                add_multithreaded_walredo_requesters(b, *thread_count, &manager, short);
-            },
-        );
-    }
-    drop(group);
-
-    let mut group = c.benchmark_group("medium");
-    group.sampling_mode(criterion::SamplingMode::Flat);
-
-    for thread_count in thread_counts {
-        group.bench_with_input(
-            BenchmarkId::new("medium", thread_count),
-            &thread_count,
-            |b, thread_count| {
-                add_multithreaded_walredo_requesters(b, *thread_count, &manager, medium);
-            },
-        );
-    }
-    drop(group);
-}
-
-/// Sets up a multi-threaded tokio runtime with default worker thread count,
-/// then, spawn `requesters` tasks that repeatedly:
-/// - get input from `input_factor()`
-/// - call `manager.request_redo()` with their input
-///
-/// This stress-tests the scalability of a single walredo manager at high tokio-level concurrency.
-///
-/// Using tokio's default worker thread count means the results will differ on machines
-/// with different core countrs. We don't care about that, the performance will always
-/// be different on different hardware. To compare performance of different software versions,
-/// use the same hardware.
-fn add_multithreaded_walredo_requesters(
-    b: &mut criterion::Bencher,
-    nrequesters: usize,
-    manager: &Arc<PostgresRedoManager>,
-    input_factory: fn() -> Request,
-) {
-    assert_ne!(nrequesters, 0);
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(nrequesters + 1));
+    let start = Arc::new(Barrier::new(nclients as usize));
 
-    let mut requesters = JoinSet::new();
-    for _ in 0..nrequesters {
-        let _entered = rt.enter();
-        let manager = manager.clone();
-        let barrier = barrier.clone();
-        requesters.spawn(async move {
-            loop {
-                let input = input_factory();
-                barrier.wait().await;
-                let page = input.execute(&manager).await.unwrap();
-                assert_eq!(page.remaining(), 8192);
-                barrier.wait().await;
-            }
+    let mut tasks = JoinSet::new();
+
+    let manager = PostgresRedoManager::new(conf, tenant_shard_id);
+    let manager = Arc::new(manager);
+
+    for _ in 0..nclients {
+        rt.block_on(async {
+            tasks.spawn(client(
+                Arc::clone(&manager),
+                Arc::clone(&start),
+                Arc::clone(&redo_work),
+                // divide the amount of work equally among the clients
+                n_redos / nclients,
+            ))
         });
     }
 
-    let do_one_iteration = || {
-        rt.block_on(async {
-            barrier.wait().await;
-            // wait for work to complete
-            barrier.wait().await;
-        })
-    };
-
-    b.iter_batched(
-        || {
-            // warmup
-            do_one_iteration();
-        },
-        |()| {
-            // work loop
-            do_one_iteration();
-        },
-        criterion::BatchSize::PerIteration,
-    );
-
-    rt.block_on(requesters.shutdown());
+    let mut total_wallclock_time = std::time::Duration::from_millis(0);
+    while let Some(res) = rt.block_on(tasks.join_next()) {
+        total_wallclock_time += res.unwrap();
+    }
+    total_wallclock_time
 }
 
-criterion_group!(benches, redo_scenarios);
-criterion_main!(benches);
+async fn client(
+    mgr: Arc<PostgresRedoManager>,
+    start: Arc<Barrier>,
+    redo_work: Arc<Request>,
+    n_redos: u64,
+) -> Duration {
+    start.wait().await;
+    let start = Instant::now();
+    for _ in 0..n_redos {
+        let page = redo_work.execute(&mgr).await.unwrap();
+        assert_eq!(page.remaining(), 8192);
+    }
+    start.elapsed()
+}
+
+fn pg_record(will_init: bool, bytes: &'static [u8]) -> NeonWalRecord {
+    let rec = Bytes::from_static(bytes);
+    NeonWalRecord::Postgres { will_init, rec }
+}
 
 macro_rules! lsn {
     ($input:expr) => {{
@@ -166,12 +139,37 @@ macro_rules! lsn {
     }};
 }
 
-/// Short payload, 1132 bytes.
-// pg_records are copypasted from log, where they are put with Debug impl of Bytes, which uses \0
-// for null bytes.
-#[allow(clippy::octal_escapes)]
-fn short() -> Request {
-    Request {
+/// Simple wrapper around `WalRedoManager::request_redo`.
+///
+/// In benchmarks this is cloned around.
+#[derive(Clone)]
+struct Request {
+    key: Key,
+    lsn: Lsn,
+    base_img: Option<(Lsn, Bytes)>,
+    records: Vec<(Lsn, NeonWalRecord)>,
+    pg_version: u32,
+}
+
+impl Request {
+    async fn execute(&self, manager: &PostgresRedoManager) -> anyhow::Result<Bytes> {
+        let Request {
+            key,
+            lsn,
+            base_img,
+            records,
+            pg_version,
+        } = self;
+
+        // TODO: avoid these clones
+        manager
+            .request_redo(*key, *lsn, base_img.clone(), records.clone(), *pg_version)
+            .await
+    }
+
+    #[allow(clippy::octal_escapes)]
+    fn short_input() -> Request {
+        Request {
         key: Key {
             field1: 0,
             field2: 1663,
@@ -194,13 +192,13 @@ fn short() -> Request {
         ],
         pg_version: 14,
     }
-}
+    }
 
-/// Medium sized payload, serializes as 26393 bytes.
-// see [`short`]
-#[allow(clippy::octal_escapes)]
-fn medium() -> Request {
-    Request {
+    /// Medium sized payload, serializes as 26393 bytes.
+    // see [`short`]
+    #[allow(clippy::octal_escapes)]
+    fn medium_input() -> Request {
+        Request {
         key: Key {
             field1: 0,
             field2: 1663,
@@ -442,37 +440,5 @@ fn medium() -> Request {
         ],
         pg_version: 14,
     }
-}
-
-fn pg_record(will_init: bool, bytes: &'static [u8]) -> NeonWalRecord {
-    let rec = Bytes::from_static(bytes);
-    NeonWalRecord::Postgres { will_init, rec }
-}
-
-/// Simple wrapper around `WalRedoManager::request_redo`.
-///
-/// In benchmarks this is cloned around.
-#[derive(Clone)]
-struct Request {
-    key: Key,
-    lsn: Lsn,
-    base_img: Option<(Lsn, Bytes)>,
-    records: Vec<(Lsn, NeonWalRecord)>,
-    pg_version: u32,
-}
-
-impl Request {
-    async fn execute(self, manager: &PostgresRedoManager) -> anyhow::Result<Bytes> {
-        let Request {
-            key,
-            lsn,
-            base_img,
-            records,
-            pg_version,
-        } = self;
-
-        manager
-            .request_redo(key, lsn, base_img, records, pg_version)
-            .await
     }
 }
