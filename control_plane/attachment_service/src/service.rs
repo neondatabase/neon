@@ -209,6 +209,7 @@ struct ShardSplitParams {
     new_stripe_size: Option<ShardStripeSize>,
     targets: Vec<ShardSplitTarget>,
     policy: PlacementPolicy,
+    config: TenantConfig,
     shard_ident: ShardIdentity,
 }
 
@@ -2989,6 +2990,7 @@ impl Service {
         )));
 
         let mut policy = None;
+        let mut config = None;
         let mut shard_ident = None;
         // Validate input, and calculate which shards we will create
         let (old_shard_count, targets) =
@@ -3044,6 +3046,9 @@ impl Service {
                     }
                     if shard_ident.is_none() {
                         shard_ident = Some(shard.shard);
+                    }
+                    if config.is_none() {
+                        config = Some(shard.config.clone());
                     }
 
                     if tenant_shard_id.shard_count.count() == split_req.new_shard_count {
@@ -3105,6 +3110,7 @@ impl Service {
             shard_ident.unwrap()
         };
         let policy = policy.unwrap();
+        let config = config.unwrap();
 
         Ok(ShardSplitAction::Split(ShardSplitParams {
             old_shard_count,
@@ -3112,6 +3118,7 @@ impl Service {
             new_stripe_size: split_req.new_stripe_size,
             targets,
             policy,
+            config,
             shard_ident,
         }))
     }
@@ -3133,6 +3140,7 @@ impl Service {
             new_stripe_size,
             mut targets,
             policy,
+            config,
             shard_ident,
         } = params;
 
@@ -3201,8 +3209,7 @@ impl Service {
                     generation: None,
                     generation_pageserver: Some(target.node.get_id().0 as i64),
                     placement_policy: serde_json::to_string(&policy).unwrap(),
-                    // TODO: get the config out of the map
-                    config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+                    config: serde_json::to_string(&config).unwrap(),
                     splitting: SplitState::Splitting,
                 });
             }
