@@ -348,7 +348,7 @@ async fn handle_tenant_timeline_passthrough(
         method: crate::metrics::Method::Get,
     };
 
-    latency.start_timer(labels.clone());
+    let _timer = latency.start_timer(labels.clone());
 
     let client = mgmt_api::Client::new(node.base_url(), service.get_config().jwt_token.as_deref());
     let resp = client.get_raw(path).await.map_err(|_e|

@@ -146,7 +146,7 @@ impl Persistence {
         let latency = &METRICS_REGISTRY
             .metrics_group
             .storage_controller_database_query_latency;
-        latency.start_timer(DatabaseQueryLatencyLabelGroup {
+        let _timer = latency.start_timer(DatabaseQueryLatencyLabelGroup {
             operation: op.clone(),
         });
 
