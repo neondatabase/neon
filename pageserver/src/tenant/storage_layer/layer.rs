@@ -1484,7 +1484,7 @@ impl ResidentLayer {
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
-    #[tracing::instrument(skip_all, fields(layer=%self))]
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
     pub(crate) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,
@@ -1504,9 +1504,9 @@ impl ResidentLayer {
                 // while it's being held.
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await
-                    .context("Layer index is corrupted")
+                    .with_context(|| format!("Layer index is corrupted for {self}"))
             }
-            Image(_) => anyhow::bail!("cannot load_keys on a image layer"),
+            Image(_) => anyhow::bail!(format!("cannot load_keys on a image layer {self}")),
         }
     }
 
