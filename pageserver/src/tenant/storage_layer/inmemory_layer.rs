@@ -23,8 +23,12 @@ use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
+use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
+use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use super::{
@@ -70,6 +74,8 @@ pub struct InMemoryLayerInner {
     /// Each serialized Value is preceded by a 'u32' length field.
     /// PerSeg::page_versions map stores offsets into this file.
     file: EphemeralFile,
+
+    resource_units: GlobalResourceUnits,
 }
 
 impl std::fmt::Debug for InMemoryLayerInner {
@@ -77,6 +83,101 @@ impl std::fmt::Debug for InMemoryLayerInner {
         f.debug_struct("InMemoryLayerInner").finish()
     }
 }
+
+/// State shared by all in-memory (ephemeral) layers.  Updated infrequently during background ticks in Timeline,
+/// to minimize contention.
+///
+/// This global state is used to implement behaviors that require a global view of the system, e.g.
+/// rolling layers proactively to limit the total amount of dirty data.
+struct GlobalResources {
+    // How many bytes are in all EphemeralFile objects
+    dirty_bytes: AtomicU64,
+    // How many InMemoryLayer objects exist
+    writers: AtomicUsize,
+}
+
+// Per-timeline RAII struct for its contribution to [`GlobalResources`]
+struct GlobalResourceUnits {
+    // How many dirty bytes have I added to the global dirty_bytes: this guard object is responsible
+    // for decrementing the global counter by this many bytes when dropped.
+    dirty_bytes: u64,
+}
+
+impl GlobalResourceUnits {
+    // Hint for layer writers to update us when the layer size differs from the last
+    // call to update_size by this much.  If we don't reach this threshold, we'll still get
+    // updated when the Timeline "ticks" in the background.
+    const MAX_SIZE_DRIFT: u64 = 10 * 1024 * 1024;
+
+    fn new() -> Self {
+        GLOBAL_RESOURCES
+            .writers
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        Self { dirty_bytes: 0 }
+    }
+
+    /// Do not call this frequently: all timelines will write to these same global atomics,
+    /// so this is a relatively expensive operation.  Wait at least a few seconds between calls.
+    fn publish_size(&mut self, size: u64) {
+        let new_global_dirty_bytes = match size.cmp(&self.dirty_bytes) {
+            Ordering::Equal => {
+                return;
+            }
+            Ordering::Greater => {
+                let delta = size - self.dirty_bytes;
+                let old = GLOBAL_RESOURCES
+                    .dirty_bytes
+                    .fetch_add(delta, AtomicOrdering::Relaxed);
+                old + delta
+            }
+            Ordering::Less => {
+                let delta = self.dirty_bytes - size;
+                let old = GLOBAL_RESOURCES
+                    .dirty_bytes
+                    .fetch_sub(delta, AtomicOrdering::Relaxed);
+                old - delta
+            }
+        };
+
+        // This is a sloppy update: concurrent updates to the counter will race, and the exact
+        // value of the metric might not be the exact latest value of GLOBAL_RESOURCES::dirty_bytes.
+        // That's okay: as long as the metric contains some recent value, it doesn't have to always
+        // be literally the last update.
+        TIMELINE_EPHEMERAL_BYTES.set(new_global_dirty_bytes);
+
+        self.dirty_bytes = size;
+    }
+
+    // Call publish_size if the input size differs from last published size by more than
+    // the drift limit
+    fn maybe_publish_size(&mut self, size: u64) {
+        let publish = match size.cmp(&self.dirty_bytes) {
+            Ordering::Equal => false,
+            Ordering::Greater => size - self.dirty_bytes > Self::MAX_SIZE_DRIFT,
+            Ordering::Less => self.dirty_bytes - size > Self::MAX_SIZE_DRIFT,
+        };
+
+        if publish {
+            self.publish_size(size);
+        }
+    }
+}
+
+impl Drop for GlobalResourceUnits {
+    fn drop(&mut self) {
+        GLOBAL_RESOURCES
+            .writers
+            .fetch_sub(1, AtomicOrdering::Relaxed);
+
+        // Subtract our contribution to the global total dirty bytes
+        self.publish_size(0);
+    }
+}
+
+static GLOBAL_RESOURCES: GlobalResources = GlobalResources {
+    dirty_bytes: AtomicU64::new(0),
+    writers: AtomicUsize::new(0),
+};
 
 impl InMemoryLayer {
     pub(crate) fn get_timeline_id(&self) -> TimelineId {
@@ -328,6 +429,7 @@ impl InMemoryLayer {
             inner: RwLock::new(InMemoryLayerInner {
                 index: HashMap::new(),
                 file,
+                resource_units: GlobalResourceUnits::new(),
             }),
         })
     }
@@ -378,7 +480,16 @@ impl InMemoryLayer {
             warn!("Key {} at {} already exists", key, lsn);
         }
 
+        let size = locked_inner.file.len();
+        locked_inner.resource_units.maybe_publish_size(size);
+
         Ok(())
+    }
+
+    pub(crate) async fn tick(&self) {
+        let mut inner = self.inner.write().await;
+        let size = inner.file.len();
+        inner.resource_units.publish_size(size);
     }
 
     pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {

@@ -699,6 +699,14 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("Failed to register pageserver_startup_is_loading")
 });
 
+pub(crate) static TIMELINE_EPHEMERAL_BYTES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_timeline_ephemeral_bytes",
+        "Total number of bytes in ephemeral layers, summed for all timelines.  Approximate, lazily updated."
+    )
+    .expect("Failed ot register metric")
+});
+
 /// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
 /// like how long it took to load.
 ///
