@@ -1118,14 +1118,7 @@ impl LayerInner {
 
         // disable any scheduled but not yet running eviction deletions for this initialization
         let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
-
-        // only reset this after we've decided we really need to download. otherwise it'd
-        // be impossible to mark cancelled downloads for eviction, like one could imagine
-        // we would like to do for prefetching which was not needed.
         self.wanted_evicted.store(false, Ordering::Release);
-
-        // no need to make the evict_and_wait wait for the actual download to complete
-        // this also stops any pending eviction from hanging
         self.status.as_ref().unwrap().send_replace(Status::Resident);
 
         let res = Arc::new(DownloadedLayer {
