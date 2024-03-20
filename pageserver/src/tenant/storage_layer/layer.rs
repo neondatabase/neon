@@ -810,17 +810,19 @@ impl LayerInner {
         allow_download: bool,
         ctx: Option<&RequestContext>,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
-        // get_or_init_detached can:
-        // - be fast (mutex lock) OR uncontested semaphore permit acquire
-        // - be slow (wait for semaphore permit or closing)
-        let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-
         let (weak, permit) = {
+            // get_or_init_detached can:
+            // - be fast (mutex lock) OR uncontested semaphore permit acquire
+            // - be slow (wait for semaphore permit or closing)
+            let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
+
             let locked = self
                 .inner
                 .get_or_init_detached()
                 .await
                 .map(|mut guard| guard.get_and_upgrade().ok_or(guard));
+
+            scopeguard::ScopeGuard::into_inner(init_cancelled);
 
             match locked {
                 // this path could had been a RwLock::read
@@ -846,8 +848,6 @@ impl LayerInner {
                 Err(permit) => (None, permit),
             }
         };
-
-        scopeguard::ScopeGuard::into_inner(init_cancelled);
 
         if let Some(weak) = weak {
             // only drop the weak after dropping the heavier_once_cell guard

@@ -166,6 +166,7 @@ async fn smoke_test() {
     rtc.wait_completion().await.unwrap();
 
     assert_eq!(rtc.get_remote_physical_size(), 0);
+    assert_eq!(0, LAYER_IMPL_METRICS.inits_cancelled.get())
 }
 
 /// This test demonstrates a previous hang when a eviction and deletion were requested at the same
@@ -240,6 +241,7 @@ async fn evict_and_wait_on_wanted_deleted() {
     assert_eq!(1, LAYER_IMPL_METRICS.completed_deletes.get());
     assert_eq!(1, LAYER_IMPL_METRICS.started_evictions.get());
     assert_eq!(1, LAYER_IMPL_METRICS.completed_evictions.get());
+    assert_eq!(0, LAYER_IMPL_METRICS.inits_cancelled.get())
 }
 
 /// This test ensures we are able to read the layer while the layer eviction has been
@@ -356,6 +358,8 @@ fn read_wins_pending_eviction() {
             1,
             LAYER_IMPL_METRICS.cancelled_evictions[EvictionCancelled::AlreadyReinitialized].get()
         );
+
+        assert_eq!(0, LAYER_IMPL_METRICS.inits_cancelled.get())
     });
 }
 
@@ -541,6 +545,8 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
                 .map(|ctr| ctr.get())
                 .sum::<u64>()
         );
+
+        assert_eq!(0, LAYER_IMPL_METRICS.inits_cancelled.get())
     });
 }
 
@@ -622,6 +628,9 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
         .await
         .unwrap_err();
     assert!(matches!(e, DownloadError::DownloadRequired), "{e:?}");
+
+    // failpoint is not counted as cancellation either
+    assert_eq!(0, LAYER_IMPL_METRICS.inits_cancelled.get())
 }
 
 #[tokio::test(start_paused = true)]
