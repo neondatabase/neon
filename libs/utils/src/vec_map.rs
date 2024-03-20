@@ -10,7 +10,7 @@ pub enum VecMapOrdering {
 /// Append only - can only add keys that are larger than the
 /// current max key.
 /// Ordering can be adjusted using [`VecMapOrdering`]
-/// during VecMap construction.
+/// during `VecMap` construction.
 #[derive(Clone, Debug)]
 pub struct VecMap<K, V> {
     data: Vec<(K, V)>,
