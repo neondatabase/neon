@@ -18,7 +18,9 @@ impl LayerInner {
     pub(super) async fn failpoint(&self, kind: FailpointKind) -> Result<(), FailpointHit> {
         let fut = {
             let mut fps = self.failpoints.lock().unwrap();
-            let fp = fps.iter_mut().find(|x| x.kind() == kind);
+            // find the *last* failpoint for cases in which we need to use multiple for the same
+            // thing (two blocked evictions)
+            let fp = fps.iter_mut().rfind(|x| x.kind() == kind);
 
             let Some(fp) = fp else {
                 return Ok(());
