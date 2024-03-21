@@ -50,7 +50,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    id::TimelineId,
+    id::TimelineId, serde_system_time,
 };
 
 use super::{
@@ -582,7 +582,7 @@ impl<'a> TenantDownloader<'a> {
         let mut progress = SecondaryProgress {
             layers_total: heatmap_stats.layers,
             bytes_total: heatmap_stats.bytes,
-            heatmap_mtime: Some(heatmap_mtime),
+            heatmap_mtime: Some(serde_system_time::SystemTime(heatmap_mtime)),
             layers_downloaded: 0,
             bytes_downloaded: 0,
         };
