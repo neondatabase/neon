@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -20,10 +19,6 @@ from performance.pageserver.util import (
 @pytest.mark.parametrize("n_tenants", [10])
 @pytest.mark.parametrize("get_vectored_impl", ["sequential", "vectored"])
 @pytest.mark.timeout(1000)
-@pytest.mark.skipif(
-    os.getenv("CI", "false") == "true",
-    reason="The test if flaky on CI: https://github.com/neondatabase/neon/issues/7006",
-)
 def test_basebackup_with_high_slru_count(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,

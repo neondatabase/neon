@@ -300,6 +300,7 @@ where
 
         let tenant_shard_id = job.get_tenant_shard_id();
         let barrier = if let Some(barrier) = self.get_running(tenant_shard_id) {
+            tracing::info!("Command already running, waiting for it");
             barrier
         } else {
             let running = self.spawn_now(job);

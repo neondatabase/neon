@@ -13,7 +13,6 @@ use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
 use fail::fail_point;
-use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::AUX_FILES_KEY,
@@ -634,6 +633,8 @@ impl Timeline {
     /// If a remote layer file is needed, it is downloaded as part of this
     /// call.
     ///
+    /// This method enforces [`Self::timeline_get_throttle`] internally.
+    ///
     /// NOTE: It is considered an error to 'get' a key that doesn't exist. The
     /// abstraction above this needs to store suitable metadata to track what
     /// data exists with what keys, in separate metadata entries. If a
@@ -644,7 +645,18 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
+    #[inline(always)]
     pub(crate) async fn get(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        self.timeline_get_throttle.throttle(ctx, 1).await;
+        self.get_impl(key, lsn, ctx).await
+    }
+    /// Not subject to [`Self::timeline_get_throttle`].
+    async fn get_impl(
         &self,
         key: Key,
         lsn: Lsn,
@@ -653,8 +665,6 @@ impl Timeline {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
-
-        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // This check is debug-only because of the cost of hashing, and because it's a double-check: we
         // already checked the key against the shard_identity when looking up the Timeline from
@@ -752,10 +762,6 @@ impl Timeline {
             return Err(GetVectoredError::Oversized(key_count));
         }
 
-        self.timeline_get_throttle
-            .throttle(ctx, key_count as usize)
-            .await;
-
         for range in &keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
@@ -772,11 +778,18 @@ impl Timeline {
             self.conf.get_vectored_impl
         );
 
-        let _timer = crate::metrics::GET_VECTORED_LATENCY
+        let start = crate::metrics::GET_VECTORED_LATENCY
             .for_task_kind(ctx.task_kind())
-            .map(|t| t.start_timer());
+            .map(|metric| (metric, Instant::now()));
 
-        match self.conf.get_vectored_impl {
+        // start counting after throttle so that throttle time
+        // is always less than observation time
+        let throttled = self
+            .timeline_get_throttle
+            .throttle(ctx, key_count as usize)
+            .await;
+
+        let res = match self.conf.get_vectored_impl {
             GetVectoredImpl::Sequential => {
                 self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
             }
@@ -790,9 +803,33 @@ impl Timeline {
 
                 vectored_res
             }
+        };
+
+        if let Some((metric, start)) = start {
+            let elapsed = start.elapsed();
+            let ex_throttled = if let Some(throttled) = throttled {
+                elapsed.checked_sub(throttled)
+            } else {
+                Some(elapsed)
+            };
+
+            if let Some(ex_throttled) = ex_throttled {
+                metric.observe(ex_throttled.as_secs_f64());
+            } else {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    warn!("error deducting time spent throttled; this message is logged at a global rate limit");
+                });
+            }
         }
+
+        res
     }
 
+    /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn get_vectored_sequential_impl(
         &self,
         keyspace: KeySpace,
@@ -803,7 +840,7 @@ impl Timeline {
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                let block = self.get(key, lsn, ctx).await;
+                let block = self.get_impl(key, lsn, ctx).await;
 
                 use PageReconstructError::*;
                 match block {
@@ -853,6 +890,7 @@ impl Timeline {
         Ok(results)
     }
 
+    /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn validate_get_vectored_impl(
         &self,
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
@@ -2403,7 +2441,7 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
-        let resident = guard.resident_layers().map(|layer| {
+        let resident = guard.likely_resident_layers().map(|layer| {
             let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
             HeatMapLayer::new(
@@ -2413,7 +2451,7 @@ impl Timeline {
             )
         });
 
-        let layers = resident.collect().await;
+        let layers = resident.collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
@@ -2967,7 +3005,6 @@ impl Timeline {
             }
 
             trace!("waking up");
-            let timer = self.metrics.flush_time_histo.start_timer();
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
                 if self.cancel.is_cancelled() {
@@ -2977,6 +3014,8 @@ impl Timeline {
                     // waiting at the same time we as drop out of this loop.
                     return;
                 }
+
+                let timer = self.metrics.flush_time_histo.start_timer();
 
                 let layer_to_flush = {
                     let guard = self.layers.read().await;
@@ -2999,13 +3038,12 @@ impl Timeline {
                         break err;
                     }
                 }
+                timer.stop_and_record();
             };
             // Notify any listeners that we're done
             let _ = self
                 .layer_flush_done_tx
                 .send_replace((flush_counter, result));
-
-            timer.stop_and_record();
         }
     }
 
@@ -3073,6 +3111,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<(), FlushLayerError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
+
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
@@ -3744,8 +3783,11 @@ impl Timeline {
                         // The timestamp is in the future. That sounds impossible,
                         // but what it really means is that there hasn't been
                         // any commits since the cutoff timestamp.
+                        //
+                        // In this case we should use the LSN of the most recent commit,
+                        // which is implicitly the last LSN in the log.
                         debug!("future({})", lsn);
-                        cutoff_horizon
+                        self.get_last_record_lsn()
                     }
                     LsnForTimestamp::Past(lsn) => {
                         debug!("past({})", lsn);
@@ -4259,7 +4301,7 @@ impl Timeline {
         let mut max_layer_size: Option<u64> = None;
 
         let resident_layers = guard
-            .resident_layers()
+            .likely_resident_layers()
             .map(|layer| {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
@@ -4272,8 +4314,7 @@ impl Timeline {
                     relative_last_activity: finite_f32::FiniteF32::ZERO,
                 }
             })
-            .collect()
-            .await;
+            .collect();
 
         DiskUsageEvictionInfo {
             max_layer_size,
@@ -4670,7 +4711,6 @@ mod tests {
             .keep_resident()
             .await
             .expect("no download => no downloading errors")
-            .expect("should had been resident")
             .drop_eviction_guard();
 
         let forever = std::time::Duration::from_secs(120);
@@ -4681,7 +4721,7 @@ mod tests {
         let (first, second) = tokio::join!(first, second);
 
         let res = layer.keep_resident().await;
-        assert!(matches!(res, Ok(None)), "{res:?}");
+        assert!(res.is_none(), "{res:?}");
 
         match (first, second) {
             (Ok(()), Ok(())) => {

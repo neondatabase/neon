@@ -10,7 +10,7 @@ use pageserver_api::{
         TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
         TimelineCreateRequest, TimelineInfo,
     },
-    shard::TenantShardId,
+    shard::{ShardStripeSize, TenantShardId},
 };
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
@@ -37,6 +37,9 @@ pub struct StorageController {
 const COMMAND: &str = "storage_controller";
 
 const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
+
+// Use a shorter pageserver unavailability interval than the default to speed up tests.
+const NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
@@ -269,6 +272,8 @@ impl StorageController {
         // Run migrations on every startup, in case something changed.
         let database_url = self.setup_database().await?;
 
+        let max_unavailable: humantime::Duration = NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL.into();
+
         let mut args = vec![
             "-l",
             &self.listen,
@@ -277,6 +282,8 @@ impl StorageController {
             "--dev",
             "--database-url",
             &database_url,
+            "--max-unavailable-interval",
+            &max_unavailable.to_string(),
         ]
         .into_iter()
         .map(|s| s.to_string())
@@ -469,7 +476,7 @@ impl StorageController {
     pub async fn tenant_locate(&self, tenant_id: TenantId) -> anyhow::Result<TenantLocateResponse> {
         self.dispatch::<(), _>(
             Method::GET,
-            format!("control/v1/tenant/{tenant_id}/locate"),
+            format!("debug/v1/tenant/{tenant_id}/locate"),
             None,
         )
         .await
@@ -497,11 +504,15 @@ impl StorageController {
         &self,
         tenant_id: TenantId,
         new_shard_count: u8,
+        new_stripe_size: Option<ShardStripeSize>,
     ) -> anyhow::Result<TenantShardSplitResponse> {
         self.dispatch(
             Method::PUT,
             format!("control/v1/tenant/{tenant_id}/shard_split"),
-            Some(TenantShardSplitRequest { new_shard_count }),
+            Some(TenantShardSplitRequest {
+                new_shard_count,
+                new_stripe_size,
+            }),
         )
         .await
     }

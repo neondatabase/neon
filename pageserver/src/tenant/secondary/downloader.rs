@@ -41,14 +41,16 @@ use crate::tenant::{
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
+use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
-    backoff, completion::Barrier, crashsafe::path_with_suffix_extension, fs_ext, id::TimelineId,
+    backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
+    id::TimelineId,
 };
 
 use super::{
@@ -128,6 +130,7 @@ pub(super) struct SecondaryDetail {
     pub(super) config: SecondaryLocationConfig,
 
     last_download: Option<Instant>,
+    last_etag: Option<Etag>,
     next_download: Option<Instant>,
     pub(super) timelines: HashMap<TimelineId, SecondaryDetailTimeline>,
 }
@@ -138,11 +141,26 @@ fn strftime(t: &'_ SystemTime) -> DelayedFormat<StrftimeItems<'_>> {
     datetime.format("%d/%m/%Y %T")
 }
 
+/// Information returned from download function when it detects the heatmap has changed
+struct HeatMapModified {
+    etag: Etag,
+    last_modified: SystemTime,
+    bytes: Vec<u8>,
+}
+
+enum HeatMapDownload {
+    // The heatmap's etag has changed: return the new etag, mtime and the body bytes
+    Modified(HeatMapModified),
+    // The heatmap's etag is unchanged
+    Unmodified,
+}
+
 impl SecondaryDetail {
     pub(super) fn new(config: SecondaryLocationConfig) -> Self {
         Self {
             config,
             last_download: None,
+            last_etag: None,
             next_download: None,
             timelines: HashMap::new(),
         }
@@ -477,11 +495,31 @@ impl<'a> TenantDownloader<'a> {
         };
 
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
+
+        // We will use the etag from last successful download to make the download conditional on changes
+        let last_etag = self
+            .secondary_state
+            .detail
+            .lock()
+            .unwrap()
+            .last_etag
+            .clone();
+
         // Download the tenant's heatmap
-        let heatmap_bytes = tokio::select!(
-            bytes = self.download_heatmap() => {bytes?},
+        let HeatMapModified {
+            last_modified: heatmap_mtime,
+            etag: heatmap_etag,
+            bytes: heatmap_bytes,
+        } = match tokio::select!(
+            bytes = self.download_heatmap(last_etag.as_ref()) => {bytes?},
             _ = self.secondary_state.cancel.cancelled() => return Ok(())
-        );
+        ) {
+            HeatMapDownload::Unmodified => {
+                tracing::info!("Heatmap unchanged since last successful download");
+                return Ok(());
+            }
+            HeatMapDownload::Modified(m) => m,
+        };
 
         let heatmap = serde_json::from_slice::<HeatMapTenant>(&heatmap_bytes)?;
 
@@ -496,11 +534,27 @@ impl<'a> TenantDownloader<'a> {
             .await
             .maybe_fatal_err(&context_msg)?;
 
-        tracing::debug!("Wrote local heatmap to {}", heatmap_path);
+        tracing::debug!(
+            "Wrote local heatmap to {}, with {} timelines",
+            heatmap_path,
+            heatmap.timelines.len()
+        );
+
+        // Clean up any local layers that aren't in the heatmap.  We do this first for all timelines, on the general
+        // principle that deletions should be done before writes wherever possible, and so that we can use this
+        // phase to initialize our SecondaryProgress.
+        {
+            *self.secondary_state.progress.lock().unwrap() =
+                self.prepare_timelines(&heatmap, heatmap_mtime).await?;
+        }
 
         // Download the layers in the heatmap
         for timeline in heatmap.timelines {
             if self.secondary_state.cancel.is_cancelled() {
+                tracing::debug!(
+                    "Cancelled before downloading timeline {}",
+                    timeline.timeline_id
+                );
                 return Ok(());
             }
 
@@ -515,30 +569,159 @@ impl<'a> TenantDownloader<'a> {
                 .await?;
         }
 
+        // Only update last_etag after a full successful download: this way will not skip
+        // the next download, even if the heatmap's actual etag is unchanged.
+        self.secondary_state.detail.lock().unwrap().last_etag = Some(heatmap_etag);
+
         Ok(())
     }
 
-    async fn download_heatmap(&self) -> Result<Vec<u8>, UpdateError> {
+    /// Do any fast local cleanup that comes before the much slower process of downloading
+    /// layers from remote storage.  In the process, initialize the SecondaryProgress object
+    /// that will later be updated incrementally as we download layers.
+    async fn prepare_timelines(
+        &self,
+        heatmap: &HeatMapTenant,
+        heatmap_mtime: SystemTime,
+    ) -> Result<SecondaryProgress, UpdateError> {
+        let heatmap_stats = heatmap.get_stats();
+        // We will construct a progress object, and then populate its initial "downloaded" numbers
+        // while iterating through local layer state in [`Self::prepare_timelines`]
+        let mut progress = SecondaryProgress {
+            layers_total: heatmap_stats.layers,
+            bytes_total: heatmap_stats.bytes,
+            heatmap_mtime: Some(heatmap_mtime),
+            layers_downloaded: 0,
+            bytes_downloaded: 0,
+        };
+        // Accumulate list of things to delete while holding the detail lock, for execution after dropping the lock
+        let mut delete_layers = Vec::new();
+        let mut delete_timelines = Vec::new();
+        {
+            let mut detail = self.secondary_state.detail.lock().unwrap();
+            for (timeline_id, timeline_state) in &mut detail.timelines {
+                let Some(heatmap_timeline_index) = heatmap
+                    .timelines
+                    .iter()
+                    .position(|t| t.timeline_id == *timeline_id)
+                else {
+                    // This timeline is no longer referenced in the heatmap: delete it locally
+                    delete_timelines.push(*timeline_id);
+                    continue;
+                };
+
+                let heatmap_timeline = heatmap.timelines.get(heatmap_timeline_index).unwrap();
+
+                let layers_in_heatmap = heatmap_timeline
+                    .layers
+                    .iter()
+                    .map(|l| &l.name)
+                    .collect::<HashSet<_>>();
+                let layers_on_disk = timeline_state
+                    .on_disk_layers
+                    .iter()
+                    .map(|l| l.0)
+                    .collect::<HashSet<_>>();
+
+                let mut layer_count = layers_on_disk.len();
+                let mut layer_byte_count: u64 = timeline_state
+                    .on_disk_layers
+                    .values()
+                    .map(|l| l.metadata.file_size())
+                    .sum();
+
+                // Remove on-disk layers that are no longer present in heatmap
+                for layer in layers_on_disk.difference(&layers_in_heatmap) {
+                    layer_count -= 1;
+                    layer_byte_count -= timeline_state
+                        .on_disk_layers
+                        .get(layer)
+                        .unwrap()
+                        .metadata
+                        .file_size();
+
+                    delete_layers.push((*timeline_id, (*layer).clone()));
+                }
+
+                progress.bytes_downloaded += layer_byte_count;
+                progress.layers_downloaded += layer_count;
+            }
+        }
+
+        // Execute accumulated deletions
+        for (timeline_id, layer_name) in delete_layers {
+            let timeline_path = self
+                .conf
+                .timeline_path(self.secondary_state.get_tenant_shard_id(), &timeline_id);
+            let local_path = timeline_path.join(layer_name.to_string());
+            tracing::info!(timeline_id=%timeline_id, "Removing secondary local layer {layer_name} because it's absent in heatmap",);
+
+            tokio::fs::remove_file(&local_path)
+                .await
+                .or_else(fs_ext::ignore_not_found)
+                .maybe_fatal_err("Removing secondary layer")?;
+
+            // Update in-memory housekeeping to reflect the absence of the deleted layer
+            let mut detail = self.secondary_state.detail.lock().unwrap();
+            let Some(timeline_state) = detail.timelines.get_mut(&timeline_id) else {
+                continue;
+            };
+            timeline_state.on_disk_layers.remove(&layer_name);
+        }
+
+        for timeline_id in delete_timelines {
+            let timeline_path = self
+                .conf
+                .timeline_path(self.secondary_state.get_tenant_shard_id(), &timeline_id);
+            tracing::info!(timeline_id=%timeline_id,
+                "Timeline no longer in heatmap, removing from secondary location"
+            );
+            tokio::fs::remove_dir_all(&timeline_path)
+                .await
+                .or_else(fs_ext::ignore_not_found)
+                .maybe_fatal_err("Removing secondary timeline")?;
+        }
+
+        Ok(progress)
+    }
+
+    /// Returns downloaded bytes if the etag differs from `prev_etag`, or None if the object
+    /// still matches `prev_etag`.
+    async fn download_heatmap(
+        &self,
+        prev_etag: Option<&Etag>,
+    ) -> Result<HeatMapDownload, UpdateError> {
         debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
-        // TODO: make download conditional on ETag having changed since last download
+        // TODO: pull up etag check into the request, to do a conditional GET rather than
+        // issuing a GET and then maybe ignoring the response body
         // (https://github.com/neondatabase/neon/issues/6199)
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
         let cancel = &self.secondary_state.cancel;
 
-        let heatmap_bytes = backoff::retry(
+        backoff::retry(
             || async {
                 let download = self
                     .remote_storage
                     .download(&heatmap_path, cancel)
                     .await
                     .map_err(UpdateError::from)?;
-                let mut heatmap_bytes = Vec::new();
-                let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-                let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
-                Ok(heatmap_bytes)
+
+                if Some(&download.etag) == prev_etag {
+                    Ok(HeatMapDownload::Unmodified)
+                } else {
+                    let mut heatmap_bytes = Vec::new();
+                    let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+                    let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
+                    SECONDARY_MODE.download_heatmap.inc();
+                    Ok(HeatMapDownload::Modified(HeatMapModified {
+                        etag: download.etag,
+                        last_modified: download.last_modified,
+                        bytes: heatmap_bytes,
+                    }))
+                }
             },
             |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
             FAILED_DOWNLOAD_WARN_THRESHOLD,
@@ -548,11 +731,7 @@ impl<'a> TenantDownloader<'a> {
         )
         .await
         .ok_or_else(|| UpdateError::Cancelled)
-        .and_then(|x| x)?;
-
-        SECONDARY_MODE.download_heatmap.inc();
-
-        Ok(heatmap_bytes)
+        .and_then(|x| x)
     }
 
     async fn download_timeline(&self, timeline: HeatMapTimeline) -> Result<(), UpdateError> {
@@ -593,31 +772,13 @@ impl<'a> TenantDownloader<'a> {
             }
         };
 
-        let layers_in_heatmap = timeline
-            .layers
-            .iter()
-            .map(|l| &l.name)
-            .collect::<HashSet<_>>();
-        let layers_on_disk = timeline_state
-            .on_disk_layers
-            .iter()
-            .map(|l| l.0)
-            .collect::<HashSet<_>>();
-
-        // Remove on-disk layers that are no longer present in heatmap
-        for layer in layers_on_disk.difference(&layers_in_heatmap) {
-            let local_path = timeline_path.join(layer.to_string());
-            tracing::info!("Removing secondary local layer {layer} because it's absent in heatmap",);
-            tokio::fs::remove_file(&local_path)
-                .await
-                .or_else(fs_ext::ignore_not_found)
-                .maybe_fatal_err("Removing secondary layer")?;
-        }
+        tracing::debug!(timeline_id=%timeline.timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
 
         // Download heatmap layers that are not present on local disk, or update their
         // access time if they are already present.
         for layer in timeline.layers {
             if self.secondary_state.cancel.is_cancelled() {
+                tracing::debug!("Cancelled -- dropping out of layer loop");
                 return Ok(());
             }
 
@@ -662,6 +823,12 @@ impl<'a> TenantDownloader<'a> {
                 }
             }
 
+            // Failpoint for simulating slow remote storage
+            failpoint_support::sleep_millis_async!(
+                "secondary-layer-download-sleep",
+                &self.secondary_state.cancel
+            );
+
             // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
             let downloaded_bytes = match download_layer_file(
                 self.conf,
@@ -701,6 +868,11 @@ impl<'a> TenantDownloader<'a> {
                 tokio::fs::remove_file(&local_path)
                     .await
                     .or_else(fs_ext::ignore_not_found)?;
+            } else {
+                tracing::info!("Downloaded layer {}, size {}", layer.name, downloaded_bytes);
+                let mut progress = self.secondary_state.progress.lock().unwrap();
+                progress.bytes_downloaded += downloaded_bytes;
+                progress.layers_downloaded += 1;
             }
 
             SECONDARY_MODE.download_layer.inc();

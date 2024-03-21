@@ -114,7 +114,7 @@ impl NeonBroker {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PageServerConf {
     // node id
     pub id: NodeId,
@@ -126,6 +126,9 @@ pub struct PageServerConf {
     // auth type used for the PG and HTTP ports
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+
+    pub(crate) virtual_file_io_engine: Option<String>,
+    pub(crate) get_vectored_impl: Option<String>,
 }
 
 impl Default for PageServerConf {
@@ -136,6 +139,8 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
+            virtual_file_io_engine: None,
+            get_vectored_impl: None,
         }
     }
 }

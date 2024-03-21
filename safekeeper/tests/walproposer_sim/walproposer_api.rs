@@ -224,6 +224,16 @@ impl SimulationApi {
             })
             .collect::<Vec<_>>();
 
+        let empty_feedback = PageserverFeedback {
+            present: false,
+            currentClusterSize: 0,
+            last_received_lsn: 0,
+            disk_consistent_lsn: 0,
+            remote_consistent_lsn: 0,
+            replytime: 0,
+            shard_number: 0,
+        };
+
         Self {
             os: args.os,
             safekeepers: RefCell::new(sk_conns),
@@ -232,15 +242,11 @@ impl SimulationApi {
             last_logged_commit_lsn: 0,
             shmem: UnsafeCell::new(walproposer::bindings::WalproposerShmemState {
                 mutex: 0,
-                feedback: PageserverFeedback {
-                    currentClusterSize: 0,
-                    last_received_lsn: 0,
-                    disk_consistent_lsn: 0,
-                    remote_consistent_lsn: 0,
-                    replytime: 0,
-                },
                 mineLastElectedTerm: 0,
                 backpressureThrottlingTime: pg_atomic_uint64 { value: 0 },
+                shard_ps_feedback: [empty_feedback; 128],
+                num_shards: 0,
+                min_ps_feedback: empty_feedback,
             }),
             config: args.config,
             event_set: RefCell::new(None),
@@ -598,7 +604,11 @@ impl ApiImpl for SimulationApi {
         }
     }
 
-    fn process_safekeeper_feedback(&mut self, wp: &mut walproposer::bindings::WalProposer) {
+    fn process_safekeeper_feedback(
+        &mut self,
+        wp: &mut walproposer::bindings::WalProposer,
+        _sk: &mut walproposer::bindings::Safekeeper,
+    ) {
         debug!("process_safekeeper_feedback, commit_lsn={}", wp.commitLsn);
         if wp.commitLsn > self.last_logged_commit_lsn {
             self.os.log_event(format!("commit_lsn;{}", wp.commitLsn));

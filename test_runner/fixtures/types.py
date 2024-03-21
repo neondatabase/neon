@@ -158,6 +158,9 @@ class TenantShardId:
     def __str__(self):
         return f"{self.tenant_id}-{self.shard_number:02x}{self.shard_count:02x}"
 
+    def __repr__(self):
+        return self.__str__()
+
     def _tuple(self) -> tuple[TenantId, int, int]:
         return (self.tenant_id, self.shard_number, self.shard_count)
 

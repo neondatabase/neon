@@ -204,7 +204,7 @@ def test_timeline_init_break_before_checkpoint_recreate(
     assert timeline_id == new_timeline_id
 
 
-def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilder):
+def test_timeline_create_break_after_dir_creation(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
@@ -214,9 +214,9 @@ def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilde
     old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 
-    # Introduce failpoint when creating a new timeline uninit mark, before any other files were created
-    pageserver_http.configure_failpoints(("after-timeline-uninit-mark-creation", "return"))
-    with pytest.raises(Exception, match="after-timeline-uninit-mark-creation"):
+    # Introduce failpoint when creating a new timeline, right after creating its directory
+    pageserver_http.configure_failpoints(("after-timeline-dir-creation", "return"))
+    with pytest.raises(Exception, match="after-timeline-dir-creation"):
         _ = pageserver_http.timeline_create(PgVersion.NOT_SET, tenant_id, TimelineId.generate())
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
