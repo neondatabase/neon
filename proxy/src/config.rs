@@ -28,6 +28,7 @@ pub struct ProxyConfig {
     pub redis_rps_limit: Vec<RateBucketInfo>,
     pub region: String,
     pub handshake_timeout: Duration,
+    pub aws_region: String,
 }
 
 #[derive(Debug)]

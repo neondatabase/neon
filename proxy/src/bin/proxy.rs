@@ -175,6 +175,9 @@ struct ProxyCliArgs {
     /// redis user_id, used in aws elasticache
     #[clap(long)]
     redis_user_id: Option<String>,
+    /// aws region to retrieve credentials
+    #[clap(long, default_value_t = String::new())]
+    aws_region: String,
     /// cache for `project_info` (use `size=0` to disable)
     #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
     project_info_cache: String,
@@ -238,9 +241,9 @@ async fn main() -> anyhow::Result<()> {
     let config = build_config(&args)?;
 
     info!("Authentication backend: {}", config.auth_backend);
-    info!("Using region: {}", config.region);
+    info!("Using region: {}", config.aws_region);
 
-    let region_provider = RegionProviderChain::default_provider().or_else(&*config.region); // Replace with your Redis region if needed
+    let region_provider = RegionProviderChain::default_provider().or_else(&*config.aws_region); // Replace with your Redis region if needed
     let provider_conf =
         ProviderConfig::without_region().with_region(region_provider.region().await);
     let aws_credentials_provider = {
@@ -266,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
         elasticache::AWSIRSAConfig::new(
-            config.region.clone(),
+            config.aws_region.clone(),
             args.redis_cluster_name,
             args.redis_user_id,
         ),
@@ -527,6 +530,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
+        aws_region: args.aws_region.clone(),
     }));
 
     Ok(config)
