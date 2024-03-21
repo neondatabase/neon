@@ -24,8 +24,6 @@
 //!  # });
 //!  ```
 
-use std::time::Instant;
-
 use tracing::warn;
 
 pub struct Poison<T> {
@@ -38,7 +36,7 @@ pub struct Poison<T> {
 enum State {
     Clean,
     Armed,
-    Poisoned { at: Instant },
+    Poisoned { at: chrono::DateTime<chrono::Utc> },
 }
 
 impl<T> Poison<T> {
@@ -88,7 +86,7 @@ impl<'a, T> Guard<'a, T> {
                 self.0.state = State::Clean;
             }
             State::Poisoned { at } => {
-                unreachable!("we fail check_and_arm() if it's in that state: {at:?}")
+                unreachable!("we fail check_and_arm() if it's in that state: {at}")
             }
         }
     }
@@ -102,12 +100,12 @@ impl<'a, T> Drop for Guard<'a, T> {
             }
             State::Armed => {
                 // still armed => poison it
-                let at = Instant::now();
+                let at = chrono::Utc::now();
                 self.0.state = State::Poisoned { at };
                 warn!(at=?at, "poisoning {}", self.0.what);
             }
             State::Poisoned { at } => {
-                unreachable!("we fail check_and_arm() if it's in that state: {at:?}")
+                unreachable!("we fail check_and_arm() if it's in that state: {at}")
             }
         }
     }
@@ -115,6 +113,9 @@ impl<'a, T> Drop for Guard<'a, T> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("poisoned at {at:?}: {what}")]
-    Poisoned { what: &'static str, at: Instant },
+    #[error("poisoned at {at}: {what}")]
+    Poisoned {
+        what: &'static str,
+        at: chrono::DateTime<chrono::Utc>,
+    },
 }
