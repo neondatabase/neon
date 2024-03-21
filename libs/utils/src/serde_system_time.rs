@@ -45,12 +45,11 @@ mod tests {
 
     #[test]
     fn test_serialize_deserialize() {
-        let ts = std::time::SystemTime::now();
-        let ts_str = format!("\"{}\"", humantime::format_rfc3339_millis(ts));
-        let st = SystemTime(ts);
-        let ser = serde_json::to_string(&st).unwrap();
-        assert_eq!(ts_str, ser);
-        let deser: SystemTime = serde_json::from_str(&ts_str).unwrap();
-        assert_eq!(to_millisecond_precision(st), deser);
+        let input = SystemTime(std::time::SystemTime::now());
+        let expected_serialized = format!("\"{}\"", humantime::format_rfc3339_millis(input.0));
+        let serialized = serde_json::to_string(&input).unwrap();
+        assert_eq!(expected_serialized, serialized);
+        let deserialized: SystemTime = serde_json::from_str(&expected_serialized).unwrap();
+        assert_eq!(to_millisecond_precision(input), deserialized);
     }
 }
