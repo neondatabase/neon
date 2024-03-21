@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
+    last_flush_lsn_upload
 )
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
@@ -16,6 +17,7 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.types import Lsn
 from fixtures.utils import run_pg_bench_small
+from fixtures.log_helper import log
 
 
 def test_tenant_s3_restore(
@@ -51,20 +53,30 @@ def test_tenant_s3_restore(
 
     # create two timelines one being the parent of another, both with non-trivial data
     parent = None
-    last_flush_lsns = []
+    last_flush_lsns = {}
 
-    for timeline in ["first", "second"]:
+    timeline_ids = {}
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as endpoint:
+        endpoint.safe_psql(f"CREATE TABLE created_main(id integer);")
+        flushed = last_flush_lsn_upload(env, endpoint, env.initial_tenant, env.initial_timeline)
+        log.info(f"Timeline main/{env.initial_timeline} last_flush_lsn: {flushed}");
+        timeline_ids["main"] = env.initial_timeline
+
+    for branch in ["first", "second"]:
         timeline_id = env.neon_cli.create_branch(
-            timeline, tenant_id=tenant_id, ancestor_branch_name=parent
+            branch, tenant_id=tenant_id, ancestor_branch_name=parent
         )
-        with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
+        timeline_ids[branch] = timeline_id
+        with env.endpoints.create_start(branch, tenant_id=tenant_id) as endpoint:
             run_pg_bench_small(pg_bin, endpoint.connstr())
-            endpoint.safe_psql(f"CREATE TABLE created_{timeline}(id integer);")
+            endpoint.safe_psql(f"CREATE TABLE created_{branch}(id integer);")
             last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
-            last_flush_lsns.append(last_flush_lsn)
+            last_flush_lsns[branch] = last_flush_lsn
+
+        log.info(f"Timeline {branch}/{timeline_id} last_flush_lsn: {last_flush_lsn}");
         ps_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
-        parent = timeline
+        parent = branch
 
     # These sleeps are important because they fend off differences in clocks between us and S3
     time.sleep(4)
@@ -107,12 +119,21 @@ def test_tenant_s3_restore(
 
     ps_http.tenant_attach(tenant_id, generation=generation)
     env.pageserver.quiesce_tenants()
+ 
+    for branch in ["main", "first", "second"]:
+        timeline_id = timeline_ids[branch]
+        detail = ps_http.timeline_detail(tenant_id, timeline_id)
+        log.info(f"Timeline {branch}/{timeline_id} detail: {detail}")
 
-    for i, timeline in enumerate(["first", "second"]):
-        with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
-            endpoint.safe_psql(f"SELECT * FROM created_{timeline};")
+        # We expect that we restored pageserver state up to last_flush_lsn, because we flushed that to
+        # remote storage before we set our recovery timestamp.
+        #assert Lsn(detail["last_record_lsn"]) >= last_flush_lsns[branch]
+
+        # Check that we can indeed read from this recovered timeline
+        with env.endpoints.create_start(branch, tenant_id=tenant_id) as endpoint:
+            endpoint.safe_psql(f"SELECT * FROM created_{branch};")
             last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
-            expected_last_flush_lsn = last_flush_lsns[i]
+            expected_last_flush_lsn = last_flush_lsns[branch]
             # There might be some activity that advances the lsn so we can't use a strict equality check
             assert last_flush_lsn >= expected_last_flush_lsn, "last_flush_lsn too old"
 

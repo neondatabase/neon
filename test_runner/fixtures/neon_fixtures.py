@@ -1617,6 +1617,8 @@ class NeonCli(AbstractNeonCli):
         if timeline_id is not None:
             cmd.extend(["--timeline-id", str(timeline_id)])
 
+        log.info(f"create_timeline: {cmd}")
+
         res = self.raw_cli(cmd)
         res.check_returncode()
 
@@ -1647,6 +1649,8 @@ class NeonCli(AbstractNeonCli):
             cmd.extend(["--ancestor-branch-name", ancestor_branch_name])
         if ancestor_start_lsn is not None:
             cmd.extend(["--ancestor-start-lsn", str(ancestor_start_lsn)])
+
+        log.info(f"create_branch: {cmd}")
 
         res = self.raw_cli(cmd)
         res.check_returncode()
