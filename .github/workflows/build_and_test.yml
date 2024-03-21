@@ -1121,10 +1121,16 @@ jobs:
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
-
-            # TODO: move deployPreprodRegion to release (`"$GITHUB_REF_NAME" == "release"` block), once Staging support different compute tag prefixes for different regions
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=true
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main \
+              -f deployPgSniRouter=false \
+              -f deployProxy=false \
+              -f deployStorage=true \
+              -f deployStorageBroker=true \
+              -f branch=main \
+              -f dockerTag=${{needs.tag.outputs.build-tag}} \
+              -f deployPreprodRegion=true
+
             gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main \
               -f deployPgSniRouter=false \
               -f deployProxy=false \
@@ -1133,6 +1139,15 @@ jobs:
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
+            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main \
+              -f deployPgSniRouter=true \
+              -f deployProxy=true \
+              -f deployStorage=false \
+              -f deployStorageBroker=false \
+              -f branch=main \
+              -f dockerTag=${{needs.tag.outputs.build-tag}} \
+              -f deployPreprodRegion=true
+
             gh workflow --repo neondatabase/aws run deploy-proxy-prod.yml --ref main \
               -f deployPgSniRouter=true \
               -f deployProxy=true \
