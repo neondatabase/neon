@@ -278,18 +278,14 @@ def test_sharding_split_smoke(
 
     # Check that no cancelled or errored reconciliations occurred: this test does no
     # failure injection and should run clean.
-    assert (
-        env.storage_controller.get_metric_value(
-            "storage_controller_reconcile_complete_total", filter={"status": "cancel"}
-        )
-        is None
+    cancelled_reconciles = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "cancel"}
     )
-    assert (
-        env.storage_controller.get_metric_value(
-            "storage_controller_reconcile_complete_total", filter={"status": "error"}
-        )
-        is None
+    errored_reconciles = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "error"}
     )
+    assert cancelled_reconciles is not None and int(cancelled_reconciles) == 0
+    assert errored_reconciles is not None and int(errored_reconciles) == 0
 
     env.storage_controller.consistency_check()
 
