@@ -210,6 +210,7 @@ struct ShardSplitParams {
     new_stripe_size: Option<ShardStripeSize>,
     targets: Vec<ShardSplitTarget>,
     policy: PlacementPolicy,
+    config: TenantConfig,
     shard_ident: ShardIdentity,
 }
 
@@ -2741,7 +2742,7 @@ impl Service {
         let detach_locations: Vec<(Node, TenantShardId)> = {
             let mut detach_locations = Vec::new();
             let mut locked = self.inner.write().unwrap();
-            let (nodes, tenants, _scheduler) = locked.parts_mut();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
 
             for (tenant_shard_id, shard) in
                 tenants.range_mut(TenantShardId::tenant_range(op.tenant_id))
@@ -2774,6 +2775,13 @@ impl Service {
 
                 tracing::info!("Restoring parent shard {tenant_shard_id}");
                 shard.splitting = SplitState::Idle;
+                if let Err(e) = shard.schedule(scheduler) {
+                    // If this shard can't be scheduled now (perhaps due to offline nodes or
+                    // capacity issues), that must not prevent us rolling back a split.  In this
+                    // case it should be eventually scheduled in the background.
+                    tracing::warn!("Failed to schedule {tenant_shard_id} during shard abort: {e}")
+                }
+
                 self.maybe_reconcile_shard(shard, nodes);
             }
 
@@ -2865,7 +2873,7 @@ impl Service {
                 .map(|(shard_id, _)| *shard_id)
                 .collect::<Vec<_>>();
 
-            let (_nodes, tenants, scheduler) = locked.parts_mut();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
@@ -2932,6 +2940,8 @@ impl Service {
                         // find a secondary (e.g. because cluster is overloaded).
                         tracing::warn!("Failed to schedule child shard {child}: {e}");
                     }
+                    // In the background, attach secondary locations for the new shards
+                    self.maybe_reconcile_shard(&mut child_state, nodes);
 
                     tenants.insert(child, child_state);
                     response.new_shards.push(child);
@@ -2996,6 +3006,7 @@ impl Service {
         )));
 
         let mut policy = None;
+        let mut config = None;
         let mut shard_ident = None;
         // Validate input, and calculate which shards we will create
         let (old_shard_count, targets) =
@@ -3052,6 +3063,9 @@ impl Service {
                     if shard_ident.is_none() {
                         shard_ident = Some(shard.shard);
                     }
+                    if config.is_none() {
+                        config = Some(shard.config.clone());
+                    }
 
                     if tenant_shard_id.shard_count.count() == split_req.new_shard_count {
                         tracing::info!(
@@ -3069,8 +3083,6 @@ impl Service {
                     let node = pageservers
                         .get(&node_id)
                         .expect("Pageservers may not be deleted while referenced");
-
-                    // TODO: if any reconciliation is currently in progress for this shard, wait for it.
 
                     targets.push(ShardSplitTarget {
                         parent_id: *tenant_shard_id,
@@ -3114,6 +3126,7 @@ impl Service {
             shard_ident.unwrap()
         };
         let policy = policy.unwrap();
+        let config = config.unwrap();
 
         Ok(ShardSplitAction::Split(ShardSplitParams {
             old_shard_count,
@@ -3121,6 +3134,7 @@ impl Service {
             new_stripe_size: split_req.new_stripe_size,
             targets,
             policy,
+            config,
             shard_ident,
         }))
     }
@@ -3140,10 +3154,48 @@ impl Service {
             old_shard_count,
             new_shard_count,
             new_stripe_size,
-            targets,
+            mut targets,
             policy,
+            config,
             shard_ident,
         } = params;
+
+        // Drop any secondary locations: pageservers do not support splitting these, and in any case the
+        // end-state for a split tenant will usually be to have secondary locations on different nodes.
+        // The reconciliation calls in this block also implicitly cancel+barrier wrt any ongoing reconciliation
+        // at the time of split.
+        let waiters = {
+            let mut locked = self.inner.write().unwrap();
+            let mut waiters = Vec::new();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
+            for target in &mut targets {
+                let Some(shard) = tenants.get_mut(&target.parent_id) else {
+                    // Paranoia check: this shouldn't happen: we have the oplock for this tenant ID.
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Shard {} not found",
+                        target.parent_id
+                    )));
+                };
+
+                if shard.intent.get_attached() != &Some(target.node.get_id()) {
+                    // Paranoia check: this shouldn't happen: we have the oplock for this tenant ID.
+                    return Err(ApiError::Conflict(format!(
+                        "Shard {} unexpectedly rescheduled during split",
+                        target.parent_id
+                    )));
+                }
+
+                // Irrespective of PlacementPolicy, clear secondary locations from intent
+                shard.intent.clear_secondary(scheduler);
+
+                // Run Reconciler to execute detach fo secondary locations.
+                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                    waiters.push(waiter);
+                }
+            }
+            waiters
+        };
+        self.await_waiters(waiters, RECONCILE_TIMEOUT).await?;
 
         // Before creating any new child shards in memory or on the pageservers, persist them: this
         // enables us to ensure that we will always be able to clean up if something goes wrong.  This also
@@ -3173,8 +3225,7 @@ impl Service {
                     generation: None,
                     generation_pageserver: Some(target.node.get_id().0 as i64),
                     placement_policy: serde_json::to_string(&policy).unwrap(),
-                    // TODO: get the config out of the map
-                    config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+                    config: serde_json::to_string(&config).unwrap(),
                     splitting: SplitState::Splitting,
                 });
             }
@@ -3363,6 +3414,11 @@ impl Service {
                         // If we were already attached to something, demote that to a secondary
                         if let Some(old_attached) = old_attached {
                             if n > 0 {
+                                // Remove other secondaries to make room for the location we'll demote
+                                while shard.intent.get_secondary().len() >= n {
+                                    shard.intent.pop_secondary(scheduler);
+                                }
+
                                 shard.intent.push_secondary(scheduler, old_attached);
                             }
                         }

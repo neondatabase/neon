@@ -118,6 +118,15 @@ impl Reconciler {
         flush_ms: Option<Duration>,
         lazy: bool,
     ) -> Result<(), ReconcileError> {
+        if !node.is_available() && config.mode == LocationConfigMode::Detached {
+            // Attempts to detach from offline nodes may be imitated without doing I/O: a node which is offline
+            // will get fully reconciled wrt the shard's intent state when it is reactivated, irrespective of
+            // what we put into `observed`, in [`crate::service::Service::node_activate_reconcile`]
+            tracing::info!("Node {node} is unavailable during detach: proceeding anyway, it will be detached on next activation");
+            self.observed.locations.remove(&node.get_id());
+            return Ok(());
+        }
+
         self.observed
             .locations
             .insert(node.get_id(), ObservedStateLocation { conf: None });
@@ -150,9 +159,16 @@ impl Reconciler {
         };
         tracing::info!("location_config({node}) complete: {:?}", config);
 
-        self.observed
-            .locations
-            .insert(node.get_id(), ObservedStateLocation { conf: Some(config) });
+        match config.mode {
+            LocationConfigMode::Detached => {
+                self.observed.locations.remove(&node.get_id());
+            }
+            _ => {
+                self.observed
+                    .locations
+                    .insert(node.get_id(), ObservedStateLocation { conf: Some(config) });
+            }
+        }
 
         Ok(())
     }
