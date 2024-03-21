@@ -1394,7 +1394,8 @@ impl Service {
             incremented_generations.len()
         );
 
-        // Apply the updated generation to our in-memory state
+        // Apply the updated generation to our in-memory state, and
+        // gather discover secondary locations.
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, scheduler) = locked.parts_mut();
 
@@ -1402,62 +1403,65 @@ impl Service {
             tenants: Vec::new(),
         };
 
-        for (tenant_shard_id, new_gen) in incremented_generations {
-            response.tenants.push(ReAttachResponseTenant {
-                id: tenant_shard_id,
-                gen: new_gen.into().unwrap(),
-            });
-            // Apply the new generation number to our in-memory state
-            let shard_state = tenants.get_mut(&tenant_shard_id);
-            let Some(shard_state) = shard_state else {
-                // Not fatal.  This edge case requires a re-attach to happen
-                // between inserting a new tenant shard in to the database, and updating our in-memory
-                // state to know about the shard, _and_ that the state inserted to the database referenced
-                // a pageserver.  Should never happen, but handle it rather than panicking, since it should
-                // be harmless.
-                tracing::error!(
-                    "Shard {} is in database for node {} but not in-memory state",
-                    tenant_shard_id,
-                    reattach_req.node_id
-                );
-                continue;
-            };
+        // TODO: cancel/restart any running reconciliation for this tenant, it might be trying
+        // to call location_conf API with an old generation.  Wait for cancellation to complete
+        // before responding to this request.  Requires well implemented CancellationToken logic
+        // all the way to where we call location_conf.  Even then, there can still be a location_conf
+        // request in flight over the network: TODO handle that by making location_conf API refuse
+        // to go backward in generations.
 
-            // If [`Persistence::re_attach`] selected this shard, it must have alread
-            // had a generation set.
-            debug_assert!(shard_state.generation.is_some());
-            let Some(old_gen) = shard_state.generation else {
-                // Should never happen:  would only return incremented generation
-                // for a tenant that already had a non-null generation.
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "Generation must be set while re-attaching"
-                )));
-            };
-            shard_state.generation = Some(std::cmp::max(old_gen, new_gen));
-            if let Some(observed) = shard_state
-                .observed
-                .locations
-                .get_mut(&reattach_req.node_id)
-            {
-                if let Some(conf) = observed.conf.as_mut() {
-                    conf.generation = new_gen.into();
+        // Scan through all shards, applying updates for ones where we updated generation
+        // and identifying shards that intend to have a secondary location on this node.
+        for (tenant_shard_id, shard) in tenants {
+            if let Some(new_gen) = incremented_generations.get(tenant_shard_id) {
+                let new_gen = *new_gen;
+                response.tenants.push(ReAttachResponseTenant {
+                    id: *tenant_shard_id,
+                    gen: Some(new_gen.into().unwrap()),
+                    // A tenant is only put into multi or stale modes in the middle of a [`Reconciler::live_migrate`]
+                    // execution.  If a pageserver is restarted during that process, then the reconcile pass will
+                    // fail, and start from scratch, so it doesn't make sense for us to try and preserve
+                    // the stale/multi states at this point.
+                    mode: LocationConfigMode::AttachedSingle,
+                });
+
+                shard.generation = std::cmp::max(shard.generation, Some(new_gen));
+                if let Some(observed) = shard.observed.locations.get_mut(&reattach_req.node_id) {
+                    // Why can we update `observed` even though we're not sure our response will be received
+                    // by the pageserver?  Because the pageserver will not proceed with startup until
+                    // it has processed response: if it loses it, we'll see another request and increment
+                    // generation again, avoiding any uncertainty about dirtiness of tenant's state.
+                    if let Some(conf) = observed.conf.as_mut() {
+                        conf.generation = new_gen.into();
+                    }
+                } else {
+                    // This node has no observed state for the shard: perhaps it was offline
+                    // when the pageserver restarted.  Insert a None, so that the Reconciler
+                    // will be prompted to learn the location's state before it makes changes.
+                    shard
+                        .observed
+                        .locations
+                        .insert(reattach_req.node_id, ObservedStateLocation { conf: None });
                 }
-            } else {
-                // This node has no observed state for the shard: perhaps it was offline
-                // when the pageserver restarted.  Insert a None, so that the Reconciler
-                // will be prompted to learn the location's state before it makes changes.
-                shard_state
-                    .observed
-                    .locations
-                    .insert(reattach_req.node_id, ObservedStateLocation { conf: None });
-            }
+            } else if shard.intent.get_secondary().contains(&reattach_req.node_id) {
+                // Ordering: pageserver will not accept /location_config requests until it has
+                // finished processing the response from re-attach.  So we can update our in-memory state
+                // now, and be confident that we are not stamping on the result of some later location config.
+                // TODO: however, we are not strictly ordered wrt ReconcileResults queue,
+                // so we might update observed state here, and then get over-written by some racing
+                // ReconcileResult.  The impact is low however, since we have set state on pageserver something
+                // that matches intent, so worst case if we race then we end up doing a spurious reconcile.
 
-            // TODO: cancel/restart any running reconciliation for this tenant, it might be trying
-            // to call location_conf API with an old generation.  Wait for cancellation to complete
-            // before responding to this request.  Requires well implemented CancellationToken logic
-            // all the way to where we call location_conf.  Even then, there can still be a location_conf
-            // request in flight over the network: TODO handle that by making location_conf API refuse
-            // to go backward in generations.
+                response.tenants.push(ReAttachResponseTenant {
+                    id: *tenant_shard_id,
+                    gen: None,
+                    mode: LocationConfigMode::Secondary,
+                });
+
+                // We must not update observed, because we have no guarantee that our
+                // response will be received by the pageserver. This could leave it
+                // falsely dirty, but the resulting reconcile should be idempotent.
+            }
         }
 
         // We consider a node Active once we have composed a re-attach response, but we
@@ -3446,7 +3450,7 @@ impl Service {
         if let Some(waiter) = waiter {
             waiter.wait_timeout(RECONCILE_TIMEOUT).await?;
         } else {
-            tracing::warn!("Migration is a no-op");
+            tracing::info!("Migration is a no-op");
         }
 
         Ok(TenantShardMigrateResponse {})
