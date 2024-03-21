@@ -952,9 +952,9 @@ def test_sharding_service_re_attach(neon_env_builder: NeonEnvBuilder):
 
     # We'll have two tenants.
     tenant_a = TenantId.generate()
-    env.neon_cli.create_tenant(tenant_a, placement_policy='{"Double":1}')
+    env.neon_cli.create_tenant(tenant_a, placement_policy='{"Attached":1}')
     tenant_b = TenantId.generate()
-    env.neon_cli.create_tenant(tenant_b, placement_policy='{"Double":1}')
+    env.neon_cli.create_tenant(tenant_b, placement_policy='{"Attached":1}')
 
     # Each pageserver will have one attached and one secondary location
     env.storage_controller.tenant_shard_migrate(
