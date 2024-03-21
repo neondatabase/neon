@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{metrics, persistence::TenantShardPersistence};
+use crate::{
+    metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
+    persistence::TenantShardPersistence,
+};
 use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
@@ -718,7 +721,10 @@ impl TenantState {
         let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
                                                         shard_id=%reconciler.tenant_shard_id.shard_slug());
-        metrics::RECONCILER.spawned.inc();
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_reconcile_spawn
+            .inc();
         let result_tx = result_tx.clone();
         let join_handle = tokio::task::spawn(
             async move {
@@ -736,10 +742,12 @@ impl TenantState {
                 // TODO: wrap all remote API operations in cancellation check
                 // as well.
                 if reconciler.cancel.is_cancelled() {
-                    metrics::RECONCILER
-                        .complete
-                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL])
-                        .inc();
+                    metrics::METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_reconcile_complete
+                        .inc(ReconcileCompleteLabelGroup {
+                            status: ReconcileOutcome::Cancel,
+                        });
                     return;
                 }
 
@@ -754,18 +762,18 @@ impl TenantState {
                 }
 
                 // Update result counter
-                match &result {
-                    Ok(_) => metrics::RECONCILER
-                        .complete
-                        .with_label_values(&[metrics::ReconcilerMetrics::SUCCESS]),
-                    Err(ReconcileError::Cancel) => metrics::RECONCILER
-                        .complete
-                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL]),
-                    Err(_) => metrics::RECONCILER
-                        .complete
-                        .with_label_values(&[metrics::ReconcilerMetrics::ERROR]),
-                }
-                .inc();
+                let outcome_label = match &result {
+                    Ok(_) => ReconcileOutcome::Success,
+                    Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
+                    Err(_) => ReconcileOutcome::Error,
+                };
+
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_reconcile_complete
+                    .inc(ReconcileCompleteLabelGroup {
+                        status: outcome_label,
+                    });
 
                 result_tx
                     .send(ReconcileResult {

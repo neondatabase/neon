@@ -4,10 +4,11 @@
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use itertools::Itertools;
 use pageserver_api::key::Key;
-use pageserver_api::models::ShardParameters;
+use pageserver_api::models::{LocationConfigMode, ShardParameters};
 use pageserver_api::shard::{
     ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
 };
+use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -122,6 +123,46 @@ pub(crate) enum ShardSelector {
     First,
     /// Pick the shard that holds this key
     Page(Key),
+}
+
+/// A convenience for use with the re_attach ControlPlaneClient function: rather
+/// than the serializable struct, we build this enum that encapsulates
+/// the invariant that attached tenants always have generations.
+///
+/// This represents the subset of a LocationConfig that we receive during re-attach.
+pub(crate) enum TenantStartupMode {
+    Attached((AttachmentMode, Generation)),
+    Secondary,
+}
+
+impl TenantStartupMode {
+    /// Return the generation & mode that should be used when starting
+    /// this tenant.
+    ///
+    /// If this returns None, the re-attach struct is in an invalid state and
+    /// should be ignored in the response.
+    fn from_reattach_tenant(rart: ReAttachResponseTenant) -> Option<Self> {
+        match (rart.mode, rart.gen) {
+            (LocationConfigMode::Detached, _) => None,
+            (LocationConfigMode::Secondary, _) => Some(Self::Secondary),
+            (LocationConfigMode::AttachedMulti, Some(g)) => {
+                Some(Self::Attached((AttachmentMode::Multi, Generation::new(g))))
+            }
+            (LocationConfigMode::AttachedSingle, Some(g)) => {
+                Some(Self::Attached((AttachmentMode::Single, Generation::new(g))))
+            }
+            (LocationConfigMode::AttachedStale, Some(g)) => {
+                Some(Self::Attached((AttachmentMode::Stale, Generation::new(g))))
+            }
+            _ => {
+                tracing::warn!(
+                    "Received invalid re-attach state for tenant {}: {rart:?}",
+                    rart.id
+                );
+                None
+            }
+        }
+    }
 }
 
 impl TenantsMap {
@@ -270,7 +311,7 @@ pub struct TenantManager {
 
 fn emergency_generations(
     tenant_confs: &HashMap<TenantShardId, anyhow::Result<LocationConf>>,
-) -> HashMap<TenantShardId, Generation> {
+) -> HashMap<TenantShardId, TenantStartupMode> {
     tenant_confs
         .iter()
         .filter_map(|(tid, lc)| {
@@ -278,12 +319,15 @@ fn emergency_generations(
                 Ok(lc) => lc,
                 Err(_) => return None,
             };
-            let gen = match &lc.mode {
-                LocationMode::Attached(alc) => Some(alc.generation),
-                LocationMode::Secondary(_) => None,
-            };
-
-            gen.map(|g| (*tid, g))
+            Some((
+                *tid,
+                match &lc.mode {
+                    LocationMode::Attached(alc) => {
+                        TenantStartupMode::Attached((alc.attach_mode, alc.generation))
+                    }
+                    LocationMode::Secondary(_) => TenantStartupMode::Secondary,
+                },
+            ))
         })
         .collect()
 }
@@ -293,7 +337,7 @@ async fn init_load_generations(
     tenant_confs: &HashMap<TenantShardId, anyhow::Result<LocationConf>>,
     resources: &TenantSharedResources,
     cancel: &CancellationToken,
-) -> anyhow::Result<Option<HashMap<TenantShardId, Generation>>> {
+) -> anyhow::Result<Option<HashMap<TenantShardId, TenantStartupMode>>> {
     let generations = if conf.control_plane_emergency_mode {
         error!(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
@@ -303,7 +347,12 @@ async fn init_load_generations(
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach(conf).await {
-            Ok(tenants) => tenants,
+            Ok(tenants) => tenants
+                .into_iter()
+                .flat_map(|(id, rart)| {
+                    TenantStartupMode::from_reattach_tenant(rart).map(|tsm| (id, tsm))
+                })
+                .collect(),
             Err(RetryForeverError::ShuttingDown) => {
                 anyhow::bail!("Shut down while waiting for control plane re-attach response")
             }
@@ -321,9 +370,17 @@ async fn init_load_generations(
     // Must only do this if remote storage is enabled, otherwise deletion queue
     // is not running and channel push will fail.
     if resources.remote_storage.is_some() {
-        resources
-            .deletion_queue_client
-            .recover(generations.clone())?;
+        let attached_tenants = generations
+            .iter()
+            .flat_map(|(id, start_mode)| {
+                match start_mode {
+                    TenantStartupMode::Attached((_mode, generation)) => Some(generation),
+                    TenantStartupMode::Secondary => None,
+                }
+                .map(|gen| (*id, *gen))
+            })
+            .collect();
+        resources.deletion_queue_client.recover(attached_tenants)?;
     }
 
     Ok(Some(generations))
@@ -489,9 +546,8 @@ pub async fn init_tenant_mgr(
     // Scan local filesystem for attached tenants
     let tenant_configs = init_load_tenant_configs(conf).await?;
 
-    // Determine which tenants are to be attached
-    let tenant_generations =
-        init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
+    // Determine which tenants are to be secondary or attached, and in which generation
+    let tenant_modes = init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
 
     tracing::info!(
         "Attaching {} tenants at startup, warming up {} at a time",
@@ -521,97 +577,102 @@ pub async fn init_tenant_mgr(
             }
         };
 
-        let generation = if let Some(generations) = &tenant_generations {
+        // FIXME: if we were attached, and get demoted to secondary on re-attach, we
+        // don't have a place to get a config.
+        // (https://github.com/neondatabase/neon/issues/5377)
+        const DEFAULT_SECONDARY_CONF: SecondaryLocationConfig =
+            SecondaryLocationConfig { warm: true };
+
+        // Update the location config according to the re-attach response
+        if let Some(tenant_modes) = &tenant_modes {
             // We have a generation map: treat it as the authority for whether
             // this tenant is really attached.
-            if let Some(gen) = generations.get(&tenant_shard_id) {
-                if let LocationMode::Attached(attached) = &location_conf.mode {
-                    if attached.generation > *gen {
+            match tenant_modes.get(&tenant_shard_id) {
+                None => {
+                    info!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Detaching tenant, control plane omitted it in re-attach response");
+                    if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
+                        error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                            "Failed to remove detached tenant directory '{tenant_dir_path}': {e:?}",
+                        );
+                    }
+
+                    // We deleted local content: move on to next tenant, don't try and spawn this one.
+                    continue;
+                }
+                Some(TenantStartupMode::Secondary) => {
+                    if !matches!(location_conf.mode, LocationMode::Secondary(_)) {
+                        location_conf.mode = LocationMode::Secondary(DEFAULT_SECONDARY_CONF);
+                    }
+                }
+                Some(TenantStartupMode::Attached((attach_mode, generation))) => {
+                    let old_gen_higher = match &location_conf.mode {
+                        LocationMode::Attached(AttachedLocationConfig {
+                            generation: old_generation,
+                            attach_mode: _attach_mode,
+                        }) => {
+                            if old_generation > generation {
+                                Some(old_generation)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(old_generation) = old_gen_higher {
                         tracing::error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
-                            "Control plane gave decreasing generation ({gen:?}) in re-attach response for tenant that was attached in generation {:?}, demoting to secondary",
-                            attached.generation
+                            "Control plane gave decreasing generation ({generation:?}) in re-attach response for tenant that was attached in generation {:?}, demoting to secondary",
+                            old_generation
                         );
 
                         // We cannot safely attach this tenant given a bogus generation number, but let's avoid throwing away
                         // local disk content: demote to secondary rather than detaching.
-                        tenants.insert(
-                            tenant_shard_id,
-                            TenantSlot::Secondary(SecondaryTenant::new(
-                                tenant_shard_id,
-                                location_conf.shard,
-                                location_conf.tenant_conf.clone(),
-                                &SecondaryLocationConfig { warm: false },
-                            )),
-                        );
+                        location_conf.mode = LocationMode::Secondary(DEFAULT_SECONDARY_CONF);
+                    } else {
+                        location_conf.attach_in_generation(*attach_mode, *generation);
                     }
                 }
-                *gen
-            } else {
-                match &location_conf.mode {
-                    LocationMode::Secondary(secondary_config) => {
-                        // We do not require the control plane's permission for secondary mode
-                        // tenants, because they do no remote writes and hence require no
-                        // generation number
-                        info!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Loaded tenant in secondary mode");
-                        tenants.insert(
-                            tenant_shard_id,
-                            TenantSlot::Secondary(SecondaryTenant::new(
-                                tenant_shard_id,
-                                location_conf.shard,
-                                location_conf.tenant_conf,
-                                secondary_config,
-                            )),
-                        );
-                    }
-                    LocationMode::Attached(_) => {
-                        // TODO: augment re-attach API to enable the control plane to
-                        // instruct us about secondary attachments.  That way, instead of throwing
-                        // away local state, we can gracefully fall back to secondary here, if the control
-                        // plane tells us so.
-                        // (https://github.com/neondatabase/neon/issues/5377)
-                        info!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Detaching tenant, control plane omitted it in re-attach response");
-                        if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
-                            error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
-                                "Failed to remove detached tenant directory '{tenant_dir_path}': {e:?}",
-                            );
-                        }
-                    }
-                };
-
-                continue;
             }
         } else {
             // Legacy mode: no generation information, any tenant present
             // on local disk may activate
             info!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Starting tenant in legacy mode, no generation",);
-            Generation::none()
         };
 
         // Presence of a generation number implies attachment: attach the tenant
         // if it wasn't already, and apply the generation number.
-        location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
 
         let shard_identity = location_conf.shard;
-        match tenant_spawn(
-            conf,
-            tenant_shard_id,
-            &tenant_dir_path,
-            resources.clone(),
-            AttachedTenantConf::try_from(location_conf)?,
-            shard_identity,
-            Some(init_order.clone()),
-            &TENANTS,
-            SpawnMode::Lazy,
-            &ctx,
-        ) {
-            Ok(tenant) => {
-                tenants.insert(tenant_shard_id, TenantSlot::Attached(tenant));
+        let slot = match location_conf.mode {
+            LocationMode::Attached(attached_conf) => {
+                match tenant_spawn(
+                    conf,
+                    tenant_shard_id,
+                    &tenant_dir_path,
+                    resources.clone(),
+                    AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
+                    shard_identity,
+                    Some(init_order.clone()),
+                    &TENANTS,
+                    SpawnMode::Lazy,
+                    &ctx,
+                ) {
+                    Ok(tenant) => TenantSlot::Attached(tenant),
+                    Err(e) => {
+                        error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Failed to start tenant: {e:#}");
+                        continue;
+                    }
+                }
             }
-            Err(e) => {
-                error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Failed to start tenant: {e:#}");
-            }
-        }
+            LocationMode::Secondary(secondary_conf) => TenantSlot::Secondary(SecondaryTenant::new(
+                tenant_shard_id,
+                shard_identity,
+                location_conf.tenant_conf,
+                &secondary_conf,
+            )),
+        };
+
+        tenants.insert(tenant_shard_id, slot);
     }
 
     info!("Processed {} local tenants at startup", tenants.len());
@@ -2142,7 +2203,7 @@ pub(crate) async fn load_tenant(
 
     let mut location_conf =
         Tenant::load_tenant_config(conf, &tenant_shard_id).map_err(TenantMapInsertError::Other)?;
-    location_conf.attach_in_generation(generation);
+    location_conf.attach_in_generation(AttachmentMode::Single, generation);
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
 

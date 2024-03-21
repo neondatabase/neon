@@ -36,6 +36,7 @@ use tracing::*;
 use utils::{
     bin_ser::BeSer,
     sync::gate::{Gate, GateGuard},
+    vec_map::VecMap,
 };
 
 use std::ops::{Deref, Range};
@@ -4616,16 +4617,15 @@ impl<'a> TimelineWriter<'a> {
         }
     }
 
-    /// Put a batch keys at the specified Lsns.
+    /// Put a batch of keys at the specified Lsns.
     ///
-    /// The batch should be sorted by Lsn such that it's safe
-    /// to roll the open layer mid batch.
+    /// The batch is sorted by Lsn (enforced by usage of [`utils::vec_map::VecMap`].
     pub(crate) async fn put_batch(
         &mut self,
-        batch: Vec<(Key, Lsn, Value)>,
+        batch: VecMap<Lsn, (Key, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for (key, lsn, val) in batch {
+        for (lsn, (key, val)) in batch {
             self.put(key, lsn, &val, ctx).await?
         }
 
