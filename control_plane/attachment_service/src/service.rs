@@ -3280,7 +3280,7 @@ impl Service {
         if let Some(waiter) = waiter {
             waiter.wait_timeout(RECONCILE_TIMEOUT).await?;
         } else {
-            tracing::warn!("Migration is a no-op");
+            tracing::info!("Migration is a no-op");
         }
 
         Ok(TenantShardMigrateResponse {})
