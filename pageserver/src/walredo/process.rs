@@ -171,9 +171,12 @@ impl WalRedoProcess {
             .id()
     }
 
-    // Apply given WAL records ('records') over an old page image. Returns
-    // new page image.
-    //
+    /// Apply given WAL records ('records') over an old page image. Returns
+    /// new page image.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// Cancellation safe.
     #[instrument(skip_all, level = tracing::Level::DEBUG, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
     pub(crate) async fn apply_wal_records(
         &self,
@@ -223,6 +226,9 @@ impl WalRedoProcess {
         res
     }
 
+    /// # Cancel-Safety
+    ///
+    /// Cancellation safe (enforced through the use of [`utils::poison::Poison`]).
     async fn apply_wal_records0(&self, writebuf: &[u8]) -> anyhow::Result<Bytes> {
         let request_no = {
             let mut lock_guard = self.stdin.lock().await;

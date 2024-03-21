@@ -174,6 +174,9 @@ impl PostgresRedoManager {
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
+    /// # Cancel-Safety
+    ///
+    /// Cancellation safe.
     #[allow(clippy::too_many_arguments)]
     async fn apply_batch_postgres(
         &self,
