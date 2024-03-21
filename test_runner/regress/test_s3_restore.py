@@ -60,6 +60,7 @@ def test_tenant_s3_restore(
         endpoint.safe_psql(f"CREATE TABLE created_main(id integer);")
         flushed = last_flush_lsn_upload(env, endpoint, env.initial_tenant, env.initial_timeline)
         log.info(f"Timeline main/{env.initial_timeline} last_flush_lsn: {flushed}");
+        last_flush_lsns["main"] = flushed
         timeline_ids["main"] = env.initial_timeline
 
     for branch in ["first", "second"]:
