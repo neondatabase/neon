@@ -408,3 +408,214 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+    use provider::AuthSecret;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::{
+        auth::{ComputeUserInfoMaybeEndpoint, IpPattern},
+        config::AuthenticationConfig,
+        console::{
+            self,
+            provider::{self, CachedAllowedIps, CachedRoleSecret},
+            CachedNodeInfo,
+        },
+        context::RequestMonitoring,
+        proxy::NeonOptions,
+        scram::ServerSecret,
+        stream::{PqStream, Stream},
+    };
+
+    use super::auth_quirks;
+
+    struct Auth {
+        ips: Vec<IpPattern>,
+        secret: AuthSecret,
+    }
+
+    impl console::Api for Auth {
+        async fn get_role_secret(
+            &self,
+            _ctx: &mut RequestMonitoring,
+            _user_info: &super::ComputeUserInfo,
+        ) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError> {
+            Ok(CachedRoleSecret::new_uncached(Some(self.secret.clone())))
+        }
+
+        async fn get_allowed_ips_and_secret(
+            &self,
+            _ctx: &mut RequestMonitoring,
+            _user_info: &super::ComputeUserInfo,
+        ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>
+        {
+            Ok((
+                CachedAllowedIps::new_uncached(Arc::new(self.ips.clone())),
+                Some(CachedRoleSecret::new_uncached(Some(self.secret.clone()))),
+            ))
+        }
+
+        async fn wake_compute(
+            &self,
+            _ctx: &mut RequestMonitoring,
+            _user_info: &super::ComputeUserInfo,
+        ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
+            unimplemented!()
+        }
+    }
+
+    static CONFIG: &AuthenticationConfig = &AuthenticationConfig {
+        scram_protocol_timeout: std::time::Duration::from_secs(5),
+    };
+
+    #[tokio::test]
+    async fn auth_quirks_scram() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        let mut stream = PqStream::new(Stream::from_raw(server));
+
+        let mut ctx = RequestMonitoring::test();
+        let api = Auth {
+            ips: vec![],
+            secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
+        };
+
+        let user_info = ComputeUserInfoMaybeEndpoint {
+            user: "conrad".into(),
+            endpoint_id: Some("endpoint".into()),
+            options: NeonOptions::default(),
+        };
+
+        let handle = tokio::spawn(async move {
+            let mut scram = ScramSha256::new(b"my-secret-password", ChannelBinding::unsupported());
+
+            let mut buf = [0; 1024];
+
+            // server should offer scram
+            let n = client.read(&mut buf).await.unwrap();
+            assert_eq!(
+                &buf[..n],
+                b"R\x00\x00\x00\x17\x00\x00\x00\x0aSCRAM-SHA-256\0\0"
+            );
+
+            // client accepts scram and sends the client-first-message
+            let method = b"SCRAM-SHA-256";
+            let message = scram.message();
+            let message_len = message.len() as u32;
+            let pw_message_len = (method.len() + 4 + 1 + 4) as u32 + message_len;
+            client.write_all(b"p").await.unwrap();
+            client
+                .write_all(&pw_message_len.to_be_bytes())
+                .await
+                .unwrap();
+            client.write_all(method).await.unwrap();
+            client.write_all(b"\0").await.unwrap();
+            client.write_all(&message_len.to_be_bytes()).await.unwrap();
+            client.write_all(message).await.unwrap();
+
+            // server response with server-first-message
+            let n = client.read(&mut buf).await.unwrap();
+            scram.update(&buf[9..n]).await.unwrap();
+
+            // client response with client-final-message
+            let message = scram.message();
+            let message_len = message.len() as u32 + 4;
+            client.write_all(b"p").await.unwrap();
+            client.write_all(&message_len.to_be_bytes()).await.unwrap();
+            client.write_all(message).await.unwrap();
+
+            // server response with server-final-message
+            let n = client.read(&mut buf).await.unwrap();
+            scram.finish(&buf[9..n]).unwrap();
+        });
+
+        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, false, CONFIG)
+            .await
+            .unwrap();
+
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_quirks_cleartext() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        let mut stream = PqStream::new(Stream::from_raw(server));
+
+        let mut ctx = RequestMonitoring::test();
+        let api = Auth {
+            ips: vec![],
+            secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
+        };
+
+        let user_info = ComputeUserInfoMaybeEndpoint {
+            user: "conrad".into(),
+            endpoint_id: Some("endpoint".into()),
+            options: NeonOptions::default(),
+        };
+
+        let handle = tokio::spawn(async move {
+            let mut buf = [0; 1024];
+
+            // server should offer cleartext
+            let n = client.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"R\x00\x00\x00\x08\x00\x00\x00\x03");
+
+            // client responds with password
+            let password = b"my-secret-password\0";
+            let password_len = password.len() as u32 + 4;
+            client.write_all(b"p").await.unwrap();
+            client.write_all(&password_len.to_be_bytes()).await.unwrap();
+            client.write_all(password).await.unwrap();
+        });
+
+        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
+            .await
+            .unwrap();
+
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_quirks_password_hack() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        let mut stream = PqStream::new(Stream::from_raw(server));
+
+        let mut ctx = RequestMonitoring::test();
+        let api = Auth {
+            ips: vec![],
+            secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
+        };
+
+        let user_info = ComputeUserInfoMaybeEndpoint {
+            user: "conrad".into(),
+            endpoint_id: None,
+            options: NeonOptions::default(),
+        };
+
+        let handle = tokio::spawn(async move {
+            let mut buf = [0; 1024];
+
+            // server should offer cleartext
+            let n = client.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"R\x00\x00\x00\x08\x00\x00\x00\x03");
+
+            // client responds with password and endpoint
+            let password = b"endpoint=my-endpoint;my-secret-password\0";
+            let password_len = password.len() as u32 + 4;
+            client.write_all(b"p").await.unwrap();
+            client.write_all(&password_len.to_be_bytes()).await.unwrap();
+            client.write_all(password).await.unwrap();
+        });
+
+        let creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
+            .await
+            .unwrap();
+
+        assert_eq!(creds.info.endpoint, "my-endpoint");
+
+        handle.await.unwrap();
+    }
+}
