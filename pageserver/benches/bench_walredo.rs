@@ -126,7 +126,7 @@ fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration 
     }
 
     rt.block_on(async move {
-        let mut total_wallclock_time = std::time::Duration::from_millis(0);
+        let mut total_wallclock_time = Duration::ZERO;
         while let Some(res) = tasks.join_next().await {
             total_wallclock_time += res.unwrap();
         }
