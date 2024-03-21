@@ -24,7 +24,7 @@ use tracing::{error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
-    locks: &'static ApiLocks,
+    pub locks: &'static ApiLocks,
     jwt: String,
 }
 
@@ -56,6 +56,15 @@ impl Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
+        if !self
+            .caches
+            .endpoints_cache
+            .is_valid(ctx, &user_info.endpoint)
+            .await
+        {
+            info!("endpoint is not valid, skipping the request");
+            return Ok(AuthInfo::default());
+        }
         let request_id = uuid::Uuid::new_v4().to_string();
         let application_name = ctx.console_application_name();
         async {
@@ -82,7 +91,9 @@ impl Api {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 Err(e) => match e.http_status_code() {
-                    Some(http::StatusCode::NOT_FOUND) => return Ok(AuthInfo::default()),
+                    Some(http::StatusCode::NOT_FOUND) => {
+                        return Ok(AuthInfo::default());
+                    }
                     _otherwise => return Err(e.into()),
                 },
             };

@@ -181,7 +181,9 @@ struct ProxyCliArgs {
     /// cache for `project_info` (use `size=0` to disable)
     #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
     project_info_cache: String,
-
+    /// cache for all valid endpoints
+    #[clap(long, default_value = config::EndpointCacheConfig::CACHE_DEFAULT_OPTIONS)]
+    endpoint_cache_config: String,
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
 }
@@ -375,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
+            maintenance_tasks.spawn(api.locks.garbage_collect_worker());
             if let Some(redis_notifications_client) = redis_notifications_client {
                 let cache = api.caches.project_info.clone();
                 maintenance_tasks.spawn(notifications::task_main(
@@ -384,6 +387,9 @@ async fn main() -> anyhow::Result<()> {
                     args.region.clone(),
                 ));
                 maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+                let cache = api.caches.endpoints_cache.clone();
+                let con = redis_notifications_client.clone();
+                maintenance_tasks.spawn(async move { cache.do_read(con).await });
             }
         }
     }
@@ -455,14 +461,18 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
 
             info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
             info!(
                 "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
             );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
             let caches = Box::leak(Box::new(console::caches::ApiCaches::new(
                 wake_compute_cache_config,
                 project_info_cache_config,
+                endpoint_cache_config,
             )));
 
             let config::WakeComputeLockOptions {
@@ -473,10 +483,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             } = args.wake_compute_lock.parse()?;
             info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
             let locks = Box::leak(Box::new(
-                console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout)
+                console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout, epoch)
                     .unwrap(),
             ));
-            tokio::spawn(locks.garbage_collect_worker(epoch));
 
             let url = args.auth_endpoint.parse()?;
             let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));

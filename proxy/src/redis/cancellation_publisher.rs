@@ -6,7 +6,7 @@ use redis::AsyncCommands;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::rate_limiter::{RateBucketInfo, RedisRateLimiter};
+use crate::rate_limiter::{GlobalRateLimiter, RateBucketInfo};
 
 use super::{
     connection_with_credentials_provider::ConnectionWithCredentialsProvider,
@@ -85,7 +85,7 @@ impl<P: CancellationPublisherMut> CancellationPublisher for Arc<Mutex<P>> {
 pub struct RedisPublisherClient {
     client: ConnectionWithCredentialsProvider,
     region_id: String,
-    limiter: RedisRateLimiter,
+    limiter: GlobalRateLimiter,
 }
 
 impl RedisPublisherClient {
@@ -97,7 +97,7 @@ impl RedisPublisherClient {
         Ok(Self {
             client,
             region_id,
-            limiter: RedisRateLimiter::new(info),
+            limiter: GlobalRateLimiter::new(info.into()),
         })
     }
 
