@@ -277,6 +277,7 @@ dependencies = [
  "anyhow",
  "aws-config",
  "aws-sdk-secretsmanager",
+ "bytes",
  "camino",
  "clap",
  "control_plane",
@@ -288,6 +289,8 @@ dependencies = [
  "hex",
  "humantime",
  "hyper",
+ "lasso",
+ "measured",
  "metrics",
  "once_cell",
  "pageserver_api",
@@ -295,6 +298,7 @@ dependencies = [
  "postgres_connection",
  "r2d2",
  "reqwest",
+ "routerify",
  "serde",
  "serde_json",
  "thiserror",
@@ -2881,6 +2885,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
+name = "measured"
+version = "0.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f246648d027839a34b420e27c7de1165ace96e19ef894985d0a6ff89a7840a9f"
+dependencies = [
+ "bytes",
+ "hashbrown 0.14.0",
+ "itoa",
+ "lasso",
+ "measured-derive",
+ "memchr",
+ "parking_lot 0.12.1",
+ "rustc-hash",
+ "ryu",
+]
+
+[[package]]
+name = "measured-derive"
+version = "0.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edaa5cc22d99d5d6d7d99c3b5b5f7e7f8034c22f1b5d62a1adecd2ed005d9b80"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.52",
+]
+
+[[package]]
 name = "memchr"
 version = "2.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3901,7 +3934,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3914,7 +3947,7 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.0"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
 dependencies = [
  "native-tls",
  "tokio",
@@ -3925,7 +3958,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -3938,12 +3971,13 @@ dependencies = [
  "rand 0.8.5",
  "sha2",
  "stringprep",
+ "tokio",
 ]
 
 [[package]]
 name = "postgres-types"
 version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -4225,6 +4259,7 @@ dependencies = [
  "smallvec",
  "smol_str",
  "socket2 0.5.5",
+ "subtle",
  "sync_wrapper",
  "task-local-extensions",
  "thiserror",
@@ -5346,13 +5381,23 @@ checksum = "ae1a47186c03a32177042e55dbc5fd5aee900b8e0069a8d70fba96a9375cd012"
 
 [[package]]
 name = "sha2"
-version = "0.10.6"
+version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82e6b795fe2e3b1e845bafcb27aa35405c4d47cdfc92af5fc8d3002f76cebdc0"
+checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
 dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f27ba7066011e3fb30d808b51affff34f0a66d3a03a58edd787c6e420e40e44e"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -5935,7 +5980,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -7033,6 +7078,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
  "subtle",
  "syn 1.0.109",

@@ -59,10 +59,11 @@ rustls.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, features = ["asm"] }
 smol_str.workspace = true
 smallvec.workspace = true
 socket2.workspace = true
+subtle.workspace = true
 sync_wrapper.workspace = true
 task-local-extensions.workspace = true
 thiserror.workspace = true

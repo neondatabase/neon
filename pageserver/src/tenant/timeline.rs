@@ -13,7 +13,6 @@ use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
 use fail::fail_point;
-use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::AUX_FILES_KEY,
@@ -37,6 +36,7 @@ use tracing::*;
 use utils::{
     bin_ser::BeSer,
     sync::gate::{Gate, GateGuard},
+    vec_map::VecMap,
 };
 
 use std::ops::{Deref, Range};
@@ -2442,7 +2442,7 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
-        let resident = guard.resident_layers().map(|layer| {
+        let resident = guard.likely_resident_layers().map(|layer| {
             let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
             HeatMapLayer::new(
@@ -2452,7 +2452,7 @@ impl Timeline {
             )
         });
 
-        let layers = resident.collect().await;
+        let layers = resident.collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
@@ -4302,7 +4302,7 @@ impl Timeline {
         let mut max_layer_size: Option<u64> = None;
 
         let resident_layers = guard
-            .resident_layers()
+            .likely_resident_layers()
             .map(|layer| {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
@@ -4315,8 +4315,7 @@ impl Timeline {
                     relative_last_activity: finite_f32::FiniteF32::ZERO,
                 }
             })
-            .collect()
-            .await;
+            .collect();
 
         DiskUsageEvictionInfo {
             max_layer_size,
@@ -4618,16 +4617,15 @@ impl<'a> TimelineWriter<'a> {
         }
     }
 
-    /// Put a batch keys at the specified Lsns.
+    /// Put a batch of keys at the specified Lsns.
     ///
-    /// The batch should be sorted by Lsn such that it's safe
-    /// to roll the open layer mid batch.
+    /// The batch is sorted by Lsn (enforced by usage of [`utils::vec_map::VecMap`].
     pub(crate) async fn put_batch(
         &mut self,
-        batch: Vec<(Key, Lsn, Value)>,
+        batch: VecMap<Lsn, (Key, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for (key, lsn, val) in batch {
+        for (lsn, (key, val)) in batch {
             self.put(key, lsn, &val, ctx).await?
         }
 
@@ -4713,7 +4711,6 @@ mod tests {
             .keep_resident()
             .await
             .expect("no download => no downloading errors")
-            .expect("should had been resident")
             .drop_eviction_guard();
 
         let forever = std::time::Duration::from_secs(120);
@@ -4724,7 +4721,7 @@ mod tests {
         let (first, second) = tokio::join!(first, second);
 
         let res = layer.keep_resident().await;
-        assert!(matches!(res, Ok(None)), "{res:?}");
+        assert!(res.is_none(), "{res:?}");
 
         match (first, second) {
             (Ok(()), Ok(())) => {

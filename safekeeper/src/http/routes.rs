@@ -20,7 +20,7 @@ use std::io::Write as _;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info_span, Instrument};
-use utils::http::endpoint::{request_span, ChannelWriter};
+use utils::http::endpoint::{prometheus_metrics_handler, request_span, ChannelWriter};
 
 use crate::debug_dump::TimelineDigestRequest;
 use crate::receive_wal::WalReceiverState;
@@ -515,6 +515,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     router
         .data(Arc::new(conf))
         .data(auth)
+        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         .get("/v1/status", |r| request_span(r, status_handler))
         .put("/v1/failpoints", |r| {
             request_span(r, move |r| async {

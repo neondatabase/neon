@@ -1,5 +1,4 @@
 use anyhow::{bail, ensure, Context, Result};
-use futures::StreamExt;
 use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
@@ -241,29 +240,16 @@ impl LayerManager {
         layer.delete_on_drop();
     }
 
-    pub(crate) fn resident_layers(&self) -> impl futures::stream::Stream<Item = Layer> + '_ {
+    pub(crate) fn likely_resident_layers(&self) -> impl Iterator<Item = Layer> + '_ {
         // for small layer maps, we most likely have all resident, but for larger more are likely
         // to be evicted assuming lots of layers correlated with longer lifespan.
 
-        let layers = self
-            .layer_map()
-            .iter_historic_layers()
-            .map(|desc| self.get_from_desc(&desc));
-
-        let layers = futures::stream::iter(layers);
-
-        layers.filter_map(|layer| async move {
-            // TODO(#6028): this query does not really need to see the ResidentLayer
-            match layer.keep_resident().await {
-                Ok(Some(layer)) => Some(layer.drop_eviction_guard()),
-                Ok(None) => None,
-                Err(e) => {
-                    // these should not happen, but we cannot make them statically impossible right
-                    // now.
-                    tracing::warn!(%layer, "failed to keep the layer resident: {e:#}");
-                    None
-                }
-            }
+        self.layer_map().iter_historic_layers().filter_map(|desc| {
+            self.layer_fmgr
+                .0
+                .get(&desc.key())
+                .filter(|l| l.is_likely_resident())
+                .cloned()
         })
     }
 
