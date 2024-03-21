@@ -4259,6 +4259,7 @@ dependencies = [
  "smallvec",
  "smol_str",
  "socket2 0.5.5",
+ "subtle",
  "sync_wrapper",
  "task-local-extensions",
  "thiserror",

@@ -149,6 +149,7 @@ smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
 strum = "0.24"
 strum_macros = "0.24"
+"subtle"  = "2.5.0"
 svg_fmt = "0.4.1"
 sync_wrapper = "0.1.2"
 tar = "0.4"
