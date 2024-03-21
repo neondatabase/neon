@@ -21,10 +21,10 @@ use proxy::metrics::NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
+use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
 use proxy::redis::notifications;
-use proxy::redis::publisher::RedisPublisherClient;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
 

@@ -11,7 +11,9 @@ use uuid::Uuid;
 use crate::{
     error::ReportableError,
     metrics::NUM_CANCELLATION_REQUESTS,
-    redis::publisher::{CancellationPublisher, CancellationPublisherMut, RedisPublisherClient},
+    redis::cancellation_publisher::{
+        CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
+    },
 };
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
