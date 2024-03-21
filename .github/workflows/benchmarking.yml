@@ -274,11 +274,15 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERY="SELECT version();"
+        QUERIES=("SELECT version()")
         if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+          QUERIES+=("SHOW neon.tenant_id")
+          QUERIES+=("SHOW neon.timeline_id")
         fi
-        psql ${CONNSTR} -c "${QUERY}"
+
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -405,11 +409,15 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERY="SELECT version();"
+        QUERIES=("SELECT version()")
         if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+          QUERIES+=("SHOW neon.tenant_id")
+          QUERIES+=("SHOW neon.timeline_id")
         fi
-        psql ${CONNSTR} -c "${QUERY}"
+
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
 
     - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
@@ -511,11 +519,15 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERY="SELECT version();"
+        QUERIES=("SELECT version()")
         if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+          QUERIES+=("SHOW neon.tenant_id")
+          QUERIES+=("SHOW neon.timeline_id")
         fi
-        psql ${CONNSTR} -c "${QUERY}"
+
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
 
     - name: Run TPC-H benchmark
       uses: ./.github/actions/run-python-test-set
@@ -601,11 +613,15 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERY="SELECT version();"
+        QUERIES=("SELECT version()")
         if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+          QUERIES+=("SHOW neon.tenant_id")
+          QUERIES+=("SHOW neon.timeline_id")
         fi
-        psql ${CONNSTR} -c "${QUERY}"
+
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
 
     - name: Run user examples
       uses: ./.github/actions/run-python-test-set
