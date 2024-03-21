@@ -125,19 +125,19 @@ async def run_update_loop_worker(ep: Endpoint, n_txns: int, idx: int):
     await conn.execute(f"ALTER TABLE {table} SET (autovacuum_enabled = false)")
     await conn.execute(f"INSERT INTO {table} VALUES (1, 0)")
     await conn.execute(
+        f"""
+        CREATE PROCEDURE updating{table}() as
+        $$
+            DECLARE
+            i integer;
+            BEGIN
+            FOR i IN 1..{n_txns} LOOP
+                UPDATE {table} SET x = x + 1 WHERE pk=1;
+                COMMIT;
+            END LOOP;
+            END
+        $$ LANGUAGE plpgsql
         """
-         CREATE PROCEDURE updating{0}() as
-         $$
-             DECLARE
-             i integer;
-             BEGIN
-             FOR i IN 1..{1} LOOP
-                 UPDATE {0} SET x = x + 1 WHERE pk=1;
-                 COMMIT;
-             END LOOP;
-             END
-         $$ LANGUAGE plpgsql
-         """.format(table, n_txns)
     )
     await conn.execute("SET statement_timeout=0")
     await conn.execute(f"call updating{table}()")
@@ -159,14 +159,14 @@ def run_benchmark(env: NeonEnv, pg_bin: PgBin, record, duration_secs: int):
         # don't specify the targets explicitly, let pagebench auto-discover them
     ]
 
-    log.info(f"command: {' '.join(cmd)}")
+    log.info("%s", "command: {' '.join(cmd)}")
     basepath = pg_bin.run_capture(cmd, with_command_header=False)
     results_path = Path(basepath + ".stdout")
-    log.info(f"Benchmark results at: {results_path}")
+    log.info("%s", "Benchmark results at: {results_path}")
 
     with open(results_path, "r") as f:
         results = json.load(f)
-    log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
+    log.info("%s", "Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
     total = results["total"]
     metric = "request_count"

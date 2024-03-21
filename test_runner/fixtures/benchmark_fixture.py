@@ -483,19 +483,19 @@ def pytest_terminal_summary(
                 is_header_printed = True
 
             terminalreporter.write(
-                "{}.{}: ".format(test_report.head_line, recorded_property["name"])
+                f"{test_report.head_line}.{recorded_property['name']}: "
             )
             unit = recorded_property["unit"]
             value = recorded_property["value"]
             if unit == "MB":
-                terminalreporter.write("{0:,.0f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.0f}", green=True)
             elif unit in ("s", "ms") and isinstance(value, float):
-                terminalreporter.write("{0:,.3f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.3f}", green=True)
             elif isinstance(value, float):
-                terminalreporter.write("{0:,.4f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.4f}", green=True)
             else:
                 terminalreporter.write(str(value), green=True)
-            terminalreporter.line(" {}".format(unit))
+            terminalreporter.line(f" {unit}")
 
             result_entry.append(recorded_property)
 
