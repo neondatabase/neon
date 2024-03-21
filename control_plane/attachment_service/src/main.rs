@@ -98,7 +98,7 @@ impl Secrets {
     /// - CLI args if database URL is provided on the CLI
     /// - Environment variables if DATABASE_URL is set.
     /// - AWS Secrets Manager secrets
-    async fn load(args: &Cli, mode: StrictMode) -> anyhow::Result<Self> {
+    async fn load(args: &Cli) -> anyhow::Result<Self> {
         let Some(database_url) =
             Self::load_secret(&args.database_url, Self::DATABASE_URL_ENV).await
         else {
@@ -122,16 +122,6 @@ impl Secrets {
             )
             .await,
         };
-
-        if matches!(mode, StrictMode::Strict)
-            && (this.public_key.is_none()
-                || this.jwt_token.is_none()
-                || this.control_plane_jwt_token.is_none())
-        {
-            anyhow::bail!(
-                    "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
-                );
-        }
 
         Ok(this)
     }
@@ -205,7 +195,35 @@ async fn async_main() -> anyhow::Result<()> {
         StrictMode::Strict
     };
 
-    let secrets = Secrets::load(&args, strict_mode).await?;
+    let secrets = Secrets::load(&args).await?;
+
+    // Validate required secrets and arguments are provided in strict mode
+    match strict_mode {
+        StrictMode::Strict
+            if (secrets.public_key.is_none()
+                || secrets.jwt_token.is_none()
+                || secrets.control_plane_jwt_token.is_none()) =>
+        {
+            // Production systems should always have secrets configured: if public_key was not set
+            // then we would implicitly disable auth.
+            anyhow::bail!(
+                    "Insecure config!  One or more secrets is not set.  This is only permitted in `--dev` mode"
+                );
+        }
+        StrictMode::Strict if args.compute_hook_url.is_none() => {
+            // Production systems should always have a compute hook set, to prevent falling
+            // back to trying to use neon_local.
+            anyhow::bail!(
+                "`--compute-hook-url` is not set: this is only permitted in `--dev` mode"
+            );
+        }
+        StrictMode::Strict => {
+            tracing::info!("Starting in strict mode: configuration is OK.")
+        }
+        StrictMode::Dev => {
+            tracing::warn!("Starting in dev mode: this may be an insecure configuration.")
+        }
+    }
 
     let config = Config {
         jwt_token: secrets.jwt_token,
