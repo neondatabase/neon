@@ -234,11 +234,9 @@ async fn main() -> anyhow::Result<()> {
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
     let cancel_map = CancelMap::default();
     let redis_publisher = match &args.redis_notifications {
-        Some(url) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
-            url,
-            args.region.clone(),
-            &config.redis_rps_limit,
-        )?))),
+        Some(url) => Some(Arc::new(Mutex::new(
+            RedisPublisherClient::new(url, args.region.clone(), &config.redis_rps_limit).await?,
+        ))),
         None => None,
     };
     let cancellation_handler = Arc::new(CancellationHandler::new(
