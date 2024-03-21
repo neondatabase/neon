@@ -220,7 +220,6 @@ impl ConnectionLike for ConnectionWithCredentialsProvider {
     }
 
     fn get_db(&self) -> i64 {
-        // TODO(anna): implement
         0
     }
 }
