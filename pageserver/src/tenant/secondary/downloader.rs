@@ -11,6 +11,7 @@ use crate::{
     disk_usage_eviction_task::{
         finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
     },
+    is_temporary,
     metrics::SECONDARY_MODE,
     tenant::{
         config::SecondaryLocationConfig,
@@ -534,7 +535,11 @@ impl<'a> TenantDownloader<'a> {
             .await
             .maybe_fatal_err(&context_msg)?;
 
-        tracing::debug!("Wrote local heatmap to {}", heatmap_path);
+        tracing::debug!(
+            "Wrote local heatmap to {}, with {} timelines",
+            heatmap_path,
+            heatmap.timelines.len()
+        );
 
         // Clean up any local layers that aren't in the heatmap.  We do this first for all timelines, on the general
         // principle that deletions should be done before writes wherever possible, and so that we can use this
@@ -547,6 +552,10 @@ impl<'a> TenantDownloader<'a> {
         // Download the layers in the heatmap
         for timeline in heatmap.timelines {
             if self.secondary_state.cancel.is_cancelled() {
+                tracing::debug!(
+                    "Cancelled before downloading timeline {}",
+                    timeline.timeline_id
+                );
                 return Ok(());
             }
 
@@ -764,10 +773,13 @@ impl<'a> TenantDownloader<'a> {
             }
         };
 
+        tracing::debug!(timeline_id=%timeline.timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
+
         // Download heatmap layers that are not present on local disk, or update their
         // access time if they are already present.
         for layer in timeline.layers {
             if self.secondary_state.cancel.is_cancelled() {
+                tracing::debug!("Cancelled -- dropping out of layer loop");
                 return Ok(());
             }
 
@@ -950,7 +962,10 @@ async fn init_timeline_state(
             // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
             warn!(path=?dentry.path(), "found legacy metadata file, these should have been removed in load_tenant_config");
             continue;
-        } else if crate::is_temporary(&file_path) || is_temp_download_file(&file_path) {
+        } else if crate::is_temporary(&file_path)
+            || is_temp_download_file(&file_path)
+            || is_temporary(&file_path)
+        {
             // Temporary files are frequently left behind from restarting during downloads
             tracing::info!("Cleaning up temporary file {file_path}");
             if let Err(e) = tokio::fs::remove_file(&file_path)

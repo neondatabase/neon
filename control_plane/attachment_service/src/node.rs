@@ -12,7 +12,9 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use utils::{backoff, id::NodeId};
 
-use crate::{persistence::NodePersistence, scheduler::MaySchedule};
+use crate::{
+    pageserver_client::PageserverClient, persistence::NodePersistence, scheduler::MaySchedule,
+};
 
 /// Represents the in-memory description of a Node.
 ///
@@ -202,7 +204,7 @@ impl Node {
         cancel: &CancellationToken,
     ) -> Option<mgmt_api::Result<T>>
     where
-        O: FnMut(mgmt_api::Client) -> F,
+        O: FnMut(PageserverClient) -> F,
         F: std::future::Future<Output = mgmt_api::Result<T>>,
     {
         fn is_fatal(e: &mgmt_api::Error) -> bool {
@@ -224,8 +226,12 @@ impl Node {
                     .build()
                     .expect("Failed to construct HTTP client");
 
-                let client =
-                    mgmt_api::Client::from_client(http_client, self.base_url(), jwt.as_deref());
+                let client = PageserverClient::from_client(
+                    self.get_id(),
+                    http_client,
+                    self.base_url(),
+                    jwt.as_deref(),
+                );
 
                 let node_cancel_fut = self.cancel.cancelled();
 

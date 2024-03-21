@@ -24,7 +24,6 @@ aws-smithy-types = { version = "1", default-features = false, features = ["byte-
 axum = { version = "0.6", features = ["ws"] }
 base64 = { version = "0.21", features = ["alloc"] }
 base64ct = { version = "1", default-features = false, features = ["std"] }
-byteorder = { version = "1", features = ["i128"] }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", features = ["derive", "string"] }
@@ -65,6 +64,7 @@ rustls = { version = "0.21", features = ["dangerous_configuration"] }
 scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+sha2 = { version = "0.10", features = ["asm"] }
 smallvec = { version = "1", default-features = false, features = ["write"] }
 subtle = { version = "2" }
 time = { version = "0.3", features = ["local-offset", "macros", "serde-well-known"] }
@@ -87,7 +87,6 @@ zstd-sys = { version = "2", default-features = false, features = ["legacy", "std
 
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-byteorder = { version = "1", features = ["i128"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }

@@ -71,7 +71,7 @@ impl<'a> Exchange<'a> {
     }
 }
 
-pub fn exchange(
+pub async fn exchange(
     secret: &ServerSecret,
     mut client: ScramSha256,
     tls_server_end_point: config::TlsServerEndPoint,
@@ -86,7 +86,7 @@ pub fn exchange(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let sent = match init.transition(secret, &tls_server_end_point, client_first)? {
         Continue(sent, server_first) => {
-            client.update(server_first.as_bytes())?;
+            client.update(server_first.as_bytes()).await?;
             sent
         }
         Success(x, _) => match x {},

@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{metrics, persistence::TenantShardPersistence};
+use crate::{
+    metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
+    persistence::TenantShardPersistence,
+};
 use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
@@ -457,22 +460,7 @@ impl TenantState {
         // Add/remove nodes to fulfil policy
         use PlacementPolicy::*;
         match self.policy {
-            Single => {
-                // Should have exactly one attached, and zero secondaries
-                if !self.intent.secondary.is_empty() {
-                    self.intent.clear_secondary(scheduler);
-                    modified = true;
-                }
-
-                let (modified_attached, _attached_node_id) = self.schedule_attached(scheduler)?;
-                modified |= modified_attached;
-
-                if !self.intent.secondary.is_empty() {
-                    self.intent.clear_secondary(scheduler);
-                    modified = true;
-                }
-            }
-            Double(secondary_count) => {
+            Attached(secondary_count) => {
                 let retain_secondaries = if self.intent.attached.is_none()
                     && scheduler.node_preferred(&self.intent.secondary).is_some()
                 {
@@ -733,7 +721,10 @@ impl TenantState {
         let reconciler_span = tracing::info_span!(parent: None, "reconciler", seq=%reconcile_seq,
                                                         tenant_id=%reconciler.tenant_shard_id.tenant_id,
                                                         shard_id=%reconciler.tenant_shard_id.shard_slug());
-        metrics::RECONCILER.spawned.inc();
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_reconcile_spawn
+            .inc();
         let result_tx = result_tx.clone();
         let join_handle = tokio::task::spawn(
             async move {
@@ -751,10 +742,12 @@ impl TenantState {
                 // TODO: wrap all remote API operations in cancellation check
                 // as well.
                 if reconciler.cancel.is_cancelled() {
-                    metrics::RECONCILER
-                        .complete
-                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL])
-                        .inc();
+                    metrics::METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_reconcile_complete
+                        .inc(ReconcileCompleteLabelGroup {
+                            status: ReconcileOutcome::Cancel,
+                        });
                     return;
                 }
 
@@ -769,18 +762,18 @@ impl TenantState {
                 }
 
                 // Update result counter
-                match &result {
-                    Ok(_) => metrics::RECONCILER
-                        .complete
-                        .with_label_values(&[metrics::ReconcilerMetrics::SUCCESS]),
-                    Err(ReconcileError::Cancel) => metrics::RECONCILER
-                        .complete
-                        .with_label_values(&[metrics::ReconcilerMetrics::CANCEL]),
-                    Err(_) => metrics::RECONCILER
-                        .complete
-                        .with_label_values(&[metrics::ReconcilerMetrics::ERROR]),
-                }
-                .inc();
+                let outcome_label = match &result {
+                    Ok(_) => ReconcileOutcome::Success,
+                    Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
+                    Err(_) => ReconcileOutcome::Error,
+                };
+
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_reconcile_complete
+                    .inc(ReconcileCompleteLabelGroup {
+                        status: outcome_label,
+                    });
 
                 result_tx
                     .send(ReconcileResult {
@@ -895,7 +888,7 @@ pub(crate) mod tests {
 
         let mut scheduler = Scheduler::new(nodes.values());
 
-        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
         tenant_state
             .schedule(&mut scheduler)
             .expect("we have enough nodes, scheduling should work");
@@ -943,7 +936,7 @@ pub(crate) mod tests {
         let nodes = make_test_nodes(3);
         let mut scheduler = Scheduler::new(nodes.values());
 
-        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Double(1));
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
 
         tenant_state.observed.locations.insert(
             NodeId(3),

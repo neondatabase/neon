@@ -245,7 +245,7 @@ impl<'a, T> Guard<'a, T> {
     ///
     /// The permit will be on a semaphore part of the new internal value, and any following
     /// [`OnceCell::get_or_init`] will wait on it to complete.
-    pub fn take_and_deinit(&mut self) -> (T, InitPermit) {
+    pub fn take_and_deinit(mut self) -> (T, InitPermit) {
         let mut swapped = Inner::default();
         let sem = swapped.init_semaphore.clone();
         // acquire and forget right away, moving the control over to InitPermit
@@ -543,7 +543,7 @@ mod tests {
         target.set(42, permit);
 
         let (_answer, permit) = {
-            let mut guard = target
+            let guard = target
                 .get_or_init(|permit| async { Ok::<_, Infallible>((11, permit)) })
                 .await
                 .unwrap();

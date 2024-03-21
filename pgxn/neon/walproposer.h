@@ -10,6 +10,7 @@
 
 #include "libpqwalproposer.h"
 #include "neon_walreader.h"
+#include "pagestore_client.h"
 
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
@@ -269,6 +270,8 @@ typedef struct HotStandbyFeedback
 
 typedef struct PageserverFeedback
 {
+	/* true if AppendResponse contains this feedback */
+	bool		present;
 	/* current size of the timeline on pageserver */
 	uint64		currentClusterSize;
 	/* standby_status_update fields that safekeeper received from pageserver */
@@ -276,14 +279,21 @@ typedef struct PageserverFeedback
 	XLogRecPtr	disk_consistent_lsn;
 	XLogRecPtr	remote_consistent_lsn;
 	TimestampTz replytime;
+	uint32		shard_number;
 } PageserverFeedback;
 
 typedef struct WalproposerShmemState
 {
 	slock_t		mutex;
-	PageserverFeedback feedback;
 	term_t		mineLastElectedTerm;
 	pg_atomic_uint64 backpressureThrottlingTime;
+
+	/* last feedback from each shard */
+	PageserverFeedback shard_ps_feedback[MAX_SHARDS];
+	int num_shards;
+
+	/* aggregated feedback with min LSNs across shards */
+	PageserverFeedback min_ps_feedback;
 } WalproposerShmemState;
 
 /*
@@ -307,12 +317,12 @@ typedef struct AppendResponse
 	/* Feedback received from pageserver includes standby_status_update fields */
 	/* and custom neon feedback. */
 	/* This part of the message is extensible. */
-	PageserverFeedback rf;
+	PageserverFeedback ps_feedback;
 } AppendResponse;
 
 /*  PageserverFeedback is extensible part of the message that is parsed separately */
 /*  Other fields are fixed part */
-#define APPENDRESPONSE_FIXEDPART_SIZE offsetof(AppendResponse, rf)
+#define APPENDRESPONSE_FIXEDPART_SIZE 56
 
 struct WalProposer;
 typedef struct WalProposer WalProposer;
@@ -560,11 +570,11 @@ typedef struct walproposer_api
 	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn);
 
 	/*
-	 * Called after every new message from the safekeeper. Used to propagate
+	 * Called after every AppendResponse from the safekeeper. Used to propagate
 	 * backpressure feedback and to confirm WAL persistence (has been commited
 	 * on the quorum of safekeepers).
 	 */
-	void		(*process_safekeeper_feedback) (WalProposer *wp);
+	void		(*process_safekeeper_feedback) (WalProposer *wp, Safekeeper *sk);
 
 	/*
 	 * Write a log message to the internal log processor. This is used only

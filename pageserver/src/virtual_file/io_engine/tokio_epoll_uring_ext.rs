@@ -5,7 +5,7 @@
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -24,6 +24,8 @@ struct ThreadLocalState(Arc<ThreadLocalStateInner>);
 struct ThreadLocalStateInner {
     cell: tokio::sync::OnceCell<SystemHandle>,
     launch_attempts: AtomicU32,
+    /// populated through fetch_add from [`THREAD_LOCAL_STATE_ID`]
+    thread_local_state_id: u64,
 }
 
 impl ThreadLocalState {
@@ -31,18 +33,16 @@ impl ThreadLocalState {
         Self(Arc::new(ThreadLocalStateInner {
             cell: tokio::sync::OnceCell::default(),
             launch_attempts: AtomicU32::new(0),
+            thread_local_state_id: THREAD_LOCAL_STATE_ID.fetch_add(1, Ordering::Relaxed),
         }))
     }
+
     pub fn make_id_string(&self) -> String {
-        format!("0x{:p}", Arc::as_ptr(&self.0))
+        format!("{}", self.0.thread_local_state_id)
     }
 }
 
-impl Drop for ThreadLocalState {
-    fn drop(&mut self) {
-        info!(parent: None, id=%self.make_id_string(), "tokio-epoll-uring_ext: ThreadLocalState is being dropped and id might be re-used in the future");
-    }
-}
+static THREAD_LOCAL_STATE_ID: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static THREAD_LOCAL: ThreadLocalState = ThreadLocalState::new();

@@ -1,3 +1,4 @@
+use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::service;
 use hyper::StatusCode;
@@ -117,6 +118,15 @@ impl Reconciler {
         flush_ms: Option<Duration>,
         lazy: bool,
     ) -> Result<(), ReconcileError> {
+        if !node.is_available() && config.mode == LocationConfigMode::Detached {
+            // Attempts to detach from offline nodes may be imitated without doing I/O: a node which is offline
+            // will get fully reconciled wrt the shard's intent state when it is reactivated, irrespective of
+            // what we put into `observed`, in [`crate::service::Service::node_activate_reconcile`]
+            tracing::info!("Node {node} is unavailable during detach: proceeding anyway, it will be detached on next activation");
+            self.observed.locations.remove(&node.get_id());
+            return Ok(());
+        }
+
         self.observed
             .locations
             .insert(node.get_id(), ObservedStateLocation { conf: None });
@@ -149,9 +159,16 @@ impl Reconciler {
         };
         tracing::info!("location_config({node}) complete: {:?}", config);
 
-        self.observed
-            .locations
-            .insert(node.get_id(), ObservedStateLocation { conf: Some(config) });
+        match config.mode {
+            LocationConfigMode::Detached => {
+                self.observed.locations.remove(&node.get_id());
+            }
+            _ => {
+                self.observed
+                    .locations
+                    .insert(node.get_id(), ObservedStateLocation { conf: Some(config) });
+            }
+        }
 
         Ok(())
     }
@@ -243,8 +260,11 @@ impl Reconciler {
         tenant_shard_id: TenantShardId,
         node: &Node,
     ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
-        let client =
-            mgmt_api::Client::new(node.base_url(), self.service_config.jwt_token.as_deref());
+        let client = PageserverClient::new(
+            node.get_id(),
+            node.base_url(),
+            self.service_config.jwt_token.as_deref(),
+        );
 
         let timelines = client.timeline_list(&tenant_shard_id).await?;
         Ok(timelines
@@ -475,7 +495,7 @@ impl Reconciler {
             }
         }
 
-        // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Single, then
+        // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
         // this location will be deleted in the general case reconciliation that runs after this.
         let origin_secondary_conf = build_location_config(
             &self.shard,

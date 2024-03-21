@@ -51,7 +51,7 @@ from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
     DEFAULT_PAGESERVER_ALLOWED_ERRORS,
-    scan_pageserver_log_for_errors,
+    DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.types import IndexPartDump
@@ -77,6 +77,7 @@ from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     allure_add_grafana_links,
     allure_attach_from_dir,
+    assert_no_errors,
     get_self_dir,
     subprocess_capture,
     wait_until,
@@ -943,6 +944,8 @@ class NeonEnvBuilder:
 
             for pageserver in self.env.pageservers:
                 pageserver.assert_no_errors()
+
+            self.env.storage_controller.assert_no_errors()
 
         try:
             self.overlay_cleanup_teardown()
@@ -1889,19 +1892,6 @@ class NeonCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=True)
 
-    def tenant_migrate(
-        self, tenant_shard_id: TenantShardId, new_pageserver: int, timeout_secs: Optional[int]
-    ):
-        args = [
-            "tenant",
-            "migrate",
-            "--tenant-id",
-            str(tenant_shard_id),
-            "--id",
-            str(new_pageserver),
-        ]
-        return self.raw_cli(args, check_return_code=True, timeout=timeout_secs)
-
     def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
         return self.raw_cli(["start"], check_return_code=check_return_code)
 
@@ -1961,6 +1951,7 @@ class NeonStorageController(MetricsGetter):
         self.env = env
         self.running = False
         self.auth_enabled = auth_enabled
+        self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
 
     def start(self):
         assert not self.running
@@ -1984,6 +1975,11 @@ class NeonStorageController(MetricsGetter):
             except:  # noqa: E722
                 msg = ""
             raise StorageControllerApiException(msg, res.status_code) from e
+
+    def assert_no_errors(self):
+        assert_no_errors(
+            self.env.repo_dir / "storage_controller.log", "storage_controller", self.allowed_errors
+        )
 
     def pageserver_api(self) -> PageserverHttpClient:
         """
@@ -2147,12 +2143,24 @@ class NeonStorageController(MetricsGetter):
         """
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/locate",
+            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
         return shards
+
+    def tenant_describe(self, tenant_id: TenantId):
+        """
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        """
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
 
     def tenant_shard_split(
         self, tenant_id: TenantId, shard_count: int, shard_stripe_size: Optional[int] = None
@@ -2357,18 +2365,9 @@ class NeonPageserver(PgProtocol):
         return self.env.repo_dir / f"pageserver_{self.id}"
 
     def assert_no_errors(self):
-        logfile = self.workdir / "pageserver.log"
-        if not logfile.exists():
-            log.warning(f"Skipping log check: {logfile} does not exist")
-            return
-
-        with logfile.open("r") as f:
-            errors = scan_pageserver_log_for_errors(f, self.allowed_errors)
-
-        for _lineno, error in errors:
-            log.info(f"not allowed error: {error.strip()}")
-
-        assert not errors
+        assert_no_errors(
+            self.workdir / "pageserver.log", f"pageserver_{self.id}", self.allowed_errors
+        )
 
     def assert_no_metric_errors(self):
         """

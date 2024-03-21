@@ -43,6 +43,8 @@ use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
 use utils::timeout::timeout_cancellable;
 use utils::timeout::TimeoutCancellableError;
+use utils::zstd::create_zst_tarball;
+use utils::zstd::extract_zst_tarball;
 
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
@@ -683,9 +685,20 @@ impl Tenant {
                 }
 
                 // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
+                enum BrokenVerbosity {
+                    Error,
+                    Info
+                }
                 let make_broken =
-                    |t: &Tenant, err: anyhow::Error| {
-                        error!("attach failed, setting tenant state to Broken: {err:?}");
+                    |t: &Tenant, err: anyhow::Error, verbosity: BrokenVerbosity| {
+                        match verbosity {
+                            BrokenVerbosity::Info => {
+                                info!("attach cancelled, setting tenant state to Broken: {err}");
+                            },
+                            BrokenVerbosity::Error => {
+                                error!("attach failed, setting tenant state to Broken: {err:?}");
+                            }
+                        }
                         t.state.send_modify(|state| {
                             // The Stopping case is for when we have passed control on to DeleteTenantFlow:
                             // if it errors, we will call make_broken when tenant is already in Stopping.
@@ -749,7 +762,7 @@ impl Tenant {
                             // Make the tenant broken so that set_stopping will not hang waiting for it to leave
                             // the Attaching state.  This is an over-reaction (nothing really broke, the tenant is
                             // just shutting down), but ensures progress.
-                            make_broken(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"));
+                            make_broken(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"), BrokenVerbosity::Info);
                             return Ok(());
                         },
                     )
@@ -771,7 +784,7 @@ impl Tenant {
                         match res {
                             Ok(p) => Some(p),
                             Err(e) => {
-                                make_broken(&tenant_clone, anyhow::anyhow!(e));
+                                make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
                                 return Ok(());
                             }
                         }
@@ -795,7 +808,7 @@ impl Tenant {
                     {
                         Ok(should_resume_deletion) => should_resume_deletion,
                         Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
+                            make_broken(&tenant_clone, anyhow::anyhow!(err), BrokenVerbosity::Error);
                             return Ok(());
                         }
                     }
@@ -825,7 +838,7 @@ impl Tenant {
                     .await;
 
                     if let Err(e) = deleted {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e));
+                        make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
                     }
 
                     return Ok(());
@@ -846,7 +859,7 @@ impl Tenant {
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e));
+                        make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
                     }
                 }
 
@@ -3049,8 +3062,13 @@ impl Tenant {
             }
         }
 
-        let (pgdata_zstd, tar_zst_size) =
-            import_datadir::create_tar_zst(pgdata_path, &temp_path).await?;
+        let (pgdata_zstd, tar_zst_size) = create_zst_tarball(pgdata_path, &temp_path).await?;
+        const INITDB_TAR_ZST_WARN_LIMIT: u64 = 2 * 1024 * 1024;
+        if tar_zst_size > INITDB_TAR_ZST_WARN_LIMIT {
+            warn!(
+                "compressed {temp_path} size of {tar_zst_size} is above limit {INITDB_TAR_ZST_WARN_LIMIT}."
+            );
+        }
 
         pausable_failpoint!("before-initdb-upload");
 
@@ -3150,7 +3168,7 @@ impl Tenant {
 
             let buf_read =
                 BufReader::with_capacity(remote_timeline_client::BUFFER_SIZE, initdb_tar_zst);
-            import_datadir::extract_tar_zst(&pgdata_path, buf_read)
+            extract_zst_tarball(&pgdata_path, buf_read)
                 .await
                 .context("extract initdb tar")?;
         } else {

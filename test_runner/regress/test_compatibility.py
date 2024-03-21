@@ -238,6 +238,10 @@ def test_forward_compatibility(
             pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
 
+        # TODO: remove this workaround after release-5090 is no longer the most recent release.
+        # There was a bug in that code that generates a warning in the storage controller log.
+        env.storage_controller.allowed_errors.append(".*no tenant_shard_id specified.*")
+
         # Use current neon_local even though we're using old binaries for
         # everything else: our test code is written for latest CLI args.
         env.neon_local_binpath = neon_local_binpath
