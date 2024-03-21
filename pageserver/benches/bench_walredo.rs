@@ -145,6 +145,9 @@ async fn client(
     for _ in 0..n_redos {
         let page = redo_work.execute(&mgr).await.unwrap();
         assert_eq!(page.remaining(), 8192);
+        // The real pageserver will rarely if ever do 2 walredos in a row without
+        // yielding to the executor.
+        tokio::task::yield_now().await;
     }
     start.elapsed()
 }
