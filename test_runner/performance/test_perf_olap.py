@@ -129,14 +129,14 @@ def run_psql(
 
     label, query = labelled_query.label, labelled_query.query
 
-    log.info(f"Running query {label} {times} times")
+    log.info("%s", "Running query {label} {times} times")
     for i in range(times):
         run = i + 1
-        log.info(f"Run {run}/{times}")
+        log.info("%s", "Run {run}/{times}")
         with env.zenbenchmark.record_duration(f"{label}/{run}"):
             env.pg_bin.run_capture(["psql", connstr, "-c", query], env=environ)
     if explain:
-        log.info(f"Explaining query {label}")
+        log.info("%s", "Explaining query {label}")
         run += 1
         with env.zenbenchmark.record_duration(f"{label}/EXPLAIN"):
             env.pg_bin.run_capture(

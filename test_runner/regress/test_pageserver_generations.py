@@ -175,7 +175,7 @@ def get_deletion_queue_depth(ps_http) -> int:
     executed = get_deletion_queue_executed(ps_http)
     dropped = get_deletion_queue_dropped(ps_http)
     depth = submitted - executed - dropped
-    log.info(f"get_deletion_queue_depth: {depth} ({submitted} - {executed} - {dropped})")
+    log.info("%s", "get_deletion_queue_depth: {depth} ({submitted} - {executed} - {dropped})")
 
     assert depth >= 0
     return int(depth)
@@ -222,8 +222,8 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
         if m is None:
             return None
         else:
-            log.info(f"match: {m}")
-            log.info(f"group: {m.group(1)}")
+            log.info("%s", "match: {m}")
+            log.info("%s", "group: {m.group(1)}")
             return int(m.group(1), 16)
 
     assert neon_env_builder.pageserver_remote_storage is not None
@@ -256,7 +256,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
         ]
     )
     for key in post_upgrade_keys:
-        log.info(f"post-upgrade key: {key}")
+        log.info("%s", "post-upgrade key: {key}")
         if parse_generation_suffix(key) is not None:
             suffixed_objects.append(key)
         else:
@@ -428,7 +428,7 @@ def test_deletion_queue_recovery(
         if keep_attachment == KeepAttachment.LOSE:
             before_restart_depth = get_deletion_queue_validated(ps_http)
 
-    log.info(f"Restarting pageserver with {before_restart_depth} deletions enqueued")
+    log.info("%s", "Restarting pageserver with {before_restart_depth} deletions enqueued")
     main_pageserver.stop(immediate=True)
 
     if keep_attachment == KeepAttachment.LOSE:
@@ -558,7 +558,7 @@ def evict_all_layers(env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId)
                 f"Skipping trying to evict remote layer {tenant_id}/{timeline_id} {layer.layer_file_name}"
             )
             continue
-        log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer.layer_file_name}")
+        log.info("%s", "Evicting layer {tenant_id}/{timeline_id} {layer.layer_file_name}")
         client.evict_layer(
             tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer.layer_file_name
         )

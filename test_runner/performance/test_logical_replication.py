@@ -36,7 +36,7 @@ def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg
     # Wait logical replication to sync
     start = time.time()
     logical_replication_sync(vanilla_pg, endpoint)
-    log.info(f"Sync with master took {time.time() - start} seconds")
+    log.info("%s", "Sync with master took {time.time() - start} seconds")
 
     sum_master = endpoint.safe_psql("select sum(abalance) from pgbench_accounts")[0][0]
     sum_replica = vanilla_pg.safe_psql("select sum(abalance) from pgbench_accounts")[0][0]

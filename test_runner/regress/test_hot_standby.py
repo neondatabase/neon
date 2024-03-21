@@ -16,7 +16,7 @@ def scan_standby_log_for_errors(secondary):
         )
         for line in f:
             if markers.search(line):
-                log.info(f"bad error in standby log: {line}")
+                log.info("%s", "bad error in standby log: {line}")
                 raise AssertionError()
 
 

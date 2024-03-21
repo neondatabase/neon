@@ -50,7 +50,7 @@ def evict_random_layers(
             continue
 
         if rng.choice([True, False]):
-            log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer.name}")
+            log.info("%s", "Evicting layer {tenant_id}/{timeline_id} {layer.name}")
             client.evict_layer(tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer.name)
 
 
@@ -133,14 +133,14 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
         last_state_ps = last_state[pageserver.id]
         if mode == "_Evictions":
             if last_state_ps[0].startswith("Attached"):
-                log.info(f"Action: evictions on pageserver {pageserver.id}")
+                log.info("%s", "Action: evictions on pageserver {pageserver.id}")
                 evict_random_layers(rng, pageserver, tenant_id, timeline_id)
             else:
                 log.info(
                     f"Action: skipping evictions on pageserver {pageserver.id}, is not attached"
                 )
         elif mode == "_Restart":
-            log.info(f"Action: restarting pageserver {pageserver.id}")
+            log.info("%s", "Action: restarting pageserver {pageserver.id}")
             pageserver.stop()
             pageserver.start()
             if last_state_ps[0].startswith("Attached") and latest_attached == pageserver.id:
@@ -173,7 +173,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                 "tenant_conf": {},
             }
 
-            log.info(f"Action: Configuring pageserver {pageserver.id} to {location_conf}")
+            log.info("%s", "Action: Configuring pageserver {pageserver.id} to {location_conf}")
 
             # Select a generation number
             if mode.startswith("Attached"):
@@ -275,7 +275,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     pageserver_b.http_client().tenant_secondary_download(tenant_id)
 
     migrated_generation = env.storage_controller.attach_hook_issue(tenant_id, pageserver_b.id)
-    log.info(f"Acquired generation {migrated_generation} for destination pageserver")
+    log.info("%s", "Acquired generation {migrated_generation} for destination pageserver")
     assert migrated_generation == initial_generation + 1
 
     # Writes and reads still work in AttachedStale.
@@ -384,7 +384,7 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
 
     # Download and inspect the heatmap that the pageserver uploaded
     heatmap_first = env.pageserver_remote_storage.heatmap_content(tenant_id)
-    log.info(f"Read back heatmap: {heatmap_first}")
+    log.info("%s", "Read back heatmap: {heatmap_first}")
     validate_heatmap(heatmap_first)
 
     # Do some more I/O to generate more layers
@@ -393,7 +393,7 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
 
     # Ensure that another heatmap upload includes the new layers
     heatmap_second = env.pageserver_remote_storage.heatmap_content(tenant_id)
-    log.info(f"Read back heatmap: {heatmap_second}")
+    log.info("%s", "Read back heatmap: {heatmap_second}")
     assert heatmap_second != heatmap_first
     validate_heatmap(heatmap_second)
 
@@ -465,7 +465,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         },
     )
     readback_conf = ps_secondary.read_tenant_location_conf(tenant_id)
-    log.info(f"Read back conf: {readback_conf}")
+    log.info("%s", "Read back conf: {readback_conf}")
 
     # Explicit upload/download cycle
     # ==============================
@@ -502,7 +502,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         log.info("Evicting a layer...")
         layer_to_evict = list_layers(ps_attached, tenant_id, timeline_id)[0]
         some_other_layer = list_layers(ps_attached, tenant_id, timeline_id)[1]
-        log.info(f"Victim layer: {layer_to_evict.name}")
+        log.info("%s", "Victim layer: {layer_to_evict.name}")
         ps_attached.http_client().evict_layer(
             tenant_id, timeline_id, layer_name=layer_to_evict.name
         )

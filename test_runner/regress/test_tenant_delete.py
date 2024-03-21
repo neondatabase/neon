@@ -239,7 +239,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         )
 
         reason = tenant_info["state"]["data"]["reason"]
-        log.info(f"tenant broken: {reason}")
+        log.info("%s", "tenant broken: {reason}")
 
         # failpoint may not be the only error in the stack
         assert reason.endswith(f"failpoint: {failpoint}"), reason

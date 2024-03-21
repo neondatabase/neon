@@ -429,7 +429,7 @@ def test_sharding_service_compute_hook(
     notifications = []
 
     def handler(request: Request):
-        log.info(f"Notify request: {request}")
+        log.info("%s", "Notify request: {request}")
         notifications.append(request.json)
         return Response(status=200)
 
@@ -459,7 +459,7 @@ def test_sharding_service_compute_hook(
     wait_until(10, 1, lambda: node_evacuated(env.pageservers[0].id))
 
     # Additional notification from migration
-    log.info(f"notifications: {notifications}")
+    log.info("%s", "notifications: {notifications}")
     expect = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
@@ -634,15 +634,15 @@ def test_sharding_service_s3_time_travel_recovery(
         f"tenants/{tenant_id}-{shard_id_for_list}/timelines/{timeline_id}/",
     ).get("Contents", [])
     assert len(objects) > 1
-    log.info(f"Found {len(objects)} objects in remote storage")
+    log.info("%s", "Found {len(objects)} objects in remote storage")
     should_delete = False
     for obj in objects:
         obj_key = obj["Key"]
         should_delete = not should_delete
         if not should_delete:
-            log.info(f"Keeping key on remote storage: {obj_key}")
+            log.info("%s", "Keeping key on remote storage: {obj_key}")
             continue
-        log.info(f"Deleting key from remote storage: {obj_key}")
+        log.info("%s", "Deleting key from remote storage: {obj_key}")
         remote_storage_delete_key(env.pageserver_remote_storage, obj_key)
         pass
 
@@ -879,7 +879,7 @@ def test_sharding_service_heartbeats(
     # ... expecting that each tenant will be placed on a different node
     def tenants_placed():
         node_to_tenants = build_node_to_tenants_map(env)
-        log.info(f"{node_to_tenants=}")
+        log.info("%s", "{node_to_tenants=}")
 
         # Check that all the tenants have been attached
         assert sum((len(ts) for ts in node_to_tenants.values())) == len(tenant_ids)
@@ -903,7 +903,7 @@ def test_sharding_service_heartbeats(
     # ... expecting the heartbeats to mark it offline
     def node_offline():
         nodes = env.storage_controller.node_list()
-        log.info(f"{nodes=}")
+        log.info("%s", "{nodes=}")
         target = next(n for n in nodes if n["id"] == offline_node_id)
         assert target["availability"] == "Offline"
 
@@ -914,7 +914,7 @@ def test_sharding_service_heartbeats(
     # .. expecting the tenant on the offline node to be migrated
     def tenant_migrated():
         node_to_tenants = build_node_to_tenants_map(env)
-        log.info(f"{node_to_tenants=}")
+        log.info("%s", "{node_to_tenants=}")
         assert set(node_to_tenants[online_node_id]) == set(tenant_ids)
 
     wait_until(10, 1, tenant_migrated)

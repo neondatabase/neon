@@ -190,7 +190,7 @@ def test_import_from_pageserver_multisegment(
     logical_size = env.pageserver.http_client().timeline_detail(env.initial_tenant, timeline)[
         "current_logical_size"
     ]
-    log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
+    log.info("%s", "timeline logical size = {logical_size / (1024 ** 2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
     tar_output_file = _import(
@@ -204,7 +204,7 @@ def test_import_from_pageserver_multisegment(
         for f in tar_f.getnames():
             if segfile_re.search(f) is not None:
                 cnt_seg_files += 1
-                log.info(f"Found a segment file: {f} in the backup archive file")
+                log.info("%s", "Found a segment file: {f} in the backup archive file")
     assert cnt_seg_files > 0
 
 
@@ -246,7 +246,7 @@ def _import(
 
     Returns:
     path to the backup archive file"""
-    log.info(f"start_backup_lsn = {lsn}")
+    log.info("%s", "start_backup_lsn = {lsn}")
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.

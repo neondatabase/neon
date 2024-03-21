@@ -124,7 +124,7 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv, test_output_dir:
         wait_for_last_flush_lsn(env, endpoint, tenant_id, first_branch_timeline_id)
 
     size_after_branching = http_client.tenant_size(tenant_id)
-    log.info(f"size_after_branching: {size_after_branching}")
+    log.info("%s", "size_after_branching: {size_after_branching}")
 
     assert size_after_branching > initial_size
 
@@ -417,7 +417,7 @@ def test_single_branch_get_tenant_size_grows(
             current_lsn = after_lsn
         size_debug_file.write(size_debug)
         assert size > 0
-        log.info(f"size: {size} at lsn {current_lsn}")
+        log.info("%s", "size: {size} at lsn {current_lsn}")
         return (current_lsn, size)
 
     with env.endpoints.create_start(
@@ -545,7 +545,7 @@ def test_single_branch_get_tenant_size_grows(
     # developing these tests that locally the value is a bit more than what we
     # get in the ci.
     for phase, lsn, size in collected_responses:
-        log.info(f"collected: {phase}, {lsn}, {size}")
+        log.info("%s", "collected: {phase}, {lsn}, {size}")
 
     env.pageserver.stop()
     env.pageserver.start()

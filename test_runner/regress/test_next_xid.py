@@ -176,7 +176,7 @@ def test_import_at_2bil(
     # Advance nextXid close to 2 billion XIDs
     while True:
         xid = int(query_scalar(cur, "SELECT txid_current()"))
-        log.info(f"xid now {xid}")
+        log.info("%s", "xid now {xid}")
         # Consume 10k transactons at a time until we get to 2^31 - 200k
         if xid < 2 * 1024 * 1024 * 1024 - 100000:
             cur.execute("select test_consume_xids(50000);")

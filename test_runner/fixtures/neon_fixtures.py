@@ -112,7 +112,7 @@ BASE_PORT: int = 15000
 def base_dir() -> Iterator[Path]:
     # find the base directory (currently this is the git root)
     base_dir = get_self_dir().parent.parent
-    log.info(f"base_dir is {base_dir}")
+    log.info("%s", "base_dir is {base_dir}")
 
     yield base_dir
 
@@ -129,7 +129,7 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
         binpath = Path(env_neon_bin)
     else:
         binpath = base_dir / "target" / build_type
-    log.info(f"neon_binpath is {binpath}")
+    log.info("%s", "neon_binpath is {binpath}")
 
     if not (binpath / "pageserver").exists():
         raise Exception(f"neon binaries not found at '{binpath}'")
@@ -144,7 +144,7 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
     else:
         distrib_dir = base_dir / "pg_install"
 
-    log.info(f"pg_distrib_dir is {distrib_dir}")
+    log.info("%s", "pg_distrib_dir is {distrib_dir}")
     yield distrib_dir
 
 
@@ -157,7 +157,7 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
         output_dir = base_dir / DEFAULT_OUTPUT_DIR
     output_dir.mkdir(exist_ok=True)
 
-    log.info(f"top_output_dir is {output_dir}")
+    log.info("%s", "top_output_dir is {output_dir}")
     yield output_dir
 
 
@@ -176,7 +176,7 @@ def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Ite
         if not postgres_bin_path.exists():
             raise Exception(f"postgres not found at '{postgres_bin_path}'")
 
-    log.info(f"versioned_pg_distrib_dir is {versioned_dir}")
+    log.info("%s", "versioned_pg_distrib_dir is {versioned_dir}")
     yield versioned_dir
 
 
@@ -372,7 +372,7 @@ class PgProtocol:
             with conn.cursor() as cur:
                 for query in queries:
                     if log_query:
-                        log.info(f"Executing query: {query}")
+                        log.info("%s", "Executing query: {query}")
                     cur.execute(query)
 
                     if cur.description is None:
@@ -555,7 +555,7 @@ class NeonEnvBuilder:
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
-        log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
+        log.info("%s", "Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
 
@@ -661,7 +661,7 @@ class NeonEnvBuilder:
 
         for sk_from_dir in (repo_dir / "safekeepers").glob("sk*"):
             sk_to_dir = self.repo_dir / "safekeepers" / sk_from_dir.name
-            log.info(f"Copying safekeeper directory {sk_from_dir} to {sk_to_dir}")
+            log.info("%s", "Copying safekeeper directory {sk_from_dir} to {sk_to_dir}")
             sk_to_dir.rmdir()
             shutil.copytree(sk_from_dir, sk_to_dir, ignore=shutil.ignore_patterns("*.log", "*.pid"))
 
@@ -723,7 +723,7 @@ class NeonEnvBuilder:
             f"lowerdir={srcdir},upperdir={upper},workdir={work}",
             str(dstdir),
         ]
-        log.info(f"Mounting overlayfs srcdir={srcdir} dstdir={dstdir}: {cmd}")
+        log.info("%s", "Mounting overlayfs srcdir={srcdir} dstdir={dstdir}: {cmd}")
         subprocess_capture(
             self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
         )
@@ -1112,7 +1112,7 @@ class NeonEnv:
             self.safekeepers.append(Safekeeper(env=self, id=id, port=port))
             cfg["safekeepers"].append(sk_cfg)
 
-        log.info(f"Config: {cfg}")
+        log.info("%s", "Config: {cfg}")
         self.neon_cli.init(cfg, force=config.config_init_force)
 
     def start(self, register_pageservers=False):
@@ -1436,7 +1436,7 @@ class AbstractNeonCli(abc.ABC):
             bin_neon = str(self.env.neon_binpath / self.COMMAND)
 
         args = [bin_neon] + arguments
-        log.info('Running command "{}"'.format(" ".join(args)))
+        log.info("%s", f'Running command {" ".join(args)}')
 
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
@@ -1744,7 +1744,7 @@ class NeonCli(AbstractNeonCli):
         if immediate:
             cmd.extend(["-m", "immediate"])
 
-        log.info(f"Stopping pageserver with {cmd}")
+        log.info("%s", "Stopping pageserver with {cmd}")
         return self.raw_cli(cmd)
 
     def safekeeper_start(
@@ -2057,7 +2057,7 @@ class NeonStorageController(MetricsGetter):
             headers=self.headers(TokenScope.ADMIN),
         )
         json = response.json()
-        log.info(f"Response: {json}")
+        log.info("%s", "Response: {json}")
         if json["attachment"]:
             # Explicit int() to make python type linter happy
             return (int(json["attachment"][0]), int(json["attachment"][1]))
@@ -2072,7 +2072,7 @@ class NeonStorageController(MetricsGetter):
             "listen_pg_addr": "localhost",
             "listen_pg_port": node.service_port.pg,
         }
-        log.info(f"node_register({body})")
+        log.info("%s", "node_register({body})")
         self.request(
             "POST",
             f"{self.env.storage_controller_api}/control/v1/node",
@@ -2097,7 +2097,7 @@ class NeonStorageController(MetricsGetter):
         return response.json()
 
     def node_configure(self, node_id, body: dict[str, Any]):
-        log.info(f"node_configure({node_id}, {body})")
+        log.info("%s", "node_configure({node_id}, {body})")
         body["node_id"] = node_id
         self.request(
             "PUT",
@@ -2135,7 +2135,7 @@ class NeonStorageController(MetricsGetter):
             json=body,
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
-        log.info(f"tenant_create success: {response.json()}")
+        log.info("%s", "tenant_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
@@ -2160,7 +2160,7 @@ class NeonStorageController(MetricsGetter):
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
-        log.info(f"tenant_shard_split success: {body}")
+        log.info("%s", "tenant_shard_split success: {body}")
         shards: list[TenantShardId] = body["new_shards"]
         return shards
 
@@ -2171,7 +2171,7 @@ class NeonStorageController(MetricsGetter):
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
             headers=self.headers(TokenScope.ADMIN),
         )
-        log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
+        log.info("%s", "Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
 
     def consistency_check(self):
@@ -2191,7 +2191,7 @@ class NeonStorageController(MetricsGetter):
         else:
             pairs = config_strings
 
-        log.info(f"Requesting config failpoints: {repr(pairs)}")
+        log.info("%s", "Requesting config failpoints: {repr(pairs)}")
 
         res = self.request(
             "PUT",
@@ -2199,7 +2199,7 @@ class NeonStorageController(MetricsGetter):
             json=[{"name": name, "actions": actions} for name, actions in pairs],
             headers=self.headers(TokenScope.ADMIN),
         )
-        log.info(f"Got failpoints request response code {res.status_code}")
+        log.info("%s", "Got failpoints request response code {res.status_code}")
         res.raise_for_status()
 
     def __enter__(self) -> "NeonStorageController":
@@ -2313,12 +2313,12 @@ class NeonPageserver(PgProtocol):
         def complete():
             log.info("Checking tenants...")
             tenants = client.tenant_list()
-            log.info(f"Tenant list: {tenants}...")
+            log.info("%s", "Tenant list: {tenants}...")
             any_unstable = any((t["state"]["slug"] not in stable_states) for t in tenants)
             if any_unstable:
                 for t in tenants:
-                    log.info(f"Waiting for tenant {t['id']} in state {t['state']['slug']}")
-            log.info(f"any_unstable={any_unstable}")
+                    log.info("%s", "Waiting for tenant {t['id']} in state {t['state']['slug']}")
+            log.info("%s", "any_unstable={any_unstable}")
             assert not any_unstable
 
         wait_until(20, 0.5, complete)
@@ -2362,7 +2362,7 @@ class NeonPageserver(PgProtocol):
         Certain metrics should _always_ be zero: they track conditions that indicate a bug.
         """
         if not self.running:
-            log.info(f"Skipping metrics check on pageserver {self.id}, it is not running")
+            log.info("%s", "Skipping metrics check on pageserver {self.id}, it is not running")
             return
 
         for metric in [
@@ -2446,7 +2446,7 @@ class NeonPageserver(PgProtocol):
 
     def read_tenant_location_conf(self, tenant_id: TenantId) -> dict[str, Any]:
         path = self.tenant_dir(tenant_id) / "config-v1"
-        log.info(f"Reading location conf from {path}")
+        log.info("%s", "Reading location conf from {path}")
         bytes = open(path, "r").read()
         try:
             decoded: dict[str, Any] = toml.loads(bytes)
@@ -2538,7 +2538,7 @@ class PgBin:
         """
 
         self._fixpath(command)
-        log.info(f"Running command '{' '.join(command)}'")
+        log.info("%s", "Running command '{' '.join(command)}'")
         env = self._build_env(env)
         subprocess.run(command, env=env, cwd=cwd, check=True)
 
@@ -2558,7 +2558,7 @@ class PgBin:
         """
 
         self._fixpath(command)
-        log.info(f"Running command '{' '.join(command)}'")
+        log.info("%s", "Running command '{' '.join(command)}'")
         env = self._build_env(env)
         base_path, _, _ = subprocess_capture(
             self.log_dir,
@@ -2582,7 +2582,7 @@ class PgBin:
         checkpoint_lsn = re.findall(
             "Latest checkpoint location:\\s+([0-9A-F]+/[0-9A-F]+)", result.stdout
         )[0]
-        log.info(f"last checkpoint at {checkpoint_lsn}")
+        log.info("%s", "last checkpoint at {checkpoint_lsn}")
         return Lsn(checkpoint_lsn)
 
 
@@ -2783,7 +2783,7 @@ class PSQL:
         if query is not None:
             run_args += ["--command", query]
 
-        log.info(f"Run psql: {subprocess.list2cmdline(run_args)}")
+        log.info("%s", "Run psql: {subprocess.list2cmdline(run_args)}")
         return await asyncio.create_subprocess_exec(
             *run_args,
             stdout=subprocess.PIPE,
@@ -2962,7 +2962,7 @@ class NeonProxy(PgProtocol):
         expected_code = kwargs.get("expected_code")
         timeout = kwargs.get("timeout")
 
-        log.info(f"Executing http query: {query}")
+        log.info("%s", "Executing http query: {query}")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
         response = requests.post(
@@ -2987,7 +2987,7 @@ class NeonProxy(PgProtocol):
         password = kwargs["password"]
         expected_code = kwargs.get("expected_code")
 
-        log.info(f"Executing http2 query: {query}")
+        log.info("%s", "Executing http2 query: {query}")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
         async with httpx.AsyncClient(
@@ -3026,9 +3026,9 @@ class NeonProxy(PgProtocol):
     async def find_auth_link(link_auth_uri, proc):
         for _ in range(100):
             line = (await proc.stderr.readline()).decode("utf-8").strip()
-            log.info(f"psql line: {line}")
+            log.info("%s", "psql line: {line}")
             if link_auth_uri in line:
-                log.info(f"SUCCESS, found auth url: {line}")
+                log.info("%s", "SUCCESS, found auth url: {line}")
                 return line
 
     def __enter__(self) -> NeonProxy:
@@ -3235,7 +3235,7 @@ class Endpoint(PgProtocol):
 
         assert self.endpoint_id is not None
 
-        log.info(f"Starting postgres endpoint {self.endpoint_id}")
+        log.info("%s", "Starting postgres endpoint {self.endpoint_id}")
 
         self.env.neon_cli.endpoint_start(
             self.endpoint_id,
@@ -3388,7 +3388,7 @@ class Endpoint(PgProtocol):
             pageserver_id=pageserver_id,
         ).start(remote_ext_config=remote_ext_config, pageserver_id=pageserver_id)
 
-        log.info(f"Postgres startup took {time.time() - started_at} seconds")
+        log.info("%s", "Postgres startup took {time.time() - started_at} seconds")
 
         return self
 
@@ -3555,7 +3555,7 @@ class Safekeeper:
         return self
 
     def stop(self, immediate: bool = False) -> "Safekeeper":
-        log.info("Stopping safekeeper {}".format(self.id))
+        log.info("Stopping safekeeper %s", self.id)
         self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
@@ -3579,10 +3579,10 @@ class Safekeeper:
             conn.autocommit = True
             with conn.cursor() as cur:
                 request_json = json.dumps(request)
-                log.info(f"JSON_CTRL request on port {self.port.pg}: {request_json}")
+                log.info("%s", "JSON_CTRL request on port {self.port.pg}: {request_json}")
                 cur.execute("JSON_CTRL " + request_json)
                 all = cur.fetchall()
-                log.info(f"JSON_CTRL response: {all[0][0]}")
+                log.info("%s", "JSON_CTRL response: {all[0][0]}")
                 res = json.loads(all[0][0])
                 assert isinstance(res, dict)
                 return res
@@ -3674,7 +3674,7 @@ def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) ->
     if (suffix := getattr(request.node, "execution_count", None)) is not None:
         test_dir = test_dir.parent / f"{test_dir.name}-{suffix}"
 
-    log.info(f"get_test_output_dir is {test_dir}")
+    log.info("%s", "get_test_output_dir is {test_dir}")
     # make mypy happy
     assert isinstance(test_dir, Path)
     return test_dir
@@ -3736,7 +3736,7 @@ def test_output_dir(
 
     # one directory per test
     test_dir = get_test_output_dir(request, top_output_dir)
-    log.info(f"test_output_dir is {test_dir}")
+    log.info("%s", "test_output_dir is {test_dir}")
     shutil.rmtree(test_dir, ignore_errors=True)
     test_dir.mkdir()
 
@@ -3827,7 +3827,7 @@ def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[
         return None
 
     overlay_dir = get_test_overlay_dir(request, top_output_dir)
-    log.info(f"test_overlay_dir is {overlay_dir}")
+    log.info("%s", "test_overlay_dir is {overlay_dir}")
 
     overlay_dir.mkdir(exist_ok=True)
     # unmount stale overlayfs mounts which subdirectories of `overlay_dir/*` as the overlayfs `upperdir` and `workdir`
@@ -3982,18 +3982,18 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     (match, mismatch, error) = filecmp.cmpfiles(
         endpoint.pgdata_dir, restored_dir_path, pgdata_files, shallow=False
     )
-    log.info(f"filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}")
+    log.info("%s", "filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}")
 
     for f in mismatch:
         f1 = os.path.join(endpoint.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
-        stdout_filename = "{}.filediff".format(f2)
+        stdout_filename = f"{f2}.filediff"
 
         with open(stdout_filename, "w") as stdout_f:
-            subprocess.run("xxd -b {} > {}.hex ".format(f1, f1), shell=True)
-            subprocess.run("xxd -b {} > {}.hex ".format(f2, f2), shell=True)
+            subprocess.run(f"xxd -b {f1} > {f1}.hex", shell=True)
+            subprocess.run(f"xxd -b {f2} > {f2}.hex", shell=True)
 
-            cmd = "diff {}.hex {}.hex".format(f1, f2)
+            cmd = f"diff {f1}.hex {f2}.hex"
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])
@@ -4007,9 +4007,9 @@ def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -
             0
         ]
         if res:
-            log.info(f"subscriber_lsn={res}")
+            log.info("%s", "subscriber_lsn={res}")
             subscriber_lsn = Lsn(res)
-            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={ publisher_lsn}")
+            log.info("%s", "Subscriber LSN={subscriber_lsn}, publisher LSN={ publisher_lsn}")
             if subscriber_lsn >= publisher_lsn:
                 return subscriber_lsn
         time.sleep(0.5)
@@ -4056,7 +4056,7 @@ def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
             secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
         )
         caught_up = secondary_lsn >= primary_lsn
-        log.info(f"caughtup={caught_up}, primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}")
+        log.info("%s", "caughtup={caught_up}, primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}")
         if caught_up:
             return
         time.sleep(1)

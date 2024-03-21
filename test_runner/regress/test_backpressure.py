@@ -27,17 +27,17 @@ def check_backpressure(endpoint: Endpoint, stop_event: threading.Event, polling_
         cur.execute("select pg_size_bytes(current_setting('max_replication_write_lag'))")
         res = cur.fetchone()
         max_replication_write_lag_bytes = res[0]
-        log.info(f"max_replication_write_lag: {max_replication_write_lag_bytes} bytes")
+        log.info("%s", "max_replication_write_lag: {max_replication_write_lag_bytes} bytes")
 
         cur.execute("select pg_size_bytes(current_setting('max_replication_flush_lag'))")
         res = cur.fetchone()
         max_replication_flush_lag_bytes = res[0]
-        log.info(f"max_replication_flush_lag: {max_replication_flush_lag_bytes} bytes")
+        log.info("%s", "max_replication_flush_lag: {max_replication_flush_lag_bytes} bytes")
 
         cur.execute("select pg_size_bytes(current_setting('max_replication_apply_lag'))")
         res = cur.fetchone()
         max_replication_apply_lag_bytes = res[0]
-        log.info(f"max_replication_apply_lag: {max_replication_apply_lag_bytes} bytes")
+        log.info("%s", "max_replication_apply_lag: {max_replication_apply_lag_bytes} bytes")
 
     with pg_cur(endpoint) as cur:
         while not stop_event.is_set():
@@ -80,7 +80,7 @@ def check_backpressure(endpoint: Endpoint, stop_event: threading.Event, polling_
                 time.sleep(polling_interval)
 
             except Exception as e:
-                log.info(f"backpressure check query failed: {e}")
+                log.info("%s", "backpressure check query failed: {e}")
                 stop_event.set()
 
     log.info("check thread stopped")
@@ -150,7 +150,7 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
                         f"Exception {e} while inserting rows and WAL lag overflowed configured threshold. That means backpressure doesn't work."
                     ) from e
 
-        log.info(f"inserted {rows_inserted} rows")
+        log.info("%s", "inserted {rows_inserted} rows")
 
     if check_thread.is_alive():
         log.info("stopping check thread")

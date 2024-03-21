@@ -49,13 +49,13 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
 
     # Leave the first timeline alone, but corrupt the others in different ways
     (tenant0, timeline0, pg0) = tenant_timelines[0]
-    log.info(f"Timeline {tenant0}/{timeline0} is left intact")
+    log.info("%s", "Timeline {tenant0}/{timeline0} is left intact")
 
     (tenant1, timeline1, pg1) = tenant_timelines[1]
     metadata_path = f"{env.pageserver.workdir}/tenants/{tenant1}/timelines/{timeline1}/metadata"
     with open(metadata_path, "w") as f:
         f.write("overwritten with garbage!")
-    log.info(f"Timeline {tenant1}/{timeline1} got its metadata spoiled")
+    log.info("%s", "Timeline {tenant1}/{timeline1} got its metadata spoiled")
 
     (tenant2, timeline2, pg2) = tenant_timelines[2]
     timeline_path = f"{env.pageserver.workdir}/tenants/{tenant2}/timelines/{timeline2}/"
@@ -67,7 +67,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
             with open(p, "wb") as f:
                 f.truncate(0)
                 f.truncate(size)
-    log.info(f"Timeline {tenant2}/{timeline2} got its local layer files spoiled")
+    log.info("%s", "Timeline {tenant2}/{timeline2} got its local layer files spoiled")
 
     env.pageserver.start()
 

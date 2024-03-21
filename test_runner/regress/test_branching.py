@@ -50,7 +50,7 @@ def test_branching_with_pgbench(
     )
 
     def run_pgbench(connstr: str):
-        log.info(f"Start a pgbench workload on pg {connstr}")
+        log.info("%s", "Start a pgbench workload on pg {connstr}")
 
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", "-T15", connstr])
@@ -71,7 +71,7 @@ def test_branching_with_pgbench(
         # random a delay between [0, 5]
         delay = random.random() * 5
         time.sleep(delay)
-        log.info(f"Sleep {delay}s")
+        log.info("%s", "Sleep {delay}s")
 
         # If the number of concurrent threads exceeds a threshold, wait for
         # all the threads to finish before spawning a new one. Because the
@@ -84,11 +84,11 @@ def test_branching_with_pgbench(
             threads = []
 
         if ty == "cascade":
-            env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(i), tenant_id=tenant)
+            env.neon_cli.create_branch(f"b{i + 1}", f"b{i}", tenant_id=tenant)
         else:
-            env.neon_cli.create_branch("b{}".format(i + 1), "b0", tenant_id=tenant)
+            env.neon_cli.create_branch(f"b{i + 1}", "b0", tenant_id=tenant)
 
-        endpoints.append(env.endpoints.create_start("b{}".format(i + 1), tenant_id=tenant))
+        endpoints.append(env.endpoints.create_start(f"b{i + 1}", tenant_id=tenant))
 
         threads.append(
             threading.Thread(target=run_pgbench, args=(endpoints[-1].connstr(),), daemon=True)
@@ -132,7 +132,7 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
     # and is smaller than `curr_lsn`.
     start_lsn = Lsn((int(curr_lsn) - XLOG_BLCKSZ) // XLOG_BLCKSZ * XLOG_BLCKSZ)
 
-    log.info(f"Branching b1 from b0 starting at lsn {start_lsn}...")
+    log.info("%s", "Branching b1 from b0 starting at lsn {start_lsn}...")
     env.neon_cli.create_branch("b1", "b0", ancestor_start_lsn=start_lsn)
     endpoint1 = env.endpoints.create_start("b1")
 
@@ -261,14 +261,14 @@ def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: N
     # Create a timeline whose creation will succeed.  The tenant will need at least one
     # timeline to be loadable.
     success_timeline = TimelineId.generate()
-    log.info(f"Creating timeline {success_timeline}")
+    log.info("%s", "Creating timeline {success_timeline}")
     ps_http.timeline_create(env.pg_version, env.initial_tenant, success_timeline, timeout=60)
 
     # Create a timeline whose upload to remote storage will be blocked
     ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
 
     def start_creating_timeline():
-        log.info(f"Creating (expect failure) timeline {env.initial_timeline}")
+        log.info("%s", "Creating (expect failure) timeline {env.initial_timeline}")
         with pytest.raises(RequestException):
             ps_http.timeline_create(
                 env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
@@ -353,7 +353,7 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
     env.pageserver.tenant_create(env.initial_tenant)
 
     success_timeline = TimelineId.generate()
-    log.info(f"Creating timeline {success_timeline}")
+    log.info("%s", "Creating timeline {success_timeline}")
     ps_http = env.pageserver.http_client()
     success_result = ps_http.timeline_create(
         env.pg_version, env.initial_tenant, success_timeline, timeout=60
@@ -362,7 +362,7 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
     ps_http.configure_failpoints(("timeline-creation-after-uninit", "pause"))
 
     def start_creating_timeline():
-        log.info(f"Creating (expect failure) timeline {env.initial_timeline}")
+        log.info("%s", "Creating (expect failure) timeline {env.initial_timeline}")
         with pytest.raises(RequestException):
             ps_http.timeline_create(
                 env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60

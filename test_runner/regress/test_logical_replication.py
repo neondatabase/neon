@@ -43,7 +43,7 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
         "CREATE TABLE replication_example(id SERIAL PRIMARY KEY, somedata int, text varchar(120), testcolumn1 int, testcolumn2 int, testcolumn3 int);"
     )
     connstr = endpoint.connstr().replace("'", "''")
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("%s", "ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
     # Wait logical replication channel to be established
@@ -197,7 +197,7 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.start()
     vanilla_pg.safe_psql("create table t(pk integer primary key, payload integer)")
     connstr = endpoint.connstr().replace("'", "''")
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("%s", "ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
     wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
@@ -224,7 +224,7 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.safe_psql("create table t(pk integer primary key, value text)")
     vanilla_pg.safe_psql("CREATE TABLE replication_example(id SERIAL PRIMARY KEY, somedata int);")
 
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("%s", "ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
     connstr = endpoint.connstr().replace("'", "''")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
     logical_replication_sync(vanilla_pg, endpoint)
@@ -235,7 +235,7 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
         # creates huge message and then it stabilizes, have no idea why.
         for _ in range(3):
             lsn_before = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-            log.info(f"current_lsn={lsn_before}")
+            log.info("%s", "current_lsn={lsn_before}")
             # Non-transactional logical message doesn't write WAL, only XLogInsert's
             # it, so use transactional. Which is a bit problematic as transactional
             # necessitates commit record. Alternatively we can do smth like
@@ -254,21 +254,21 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
 
         # and write logical message spanning exactly as we want
         lsn_before = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        log.info(f"current_lsn={lsn_before}")
+        log.info("%s", "current_lsn={lsn_before}")
         curr_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
         offs = int(curr_lsn) % 8192
         till_page = 8192 - offs
         payload_len = (
             till_page - logical_message_base - 8
         )  # not sure why 8 is here, it is deduced from experiments
-        log.info(f"current_lsn={curr_lsn}, offs {offs}, till_page {till_page}")
+        log.info("%s", "current_lsn={curr_lsn}, offs {offs}, till_page {till_page}")
 
         # payload_len above would go exactly till the page boundary; but we want contrecord, so make it slightly longer
         payload_len += 8
 
         cur.execute(f"select pg_logical_emit_message(true, 'pref', 'f{'a' * payload_len}')")
         supposedly_contrecord_end = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        log.info(f"supposedly_page_boundary={supposedly_contrecord_end}")
+        log.info("%s", "supposedly_page_boundary={supposedly_contrecord_end}")
         # The calculations to hit the page boundary are very fuzzy, so just
         # ignore test if we fail to reach it.
         if not (int(supposedly_contrecord_end) % 8192 == 32):
@@ -310,7 +310,7 @@ def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.start()
     vanilla_pg.safe_psql("CREATE TABLE reptbl(id int, largeval text);")
 
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("%s", "ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
     connstr = endpoint.connstr().replace("'", "''")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 

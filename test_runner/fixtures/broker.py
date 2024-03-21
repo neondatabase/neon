@@ -31,7 +31,7 @@ class NeonBroker:
             return
 
         listen_addr = self.listen_addr()
-        log.info(f'starting storage_broker to listen incoming connections at "{listen_addr}"')
+        log.info("%s", 'starting storage_broker to listen incoming connections at "{listen_addr}"')
         with open(self.logfile, "wb") as logfile:
             args = [
                 str(self.neon_binpath / "storage_broker"),

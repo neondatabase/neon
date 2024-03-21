@@ -81,7 +81,7 @@ class MetricsGetter:
 
         if not absence_ok:
             if len(result) != len(names):
-                log.info(f"Metrics found: {metrics.metrics}")
+                log.info("%s", "Metrics found: {metrics.metrics}")
                 raise RuntimeError(f"could not find all metrics {' '.join(names)}")
 
         return result

@@ -42,7 +42,7 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     )
     row = cur.fetchone()
     assert row is not None
-    log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
+    log.info("%s", "shared_buffers is {row[0]}, table size {row[1]}")
     assert int(row[0]) < int(row[1])
 
     cur.execute("SELECT count(*) FROM foo")
@@ -57,4 +57,4 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
             cur.execute("SELECT t FROM foo ORDER BY RANDOM() LIMIT 10")
             cur.fetchall()
         times_executed += 1
-    log.info(f"Workload executed {times_executed} times")
+    log.info("%s", "Workload executed {times_executed} times")

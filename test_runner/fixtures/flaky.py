@@ -54,7 +54,7 @@ def pytest_collection_modifyitems(config: Config, items: List[pytest.Item]):
 
         if flaky_tests.get(parent_suite, {}).get(suite, {}).get(name, False):
             # Rerun 3 times = 1 original run + 2 reruns
-            log.info(f"Marking {item.nodeid} as flaky. It will be rerun up to 3 times")
+            log.info("%s", "Marking {item.nodeid} as flaky. It will be rerun up to 3 times")
             item.add_marker(pytest.mark.flaky(reruns=2))
 
             # pytest-rerunfailures is not compatible with pytest-timeout (timeout is not set for reruns),

@@ -171,14 +171,14 @@ def run_benchmark_max_throughput_latest_lsn(
         f"{duration_secs}s",
         # don't specify the targets explicitly, let pagebench auto-discover them
     ]
-    log.info(f"command: {' '.join(cmd)}")
+    log.info("%s", "command: {' '.join(cmd)}")
     basepath = pg_bin.run_capture(cmd, with_command_header=False)
     results_path = Path(basepath + ".stdout")
-    log.info(f"Benchmark results at: {results_path}")
+    log.info("%s", "Benchmark results at: {results_path}")
 
     with open(results_path, "r") as f:
         results = json.load(f)
-    log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
+    log.info("%s", "Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
     total = results["total"]
 
