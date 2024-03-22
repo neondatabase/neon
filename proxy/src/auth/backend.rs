@@ -413,9 +413,14 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
 mod tests {
     use std::sync::Arc;
 
-    use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+    use bytes::BytesMut;
+    use fallible_iterator::FallibleIterator;
+    use postgres_protocol::{
+        authentication::sasl::{ChannelBinding, ScramSha256},
+        message::{backend::Message as PgMessage, frontend},
+    };
     use provider::AuthSecret;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
     use crate::{
         auth::{ComputeUserInfoMaybeEndpoint, IpPattern},
@@ -472,6 +477,15 @@ mod tests {
         scram_protocol_timeout: std::time::Duration::from_secs(5),
     };
 
+    async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
+        loop {
+            r.read_buf(&mut *b).await.unwrap();
+            if let Some(m) = PgMessage::parse(&mut *b).unwrap() {
+                break m;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn auth_quirks_scram() {
         let (mut client, server) = tokio::io::duplex(1024);
@@ -492,44 +506,41 @@ mod tests {
         let handle = tokio::spawn(async move {
             let mut scram = ScramSha256::new(b"my-secret-password", ChannelBinding::unsupported());
 
-            let mut buf = [0; 1024];
+            let mut read = BytesMut::new();
+            let mut write = BytesMut::new();
 
             // server should offer scram
-            let n = client.read(&mut buf).await.unwrap();
-            assert_eq!(
-                &buf[..n],
-                b"R\x00\x00\x00\x17\x00\x00\x00\x0aSCRAM-SHA-256\0\0"
-            );
+            match read_message(&mut client, &mut read).await {
+                PgMessage::AuthenticationSasl(a) => {
+                    let options: Vec<&str> = a.mechanisms().collect().unwrap();
+                    assert_eq!(options, ["SCRAM-SHA-256"]);
+                }
+                _ => panic!("wrong message"),
+            }
 
-            // client accepts scram and sends the client-first-message
-            let method = b"SCRAM-SHA-256";
-            let message = scram.message();
-            let message_len = message.len() as u32;
-            let pw_message_len = (method.len() + 4 + 1 + 4) as u32 + message_len;
-            client.write_all(b"p").await.unwrap();
-            client
-                .write_all(&pw_message_len.to_be_bytes())
-                .await
-                .unwrap();
-            client.write_all(method).await.unwrap();
-            client.write_all(b"\0").await.unwrap();
-            client.write_all(&message_len.to_be_bytes()).await.unwrap();
-            client.write_all(message).await.unwrap();
+            // client sends client-first-message
+            frontend::sasl_initial_response("SCRAM-SHA-256", scram.message(), &mut write).unwrap();
+            client.write_all(&write.split().freeze()).await.unwrap();
 
             // server response with server-first-message
-            let n = client.read(&mut buf).await.unwrap();
-            scram.update(&buf[9..n]).await.unwrap();
+            match read_message(&mut client, &mut read).await {
+                PgMessage::AuthenticationSaslContinue(a) => {
+                    scram.update(a.data()).await.unwrap();
+                }
+                _ => panic!("wrong message"),
+            }
 
             // client response with client-final-message
-            let message = scram.message();
-            let message_len = message.len() as u32 + 4;
-            client.write_all(b"p").await.unwrap();
-            client.write_all(&message_len.to_be_bytes()).await.unwrap();
-            client.write_all(message).await.unwrap();
+            frontend::sasl_response(scram.message(), &mut write).unwrap();
+            client.write_all(&write.split().freeze()).await.unwrap();
 
             // server response with server-final-message
-            let n = client.read(&mut buf).await.unwrap();
-            scram.finish(&buf[9..n]).unwrap();
+            match read_message(&mut client, &mut read).await {
+                PgMessage::AuthenticationSaslFinal(a) => {
+                    scram.finish(a.data()).unwrap();
+                }
+                _ => panic!("wrong message"),
+            }
         });
 
         let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, false, CONFIG)
@@ -557,18 +568,18 @@ mod tests {
         };
 
         let handle = tokio::spawn(async move {
-            let mut buf = [0; 1024];
+            let mut read = BytesMut::new();
+            let mut write = BytesMut::new();
 
             // server should offer cleartext
-            let n = client.read(&mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"R\x00\x00\x00\x08\x00\x00\x00\x03");
+            match read_message(&mut client, &mut read).await {
+                PgMessage::AuthenticationCleartextPassword => {}
+                _ => panic!("wrong message"),
+            }
 
             // client responds with password
-            let password = b"my-secret-password\0";
-            let password_len = password.len() as u32 + 4;
-            client.write_all(b"p").await.unwrap();
-            client.write_all(&password_len.to_be_bytes()).await.unwrap();
-            client.write_all(password).await.unwrap();
+            frontend::password_message(b"my-secret-password", &mut write).unwrap();
+            client.write_all(&write.split().freeze()).await.unwrap();
         });
 
         let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
@@ -596,18 +607,19 @@ mod tests {
         };
 
         let handle = tokio::spawn(async move {
-            let mut buf = [0; 1024];
+            let mut read = BytesMut::new();
+            let mut write = BytesMut::new();
 
             // server should offer cleartext
-            let n = client.read(&mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"R\x00\x00\x00\x08\x00\x00\x00\x03");
+            match read_message(&mut client, &mut read).await {
+                PgMessage::AuthenticationCleartextPassword => {}
+                _ => panic!("wrong message"),
+            }
 
-            // client responds with password and endpoint
-            let password = b"endpoint=my-endpoint;my-secret-password\0";
-            let password_len = password.len() as u32 + 4;
-            client.write_all(b"p").await.unwrap();
-            client.write_all(&password_len.to_be_bytes()).await.unwrap();
-            client.write_all(password).await.unwrap();
+            // client responds with password
+            frontend::password_message(b"endpoint=my-endpoint;my-secret-password", &mut write)
+                .unwrap();
+            client.write_all(&write.split().freeze()).await.unwrap();
         });
 
         let creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)

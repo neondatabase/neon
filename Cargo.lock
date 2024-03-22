@@ -4209,6 +4209,7 @@ dependencies = [
  "consumption_metrics",
  "dashmap",
  "env_logger",
+ "fallible-iterator",
  "futures",
  "git-version",
  "hashbrown 0.13.2",
