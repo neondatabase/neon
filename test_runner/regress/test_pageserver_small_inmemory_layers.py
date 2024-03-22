@@ -83,6 +83,16 @@ def wait_for_wal_ingest_metric(pageserver_http: PageserverHttpClient) -> float:
         return 0
 
 
+def get_dirty_bytes(env):
+    v = env.pageserver.http_client().get_metric_value("pageserver_timeline_ephemeral_bytes") or 0
+    log.info(f"dirty_bytes: {v}")
+    return v
+
+
+def assert_dirty_bytes(env, v):
+    assert get_dirty_bytes(env) == v
+
+
 @pytest.mark.parametrize("immediate_shutdown", [True, False])
 def test_pageserver_small_inmemory_layers(
     neon_env_builder: NeonEnvBuilder, immediate_shutdown: bool
@@ -95,17 +105,6 @@ def test_pageserver_small_inmemory_layers(
     but not enough to trigger flushes via the `checkpoint_distance` config.
     """
 
-    def get_dirty_bytes():
-        v = (
-            env.pageserver.http_client().get_metric_value("pageserver_timeline_ephemeral_bytes")
-            or 0
-        )
-        log.info(f"dirty_bytes: {v}")
-        return v
-
-    def assert_dirty_bytes(v):
-        assert get_dirty_bytes() == v
-
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -113,7 +112,7 @@ def test_pageserver_small_inmemory_layers(
     wait_until_pageserver_is_caught_up(env, last_flush_lsns)
 
     # We didn't write enough data to trigger a size-based checkpoint
-    assert get_dirty_bytes() > 0
+    assert get_dirty_bytes(env) > 0
 
     ps_http_client = env.pageserver.http_client()
     total_wal_ingested_before_restart = wait_for_wal_ingest_metric(ps_http_client)
@@ -133,7 +132,7 @@ def test_pageserver_small_inmemory_layers(
     # Catching up with WAL ingest should have resulted in zero bytes of ephemeral layers, since
     # we froze, flushed and uploaded everything before restarting.  There can be no more WAL writes
     # because we shut down compute endpoints before flushing.
-    assert get_dirty_bytes() == 0
+    assert get_dirty_bytes(env) == 0
 
     total_wal_ingested_after_restart = wait_for_wal_ingest_metric(ps_http_client)
 
@@ -141,3 +140,31 @@ def test_pageserver_small_inmemory_layers(
     log.info(f"WAL ingested after restart: {total_wal_ingested_after_restart}")
 
     assert total_wal_ingested_after_restart == 0
+
+
+def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that `checkpoint_timeout` is enforced even if there is no safekeeper input.
+    """
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    last_flush_lsns = asyncio.run(workload(env, TIMELINE_COUNT, ENTRIES_PER_TIMELINE))
+    wait_until_pageserver_is_caught_up(env, last_flush_lsns)
+
+    # We didn't write enough data to trigger a size-based checkpoint
+    assert get_dirty_bytes(env) > 0
+
+    # Stop the safekeepers, so that we cannot have any more WAL receiver connections
+    for sk in env.safekeepers:
+        sk.stop()
+
+    # We should have got here fast enough that we didn't hit the background interval yet,
+    # and the teardown of SK connections shouldn't prompt any layer freezing.
+    assert get_dirty_bytes(env) > 0
+
+    # Within ~ the checkpoint interval, all the ephemeral layers should be frozen and flushed,
+    # such that there are zero bytes of ephemeral layer left on the pageserver
+    log.info("Waiting for background checkpoints...")
+    wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(env, 0))  # type: ignore
