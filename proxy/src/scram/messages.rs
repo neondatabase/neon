@@ -207,6 +207,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_client_first_message_with_invalid_gs2_authz() {
+        assert!(ClientFirstMessage::parse("n,authzid,n=user,r=nonce").is_none())
+    }
+
+    #[test]
+    fn parse_client_first_message_with_extra_params() {
+        let msg = ClientFirstMessage::parse("n,,n=user,r=nonce,a=foo,b=bar,c=baz").unwrap();
+        assert_eq!(msg.bare, "n=user,r=nonce,a=foo,b=bar,c=baz");
+        assert_eq!(msg.username, "user");
+        assert_eq!(msg.nonce, "nonce");
+        assert_eq!(msg.cbind_flag, ChannelBinding::NotSupportedClient);
+    }
+
+    #[test]
+    fn parse_client_first_message_with_extra_params_invalid() {
+        // must be of the form `<ascii letter>=<...>`
+        assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,abc=foo").is_none());
+        assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,1=foo").is_none());
+        assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,a").is_none());
+    }
+
+    #[test]
     fn parse_client_final_message() {
         let input = [
             "c=eSws",

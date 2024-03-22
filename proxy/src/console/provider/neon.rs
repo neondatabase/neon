@@ -14,7 +14,6 @@ use crate::{
     context::RequestMonitoring,
     metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
 };
-use async_trait::async_trait;
 use futures::TryFutureExt;
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -168,7 +167,6 @@ impl Api {
     }
 }
 
-#[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
