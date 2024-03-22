@@ -20,6 +20,7 @@
 
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
+pub(crate) use process::{Kind as ProcessKind, set_kind as set_process_kind};
 
 /// Code to apply [`NeonWalRecord`]s.
 pub(crate) mod apply_neon;
@@ -53,7 +54,7 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    redo_process: RwLock<Option<Arc<process::WalRedoProcess>>>,
+    redo_process: RwLock<Option<Arc<process::Process>>>,
 }
 
 ///
@@ -194,7 +195,7 @@ impl PostgresRedoManager {
         let mut n_attempts = 0u32;
         loop {
             // launch the WAL redo process on first use
-            let proc: Arc<process::WalRedoProcess> = {
+            let proc: Arc<process::Process> = {
                 let proc_guard = self.redo_process.read().unwrap();
                 match &*proc_guard {
                     None => {
@@ -205,7 +206,7 @@ impl PostgresRedoManager {
                             None => {
                                 let start = Instant::now();
                                 let proc = Arc::new(
-                                    process::WalRedoProcess::launch(
+                                    process::Process::launch(
                                         self.conf,
                                         self.tenant_shard_id,
                                         pg_version,
