@@ -1,6 +1,7 @@
 use crate::{auth, rate_limiter::RateBucketInfo, serverless::GlobalConnPoolOptions};
 use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
+use remote_storage::RemoteStorageConfig;
 use rustls::{
     crypto::ring::sign,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -19,6 +20,7 @@ pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, (), ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
+    pub backup_metric_collection: MetricBackupCollectionConfig,
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
@@ -303,6 +305,21 @@ impl CertResolver {
             self.default.as_ref().cloned()
         }
     }
+}
+
+#[derive(Debug)]
+pub struct MetricBackupCollectionConfig {
+    pub interval: Duration,
+    pub remote_storage_config: OptRemoteStorageConfig,
+    pub chunk_size: usize,
+}
+
+/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
+/// runtime type errors from the value parser we use.
+pub type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
+
+pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
+    RemoteStorageConfig::from_toml(&s.parse()?)
 }
 
 /// Helper for cmdline cache options parsing.
