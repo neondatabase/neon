@@ -84,3 +84,15 @@ def test_hot_standby(neon_simple_env: NeonEnv):
     # clean up
     if slow_down_send:
         sk_http.configure_failpoints(("sk-send-wal-replica-sleep", "off"))
+
+def test_2_replicas_start(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    with env.endpoints.create_start(
+        branch_name="main",
+        endpoint_id="primary",
+    ) as primary:
+        time.sleep(1)
+        with env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary1") as secondary1:
+            with env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary2") as secondary2:
+                pass
