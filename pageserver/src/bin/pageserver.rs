@@ -17,6 +17,7 @@ use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_evicti
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::tenant::{secondary, TenantSharedResources};
 use remote_storage::GenericRemoteStorage;
+use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tracing::*;
 
@@ -662,40 +663,37 @@ fn start_pageserver(
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
     // All started up! Now just sit and wait for shutdown signal.
-    {
-        use signal_hook::consts::*;
-        let signal_handler = THE_RUNTIME.spawn_blocking(move || {
-            let mut signals =
-                signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGQUIT]).unwrap();
-            return signals
-                .forever()
-                .next()
-                .expect("forever() never returns None unless explicitly closed");
-        });
-        let signal = THE_RUNTIME.block_on(signal_handler).expect("join error");
-        match signal {
-            SIGQUIT => {
-                info!("Got signal {signal}. Terminating in immediate shutdown mode",);
-                std::process::exit(111);
-            }
-            SIGINT | SIGTERM => {
-                info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
 
-                // This cancels the `shutdown_pageserver` cancellation tree.
-                // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
-                // The plan is to change that over time.
-                shutdown_pageserver.take();
-                let bg_remote_storage = remote_storage.clone();
-                let bg_deletion_queue = deletion_queue.clone();
-                THE_RUNTIME.block_on(pageserver::shutdown_pageserver(
-                    &tenant_manager,
-                    bg_remote_storage.map(|_| bg_deletion_queue),
-                    0,
-                ));
-                unreachable!()
-            }
-            _ => unreachable!(),
-        }
+    {
+        THE_RUNTIME.block_on(async move {
+            let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
+            let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
+            let mut sigquit = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
+            let signal = tokio::select! {
+                _ = sigquit.recv() => {
+                    info!("Got signal SIGQUIT. Terminating in immediate shutdown mode",);
+                    std::process::exit(111);
+                }
+                _ = sigint.recv() => { "SIGINT" },
+                _ = sigterm.recv() => { "SIGTERM" },
+            };
+
+            info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
+
+            // This cancels the `shutdown_pageserver` cancellation tree.
+            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
+            // The plan is to change that over time.
+            shutdown_pageserver.take();
+            let bg_remote_storage = remote_storage.clone();
+            let bg_deletion_queue = deletion_queue.clone();
+            pageserver::shutdown_pageserver(
+                &tenant_manager,
+                bg_remote_storage.map(|_| bg_deletion_queue),
+                0,
+            )
+            .await;
+            unreachable!()
+        })
     }
 }
 
