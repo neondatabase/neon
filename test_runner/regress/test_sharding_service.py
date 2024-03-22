@@ -23,7 +23,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
-from fixtures.types import TenantId, TimelineId
+from fixtures.types import TenantId, TenantShardId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
@@ -948,3 +948,65 @@ def test_sharding_service_heartbeats(
         env.storage_controller.consistency_check()
 
     wait_until(10, 1, storage_controller_consistent)
+
+
+def test_sharding_service_re_attach(neon_env_builder: NeonEnvBuilder):
+    """
+    Exercise the behavior of the /re-attach endpoint on pageserver startup when
+    pageservers have a mixture of attached and secondary locations
+    """
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # We'll have two tenants.
+    tenant_a = TenantId.generate()
+    env.neon_cli.create_tenant(tenant_a, placement_policy='{"Attached":1}')
+    tenant_b = TenantId.generate()
+    env.neon_cli.create_tenant(tenant_b, placement_policy='{"Attached":1}')
+
+    # Each pageserver will have one attached and one secondary location
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(tenant_a, 0, 0), env.pageservers[0].id
+    )
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(tenant_b, 0, 0), env.pageservers[1].id
+    )
+
+    # Hard-fail a pageserver
+    victim_ps = env.pageservers[1]
+    survivor_ps = env.pageservers[0]
+    victim_ps.stop(immediate=True)
+
+    # Heatbeater will notice it's offline, and consequently attachments move to the other pageserver
+    def failed_over():
+        locations = survivor_ps.http_client().tenant_list_locations()["tenant_shards"]
+        log.info(f"locations: {locations}")
+        assert len(locations) == 2
+        assert all(loc[1]["mode"] == "AttachedSingle" for loc in locations)
+
+    # We could pre-empty this by configuring the node to Offline, but it's preferable to test
+    # the realistic path we would take when a node restarts uncleanly.
+    # The delay here will be ~NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL in neon_local
+    wait_until(30, 1, failed_over)
+
+    reconciles_before_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+
+    # Restart the failed pageserver
+    victim_ps.start()
+
+    # We expect that the re-attach call correctly tipped off the pageserver that its locations
+    # are all secondaries now.
+    locations = victim_ps.http_client().tenant_list_locations()["tenant_shards"]
+    assert len(locations) == 2
+    assert all(loc[1]["mode"] == "Secondary" for loc in locations)
+
+    # We expect that this situation resulted from the re_attach call, and not any explicit
+    # Reconciler runs: assert that the reconciliation count has not gone up since we restarted.
+    reconciles_after_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+    assert reconciles_after_restart == reconciles_before_restart

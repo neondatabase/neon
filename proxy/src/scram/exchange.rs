@@ -2,7 +2,11 @@
 
 use std::convert::Infallible;
 
-use postgres_protocol::authentication::sasl::ScramSha256;
+use hmac::{Hmac, Mac};
+use sha2::digest::FixedOutput;
+use sha2::{Digest, Sha256};
+use subtle::{Choice, ConstantTimeEq};
+use tokio::task::yield_now;
 
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
@@ -71,47 +75,71 @@ impl<'a> Exchange<'a> {
     }
 }
 
+// copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
+async fn pbkdf2(str: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let hmac = Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
+    let mut prev = hmac
+        .clone()
+        .chain_update(salt)
+        .chain_update(1u32.to_be_bytes())
+        .finalize()
+        .into_bytes();
+
+    let mut hi = prev;
+
+    for i in 1..iterations {
+        prev = hmac.clone().chain_update(prev).finalize().into_bytes();
+
+        for (hi, prev) in hi.iter_mut().zip(prev) {
+            *hi ^= prev;
+        }
+        // yield every ~250us
+        // hopefully reduces tail latencies
+        if i % 1024 == 0 {
+            yield_now().await
+        }
+    }
+
+    hi.into()
+}
+
+// copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L236-L248>
+async fn derive_keys(password: &[u8], salt: &[u8], iterations: u32) -> ([u8; 32], [u8; 32]) {
+    let salted_password = pbkdf2(password, salt, iterations).await;
+
+    let make_key = |name| {
+        let key = Hmac::<Sha256>::new_from_slice(&salted_password)
+            .expect("HMAC is able to accept all key sizes")
+            .chain_update(name)
+            .finalize();
+
+        <[u8; 32]>::from(key.into_bytes())
+    };
+
+    (make_key(b"Client Key"), make_key(b"Server Key"))
+}
+
 pub async fn exchange(
     secret: &ServerSecret,
-    mut client: ScramSha256,
-    tls_server_end_point: config::TlsServerEndPoint,
+    password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
-    use sasl::Step::*;
+    let salt = base64::decode(&secret.salt_base64)?;
+    let (client_key, server_key) = derive_keys(password, &salt, secret.iterations).await;
+    let stored_key: [u8; 32] = Sha256::default()
+        .chain_update(client_key)
+        .finalize_fixed()
+        .into();
 
-    let init = SaslInitial {
-        nonce: rand::random,
-    };
+    // constant time to not leak partial key match
+    let valid = stored_key.ct_eq(&secret.stored_key.as_bytes())
+        | server_key.ct_eq(&secret.server_key.as_bytes())
+        | Choice::from(secret.doomed as u8);
 
-    let client_first = std::str::from_utf8(client.message())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let sent = match init.transition(secret, &tls_server_end_point, client_first)? {
-        Continue(sent, server_first) => {
-            // `client.update` might perform `pbkdf2(pw)`, best to spawn it in a blocking thread.
-            // TODO(conrad): take this code from tokio-postgres and make an async-aware pbkdf2 impl
-            client = tokio::task::spawn_blocking(move || {
-                client.update(server_first.as_bytes())?;
-                Ok::<ScramSha256, std::io::Error>(client)
-            })
-            .await
-            .expect("should not panic while performing password hash")?;
-            sent
-        }
-        Success(x, _) => match x {},
-        Failure(msg) => return Ok(sasl::Outcome::Failure(msg)),
-    };
-
-    let client_final = std::str::from_utf8(client.message())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let keys = match sent.transition(secret, &tls_server_end_point, client_final)? {
-        Success(keys, server_final) => {
-            client.finish(server_final.as_bytes())?;
-            keys
-        }
-        Continue(x, _) => match x {},
-        Failure(msg) => return Ok(sasl::Outcome::Failure(msg)),
-    };
-
-    Ok(sasl::Outcome::Success(keys))
+    if valid.into() {
+        Ok(sasl::Outcome::Success(super::ScramKey::from(client_key)))
+    } else {
+        Ok(sasl::Outcome::Failure("password doesn't match"))
+    }
 }
 
 impl SaslInitial {

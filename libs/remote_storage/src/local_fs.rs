@@ -198,6 +198,7 @@ impl LocalFs {
             fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&temp_file_path)
                 .await
                 .with_context(|| {
