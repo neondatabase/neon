@@ -1,6 +1,8 @@
 import asyncio
+import os
 from typing import Tuple
 
+import psutil
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -17,16 +19,9 @@ TIMELINE_COUNT = 10
 ENTRIES_PER_TIMELINE = 10_000
 CHECKPOINT_TIMEOUT_SECONDS = 60
 
-TENANT_CONF = {
-    # Large `checkpoint_distance` effectively disables size
-    # based checkpointing.
-    "checkpoint_distance": f"{2 * 1024 ** 3}",
-    "checkpoint_timeout": f"{CHECKPOINT_TIMEOUT_SECONDS}s",
-}
 
-
-async def run_worker(env: NeonEnv, entries: int) -> Tuple[TenantId, TimelineId, Lsn]:
-    tenant, timeline = env.neon_cli.create_tenant(conf=TENANT_CONF)
+async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> Tuple[TenantId, TimelineId, Lsn]:
+    tenant, timeline = env.neon_cli.create_tenant(conf=tenant_conf)
     with env.endpoints.create_start("main", tenant_id=tenant) as ep:
         conn = await ep.connect_async()
         try:
@@ -42,9 +37,9 @@ async def run_worker(env: NeonEnv, entries: int) -> Tuple[TenantId, TimelineId, 
 
 
 async def workload(
-    env: NeonEnv, timelines: int, entries: int
+    env: NeonEnv, tenant_conf, timelines: int, entries: int
 ) -> list[Tuple[TenantId, TimelineId, Lsn]]:
-    workers = [asyncio.create_task(run_worker(env, entries)) for _ in range(timelines)]
+    workers = [asyncio.create_task(run_worker(env, tenant_conf, entries)) for _ in range(timelines)]
     return await asyncio.gather(*workers)
 
 
@@ -93,6 +88,10 @@ def assert_dirty_bytes(env, v):
     assert get_dirty_bytes(env) == v
 
 
+def assert_dirty_bytes_nonzero(env):
+    assert get_dirty_bytes(env) > 0
+
+
 @pytest.mark.parametrize("immediate_shutdown", [True, False])
 def test_pageserver_small_inmemory_layers(
     neon_env_builder: NeonEnvBuilder, immediate_shutdown: bool
@@ -104,15 +103,22 @@ def test_pageserver_small_inmemory_layers(
     The workload creates a number of timelines and writes some data to each,
     but not enough to trigger flushes via the `checkpoint_distance` config.
     """
+    tenant_conf = {
+        # Large `checkpoint_distance` effectively disables size
+        # based checkpointing.
+        "checkpoint_distance": f"{2 * 1024 ** 3}",
+        "checkpoint_timeout": f"{CHECKPOINT_TIMEOUT_SECONDS}s",
+        "compaction_period": "1s",
+    }
 
     env = neon_env_builder.init_configs()
     env.start()
 
-    last_flush_lsns = asyncio.run(workload(env, TIMELINE_COUNT, ENTRIES_PER_TIMELINE))
+    last_flush_lsns = asyncio.run(workload(env, tenant_conf, TIMELINE_COUNT, ENTRIES_PER_TIMELINE))
     wait_until_pageserver_is_caught_up(env, last_flush_lsns)
 
-    # We didn't write enough data to trigger a size-based checkpoint
-    assert get_dirty_bytes(env) > 0
+    # We didn't write enough data to trigger a size-based checkpoint: we should see dirty data.
+    wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))  # type: ignore
 
     ps_http_client = env.pageserver.http_client()
     total_wal_ingested_before_restart = wait_for_wal_ingest_metric(ps_http_client)
@@ -120,7 +126,7 @@ def test_pageserver_small_inmemory_layers(
     # Within ~ the checkpoint interval, all the ephemeral layers should be frozen and flushed,
     # such that there are zero bytes of ephemeral layer left on the pageserver
     log.info("Waiting for background checkpoints...")
-    wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(0))  # type: ignore
+    wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(env, 0))  # type: ignore
 
     # Zero ephemeral layer bytes does not imply that all the frozen layers were uploaded: they
     # must be uploaded to remain visible to the pageserver after restart.
@@ -146,15 +152,22 @@ def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
     """
     Test that `checkpoint_timeout` is enforced even if there is no safekeeper input.
     """
+    tenant_conf = {
+        # Large `checkpoint_distance` effectively disables size
+        # based checkpointing.
+        "checkpoint_distance": f"{2 * 1024 ** 3}",
+        "checkpoint_timeout": f"{CHECKPOINT_TIMEOUT_SECONDS}s",
+        "compaction_period": "1s",
+    }
 
     env = neon_env_builder.init_configs()
     env.start()
 
-    last_flush_lsns = asyncio.run(workload(env, TIMELINE_COUNT, ENTRIES_PER_TIMELINE))
+    last_flush_lsns = asyncio.run(workload(env, tenant_conf, TIMELINE_COUNT, ENTRIES_PER_TIMELINE))
     wait_until_pageserver_is_caught_up(env, last_flush_lsns)
 
-    # We didn't write enough data to trigger a size-based checkpoint
-    assert get_dirty_bytes(env) > 0
+    # We didn't write enough data to trigger a size-based checkpoint: we should see dirty data.
+    wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))  # type: ignore
 
     # Stop the safekeepers, so that we cannot have any more WAL receiver connections
     for sk in env.safekeepers:
@@ -168,3 +181,95 @@ def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
     # such that there are zero bytes of ephemeral layer left on the pageserver
     log.info("Waiting for background checkpoints...")
     wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(env, 0))  # type: ignore
+
+
+@pytest.mark.skipif(
+    # We have to use at least ~100MB of data to hit the lowest limit we can configure, which is
+    # prohibitively slow in debug mode
+    os.getenv("BUILD_TYPE") == "debug",
+    reason="Avoid running bulkier ingest tests in debug mode",
+)
+def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that checkpoints are done based on total ephemeral layer size, even if no one timeline is
+    individually exceeding checkpoint thresholds.
+    """
+
+    system_memory = psutil.virtual_memory().total
+
+    # The smallest total size limit we can configure is 1/1024th of the system memory (e.g. 128MB on
+    # a system with 128GB of RAM).  We will then write enough data to violate this limit.
+    max_dirty_data = 128 * 1024 * 1024
+    ephemeral_bytes_per_memory_kb = (max_dirty_data * 1024) // system_memory
+    assert ephemeral_bytes_per_memory_kb > 0
+
+    neon_env_builder.pageserver_config_override = f"""
+        ephemeral_bytes_per_memory_kb={ephemeral_bytes_per_memory_kb}
+        """
+
+    compaction_period_s = 10
+
+    tenant_conf = {
+        # Large space + time thresholds: effectively disable these limits
+        "checkpoint_distance": f"{1024 ** 4}",
+        "checkpoint_timeout": "3600s",
+        "compaction_period": f"{compaction_period_s}s",
+    }
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    timeline_count = 10
+
+    # This is about 2MiB of data per timeline
+    entries_per_timeline = 100_000
+
+    last_flush_lsns = asyncio.run(workload(env, tenant_conf, timeline_count, entries_per_timeline))
+    wait_until_pageserver_is_caught_up(env, last_flush_lsns)
+
+    total_bytes_ingested = 0
+    for tenant, timeline, last_flush_lsn in last_flush_lsns:
+        http_client = env.pageserver.http_client()
+        initdb_lsn = Lsn(http_client.timeline_detail(tenant, timeline)["initdb_lsn"])
+        total_bytes_ingested += last_flush_lsn - initdb_lsn
+
+    log.info(f"Ingested {total_bytes_ingested} bytes since initdb (vs max dirty {max_dirty_data})")
+    assert total_bytes_ingested > max_dirty_data
+
+    # Expected end state: the total physical size of all the tenants is in excess of the max dirty
+    # data, but the total amount of dirty data is less than the limit: this demonstrates that we
+    # have exceeded the threshold but then rolled layers in response
+    def get_total_historic_layers():
+        total_ephemeral_layers = 0
+        total_historic_bytes = 0
+        for tenant, timeline, _last_flush_lsn in last_flush_lsns:
+            http_client = env.pageserver.http_client()
+            initdb_lsn = Lsn(http_client.timeline_detail(tenant, timeline)["initdb_lsn"])
+            layer_map = http_client.layer_map_info(tenant, timeline)
+            total_historic_bytes += sum(
+                layer.layer_file_size
+                for layer in layer_map.historic_layers
+                if layer.layer_file_size is not None and Lsn(layer.lsn_start) > initdb_lsn
+            )
+            total_ephemeral_layers += len(layer_map.in_memory_layers)
+
+        log.info(
+            f"Total historic layer bytes: {total_historic_bytes} ({total_ephemeral_layers} ephemeral layers)"
+        )
+
+        return total_historic_bytes
+
+    def assert_bytes_rolled():
+        assert total_bytes_ingested - get_total_historic_layers() <= max_dirty_data
+
+    # Wait until enough layers have rolled that the amount of dirty data is under the threshold.
+    # We do this indirectly via layer maps, rather than the dirty bytes metric, to avoid false-passing
+    # if that metric isn't updated quickly enough to reflect the dirty bytes exceeding the limit.
+    wait_until(compaction_period_s * 2, 1, assert_bytes_rolled)
+
+    # The end state should also have the reported metric under the limit
+    def assert_dirty_data_limited():
+        dirty_bytes = get_dirty_bytes(env)
+        assert dirty_bytes < max_dirty_data
+
+    wait_until(compaction_period_s * 2, 1, lambda: assert_dirty_data_limited())  # type: ignore
