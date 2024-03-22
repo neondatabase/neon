@@ -194,6 +194,10 @@ impl InMemoryLayer {
         }
     }
 
+    pub(crate) fn try_len(&self) -> Option<u64> {
+        self.inner.try_read().map(|i| i.file.len()).ok()
+    }
+
     pub(crate) fn assert_writable(&self) {
         assert!(self.end_lsn.get().is_none());
     }
