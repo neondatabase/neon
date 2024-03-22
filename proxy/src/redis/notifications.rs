@@ -6,12 +6,11 @@ use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::{
     cache::project_info::ProjectInfoCache,
-    cancellation::{CancelMap, CancellationHandler},
+    cancellation::{CancelMap, CancellationHandler, NotificationsCancellationHandler},
     intern::{ProjectIdInt, RoleNameInt},
-    metrics::{NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS, REDIS_BROKEN_MESSAGES},
+    metrics::REDIS_BROKEN_MESSAGES,
 };
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
@@ -19,13 +18,23 @@ pub(crate) const PROXY_CHANNEL_NAME: &str = "neondb-proxy-to-proxy-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const INVALIDATION_LAG: std::time::Duration = std::time::Duration::from_secs(20);
 
-async fn try_connect(client: &ConnectionWithCredentialsProvider) -> anyhow::Result<PubSub> {
-    let mut conn = client.get_async_pubsub().await?;
-    tracing::info!("subscribing to a channel `{CPLANE_CHANNEL_NAME}`");
-    conn.subscribe(CPLANE_CHANNEL_NAME).await?;
-    tracing::info!("subscribing to a channel `{PROXY_CHANNEL_NAME}`");
-    conn.subscribe(PROXY_CHANNEL_NAME).await?;
-    Ok(conn)
+struct RedisConsumerClient {
+    client: redis::Client,
+}
+
+impl RedisConsumerClient {
+    pub fn new(url: &str) -> anyhow::Result<Self> {
+        let client = redis::Client::open(url)?;
+        Ok(Self { client })
+    }
+    async fn try_connect(&self) -> anyhow::Result<PubSub> {
+        let mut conn = self.client.get_async_connection().await?.into_pubsub();
+        tracing::info!("subscribing to a channel `{CPLANE_CHANNEL_NAME}`");
+        conn.subscribe(CPLANE_CHANNEL_NAME).await?;
+        tracing::info!("subscribing to a channel `{PROXY_CHANNEL_NAME}`");
+        conn.subscribe(PROXY_CHANNEL_NAME).await?;
+        Ok(conn)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -71,18 +80,21 @@ where
     serde_json::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
 }
 
-struct MessageHandler<C: ProjectInfoCache + Send + Sync + 'static> {
+struct MessageHandler<
+    C: ProjectInfoCache + Send + Sync + 'static,
+    H: NotificationsCancellationHandler + Send + Sync + 'static,
+> {
     cache: Arc<C>,
-    cancellation_handler: Arc<CancellationHandler<()>>,
+    cancellation_handler: Arc<H>,
     region_id: String,
 }
 
-impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
-    pub fn new(
-        cache: Arc<C>,
-        cancellation_handler: Arc<CancellationHandler<()>>,
-        region_id: String,
-    ) -> Self {
+impl<
+        C: ProjectInfoCache + Send + Sync + 'static,
+        H: NotificationsCancellationHandler + Send + Sync + 'static,
+    > MessageHandler<C, H>
+{
+    pub fn new(cache: Arc<C>, cancellation_handler: Arc<H>, region_id: String) -> Self {
         Self {
             cache,
             cancellation_handler,
@@ -127,7 +139,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                 // This instance of cancellation_handler doesn't have a RedisPublisherClient so it can't publish the message.
                 match self
                     .cancellation_handler
-                    .cancel_session(cancel_session.cancel_key_data, uuid::Uuid::nil())
+                    .cancel_session_no_publish(cancel_session.cancel_key_data)
                     .await
                 {
                     Ok(()) => {}
@@ -170,7 +182,7 @@ fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
 /// Handle console's invalidation messages.
 #[tracing::instrument(name = "console_notifications", skip_all)]
 pub async fn task_main<C>(
-    redis: ConnectionWithCredentialsProvider,
+    url: String,
     cache: Arc<C>,
     cancel_map: CancelMap,
     region_id: String,
@@ -181,15 +193,13 @@ where
     cache.enable_ttl();
     let handler = MessageHandler::new(
         cache,
-        Arc::new(CancellationHandler::<()>::new(
-            cancel_map,
-            NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS,
-        )),
+        Arc::new(CancellationHandler::new(cancel_map, None)),
         region_id,
     );
 
     loop {
-        let mut conn = match try_connect(&redis).await {
+        let redis = RedisConsumerClient::new(&url)?;
+        let conn = match redis.try_connect().await {
             Ok(conn) => {
                 handler.disable_ttl();
                 conn
@@ -202,7 +212,7 @@ where
                 continue;
             }
         };
-        let mut stream = conn.on_message();
+        let mut stream = conn.into_on_message();
         while let Some(msg) = stream.next().await {
             match handler.handle_message(msg).await {
                 Ok(()) => {}
