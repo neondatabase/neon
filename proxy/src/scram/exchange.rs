@@ -3,9 +3,7 @@
 use std::convert::Infallible;
 
 use hmac::{Hmac, Mac};
-use sha2::digest::FixedOutput;
-use sha2::{Digest, Sha256};
-use subtle::{Choice, ConstantTimeEq};
+use sha2::Sha256;
 use tokio::task::yield_now;
 
 use super::messages::{
@@ -13,6 +11,7 @@ use super::messages::{
 };
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
+use super::ScramKey;
 use crate::config;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
@@ -104,7 +103,7 @@ async fn pbkdf2(str: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
 }
 
 // copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L236-L248>
-async fn derive_keys(password: &[u8], salt: &[u8], iterations: u32) -> ([u8; 32], [u8; 32]) {
+async fn derive_client_key(password: &[u8], salt: &[u8], iterations: u32) -> ScramKey {
     let salted_password = pbkdf2(password, salt, iterations).await;
 
     let make_key = |name| {
@@ -116,7 +115,7 @@ async fn derive_keys(password: &[u8], salt: &[u8], iterations: u32) -> ([u8; 32]
         <[u8; 32]>::from(key.into_bytes())
     };
 
-    (make_key(b"Client Key"), make_key(b"Server Key"))
+    make_key(b"Client Key").into()
 }
 
 pub async fn exchange(
@@ -124,21 +123,12 @@ pub async fn exchange(
     password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
     let salt = base64::decode(&secret.salt_base64)?;
-    let (client_key, server_key) = derive_keys(password, &salt, secret.iterations).await;
-    let stored_key: [u8; 32] = Sha256::default()
-        .chain_update(client_key)
-        .finalize_fixed()
-        .into();
+    let client_key = derive_client_key(password, &salt, secret.iterations).await;
 
-    // constant time to not leak partial key match
-    let valid = stored_key.ct_eq(&secret.stored_key.as_bytes())
-        | server_key.ct_eq(&secret.server_key.as_bytes())
-        | Choice::from(secret.doomed as u8);
-
-    if valid.into() {
-        Ok(sasl::Outcome::Success(super::ScramKey::from(client_key)))
-    } else {
+    if secret.is_password_invalid(&client_key).into() {
         Ok(sasl::Outcome::Failure("password doesn't match"))
+    } else {
+        Ok(sasl::Outcome::Success(client_key))
     }
 }
 
@@ -220,7 +210,7 @@ impl SaslSentInner {
             .derive_client_key(&client_final_message.proof);
 
         // Auth fails either if keys don't match or it's pre-determined to fail.
-        if client_key.sha256() != secret.stored_key || secret.doomed {
+        if secret.is_password_invalid(&client_key).into() {
             return Ok(sasl::Step::Failure("password doesn't match"));
         }
 
