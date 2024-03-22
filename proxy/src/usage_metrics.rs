@@ -528,7 +528,7 @@ mod tests {
         let r = std::mem::take(&mut *reports2.lock().unwrap());
         assert!(r.is_empty());
 
-        // register a new counteruse itertools::Itertools;
+        // register a new counter
 
         let counter = metrics.register(Ids {
             endpoint_id: "e1".into(),
