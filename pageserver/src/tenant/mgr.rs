@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use sysinfo::SystemExt;
 use tokio::fs;
 use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
@@ -43,6 +44,7 @@ use crate::tenant::config::{
 };
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
+use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
 
@@ -542,6 +544,18 @@ pub async fn init_tenant_mgr(
     let mut tenants = BTreeMap::new();
 
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
+
+    // Initialize dynamic limits that depend on system resources
+    let system_memory =
+        sysinfo::System::new_with_specifics(sysinfo::RefreshKind::new().with_memory())
+            .total_memory();
+    let max_ephemeral_layer_bytes =
+        conf.ephemeral_bytes_per_memory_kb as u64 * (system_memory / 1024);
+    tracing::info!("Initialized ephemeral layer size limit to {max_ephemeral_layer_bytes}, for {system_memory} bytes of memory");
+    inmemory_layer::GLOBAL_RESOURCES.max_dirty_bytes.store(
+        max_ephemeral_layer_bytes,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     // Scan local filesystem for attached tenants
     let tenant_configs = init_load_tenant_configs(conf).await?;

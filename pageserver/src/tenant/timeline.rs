@@ -1172,9 +1172,24 @@ impl Timeline {
 
         let current_lsn = self.get_last_record_lsn();
 
+        let checkpoint_distance_override = open_layer.tick().await;
+
+        if let Some(size_override) = checkpoint_distance_override {
+            if current_size > size_override {
+                // This is not harmful, but it only happens in relatively rare cases where
+                // time-based checkpoints are not happening fast enough to keep the amount of
+                // ephemeral data within configured limits.  It's a sign of stress on the system.
+                tracing::info!("Early-rolling open layer at size {current_size} (limit {size_override}) due to dirty data pressure");
+            }
+        }
+
+        let checkpoint_distance =
+            checkpoint_distance_override.unwrap_or(self.get_checkpoint_distance());
+
         if self.should_roll(
             current_size,
             current_size,
+            checkpoint_distance,
             self.get_last_record_lsn(),
             self.last_freeze_at.load(),
             *self.last_freeze_ts.read().unwrap(),
@@ -1511,6 +1526,7 @@ impl Timeline {
         &self,
         layer_size: u64,
         projected_layer_size: u64,
+        checkpoint_distance: u64,
         projected_lsn: Lsn,
         last_freeze_at: Lsn,
         last_freeze_ts: Instant,
@@ -1525,16 +1541,14 @@ impl Timeline {
         // 2. The size of the currently open layer.
         // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
         //    up and suspend activity.
-        if distance
-            >= self.get_checkpoint_distance() as i128 * self.shard_identity.count.count() as i128
-        {
+        if distance >= checkpoint_distance as i128 * self.shard_identity.count.count() as i128 {
             info!(
                 "Will roll layer at {} with layer size {} due to LSN distance ({})",
                 projected_lsn, layer_size, distance
             );
 
             true
-        } else if projected_layer_size >= self.get_checkpoint_distance() {
+        } else if projected_layer_size >= checkpoint_distance {
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 projected_lsn, layer_size, projected_layer_size
@@ -4687,6 +4701,7 @@ impl<'a> TimelineWriter<'a> {
         if self.tl.should_roll(
             state.current_size,
             state.current_size + new_value_size,
+            self.get_checkpoint_distance(),
             lsn,
             state.cached_last_freeze_at,
             state.cached_last_freeze_ts,
