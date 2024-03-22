@@ -188,6 +188,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "max": 1000,
         },
         "trace_read_requests": True,
+        "image_layer_compression": "NoCompression",
         "walreceiver_connect_timeout": "13m",
     }
 

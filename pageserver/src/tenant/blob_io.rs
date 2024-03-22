@@ -11,13 +11,16 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::VirtualFile;
+use lz4_flex;
+use pageserver_api::models::CompressionAlgorithm;
+use postgres_ffi::BLCKSZ;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
@@ -32,6 +35,29 @@ impl<'a> BlockCursor<'a> {
         self.read_blob_into_buf(offset, &mut buf, ctx).await?;
         Ok(buf)
     }
+    /// Read blob into the given buffer. Any previous contents in the buffer
+    /// are overwritten.
+    pub async fn read_compressed_blob(
+        &self,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let blknum = (offset / PAGE_SZ as u64) as u32;
+        let off = (offset % PAGE_SZ as u64) as usize;
+
+        let buf = self.read_blk(blknum, ctx).await?;
+        let compression_alg = CompressionAlgorithm::from_repr(buf[off]).unwrap();
+        let res = self.read_blob(offset + 1, ctx).await?;
+        if compression_alg == CompressionAlgorithm::LZ4 {
+            lz4_flex::block::decompress(&res, BLCKSZ as usize).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "decompress error")
+            })
+        } else {
+            assert_eq!(compression_alg, CompressionAlgorithm::NoCompression);
+            Ok(res)
+        }
+    }
+
     /// Read blob into the given buffer. Any previous contents in the buffer
     /// are overwritten.
     pub async fn read_blob_into_buf(
@@ -211,6 +237,61 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         (src_buf, Ok(()))
     }
 
+    pub async fn write_compressed_blob(
+        &mut self,
+        srcbuf: Bytes,
+        compression: CompressionAlgorithm,
+    ) -> Result<u64, Error> {
+        let offset = self.offset;
+        let len = srcbuf.len();
+
+        let mut io_buf = self.io_buf.take().expect("we always put it back below");
+        io_buf.clear();
+        let mut is_compressed = false;
+        if len < 128 {
+            // Short blob. Write a 1-byte length header
+            io_buf.put_u8(CompressionAlgorithm::NoCompression as u8);
+            io_buf.put_u8(len as u8);
+        } else {
+            // Write a 4-byte length header
+            if len > 0x7fff_ffff {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    format!("blob too large ({} bytes)", len),
+                ));
+            }
+            if compression == CompressionAlgorithm::LZ4 && len == BLCKSZ as usize {
+                let compressed = lz4_flex::block::compress(&srcbuf);
+                if compressed.len() < len {
+                    io_buf.put_u8(compression as u8);
+                    let mut len_buf = (compressed.len() as u32).to_be_bytes();
+                    len_buf[0] |= 0x80;
+                    io_buf.extend_from_slice(&len_buf[..]);
+                    io_buf.extend_from_slice(&compressed[..]);
+                    is_compressed = true;
+                }
+            }
+            if !is_compressed {
+                io_buf.put_u8(CompressionAlgorithm::NoCompression as u8);
+                let mut len_buf = (len as u32).to_be_bytes();
+                len_buf[0] |= 0x80;
+                io_buf.extend_from_slice(&len_buf[..]);
+            }
+        }
+        let (io_buf, hdr_res) = self.write_all(io_buf).await;
+        match hdr_res {
+            Ok(_) => (),
+            Err(e) => return Err(e),
+        }
+        self.io_buf = Some(io_buf);
+        if is_compressed {
+            hdr_res.map(|_| offset)
+        } else {
+            let (_buf, res) = self.write_all(srcbuf).await;
+            res.map(|_| offset)
+        }
+    }
+
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
     pub async fn write_blob<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
@@ -227,7 +308,6 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             if len < 128 {
                 // Short blob. Write a 1-byte length header
                 io_buf.put_u8(len as u8);
-                self.write_all(io_buf).await
             } else {
                 // Write a 4-byte length header
                 if len > 0x7fff_ffff {
@@ -242,8 +322,8 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 let mut len_buf = (len as u32).to_be_bytes();
                 len_buf[0] |= 0x80;
                 io_buf.extend_from_slice(&len_buf[..]);
-                self.write_all(io_buf).await
             }
+            self.write_all(io_buf).await
         }
         .await;
         self.io_buf = Some(io_buf);

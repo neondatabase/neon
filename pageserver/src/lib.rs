@@ -43,6 +43,9 @@ use tracing::info;
 /// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
+/// Minimal sorage format version with compression support
+pub const COMPRESSED_STORAGE_FORMAT_VERSION: u16 = 4;
+
 pub const DEFAULT_PG_VERSION: u32 = 15;
 
 // Magic constants used to identify different kinds of files

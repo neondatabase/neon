@@ -39,14 +39,17 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
-use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
+use crate::{
+    COMPRESSED_STORAGE_FORMAT_VERSION, IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX,
+};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::LayerAccessKind;
+use pageserver_api::models::{CompressionAlgorithm, LayerAccessKind};
 use pageserver_api::shard::TenantShardId;
+use postgres_ffi::BLCKSZ;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -153,6 +156,7 @@ pub struct ImageLayerInner {
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
+    format_version: u16,
 
     lsn: Lsn,
 
@@ -167,6 +171,7 @@ impl std::fmt::Debug for ImageLayerInner {
         f.debug_struct("ImageLayerInner")
             .field("index_start_blk", &self.index_start_blk)
             .field("index_root_blk", &self.index_root_blk)
+            .field("format_version", &self.format_version)
             .finish()
     }
 }
@@ -391,7 +396,12 @@ impl ImageLayerInner {
         let actual_summary =
             Summary::des_prefix(summary_blk.as_ref()).context("deserialize first block")?;
 
+        if actual_summary.format_version > COMPRESSED_STORAGE_FORMAT_VERSION {
+            bail!("Forward compatibility of storage is not supported: current format version is {}, format version of layer {} is {}", COMPRESSED_STORAGE_FORMAT_VERSION, path, actual_summary.format_version);
+        }
         if let Some(mut expected_summary) = summary {
+            // assume backward compatibility
+            expected_summary.format_version = actual_summary.format_version;
             // production code path
             expected_summary.index_start_blk = actual_summary.index_start_blk;
             expected_summary.index_root_blk = actual_summary.index_root_blk;
@@ -408,6 +418,7 @@ impl ImageLayerInner {
         Ok(Ok(ImageLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
+            format_version: actual_summary.format_version,
             lsn,
             file,
             file_id,
@@ -436,18 +447,20 @@ impl ImageLayerInner {
             )
             .await?
         {
-            let blob = block_reader
-                .block_cursor()
-                .read_blob(
-                    offset,
-                    &RequestContextBuilder::extend(ctx)
-                        .page_content_kind(PageContentKind::ImageLayerValue)
-                        .build(),
-                )
-                .await
-                .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
+            let ctx = RequestContextBuilder::extend(ctx)
+                .page_content_kind(PageContentKind::ImageLayerValue)
+                .build();
+            let blob = (if self.format_version >= COMPRESSED_STORAGE_FORMAT_VERSION {
+                block_reader
+                    .block_cursor()
+                    .read_compressed_blob(offset, &ctx)
+                    .await
+            } else {
+                block_reader.block_cursor().read_blob(offset, &ctx).await
+            })
+            .with_context(|| format!("failed to read value from offset {}", offset))?;
 
+            let value = Bytes::from(blob);
             reconstruct_state.img = Some((self.lsn, value));
             Ok(ValueReconstructResult::Complete)
         } else {
@@ -539,9 +552,12 @@ impl ImageLayerInner {
             .into();
 
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let compressed_storage_format = self.format_version >= COMPRESSED_STORAGE_FORMAT_VERSION;
         for read in reads.into_iter() {
             let buf = BytesMut::with_capacity(max_vectored_read_bytes);
-            let res = vectored_blob_reader.read_blobs(&read, buf).await;
+            let res = vectored_blob_reader
+                .read_blobs(&read, buf, compressed_storage_format)
+                .await;
 
             match res {
                 Ok(blobs_buf) => {
@@ -549,11 +565,31 @@ impl ImageLayerInner {
 
                     for meta in blobs_buf.blobs.iter() {
                         let img_buf = frozen_buf.slice(meta.start..meta.end);
-                        reconstruct_state.update_key(
-                            &meta.meta.key,
-                            self.lsn,
-                            Value::Image(img_buf),
-                        );
+                        if meta.compression_alg == CompressionAlgorithm::LZ4 {
+                            match lz4_flex::block::decompress(&img_buf, BLCKSZ as usize) {
+                                Ok(decompressed) => {
+                                    reconstruct_state.update_key(
+                                        &meta.meta.key,
+                                        self.lsn,
+                                        Value::Image(Bytes::from(decompressed)),
+                                    );
+                                }
+                                Err(err) => reconstruct_state.on_key_error(
+                                    meta.meta.key,
+                                    PageReconstructError::from(anyhow!(
+                                        "Failed to decompress blob from file {}: {}",
+                                        self.file.path,
+                                        err
+                                    )),
+                                ),
+                            }
+                        } else {
+                            reconstruct_state.update_key(
+                                &meta.meta.key,
+                                self.lsn,
+                                Value::Image(img_buf),
+                            );
+                        }
                     }
                 }
                 Err(err) => {
@@ -591,6 +627,7 @@ struct ImageLayerWriterInner {
     timeline_id: TimelineId,
     tenant_shard_id: TenantShardId,
     key_range: Range<Key>,
+    compression: CompressionAlgorithm,
     lsn: Lsn,
 
     blob_writer: BlobWriter<false>,
@@ -602,16 +639,17 @@ impl ImageLayerWriterInner {
     /// Start building a new image layer.
     ///
     async fn new(
-        conf: &'static PageServerConf,
-        timeline_id: TimelineId,
-        tenant_shard_id: TenantShardId,
+        timeline: &Arc<Timeline>,
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<Self> {
+        let timeline_id = timeline.timeline_id;
+        let tenant_shard_id = timeline.tenant_shard_id;
+        let compression = timeline.get_image_layer_compression();
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
         let path = ImageLayer::temp_path_for(
-            conf,
+            timeline.conf,
             timeline_id,
             tenant_shard_id,
             &ImageFileName {
@@ -638,11 +676,12 @@ impl ImageLayerWriterInner {
         let tree_builder = DiskBtreeBuilder::new(block_buf);
 
         let writer = Self {
-            conf,
+            conf: timeline.conf,
             path,
             timeline_id,
             tenant_shard_id,
             key_range: key_range.clone(),
+            compression,
             lsn,
             tree: tree_builder,
             blob_writer,
@@ -658,10 +697,15 @@ impl ImageLayerWriterInner {
     ///
     async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img).await;
-        // TODO: re-use the buffer for `img` further upstack
-        let off = res?;
-
+        let off = if STORAGE_FORMAT_VERSION >= COMPRESSED_STORAGE_FORMAT_VERSION {
+            self.blob_writer
+                .write_compressed_blob(img, self.compression)
+                .await?
+        } else {
+            let (_img, res) = self.blob_writer.write_blob(img).await;
+            // TODO: re-use the buffer for `img` further upstack
+            res?
+        };
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;
@@ -766,17 +810,12 @@ impl ImageLayerWriter {
     /// Start building a new image layer.
     ///
     pub async fn new(
-        conf: &'static PageServerConf,
-        timeline_id: TimelineId,
-        tenant_shard_id: TenantShardId,
+        timeline: &Arc<Timeline>,
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
-            inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn)
-                    .await?,
-            ),
+            inner: Some(ImageLayerWriterInner::new(timeline, key_range, lsn).await?),
         })
     }
 
