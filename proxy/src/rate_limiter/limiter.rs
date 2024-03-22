@@ -15,7 +15,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
 
-use crate::EndpointId;
+use crate::{EndpointId, Normalize};
 
 use super::{
     limit_algorithm::{LimitAlgorithm, Sample},
@@ -186,6 +186,7 @@ impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
     pub fn check(&self, endpoint: EndpointId) -> bool {
+        let endpoint = endpoint.normalize();
         // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
