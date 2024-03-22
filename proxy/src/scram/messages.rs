@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn parse_client_first_message_with_extra_params_invalid() {
-        // must be off the form `<ascii letter>=<...>`
+        // must be of the form `<ascii letter>=<...>`
         assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,abc=foo").is_none());
         assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,1=foo").is_none());
         assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,a").is_none());

@@ -507,7 +507,6 @@ mod tests {
             let mut scram = ScramSha256::new(b"my-secret-password", ChannelBinding::unsupported());
 
             let mut read = BytesMut::new();
-            let mut write = BytesMut::new();
 
             // server should offer scram
             match read_message(&mut client, &mut read).await {
@@ -519,8 +518,9 @@ mod tests {
             }
 
             // client sends client-first-message
+            let mut write = BytesMut::new();
             frontend::sasl_initial_response("SCRAM-SHA-256", scram.message(), &mut write).unwrap();
-            client.write_all(&write.split().freeze()).await.unwrap();
+            client.write_all(&write).await.unwrap();
 
             // server response with server-first-message
             match read_message(&mut client, &mut read).await {
@@ -531,8 +531,9 @@ mod tests {
             }
 
             // client response with client-final-message
+            write.clear();
             frontend::sasl_response(scram.message(), &mut write).unwrap();
-            client.write_all(&write.split().freeze()).await.unwrap();
+            client.write_all(&write).await.unwrap();
 
             // server response with server-final-message
             match read_message(&mut client, &mut read).await {
@@ -578,8 +579,9 @@ mod tests {
             }
 
             // client responds with password
+            write.clear();
             frontend::password_message(b"my-secret-password", &mut write).unwrap();
-            client.write_all(&write.split().freeze()).await.unwrap();
+            client.write_all(&write).await.unwrap();
         });
 
         let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
@@ -608,7 +610,6 @@ mod tests {
 
         let handle = tokio::spawn(async move {
             let mut read = BytesMut::new();
-            let mut write = BytesMut::new();
 
             // server should offer cleartext
             match read_message(&mut client, &mut read).await {
@@ -617,9 +618,10 @@ mod tests {
             }
 
             // client responds with password
+            let mut write = BytesMut::new();
             frontend::password_message(b"endpoint=my-endpoint;my-secret-password", &mut write)
                 .unwrap();
-            client.write_all(&write.split().freeze()).await.unwrap();
+            client.write_all(&write).await.unwrap();
         });
 
         let creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
