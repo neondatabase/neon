@@ -480,7 +480,7 @@ def assert_no_errors(log_file, service, allowed_errors):
     with log_file.open("r") as f:
         errors = scan_log_for_errors(f, allowed_errors)
 
-    for _lineno, error in errors:
+    for _lineno, _error in errors:
         log.info("%s", "not allowed {service} error: {error.strip()}")
 
     assert not errors, f"Log errors on {service}: {errors[0]}"

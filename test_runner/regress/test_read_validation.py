@@ -87,7 +87,9 @@ def test_read_validation(neon_simple_env: NeonEnv):
             )
             assert cache_entries == 0, "relation buffers detected after invalidation"
 
-            log.info("Cache is clear, reading stale page version without cache using relation identifiers")
+            log.info(
+                "Cache is clear, reading stale page version without cache using relation identifiers"
+            )
 
             c.execute(
                 f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, '{first[0]}'))"
@@ -95,7 +97,9 @@ def test_read_validation(neon_simple_env: NeonEnv):
             direct_first = c.fetchone()
             assert first == direct_first, "Failed fetch page at historic lsn using oid"
 
-            log.info("Cache is clear, reading latest page version without cache using relation identifiers")
+            log.info(
+                "Cache is clear, reading latest page version without cache using relation identifiers"
+            )
 
             c.execute(
                 f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, NULL))"
@@ -105,7 +109,9 @@ def test_read_validation(neon_simple_env: NeonEnv):
 
             c.execute("drop table foo;")
 
-            log.info("Relation dropped, attempting reading stale page version without cache using relation identifiers")
+            log.info(
+                "Relation dropped, attempting reading stale page version without cache using relation identifiers"
+            )
 
             c.execute(
                 f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, '{first[0]}'))"
@@ -119,7 +125,6 @@ def test_read_validation(neon_simple_env: NeonEnv):
                 raise AssertionError("query should have failed")
             except UndefinedTable as e:
                 log.info(f"Caught an expected failure: {e}")
-
 
 
 def test_read_validation_neg(neon_simple_env: NeonEnv):

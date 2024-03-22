@@ -544,8 +544,8 @@ def test_single_branch_get_tenant_size_grows(
     # this isn't too many lines to forget for a while. observed while
     # developing these tests that locally the value is a bit more than what we
     # get in the ci.
-    for phase, lsn, size in collected_responses:
-        log.info("%s", "collected: {phase}, {lsn}, {size}")
+    for _phase, _lsn, size in collected_responses:
+        log.info("collected: %s, %s, %s", _phase, _lsn, size)
 
     env.pageserver.stop()
     env.pageserver.start()

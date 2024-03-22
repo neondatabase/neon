@@ -79,10 +79,13 @@ class WorkerStats(object):
         log.debug(f"Workers progress: {self.counters}")
 
         # every worker should finish at least one tx
-        assert all(cnt > 0 for cnt in self.counters), "Every worker should finish at least one transaction"
+        assert all(
+            cnt > 0 for cnt in self.counters
+        ), "Every worker should finish at least one transaction"
 
         progress = sum(self.counters)
         log.info(f"All workers made {progress} transactions")
+
 
 async def run_random_worker(
     stats: WorkerStats, endpoint: Endpoint, worker_id, n_accounts, max_transfer
@@ -185,7 +188,7 @@ async def run_restarts_under_load(
         pageserver_lsn = Lsn(
             env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["last_record_lsn"]
         )
-        sk_ps_lag = flush_lsn - pageserver_lsn
+        flush_lsn - pageserver_lsn
         log.info("%s", "Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb")
 
         # Wait until alive safekeepers catch up with postgres
@@ -271,11 +274,11 @@ async def exec_compute_query(
     env: NeonEnv, branch: str, query: str, pgdir_name: Optional[str] = None
 ):
     with endpoint_create_start(env, branch=branch, pgdir_name=pgdir_name) as endpoint:
-        before_conn = time.time()
+        time.time()
         conn = await endpoint.connect_async()
         res = await conn.fetch(query)
         await conn.close()
-        after_conn = time.time()
+        time.time()
         log.info("%s", "{query} took {after_conn - before_conn}s")
         return res
 
@@ -349,7 +352,7 @@ class BackgroundCompute(object):
                 if res[0][0] != verify_key:
                     raise Exception("Wrong result returned")
                 self.successful_queries.append(verify_key)
-            except Exception as e:
+            except Exception:
                 log.info("%s", "BackgroundCompute {self.index} query failed: {e}")
 
             # With less sleep, there is a very big chance of not committing
@@ -403,7 +406,7 @@ async def run_concurrent_computes(
         f"Executed {len(result)} queries, {current_queries_by_0} of them "
         f"by computes[0] after we started stopping the others"
     )
-    for row in result:
+    for _row in result:
         log.info("%s", "{row[0]} {row[1]} {row[2]}")
 
     # ensure everything reported as committed wasn't lost

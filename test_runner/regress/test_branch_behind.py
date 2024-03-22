@@ -69,7 +69,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
             FROM generate_series(1, 200000) g
     """
     )
-    lsn_c = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
+    Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
 
     log.info("%s", "LSN after 400100 rows: {lsn_c}")
 
@@ -108,7 +108,9 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # retry the same with the HTTP API, so that we can inspect the status code
     with pytest.raises(TimelineCreate406):
         new_timeline_id = TimelineId.generate()
-        log.info("%s", "Expecting failure for branch pre-initdb LSN, new_timeline_id={new_timeline_id}")
+        log.info(
+            "%s", "Expecting failure for branch pre-initdb LSN, new_timeline_id={new_timeline_id}"
+        )
         pageserver_http.timeline_create(
             env.pg_version, env.initial_tenant, new_timeline_id, env.initial_timeline, Lsn("0/42")
         )
@@ -144,7 +146,9 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # retry the same with the HTTP API, so that we can inspect the status code
     with pytest.raises(TimelineCreate406):
         new_timeline_id = TimelineId.generate()
-        log.info("%s", "Expecting failure for branch behind gc'd LSN, new_timeline_id={new_timeline_id}")
+        log.info(
+            "%s", "Expecting failure for branch behind gc'd LSN, new_timeline_id={new_timeline_id}"
+        )
         pageserver_http.timeline_create(
             env.pg_version, env.initial_tenant, new_timeline_id, branch_behind_timeline_id, gced_lsn
         )

@@ -538,7 +538,7 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     for layer in layers.historic_layers:
-        log.info("%s", "post compact: {layer}")
+        log.info("post compact: %s", layer)
     assert len(layers.historic_layers) == 1, "should have compacted to single layer"
 
     post_compact = downloaded_bytes_and_count(pageserver_http)

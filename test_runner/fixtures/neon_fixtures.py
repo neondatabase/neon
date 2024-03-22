@@ -2129,7 +2129,7 @@ class NeonStorageController(MetricsGetter):
             for k, v in tenant_config.items():
                 body[k] = v
 
-        response = self.request(
+        self.request(
             "POST",
             f"{self.env.storage_controller_api}/v1/tenant",
             json=body,
@@ -2316,7 +2316,7 @@ class NeonPageserver(PgProtocol):
             log.info("%s", "Tenant list: {tenants}...")
             any_unstable = any((t["state"]["slug"] not in stable_states) for t in tenants)
             if any_unstable:
-                for t in tenants:
+                for _t in tenants:
                     log.info("%s", "Waiting for tenant {t['id']} in state {t['state']['slug']}")
             log.info("%s", "any_unstable={any_unstable}")
             assert not any_unstable
@@ -3377,7 +3377,7 @@ class Endpoint(PgProtocol):
         Returns self.
         """
 
-        started_at = time.time()
+        time.time()
 
         self.create(
             branch_name=branch_name,
@@ -3982,7 +3982,9 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     (match, mismatch, error) = filecmp.cmpfiles(
         endpoint.pgdata_dir, restored_dir_path, pgdata_files, shallow=False
     )
-    log.info("%s", "filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}")
+    log.info(
+        "%s", "filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}"
+    )
 
     for f in mismatch:
         f1 = os.path.join(endpoint.pgdata_dir, f)
@@ -4056,7 +4058,9 @@ def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
             secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
         )
         caught_up = secondary_lsn >= primary_lsn
-        log.info("%s", "caughtup={caught_up}, primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}")
+        log.info(
+            "%s", "caughtup={caught_up}, primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}"
+        )
         if caught_up:
             return
         time.sleep(1)

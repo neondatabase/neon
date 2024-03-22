@@ -12,7 +12,9 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
 
     branchname = "test_explain_with_lfc_stats"
     env.neon_cli.create_branch(branchname, "empty")
-    log.info("%s", "Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}")
+    log.info(
+        "%s", "Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}"
+    )
     endpoint = env.endpoints.create_start(
         branchname,
         config_lines=[

@@ -34,7 +34,7 @@ def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg
     pg_bin.run_capture(["pgbench", "-c10", "-T100", "-Mprepared", endpoint.connstr()])
 
     # Wait logical replication to sync
-    start = time.time()
+    time.time()
     logical_replication_sync(vanilla_pg, endpoint)
     log.info("%s", "Sync with master took {time.time() - start} seconds")
 

@@ -329,7 +329,7 @@ class MetricsVerifier:
         pass
 
     def ingest(self, events, is_last):
-        stringified = json.dumps(events, indent=2)
+        json.dumps(events, indent=2)
         log.info("%s", "ingesting: {stringified}")
         for event in events:
             id = TenantId(event["tenant_id"])

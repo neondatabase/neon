@@ -374,7 +374,7 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
     # try to evict everything, then validate that broken tenant wasn't touched
     target = broken_size_pre + healthy_size_pre
 
-    response = env.pageserver_http.disk_usage_eviction_run({"evict_bytes": target})
+    env.pageserver_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info("%s", "{response}")
 
     broken_size_post, _, _ = poor_mans_du(
@@ -522,9 +522,7 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv, order: E
     (total_on_disk, _, _) = env.timelines_du(env.pageserver)
     target = total_on_disk
 
-    response = ps_http.disk_usage_eviction_run(
-        {"evict_bytes": target, "eviction_order": order.config()}
-    )
+    ps_http.disk_usage_eviction_run({"evict_bytes": target, "eviction_order": order.config()})
     log.info("%s", "{response}")
 
     (later_total_on_disk, _, _) = env.timelines_du(env.pageserver)
@@ -570,9 +568,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
     # but not enough to fall into global LRU.
     # So, set target to all occupied space, except 2*env.layer_size per tenant
     target = du_by_timeline[cold] + (du_by_timeline[warm] // 2) - 2 * 2 * env.layer_size
-    response = ps_http.disk_usage_eviction_run(
-        {"evict_bytes": target, "eviction_order": order.config()}
-    )
+    ps_http.disk_usage_eviction_run({"evict_bytes": target, "eviction_order": order.config()})
     log.info("%s", "{response}")
 
     (later_total_on_disk, _, _) = env.timelines_du(env.pageserver)
@@ -602,7 +598,9 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
         log.info(
             f"expecting for warm tenant: {human_bytes(warm_lower)} < {human_bytes(warm_size)} < {human_bytes(warm_upper)}"
         )
-        log.info("%s", "expecting for cold tenant: {human_bytes(cold_size)} < {human_bytes(cold_upper)}")
+        log.info(
+            "%s", "expecting for cold tenant: {human_bytes(cold_size)} < {human_bytes(cold_upper)}"
+        )
 
         assert warm_size > warm_lower, "warmed up tenant should be at about half size (lower)"
         assert warm_size < warm_upper, "warmed up tenant should be at about half size (upper)"
@@ -674,7 +672,7 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, False)
 
     # cut 10 percent
-    response = env.pageserver.http_client().disk_usage_eviction_run(
+    env.pageserver.http_client().disk_usage_eviction_run(
         {"evict_bytes": total_on_disk // 10, "eviction_order": order.config()}
     )
     log.info("%s", "{response}")
@@ -682,7 +680,7 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     after_tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
 
     ratios = []
-    for i, ((tenant_id, _timeline_id), _scale) in enumerate(timelines):
+    for _i, ((tenant_id, _timeline_id), _scale) in enumerate(timelines):
         # we expect the oldest to suffer most
         originally, after = tenant_layers[tenant_id], after_tenant_layers[tenant_id]
         log.info("%s", "{i + 1}th tenant went from {originally} -> {after}")
@@ -739,7 +737,9 @@ def poor_mans_du(
             else:
                 smallest_layer = size
             if verbose:
-                log.info("%s", "{tenant_id}/{timeline_id} => {file.name} {size} ({human_bytes(size)})")
+                log.info(
+                    "%s", "{tenant_id}/{timeline_id} => {file.name} {size} ({human_bytes(size)})"
+                )
 
         if verbose:
             log.info("%s", "{tenant_id}/{timeline_id}: sum {total} ({human_bytes(total)})")
@@ -884,7 +884,7 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
                 "tenant_conf": {},
             },
         )
-        readback_conf = ps_secondary.read_tenant_location_conf(tenant_id)
+        ps_secondary.read_tenant_location_conf(tenant_id)
         log.info("%s", "Read back conf: {readback_conf}")
 
         # Request secondary location to download all layers that the attached location indicated
@@ -894,7 +894,7 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
     total_size, _, _ = env.timelines_du(ps_secondary)
     evict_bytes = total_size // 3
 
-    response = ps_secondary.http_client().disk_usage_eviction_run({"evict_bytes": evict_bytes})
+    ps_secondary.http_client().disk_usage_eviction_run({"evict_bytes": evict_bytes})
     log.info("%s", "{response}")
 
     post_eviction_total_size, _, _ = env.timelines_du(ps_secondary)

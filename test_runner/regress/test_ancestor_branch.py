@@ -24,11 +24,11 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
 
     endpoint_branch0 = env.endpoints.create_start("main", tenant_id=tenant)
     branch0_cur = endpoint_branch0.connect().cursor()
-    branch0_timeline = TimelineId(query_scalar(branch0_cur, "SHOW neon.timeline_id"))
+    TimelineId(query_scalar(branch0_cur, "SHOW neon.timeline_id"))
     log.info("%s", "b0 timeline {branch0_timeline}")
 
     # Create table, and insert 100k rows.
-    branch0_lsn = query_scalar(branch0_cur, "SELECT pg_current_wal_insert_lsn()")
+    query_scalar(branch0_cur, "SELECT pg_current_wal_insert_lsn()")
     log.info("%s", "b0 at lsn {branch0_lsn}")
 
     branch0_cur.execute("CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)")
@@ -50,7 +50,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     branch1_timeline = TimelineId(query_scalar(branch1_cur, "SHOW neon.timeline_id"))
     log.info("%s", "b1 timeline {branch1_timeline}")
 
-    branch1_lsn = query_scalar(branch1_cur, "SELECT pg_current_wal_insert_lsn()")
+    query_scalar(branch1_cur, "SELECT pg_current_wal_insert_lsn()")
     log.info("%s", "b1 at lsn {branch1_lsn}")
 
     # Insert 100k rows.
@@ -69,10 +69,10 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     endpoint_branch2 = env.endpoints.create_start("branch2", tenant_id=tenant)
     branch2_cur = endpoint_branch2.connect().cursor()
 
-    branch2_timeline = TimelineId(query_scalar(branch2_cur, "SHOW neon.timeline_id"))
+    TimelineId(query_scalar(branch2_cur, "SHOW neon.timeline_id"))
     log.info("%s", "b2 timeline {branch2_timeline}")
 
-    branch2_lsn = query_scalar(branch2_cur, "SELECT pg_current_wal_insert_lsn()")
+    query_scalar(branch2_cur, "SELECT pg_current_wal_insert_lsn()")
     log.info("%s", "b2 at lsn {branch2_lsn}")
 
     # Insert 100k rows.
@@ -83,7 +83,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
             FROM generate_series(1, 100000) g
     """
     )
-    lsn_300 = query_scalar(branch2_cur, "SELECT pg_current_wal_insert_lsn()")
+    query_scalar(branch2_cur, "SELECT pg_current_wal_insert_lsn()")
     log.info("%s", "LSN after 300k rows: {lsn_300}")
 
     # Run compaction on branch1.

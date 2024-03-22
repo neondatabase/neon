@@ -13,7 +13,9 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
 
     branchname = "test_approximate_working_set_size"
     env.neon_cli.create_branch(branchname, "empty")
-    log.info("%s", "Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}")
+    log.info(
+        "%s", "Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}"
+    )
     endpoint = env.endpoints.create_start(
         branchname,
         config_lines=[

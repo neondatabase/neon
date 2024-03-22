@@ -57,7 +57,13 @@ def wait_for_upload(
             log.info("wait finished")
             return
         lr_lsn = last_record_lsn(pageserver_http, tenant, timeline)
-        log.info("waiting for remote_consistent_lsn to reach %s, now %s, last_record_lsn=%s, iteration %s", lsn, current_lsn, lr_lsn, i + 1)
+        log.info(
+            "waiting for remote_consistent_lsn to reach %s, now %s, last_record_lsn=%s, iteration %s",
+            lsn,
+            current_lsn,
+            lr_lsn,
+            i + 1,
+        )
         time.sleep(1)
     raise Exception(
         f"timed out while waiting for remote_consistent_lsn to reach {lsn}, was {current_lsn}"
@@ -201,7 +207,9 @@ def wait_for_last_record_lsn(
         if current_lsn >= lsn:
             return current_lsn
         if i % 10 == 0:
-            log.info(f"{tenant}/{timeline} waiting for last_record_lsn to reach {lsn}, now {current_lsn}, iteration {i + 1}")
+            log.info(
+                f"{tenant}/{timeline} waiting for last_record_lsn to reach {lsn}, now {current_lsn}, iteration {i + 1}"
+            )
         time.sleep(0.1)
     raise Exception(
         f"timed out while waiting for last_record_lsn to reach {lsn}, was {current_lsn}"
@@ -245,7 +253,7 @@ def wait_for_upload_queue_empty(
                 tl.append((s.labels, int(s.value)))
         assert len(tl) == len(started), "something broken with join logic"
         log.info("%s", "upload queue for {tenant_id}/{timeline_id}:")
-        for labels, queue_count in tl:
+        for _labels, _queue_count in tl:
             log.info("%s", "  {labels}: {queue_count}")
         if all(queue_count == 0 for (_, queue_count) in tl):
             return

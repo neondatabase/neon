@@ -218,7 +218,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         ps_samples = ps_metrics.query_all(metric, {})
         assert len(ps_samples) > 0, f"expected at least one sample for {metric}"
         for sample in ps_samples:
-            labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
+            ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
             log.info("%s", "{sample.name}{{{labels}}} {sample.value}")
 
     # Test that we gather tenant operations metrics

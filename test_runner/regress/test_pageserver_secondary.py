@@ -464,7 +464,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
             "tenant_conf": {},
         },
     )
-    readback_conf = ps_secondary.read_tenant_location_conf(tenant_id)
+    ps_secondary.read_tenant_location_conf(tenant_id)
     log.info("%s", "Read back conf: {readback_conf}")
 
     # Explicit upload/download cycle

@@ -79,7 +79,7 @@ def check_backpressure(endpoint: Endpoint, stop_event: threading.Event, polling_
 
                 time.sleep(polling_interval)
 
-            except Exception as e:
+            except Exception:
                 log.info("%s", "backpressure check query failed: {e}")
                 stop_event.set()
 

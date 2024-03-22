@@ -229,6 +229,6 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
     #
     # ERROR: could not access status of transaction 1027
     cur.execute("select xmin, xmax, * from vmtest_lock where id = 40000 for update")
-    tup = cur.fetchall()
+    cur.fetchall()
     log.info("%s", "tuple = {tup}")
     cur.execute("commit transaction")

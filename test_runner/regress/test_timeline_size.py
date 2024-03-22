@@ -179,7 +179,7 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
                 log.error("Query unexpectedly succeeded")
                 raise AssertionError()
 
-            except psycopg2.errors.DiskFull as err:
+            except psycopg2.errors.DiskFull:
                 log.info("%s", "Query expectedly failed with: {err}")
 
     # Restart endpoint that reached the limit to ensure that it doesn't fail on startup
@@ -206,7 +206,7 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
                 log.error("Query unexpectedly succeeded")
                 raise AssertionError()
 
-            except psycopg2.errors.DiskFull as err:
+            except psycopg2.errors.DiskFull:
                 log.info("%s", "Query expectedly failed with: {err}")
 
 
@@ -257,7 +257,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
                 log.error("Query unexpectedly succeeded")
                 raise AssertionError()
 
-            except psycopg2.errors.DiskFull as err:
+            except psycopg2.errors.DiskFull:
                 log.info("%s", "Query expectedly failed with: {err}")
 
             # drop table to free space
@@ -278,7 +278,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
             wait_for_pageserver_catchup(endpoint_main)
 
             cur.execute("SELECT * from pg_size_pretty(neon.pg_cluster_size())")
-            pg_cluster_size = cur.fetchone()
+            cur.fetchone()
             log.info("%s", "pg_cluster_size = {pg_cluster_size}")
 
     new_res = client.timeline_detail(

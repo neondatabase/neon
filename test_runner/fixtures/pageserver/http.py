@@ -618,7 +618,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def timeline_get_timestamp_of_lsn(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
     ):
-        log.info("%s", "Requesting time range of lsn {lsn}, tenant {tenant_id}, timeline {timeline_id}")
+        log.info(
+            "%s", "Requesting time range of lsn {lsn}, tenant {tenant_id}, timeline {timeline_id}"
+        )
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn?lsn={lsn}",
         )

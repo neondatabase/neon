@@ -914,7 +914,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
     endpoint = workload.endpoint()
 
     # on 2024-03-05, the default config on prod was [15MB, 10GB, null]
-    res = endpoint.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "SHOW max_replication_write_lag",
             "SHOW max_replication_flush_lag",
