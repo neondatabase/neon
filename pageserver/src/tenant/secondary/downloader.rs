@@ -11,6 +11,7 @@ use crate::{
     disk_usage_eviction_task::{
         finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
     },
+    is_temporary,
     metrics::SECONDARY_MODE,
     tenant::{
         config::SecondaryLocationConfig,
@@ -961,7 +962,10 @@ async fn init_timeline_state(
             // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
             warn!(path=?dentry.path(), "found legacy metadata file, these should have been removed in load_tenant_config");
             continue;
-        } else if crate::is_temporary(&file_path) || is_temp_download_file(&file_path) {
+        } else if crate::is_temporary(&file_path)
+            || is_temp_download_file(&file_path)
+            || is_temporary(&file_path)
+        {
             // Temporary files are frequently left behind from restarting during downloads
             tracing::info!("Cleaning up temporary file {file_path}");
             if let Err(e) = tokio::fs::remove_file(&file_path)

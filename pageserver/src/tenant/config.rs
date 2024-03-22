@@ -196,16 +196,17 @@ impl LocationConf {
     /// For use when attaching/re-attaching: update the generation stored in this
     /// structure.  If we were in a secondary state, promote to attached (posession
     /// of a fresh generation implies this).
-    pub(crate) fn attach_in_generation(&mut self, generation: Generation) {
+    pub(crate) fn attach_in_generation(&mut self, mode: AttachmentMode, generation: Generation) {
         match &mut self.mode {
             LocationMode::Attached(attach_conf) => {
                 attach_conf.generation = generation;
+                attach_conf.attach_mode = mode;
             }
             LocationMode::Secondary(_) => {
                 // We are promoted to attached by the control plane's re-attach response
                 self.mode = LocationMode::Attached(AttachedLocationConfig {
                     generation,
-                    attach_mode: AttachmentMode::Single,
+                    attach_mode: mode,
                 })
             }
         }

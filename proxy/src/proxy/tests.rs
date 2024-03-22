@@ -135,9 +135,10 @@ impl TestAuth for NoAuth {}
 struct Scram(scram::ServerSecret);
 
 impl Scram {
-    fn new(password: &str) -> anyhow::Result<Self> {
-        let secret =
-            scram::ServerSecret::build(password).context("failed to generate scram secret")?;
+    async fn new(password: &str) -> anyhow::Result<Self> {
+        let secret = scram::ServerSecret::build(password)
+            .await
+            .context("failed to generate scram secret")?;
         Ok(Scram(secret))
     }
 
@@ -284,7 +285,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
-        Scram::new(password)?,
+        Scram::new(password).await?,
     ));
 
     let (_client, _conn) = tokio_postgres::Config::new()
@@ -308,7 +309,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
-        Scram::new("password")?,
+        Scram::new("password").await?,
     ));
 
     let (_client, _conn) = tokio_postgres::Config::new()

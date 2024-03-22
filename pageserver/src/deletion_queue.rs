@@ -724,8 +724,8 @@ impl DeletionQueue {
 mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
-    use pageserver_api::shard::ShardIndex;
-    use std::io::ErrorKind;
+    use pageserver_api::{shard::ShardIndex, upcall_api::ReAttachResponseTenant};
+    use std::{io::ErrorKind, time::Duration};
     use tracing::info;
 
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
@@ -834,9 +834,10 @@ mod test {
         async fn re_attach(
             &self,
             _conf: &PageServerConf,
-        ) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
+        ) -> Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError> {
             unimplemented!()
         }
+
         async fn validate(
             &self,
             tenants: Vec<(TenantShardId, Generation)>,

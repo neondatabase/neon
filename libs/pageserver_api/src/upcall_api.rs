@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 use utils::id::NodeId;
 
-use crate::{controller_api::NodeRegisterRequest, shard::TenantShardId};
+use crate::{
+    controller_api::NodeRegisterRequest, models::LocationConfigMode, shard::TenantShardId,
+};
 
 /// Upcall message sent by the pageserver to the configured `control_plane_api` on
 /// startup.
@@ -20,12 +22,20 @@ pub struct ReAttachRequest {
     pub register: Option<NodeRegisterRequest>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ReAttachResponseTenant {
-    pub id: TenantShardId,
-    pub gen: u32,
+fn default_mode() -> LocationConfigMode {
+    LocationConfigMode::AttachedSingle
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReAttachResponseTenant {
+    pub id: TenantShardId,
+    /// Mandatory if LocationConfigMode is None or set to an Attached* mode
+    pub gen: Option<u32>,
+
+    /// Default value only for backward compat: this field should be set
+    #[serde(default = "default_mode")]
+    pub mode: LocationConfigMode,
+}
 #[derive(Serialize, Deserialize)]
 pub struct ReAttachResponse {
     pub tenants: Vec<ReAttachResponseTenant>,

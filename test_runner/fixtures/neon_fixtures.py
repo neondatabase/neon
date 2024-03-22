@@ -2150,6 +2150,18 @@ class NeonStorageController(MetricsGetter):
         shards: list[dict[str, Any]] = body["shards"]
         return shards
 
+    def tenant_describe(self, tenant_id: TenantId):
+        """
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        """
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
+
     def tenant_shard_split(
         self, tenant_id: TenantId, shard_count: int, shard_stripe_size: Optional[int] = None
     ) -> list[TenantShardId]:

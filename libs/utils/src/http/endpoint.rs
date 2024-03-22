@@ -245,7 +245,7 @@ impl std::io::Write for ChannelWriter {
     }
 }
 
-async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     SERVE_METRICS_COUNT.inc();
 
     let started_at = std::time::Instant::now();
@@ -367,7 +367,6 @@ pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
         .middleware(Middleware::post_with_info(
             add_request_id_header_to_response,
         ))
-        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         .err_handler(route_error_handler)
 }
 

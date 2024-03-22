@@ -194,14 +194,7 @@ pub(crate) async fn validate_password_and_exchange(
         }
         // perform scram authentication as both client and server to validate the keys
         AuthSecret::Scram(scram_secret) => {
-            use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
-            let sasl_client = ScramSha256::new(password, ChannelBinding::unsupported());
-            let outcome = crate::scram::exchange(
-                &scram_secret,
-                sasl_client,
-                crate::config::TlsServerEndPoint::Undefined,
-            )
-            .await?;
+            let outcome = crate::scram::exchange(&scram_secret, password).await?;
 
             let client_key = match outcome {
                 sasl::Outcome::Success(client_key) => client_key,

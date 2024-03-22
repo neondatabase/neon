@@ -148,7 +148,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
-        Scram::new("password")?,
+        Scram::new("password").await?,
     ));
 
     let _client_err = tokio_postgres::Config::new()
@@ -231,7 +231,7 @@ async fn connect_failure(
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
-        Scram::new("password")?,
+        Scram::new("password").await?,
     ));
 
     let _client_err = tokio_postgres::Config::new()

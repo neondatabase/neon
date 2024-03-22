@@ -5,7 +5,8 @@ use pageserver_api::{
     controller_api::NodeRegisterRequest,
     shard::TenantShardId,
     upcall_api::{
-        ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
+        ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
+        ValidateRequestTenant, ValidateResponse,
     },
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -37,7 +38,9 @@ pub trait ControlPlaneGenerationsApi {
     fn re_attach(
         &self,
         conf: &PageServerConf,
-    ) -> impl Future<Output = Result<HashMap<TenantShardId, Generation>, RetryForeverError>> + Send;
+    ) -> impl Future<
+        Output = Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError>,
+    > + Send;
     fn validate(
         &self,
         tenants: Vec<(TenantShardId, Generation)>,
@@ -118,7 +121,7 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
     async fn re_attach(
         &self,
         conf: &PageServerConf,
-    ) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
+    ) -> Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("re-attach")
@@ -181,7 +184,7 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
         Ok(response
             .tenants
             .into_iter()
-            .map(|t| (t.id, Generation::new(t.gen)))
+            .map(|rart| (rart.id, rart))
             .collect::<HashMap<_, _>>())
     }
 
