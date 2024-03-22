@@ -8,6 +8,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     last_flush_lsn_upload,
+    wait_for_last_flush_lsn,
 )
 
 from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
@@ -27,10 +28,16 @@ def test_many_small_tenants(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
 ):
-    _env = setup_env(neon_env_builder, 2)  # vary this to the desired number of tenants
-    _pg_bin = pg_bin
 
-    # drop into pdb so that we can debug pageserver interactively, use pdb here
+    page_cache_size = int(40 * (1024**3) / 8192)
+    max_file_descriptors = 500000
+    neon_env_builder.pageserver_config_override = (
+        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
+    )
+
+    _env = setup_env(neon_env_builder, 3000, pg_bin)  # vary this to the desired number of tenants
+
+        # drop into pdb so that we can debug pageserver interactively, use pdb here
     # For example, to interactively examine pageserver startup behavior, call
     #   _env.pageserver.stop(immediate=True)
     #   _env.pageserver.start()
@@ -41,6 +48,7 @@ def test_many_small_tenants(
 def setup_env(
     neon_env_builder: NeonEnvBuilder,
     n_tenants: int,
+    pg_bin: PgBin,
 ) -> NeonEnv:
     def setup_template(env: NeonEnv):
         # create our template tenant
@@ -60,12 +68,38 @@ def setup_env(
             ".*Dropped remote consistent LSN updates.*",
         )
         env.pageserver.tenant_attach(template_tenant, config)
-        ep = env.endpoints.create_start("main", tenant_id=template_tenant)
-        ep.safe_psql("create table foo(b text)")
-        for _ in range(0, 8):
-            ep.safe_psql("insert into foo(b) values ('some text')")
-            last_flush_lsn_upload(env, ep, template_tenant, template_timeline)
-        ep.stop_and_destroy()
+        ps_http = env.pageserver.http_client()
+        scale = 10
+        with env.endpoints.create_start("main", tenant_id=template_tenant) as ep:
+            pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", "-I", "dtGvp", ep.connstr()])
+            wait_for_last_flush_lsn(env, ep, template_tenant, template_timeline)
+            ps_http.timeline_checkpoint(template_tenant, template_timeline)
+            ps_http.timeline_compact(template_tenant, template_timeline)
+            for _ in range(
+                0, 17
+            ):  # some prime number to avoid potential resonances with the "_threshold" variables from the config
+                # the L0s produced by this appear to have size ~5MiB
+                num_txns = 10_000
+                pg_bin.run_capture(
+                    ["pgbench", "-N", "-c1", "--transactions", f"{num_txns}", ep.connstr()]
+                )
+                wait_for_last_flush_lsn(env, ep, template_tenant, template_timeline)
+                ps_http.timeline_checkpoint(template_tenant, template_timeline)
+                ps_http.timeline_compact(template_tenant, template_timeline)
+            # for reference, the output at scale=6 looked like so (306M total)
+            # ls -sh test_output/shared-snapshots/max_throughput_latest_lsn-2-6/snapshot/pageserver_1/tenants/35c30b88ea16a7a09f82d9c6a115551b/timelines/da902b378eebe83dc8a4e81cd3dc1c59
+            # total 306M
+            # 188M 000000000000000000000000000000000000-030000000000000000000000000000000003__000000000149F060-0000000009E75829
+            # 4.5M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000009E75829-000000000A21E919
+            #  33M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000000A21E919-000000000C20CB71
+            #  36M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000000C20CB71-000000000E470791
+            #  16M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000000E470791-000000000F34AEF1
+            # 8.2M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000000F34AEF1-000000000FABA8A9
+            # 6.0M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000000FABA8A9-000000000FFE0639
+            # 6.1M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000000FFE0639-000000001051D799
+            # 4.7M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__000000001051D799-0000000010908F19
+            # 4.6M 000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000010908F19-0000000010CD3021
+            ep.stop_and_destroy()
         return (template_tenant, template_timeline, config)
 
     def doit(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
