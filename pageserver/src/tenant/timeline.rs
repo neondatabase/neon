@@ -2852,15 +2852,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Option<(Lsn, Bytes)> {
-        let cache = page_cache::get();
-
-        // FIXME: It's pointless to check the cache for things that are not 8kB pages.
-        // We should look at the key to determine if it's a cacheable object
-        let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_shard_id, self.timeline_id, key, lsn, ctx)
-            .await?;
-        let img = Bytes::from(read_guard.to_vec());
-        Some((lsn, img))
+        return None;
     }
 
     async fn get_ready_ancestor_timeline(
