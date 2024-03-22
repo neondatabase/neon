@@ -100,4 +100,5 @@ def test_2_replicas_start(neon_simple_env: NeonEnv):
             with env.endpoints.new_replica_start(
                 origin=primary, endpoint_id="secondary2"
             ) as secondary2:
-                pass
+                wait_replica_caughtup(primary, secondary1)
+                wait_replica_caughtup(primary, secondary2)
