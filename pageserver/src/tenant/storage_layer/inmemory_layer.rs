@@ -92,8 +92,8 @@ impl std::fmt::Debug for InMemoryLayerInner {
 struct GlobalResources {
     // How many bytes are in all EphemeralFile objects
     dirty_bytes: AtomicU64,
-    // How many InMemoryLayer objects exist
-    writers: AtomicUsize,
+    // How many layers are contributing to dirty_bytes
+    dirty_layers: AtomicUsize,
 }
 
 // Per-timeline RAII struct for its contribution to [`GlobalResources`]
@@ -104,14 +104,14 @@ struct GlobalResourceUnits {
 }
 
 impl GlobalResourceUnits {
-    // Hint for layer writers to update us when the layer size differs from the last
+    // Hint for the layer append path to update us when the layer size differs from the last
     // call to update_size by this much.  If we don't reach this threshold, we'll still get
     // updated when the Timeline "ticks" in the background.
     const MAX_SIZE_DRIFT: u64 = 10 * 1024 * 1024;
 
     fn new() -> Self {
         GLOBAL_RESOURCES
-            .writers
+            .dirty_layers
             .fetch_add(1, AtomicOrdering::Relaxed);
         Self { dirty_bytes: 0 }
     }
@@ -166,7 +166,7 @@ impl GlobalResourceUnits {
 impl Drop for GlobalResourceUnits {
     fn drop(&mut self) {
         GLOBAL_RESOURCES
-            .writers
+            .dirty_layers
             .fetch_sub(1, AtomicOrdering::Relaxed);
 
         // Subtract our contribution to the global total dirty bytes
@@ -176,7 +176,7 @@ impl Drop for GlobalResourceUnits {
 
 static GLOBAL_RESOURCES: GlobalResources = GlobalResources {
     dirty_bytes: AtomicU64::new(0),
-    writers: AtomicUsize::new(0),
+    dirty_layers: AtomicUsize::new(0),
 };
 
 impl InMemoryLayer {

@@ -704,7 +704,7 @@ pub(crate) static TIMELINE_EPHEMERAL_BYTES: Lazy<UIntGauge> = Lazy::new(|| {
         "pageserver_timeline_ephemeral_bytes",
         "Total number of bytes in ephemeral layers, summed for all timelines.  Approximate, lazily updated."
     )
-    .expect("Failed ot register metric")
+    .expect("Failed to register metric")
 });
 
 /// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
