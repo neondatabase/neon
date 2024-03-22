@@ -15,7 +15,6 @@ use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
-use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use pageserver::tenant::{secondary, TenantSharedResources};
 use remote_storage::GenericRemoteStorage;
 use tokio::time::Instant;
@@ -28,7 +27,7 @@ use pageserver::{
     deletion_queue::DeletionQueue,
     http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
-    task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
+    task_mgr::THE_RUNTIME,
     tenant::mgr,
     virtual_file,
 };
@@ -323,7 +322,7 @@ fn start_pageserver(
 
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
-    let broker_client = WALRECEIVER_RUNTIME
+    let broker_client = THE_RUNTIME
         .block_on(async {
             // Note: we do not attempt connecting here (but validate endpoints sanity).
             storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)
@@ -391,7 +390,7 @@ fn start_pageserver(
         conf,
     );
     if let Some(deletion_workers) = deletion_workers {
-        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
+        deletion_workers.spawn_with(THE_RUNTIME.handle());
     }
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
@@ -423,7 +422,7 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
-    let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+    let tenant_manager = THE_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         TenantSharedResources {
             broker_client: broker_client.clone(),
@@ -435,7 +434,7 @@ fn start_pageserver(
     ))?;
     let tenant_manager = Arc::new(tenant_manager);
 
-    BACKGROUND_RUNTIME.spawn({
+    THE_RUNTIME.spawn({
         let shutdown_pageserver = shutdown_pageserver.clone();
         let drive_init = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
@@ -545,7 +544,7 @@ fn start_pageserver(
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
     {
-        let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
+        let _rt_guard = THE_RUNTIME.enter();
 
         let router_state = Arc::new(
             http::routes::State::new(
@@ -569,7 +568,6 @@ fn start_pageserver(
             .with_graceful_shutdown(task_mgr::shutdown_watcher());
 
         task_mgr::spawn(
-            MGMT_REQUEST_RUNTIME.handle(),
             TaskKind::HttpEndpointListener,
             None,
             None,
@@ -594,7 +592,6 @@ fn start_pageserver(
         let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
 
         task_mgr::spawn(
-            crate::BACKGROUND_RUNTIME.handle(),
             TaskKind::MetricsCollection,
             None,
             None,
@@ -642,7 +639,6 @@ fn start_pageserver(
             DownloadBehavior::Error,
         );
         task_mgr::spawn(
-            COMPUTE_REQUEST_RUNTIME.handle(),
             TaskKind::LibpqEndpointListener,
             None,
             None,
@@ -668,7 +664,7 @@ fn start_pageserver(
     // All started up! Now just sit and wait for shutdown signal.
     {
         use signal_hook::consts::*;
-        let signal_handler = BACKGROUND_RUNTIME.spawn_blocking(move || {
+        let signal_handler = THE_RUNTIME.spawn_blocking(move || {
             let mut signals =
                 signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGQUIT]).unwrap();
             return signals
@@ -676,9 +672,7 @@ fn start_pageserver(
                 .next()
                 .expect("forever() never returns None unless explicitly closed");
         });
-        let signal = BACKGROUND_RUNTIME
-            .block_on(signal_handler)
-            .expect("join error");
+        let signal = THE_RUNTIME.block_on(signal_handler).expect("join error");
         match signal {
             SIGQUIT => {
                 info!("Got signal {signal}. Terminating in immediate shutdown mode",);
@@ -693,7 +687,7 @@ fn start_pageserver(
                 shutdown_pageserver.take();
                 let bg_remote_storage = remote_storage.clone();
                 let bg_deletion_queue = deletion_queue.clone();
-                BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
+                THE_RUNTIME.block_on(pageserver::shutdown_pageserver(
                     &tenant_manager,
                     bg_remote_storage.map(|_| bg_deletion_queue),
                     0,

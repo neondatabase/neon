@@ -1850,7 +1850,6 @@ impl TenantManager {
         let task_tenant_id = None;
 
         task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::MgmtRequest,
             task_tenant_id,
             None,
@@ -2816,7 +2815,6 @@ pub(crate) fn immediate_gc(
 
     // TODO: spawning is redundant now, need to hold the gate
     task_mgr::spawn(
-        &tokio::runtime::Handle::current(),
         TaskKind::GarbageCollector,
         Some(tenant_shard_id),
         Some(timeline_id),
