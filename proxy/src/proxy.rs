@@ -10,7 +10,7 @@ pub mod wake_compute;
 
 use crate::{
     auth,
-    cancellation::{self, CancellationHandler},
+    cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
     compute,
     config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
@@ -62,7 +62,7 @@ pub async fn task_main(
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    cancellation_handler: Arc<CancellationHandler>,
+    cancellation_handler: Arc<CancellationHandlerMain>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -233,12 +233,12 @@ impl ReportableError for ClientRequestError {
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    cancellation_handler: Arc<CancellationHandler>,
+    cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: IntCounterPairGuard,
-) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
+) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
     info!("handling interactive connection from client");
 
     let proto = ctx.protocol;
@@ -338,9 +338,9 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 #[tracing::instrument(skip_all)]
-async fn prepare_client_connection(
+async fn prepare_client_connection<P>(
     node: &compute::PostgresConnection,
-    session: &cancellation::Session,
+    session: &cancellation::Session<P>,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> Result<(), std::io::Error> {
     // Register compute's query cancellation token and produce a new, unique one.
