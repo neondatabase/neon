@@ -16,14 +16,17 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
     env.pageserver.is_testing_enabled_or_skip()
-    env.storage_controller.allowed_errors.append(".*management API still failed.*utilization.*")
+
+    # We expect the pageserver to exit, which will cause storage storage controller
+    # requests to fail and warn.
+    env.storage_controller.allowed_errors.append(".*management API still failed.*")
 
     # Create a branch for us
     env.neon_cli.create_branch("test_pageserver_recovery", "main")
 
     endpoint = env.endpoints.create_start("test_pageserver_recovery")
 
-    with closing(endpoint.connect()) as conn:
+    with closing(endpoint.connect(options="-cstatement_timeout=300s")) as conn:
         with conn.cursor() as cur:
             with env.pageserver.http_client() as pageserver_http:
                 # Create and initialize test table
