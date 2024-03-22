@@ -333,7 +333,7 @@ where
 
     let task_name = name.to_string();
     let task_cloned = Arc::clone(&task);
-    let join_handle = THE_RUNTIME.spawn(task_wrapper(
+    let join_handle = tokio::spawn(task_wrapper(
         task_name,
         task_id,
         task_cloned,
