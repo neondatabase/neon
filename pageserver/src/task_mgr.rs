@@ -98,22 +98,42 @@ use utils::id::TimelineId;
 // other operations, if the upload tasks e.g. get blocked on locks. It shouldn't
 // happen, but still.
 //
-
-/// The single tokio runtime used by all pageserver code.
-/// In the past, we had multiple runtimes, and in the future we should weed out
-/// remaining references to this global field and rely on ambient runtime instead,
-/// i.e., use `tokio::spawn` instead of `THE_RUNTIME.spawn()`, etc.
-pub static THE_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+pub static COMPUTE_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
+        .thread_name("compute request worker")
+        .enable_all()
+        .build()
+        .expect("Failed to create compute request runtime")
+});
+
+pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_name("mgmt request worker")
+        .enable_all()
+        .build()
+        .expect("Failed to create mgmt request runtime")
+});
+
+pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_name("walreceiver worker")
+        .enable_all()
+        .build()
+        .expect("Failed to create walreceiver runtime")
+});
+
+pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_name("background op worker")
         // if you change the number of worker threads please change the constant below
         .enable_all()
         .build()
         .expect("Failed to create background op runtime")
 });
 
-pub(crate) static THE_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
+pub(crate) static BACKGROUND_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
     // force init and thus panics
-    let _ = THE_RUNTIME.handle();
+    let _ = BACKGROUND_RUNTIME.handle();
     // replicates tokio-1.28.1::loom::sys::num_cpus which is not available publicly
     // tokio would had already panicked for parsing errors or NotUnicode
     //
@@ -305,6 +325,7 @@ struct PageServerTask {
 /// Note: if shutdown_process_on_error is set to true failure
 ///   of the task will lead to shutdown of entire process
 pub fn spawn<F>(
+    runtime: &tokio::runtime::Handle,
     kind: TaskKind,
     tenant_shard_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
@@ -333,7 +354,7 @@ where
 
     let task_name = name.to_string();
     let task_cloned = Arc::clone(&task);
-    let join_handle = tokio::spawn(task_wrapper(
+    let join_handle = runtime.spawn(task_wrapper(
         task_name,
         task_id,
         task_cloned,

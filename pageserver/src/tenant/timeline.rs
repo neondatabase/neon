@@ -1723,6 +1723,7 @@ impl Timeline {
             initdb_optimization_count: 0,
         };
         task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -2085,6 +2086,7 @@ impl Timeline {
             DownloadBehavior::Download,
         );
         task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -2262,6 +2264,7 @@ impl Timeline {
             DownloadBehavior::Download,
         );
         task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -4140,6 +4143,7 @@ impl Timeline {
 
         let self_clone = Arc::clone(&self);
         let task_id = task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),

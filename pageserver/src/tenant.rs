@@ -661,6 +661,7 @@ impl Tenant {
         let tenant_clone = Arc::clone(&tenant);
         let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
         task_mgr::spawn(
+            &tokio::runtime::Handle::current(),
             TaskKind::Attach,
             Some(tenant_shard_id),
             None,
