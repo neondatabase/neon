@@ -2080,6 +2080,16 @@ async fn put_io_engine_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn put_walredo_process_kind(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+    let kind: crate::walredo::ProcessKind = json_request(&mut r).await?;
+    crate::walredo::set_process_kind(kind);
+    json_response(StatusCode::OK, ())
+}
+
 /// Polled by control plane.
 ///
 /// See [`crate::utilization`].
@@ -2407,6 +2417,9 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .put("/v1/walredo_process_kind", |r| {
+            api_handler(r, put_walredo_process_kind)
+        })
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
         .any(handler_404))
 }
