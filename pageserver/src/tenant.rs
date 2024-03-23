@@ -144,6 +144,7 @@ macro_rules! pausable_failpoint {
         }
     };
 }
+pub(crate) use pausable_failpoint;
 
 pub mod blob_io;
 pub mod block_io;
