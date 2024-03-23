@@ -121,28 +121,53 @@ use utils::{
 
 /// Declare a failpoint that can use the `pause` failpoint action.
 /// We don't want to block the executor thread, hence, spawn_blocking + await.
+#[macro_export]
 macro_rules! pausable_failpoint {
-    ($name:literal) => {
-        if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    tracing::info!("at failpoint {}", $name);
-                    fail::fail_point!($name);
-                }
-            })
-            .await
-            .expect("spawn_blocking");
+    ($name:literal) => {{ pausable_failpoint!($name if true) }};
+    ($name:literal if $cond:expr) => {{ pausable_failpoint!($name if $cond,) }};
+    ($name:literal if $cond:expr, $($field:ident = $value:expr),*) => {{
+        struct PausableFailpoint {
+            name: &'static str,
+            log: bool,
         }
-    };
-    ($name:literal, $cond:expr) => {
-        if cfg!(feature = "testing") {
-            if $cond {
-                pausable_failpoint!($name)
+        impl PausableFailpoint {
+            #[inline(always)]
+            async fn run(self) {
+                if cfg!(feature = "testing") {
+                    tokio::task::spawn_blocking({
+                        let current = tracing::Span::current();
+                        move || {
+                            let _entered = current.entered();
+                            if self.log {
+                                tracing::info!("at failpoint {}", self.name);
+                            }
+                            fail::fail_point!($name);
+                        }
+                    })
+                    .await
+                    .expect("spawn_blocking");
+                }
             }
         }
-    };
+        const FAILPOINT: PausableFailpoint = {
+            let fp = PausableFailpoint {
+                name: $name,
+                $(
+                    $field: $value,
+                )*
+                ..{
+                    PausableFailpoint {
+                        name: "always set by macro",
+                        log: true,
+                    }
+                }
+            };
+            fp
+        };
+        if $cond && fail::{
+            FAILPOINT.run().await;
+        }
+    }};
 }
 pub(crate) use pausable_failpoint;
 

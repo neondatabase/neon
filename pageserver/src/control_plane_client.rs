@@ -15,8 +15,7 @@ use url::Url;
 use utils::{backoff, generation::Generation, id::NodeId};
 
 use crate::{
-    config::{NodeMetadata, PageServerConf},
-    virtual_file::on_fatal_io_error,
+    config::{NodeMetadata, PageServerConf}, pausable_failpoint, virtual_file::on_fatal_io_error
 };
 
 /// The Pageserver's client for using the control plane API: this is a small subset
@@ -208,7 +207,7 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
                 .collect(),
         };
 
-        crate::tenant::pausable_failpoint!("control-plane-client-validate");
+        pausable_failpoint!("control-plane-client-validate");
 
         let response: ValidateResponse = self.retry_http_forever(&re_attach_path, request).await?;
 
