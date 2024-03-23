@@ -1,7 +1,7 @@
 //! Periodically collect consumption metrics for all active tenants
 //! and push them to a HTTP endpoint.
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr::{self, TaskKind};
 use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::{mgr, LogicalSizeCalculationCause, PageReconstructError, Tenant};
 use camino::Utf8PathBuf;
@@ -61,7 +61,6 @@ pub async fn collect_metrics(
     let worker_ctx =
         ctx.detached_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);
     task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
         TaskKind::CalculateSyntheticSize,
         None,
         None,
