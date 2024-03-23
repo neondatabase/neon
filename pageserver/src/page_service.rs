@@ -180,7 +180,6 @@ pub async fn libpq_listener_main(
                 // only deal with a particular timeline, but we don't know which one
                 // yet.
                 task_mgr::spawn(
-                    &tokio::runtime::Handle::current(),
                     TaskKind::PageRequestHandler,
                     None,
                     None,

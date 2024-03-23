@@ -211,4 +211,19 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn cancel_session_noop_regression() {
+        let handler = CancellationHandler::<()>::new(Default::default(), "local");
+        handler
+            .cancel_session(
+                CancelKeyData {
+                    backend_pid: 0,
+                    cancel_key: 0,
+                },
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+    }
 }
