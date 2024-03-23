@@ -118,11 +118,11 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::remote_timeline_client::RemoteTimelineClient;
+use super::config::TenantConf;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
-use super::{config::TenantConf, storage_layer::ReadableLayerDesc};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
+use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -2771,16 +2771,6 @@ impl Timeline {
 
         let mut completed_keyspace = KeySpace::default();
 
-        // Hold the layer map whilst visiting the timeline to prevent
-        // compaction, eviction and flushes from rendering the layers unreadable.
-        //
-        // TODO: Do we actually need to do this? In theory holding on
-        // to [`tenant::storage_layer::Layer`] should be enough. However,
-        // [`Timeline::get`] also holds the lock during IO, so more investigation
-        // is needed.
-        let guard = timeline.layers.read().await;
-        let layers = guard.layer_map();
-
         loop {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
@@ -2790,6 +2780,9 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
+            let guard = timeline.layers.read().await;
+            let layers = guard.layer_map();
+
             let in_memory_layer = layers.find_in_memory_layer(|l| {
                 let start_lsn = l.get_lsn_range().start;
                 cont_lsn > start_lsn
@@ -2797,12 +2790,11 @@ impl Timeline {
 
             match in_memory_layer {
                 Some(l) => {
+                    let lsn_range = l.get_lsn_range().start..cont_lsn;
                     fringe.update(
-                        ReadableLayerDesc::InMemory {
-                            handle: l,
-                            lsn_ceil: cont_lsn,
-                        },
+                        ReadableLayer::InMemoryLayer(l),
                         unmapped_keyspace.clone(),
+                        lsn_range,
                     );
                 }
                 None => {
@@ -2814,30 +2806,36 @@ impl Timeline {
                             .into_iter()
                             .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
                                 (
-                                    ReadableLayerDesc::Persistent {
-                                        desc: (*layer).clone(),
-                                        lsn_range: lsn_floor..cont_lsn,
-                                    },
+                                    ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
                                     keyspace_accum.to_keyspace(),
+                                    lsn_floor..cont_lsn,
                                 )
                             })
-                            .for_each(|(layer, keyspace)| fringe.update(layer, keyspace));
+                            .for_each(|(layer, keyspace, lsn_range)| {
+                                fringe.update(layer, keyspace, lsn_range)
+                            });
                     }
                 }
             }
 
-            if let Some((layer_to_read, keyspace_to_read)) = fringe.next_layer() {
+            // It's safe to drop the layer map lock after planning the next round of reads.
+            // The fringe keeps readable handles for the layers which are safe to read even
+            // if layers were compacted or flushed.
+            drop(guard);
+
+            if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
+                let next_cont_lsn = lsn_range.start;
                 layer_to_read
                     .get_values_reconstruct_data(
-                        &guard,
                         keyspace_to_read.clone(),
+                        lsn_range,
                         reconstruct_state,
                         ctx,
                     )
                     .await?;
 
                 unmapped_keyspace = keyspace_to_read;
-                cont_lsn = layer_to_read.get_lsn_floor();
+                cont_lsn = next_cont_lsn;
             } else {
                 break;
             }

@@ -25,7 +25,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use utils::history_buffer::HistoryBufferWithDropCounter;
@@ -41,8 +41,8 @@ pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 
 pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 
-use super::layer_map::InMemoryLayerHandle;
-use super::timeline::layer_manager::LayerManager;
+use self::inmemory_layer::InMemoryLayerKey;
+
 use super::timeline::GetVectoredError;
 use super::PageReconstructError;
 
@@ -204,23 +204,48 @@ impl Default for ValuesReconstructState {
     }
 }
 
-/// Description of layer to be read - the layer map can turn
-/// this description into the actual layer.
-#[derive(PartialEq, Eq, Hash, Debug, Clone)]
-pub(crate) enum ReadableLayerDesc {
-    Persistent {
-        desc: PersistentLayerDesc,
-        lsn_range: Range<Lsn>,
-    },
-    InMemory {
-        handle: InMemoryLayerHandle,
-        lsn_ceil: Lsn,
-    },
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub(crate) enum LayerKey {
+    PersitentLayerKey(PersistentLayerKey),
+    InMemoryLayerKey(InMemoryLayerKey),
 }
 
-/// Wraper for 'ReadableLayerDesc' sorted by Lsn
 #[derive(Debug)]
-struct ReadableLayerDescOrdered(ReadableLayerDesc);
+pub(crate) enum ReadableLayer {
+    PersistentLayer(Layer),
+    InMemoryLayer(Arc<InMemoryLayer>),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReadDesc {
+    layer_key: LayerKey,
+    lsn_range: Range<Lsn>,
+}
+
+impl Ord for ReadDesc {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let ord = self.lsn_range.end.cmp(&other.lsn_range.end);
+        if ord == std::cmp::Ordering::Equal {
+            self.lsn_range.start.cmp(&other.lsn_range.start).reverse()
+        } else {
+            ord
+        }
+    }
+}
+
+impl PartialOrd for ReadDesc {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for ReadDesc {
+    fn eq(&self, other: &Self) -> bool {
+        self.lsn_range == other.lsn_range
+    }
+}
+
+impl Eq for ReadDesc {}
 
 /// Data structure which maintains a fringe of layers for the
 /// read path. The fringe is the set of layers which intersects
@@ -231,41 +256,50 @@ struct ReadableLayerDescOrdered(ReadableLayerDesc);
 /// a two layer indexing scheme.
 #[derive(Debug)]
 pub(crate) struct LayerFringe {
-    layers_by_lsn: BinaryHeap<ReadableLayerDescOrdered>,
-    layers: HashMap<ReadableLayerDesc, KeySpace>,
+    // TODO: rename members
+    reads_by_lsn: BinaryHeap<ReadDesc>,
+    layers: HashMap<LayerKey, (ReadableLayer, KeySpace)>,
 }
 
 impl LayerFringe {
     pub(crate) fn new() -> Self {
         LayerFringe {
-            layers_by_lsn: BinaryHeap::new(),
+            reads_by_lsn: BinaryHeap::new(),
             layers: HashMap::new(),
         }
     }
 
-    pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayerDesc, KeySpace)> {
-        let handle = match self.layers_by_lsn.pop() {
-            Some(h) => h,
+    pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayer, KeySpace, Range<Lsn>)> {
+        let read_desc = match self.reads_by_lsn.pop() {
+            Some(desc) => desc,
             None => return None,
         };
 
-        let removed = self.layers.remove_entry(&handle.0);
+        let removed = self.layers.remove_entry(&read_desc.layer_key);
         match removed {
-            Some((layer, keyspace)) => Some((layer, keyspace)),
+            Some((_, (layer, keyspace))) => Some((layer, keyspace, read_desc.lsn_range)),
             None => unreachable!("fringe internals are always consistent"),
         }
     }
 
-    pub(crate) fn update(&mut self, layer: ReadableLayerDesc, keyspace: KeySpace) {
-        let entry = self.layers.entry(layer.clone());
+    pub(crate) fn update(
+        &mut self,
+        layer: ReadableLayer,
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+    ) {
+        let key = layer.key();
+        let entry = self.layers.entry(key.clone());
         match entry {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().merge(&keyspace);
+                entry.get_mut().1.merge(&keyspace);
             }
             Entry::Vacant(entry) => {
-                self.layers_by_lsn
-                    .push(ReadableLayerDescOrdered(entry.key().clone()));
-                entry.insert(keyspace);
+                self.reads_by_lsn.push(ReadDesc {
+                    lsn_range,
+                    layer_key: key.clone(),
+                });
+                entry.insert((layer, keyspace));
             }
         }
     }
@@ -277,77 +311,30 @@ impl Default for LayerFringe {
     }
 }
 
-impl Ord for ReadableLayerDescOrdered {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let ord = self.0.get_lsn_ceil().cmp(&other.0.get_lsn_ceil());
-        if ord == std::cmp::Ordering::Equal {
-            self.0
-                .get_lsn_floor()
-                .cmp(&other.0.get_lsn_floor())
-                .reverse()
-        } else {
-            ord
-        }
-    }
-}
-
-impl PartialOrd for ReadableLayerDescOrdered {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for ReadableLayerDescOrdered {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.get_lsn_floor() == other.0.get_lsn_floor()
-            && self.0.get_lsn_ceil() == other.0.get_lsn_ceil()
-    }
-}
-
-impl Eq for ReadableLayerDescOrdered {}
-
-impl ReadableLayerDesc {
-    pub(crate) fn get_lsn_floor(&self) -> Lsn {
+impl ReadableLayer {
+    pub(crate) fn key(&self) -> LayerKey {
         match self {
-            ReadableLayerDesc::Persistent { lsn_range, .. } => lsn_range.start,
-            ReadableLayerDesc::InMemory { handle, .. } => handle.get_lsn_floor(),
-        }
-    }
-
-    pub(crate) fn get_lsn_ceil(&self) -> Lsn {
-        match self {
-            ReadableLayerDesc::Persistent { lsn_range, .. } => lsn_range.end,
-            ReadableLayerDesc::InMemory { lsn_ceil, .. } => *lsn_ceil,
+            Self::PersistentLayer(layer) => LayerKey::PersitentLayerKey(layer.layer_desc().key()),
+            Self::InMemoryLayer(layer) => LayerKey::InMemoryLayerKey(layer.key()),
         }
     }
 
     pub(crate) async fn get_values_reconstruct_data(
         &self,
-        layer_manager: &LayerManager,
         keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         match self {
-            ReadableLayerDesc::Persistent { desc, lsn_range } => {
-                let layer = layer_manager.get_from_desc(desc);
+            ReadableLayer::PersistentLayer(layer) => {
                 layer
-                    .get_values_reconstruct_data(
-                        keyspace,
-                        lsn_range.clone(),
-                        reconstruct_state,
-                        ctx,
-                    )
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
                     .await
             }
-            ReadableLayerDesc::InMemory { handle, lsn_ceil } => {
-                let layer = layer_manager
-                    .layer_map()
-                    .get_in_memory_layer(handle)
-                    .unwrap();
-
+            ReadableLayer::InMemoryLayer(layer) => {
                 layer
-                    .get_values_reconstruct_data(keyspace, *lsn_ceil, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(keyspace, lsn_range.end, reconstruct_state, ctx)
                     .await
             }
         }

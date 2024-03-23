@@ -72,6 +72,10 @@ impl EphemeralFile {
         self.len
     }
 
+    pub(crate) fn path(&self) -> Utf8PathBuf {
+        self.file.path.clone()
+    }
+
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,

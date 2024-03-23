@@ -32,10 +32,14 @@ use super::{
     ValuesReconstructState,
 };
 
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub(crate) struct InMemoryLayerKey(camino::Utf8PathBuf);
+
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
+    key: InMemoryLayerKey,
 
     /// This layer contains all the changes from 'start_lsn'. The
     /// start is inclusive.
@@ -79,6 +83,10 @@ impl std::fmt::Debug for InMemoryLayerInner {
 }
 
 impl InMemoryLayer {
+    pub(crate) fn key(&self) -> InMemoryLayerKey {
+        self.key.clone()
+    }
+
     pub(crate) fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
@@ -318,8 +326,10 @@ impl InMemoryLayer {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
         let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id).await?;
+        let key = InMemoryLayerKey(file.path());
 
         Ok(InMemoryLayer {
+            key,
             conf,
             timeline_id,
             tenant_shard_id,
