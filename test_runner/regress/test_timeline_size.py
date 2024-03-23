@@ -931,7 +931,7 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest-pause-activate=return(1),walreceiver-after-ingest-pause=pause"
+            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest-pause-activate=return(1);walreceiver-after-ingest-pause=pause"
         }
     )
 
@@ -987,7 +987,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
     # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest-pause-activate=return(1),walreceiver-after-ingest-pause=pause"
+            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest-pause-activate=return(1);walreceiver-after-ingest-pause=pause"
         }
     )
 
@@ -1067,7 +1067,7 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
     # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest-pause-activate=return(1),walreceiver-after-ingest-pause=pause"
+            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest-pause-activate=return(1);walreceiver-after-ingest-pause=pause"
         }
     )
 
