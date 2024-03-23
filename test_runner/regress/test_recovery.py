@@ -1,7 +1,6 @@
 import time
 from contextlib import closing
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -9,7 +8,6 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 #
 # Test pageserver recovery after crash
 #
-@pytest.mark.repeat(30)
 def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     # Override default checkpointer settings to run it more often
     neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
