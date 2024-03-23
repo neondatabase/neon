@@ -68,8 +68,8 @@ pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
         .guard();
 
     pausable_failpoint!(
-        "initial-size-calculation-permit-pause"
-        if loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation
+        "initial-size-calculation-permit-pause",
+        loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation
     );
 
     match CONCURRENT_BACKGROUND_TASKS.acquire().await {
