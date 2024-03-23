@@ -4581,52 +4581,6 @@ impl<'a> TimelineWriter<'a> {
         res
     }
 
-    /// "Tick" the timeline writer: it will roll the open layer if required
-    /// and do nothing else.
-    pub(crate) async fn tick(&mut self) -> anyhow::Result<()> {
-        self.open_layer_if_present().await?;
-
-        let last_record_lsn = self.get_last_record_lsn();
-        let action = self.get_open_layer_action(last_record_lsn, 0);
-        if action == OpenLayerAction::Roll {
-            self.roll_layer(last_record_lsn).await?;
-        } else if let Some(writer_state) = &mut *self.write_guard {
-            // Periodic update of statistics
-            writer_state.open_layer.tick().await;
-        }
-
-        Ok(())
-    }
-
-    /// Populate the timeline writer state only if an in-memory layer
-    /// is already open.
-    async fn open_layer_if_present(&mut self) -> anyhow::Result<()> {
-        assert!(self.write_guard.is_none());
-
-        let open_layer = {
-            let guard = self.layers.read().await;
-            let layers = guard.layer_map();
-            match layers.open_layer {
-                Some(ref open_layer) => open_layer.clone(),
-                None => {
-                    return Ok(());
-                }
-            }
-        };
-
-        let initial_size = open_layer.size().await?;
-        let last_freeze_at = self.last_freeze_at.load();
-        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
-        self.write_guard.replace(TimelineWriterState::new(
-            open_layer,
-            initial_size,
-            last_freeze_at,
-            last_freeze_ts,
-        ));
-
-        Ok(())
-    }
-
     async fn handle_open_layer_action(
         &mut self,
         at: Lsn,
