@@ -3837,7 +3837,7 @@ impl Timeline {
         };
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
-        fail_point!("before-timeline-gc");
+        pausable_failpoint!("before-timeline-gc");
 
         // Is the timeline being deleted?
         if self.is_stopping() {
