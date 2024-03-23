@@ -325,7 +325,17 @@ pub(super) async fn handle_walreceiver_connection(
                             filtered_records += 1;
                         }
 
-                        pausable_failpoint!("walreceiver-after-ingest");
+                        // don't simply use pausable_failpoint here because its spawn_blocking slows
+                        // slows down the tests too much.
+                        fail::fail_point!("walreceiver-after-ingest-blocking");
+                        if let Err(()) = (|| {
+                            fail::fail_point!("walreceiver-after-ingest-pause-activate", |_| {
+                                Err(())
+                            });
+                            Ok(())
+                        })() {
+                            pausable_failpoint!("walreceiver-after-ingest-pause");
+                        }
 
                         last_rec_lsn = lsn;
 
