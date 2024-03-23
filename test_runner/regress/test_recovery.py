@@ -26,7 +26,7 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
 
     endpoint = env.endpoints.create_start("test_pageserver_recovery")
 
-    with closing(endpoint.connect(options="-cstatement_timeout=300s")) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             with env.pageserver.http_client() as pageserver_http:
                 # Create and initialize test table
