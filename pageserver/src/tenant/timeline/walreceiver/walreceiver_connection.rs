@@ -11,7 +11,6 @@ use std::{
 use anyhow::{anyhow, Context};
 use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
-use fail::fail_point;
 use futures::StreamExt;
 use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::WAL_SEGMENT_SIZE;
@@ -326,7 +325,7 @@ pub(super) async fn handle_walreceiver_connection(
                             filtered_records += 1;
                         }
 
-                        fail_point!("walreceiver-after-ingest");
+                        pausable_failpoint!("walreceiver-after-ingest");
 
                         last_rec_lsn = lsn;
 
