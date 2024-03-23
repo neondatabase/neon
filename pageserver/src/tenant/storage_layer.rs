@@ -204,12 +204,16 @@ impl Default for ValuesReconstructState {
     }
 }
 
+/// A key that uniquely identifies a layer in a timeline
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub(crate) enum LayerKey {
     PersitentLayerKey(PersistentLayerKey),
     InMemoryLayerKey(InMemoryLayerKey),
 }
 
+/// Layer wrapper for the read path. Note that it is valid
+/// to use these layers even after external operations have
+/// been performed on them (compaction, freeze, etc.).
 #[derive(Debug)]
 pub(crate) enum ReadableLayer {
     PersistentLayer(Layer),
@@ -256,21 +260,20 @@ impl Eq for ReadDesc {}
 /// a two layer indexing scheme.
 #[derive(Debug)]
 pub(crate) struct LayerFringe {
-    // TODO: rename members
-    reads_by_lsn: BinaryHeap<ReadDesc>,
+    planned_reads_by_lsn: BinaryHeap<ReadDesc>,
     layers: HashMap<LayerKey, (ReadableLayer, KeySpace)>,
 }
 
 impl LayerFringe {
     pub(crate) fn new() -> Self {
         LayerFringe {
-            reads_by_lsn: BinaryHeap::new(),
+            planned_reads_by_lsn: BinaryHeap::new(),
             layers: HashMap::new(),
         }
     }
 
     pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayer, KeySpace, Range<Lsn>)> {
-        let read_desc = match self.reads_by_lsn.pop() {
+        let read_desc = match self.planned_reads_by_lsn.pop() {
             Some(desc) => desc,
             None => return None,
         };
@@ -295,7 +298,7 @@ impl LayerFringe {
                 entry.get_mut().1.merge(&keyspace);
             }
             Entry::Vacant(entry) => {
-                self.reads_by_lsn.push(ReadDesc {
+                self.planned_reads_by_lsn.push(ReadDesc {
                     lsn_range,
                     layer_key: key.clone(),
                 });
