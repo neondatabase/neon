@@ -2821,8 +2821,6 @@ pub(crate) fn immediate_gc(
         &format!("timeline_gc_handler garbage collection run for tenant {tenant_shard_id} timeline {timeline_id}"),
         false,
         async move {
-            fail::fail_point!("immediate_gc_task_pre");
-
             #[allow(unused_mut)]
             let mut result = tenant
                 .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)

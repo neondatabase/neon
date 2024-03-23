@@ -173,8 +173,6 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
             register,
         };
 
-        fail::fail_point!("control-plane-client-re-attach");
-
         let response: ReAttachResponse = self.retry_http_forever(&re_attach_path, request).await?;
         tracing::info!(
             "Received re-attach response with {} tenants",
