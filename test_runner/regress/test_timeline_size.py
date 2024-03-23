@@ -1057,9 +1057,10 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
     env.pageserver.stop()
 
     # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
+    paused_failpoints = ["timeline-calculate-logical-size-pause", "walreceiver-after-ingest"]
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest=pause"
+            "FAILPOINTS": ";".join([f"{fp}=pause" for fp in paused_failpoints]),
         }
     )
 
@@ -1111,3 +1112,6 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
         delete_lazy_activating(lazy_tenant, env.pageserver, expect_attaching=True)
     else:
         raise RuntimeError(activation_method)
+
+    ps_http = env.pageserver.http_client()
+    ps_http.configure_failpoints([(fp, "off") for fp in paused_failpoints])
