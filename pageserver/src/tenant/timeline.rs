@@ -2596,6 +2596,10 @@ impl Timeline {
                     // Get all the data needed to reconstruct the page version from this layer.
                     // But if we have an older cached page image, no need to go past that.
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
+
+                    let open_layer = open_layer.clone();
+                    drop(guard);
+
                     result = match open_layer
                         .get_value_reconstruct_data(
                             key,
@@ -2613,10 +2617,7 @@ impl Timeline {
                     traversal_path.push((
                         result,
                         cont_lsn,
-                        Box::new({
-                            let open_layer = Arc::clone(open_layer);
-                            move || open_layer.traversal_id()
-                        }),
+                        Box::new(move || open_layer.traversal_id()),
                     ));
                     continue 'outer;
                 }
@@ -2626,6 +2627,10 @@ impl Timeline {
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
+
+                    let frozen_layer = frozen_layer.clone();
+                    drop(guard);
+
                     result = match frozen_layer
                         .get_value_reconstruct_data(
                             key,
@@ -2643,10 +2648,7 @@ impl Timeline {
                     traversal_path.push((
                         result,
                         cont_lsn,
-                        Box::new({
-                            let frozen_layer = Arc::clone(frozen_layer);
-                            move || frozen_layer.traversal_id()
-                        }),
+                        Box::new(move || frozen_layer.traversal_id()),
                     ));
                     continue 'outer;
                 }
@@ -2654,6 +2656,8 @@ impl Timeline {
 
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                 let layer = guard.get_from_desc(&layer);
+                drop(guard);
+
                 // Get all the data needed to reconstruct the page version from this layer.
                 // But if we have an older cached page image, no need to go past that.
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
