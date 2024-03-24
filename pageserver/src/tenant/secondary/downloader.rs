@@ -11,11 +11,11 @@ use crate::{
     disk_usage_eviction_task::{
         finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
     },
-    is_temporary,
     metrics::SECONDARY_MODE,
     tenant::{
         config::SecondaryLocationConfig,
         debug_assert_current_span_has_tenant_and_timeline_id,
+        ephemeral_file::is_ephemeral_file,
         remote_timeline_client::{
             index::LayerFileMetadata, is_temp_download_file, FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
@@ -964,7 +964,7 @@ async fn init_timeline_state(
             continue;
         } else if crate::is_temporary(&file_path)
             || is_temp_download_file(&file_path)
-            || is_temporary(&file_path)
+            || is_ephemeral_file(file_name)
         {
             // Temporary files are frequently left behind from restarting during downloads
             tracing::info!("Cleaning up temporary file {file_path}");

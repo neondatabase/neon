@@ -8,7 +8,6 @@ use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::context::RequestMonitoring;
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use crate::{auth::IpPattern, cache::Cached};
-use async_trait::async_trait;
 use futures::TryFutureExt;
 use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
@@ -144,7 +143,6 @@ async fn get_execute_postgres_query(
     Ok(Some(entry))
 }
 
-#[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(

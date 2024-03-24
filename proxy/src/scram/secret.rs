@@ -1,5 +1,7 @@
 //! Tools for SCRAM server secret management.
 
+use subtle::{Choice, ConstantTimeEq};
+
 use super::base64_decode_array;
 use super::key::ScramKey;
 
@@ -38,6 +40,11 @@ impl ServerSecret {
         };
 
         Some(secret)
+    }
+
+    pub fn is_password_invalid(&self, client_key: &ScramKey) -> Choice {
+        // constant time to not leak partial key match
+        client_key.sha256().ct_ne(&self.stored_key) | Choice::from(self.doomed as u8)
     }
 
     /// To avoid revealing information to an attacker, we use a

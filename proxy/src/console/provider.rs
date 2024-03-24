@@ -14,7 +14,6 @@ use crate::{
     context::RequestMonitoring,
     scram, EndpointCacheKey, ProjectId,
 };
-use async_trait::async_trait;
 use dashmap::DashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -326,8 +325,7 @@ pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPatt
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
-#[async_trait]
-pub trait Api {
+pub(crate) trait Api {
     /// Get the client's auth secret for authentication.
     /// Returns option because user not found situation is special.
     /// We still have to mock the scram to avoid leaking information that user doesn't exist.
@@ -363,7 +361,6 @@ pub enum ConsoleBackend {
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
-#[async_trait]
 impl Api for ConsoleBackend {
     async fn get_role_secret(
         &self,

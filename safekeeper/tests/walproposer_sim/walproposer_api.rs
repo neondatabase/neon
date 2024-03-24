@@ -244,6 +244,7 @@ impl SimulationApi {
                 mutex: 0,
                 mineLastElectedTerm: 0,
                 backpressureThrottlingTime: pg_atomic_uint64 { value: 0 },
+                currentClusterSize: pg_atomic_uint64 { value: 0 },
                 shard_ps_feedback: [empty_feedback; 128],
                 num_shards: 0,
                 min_ps_feedback: empty_feedback,

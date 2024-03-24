@@ -17,6 +17,7 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
         .write(true)
         .create(true)
         .append(false)
+        .truncate(false)
         .open(path)?;
     let buf = io::BufReader::new(&file);
     let mut count: usize = 0;

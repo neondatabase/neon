@@ -1831,7 +1831,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
 		!IsAutoVacuumWorkerProcess())
 	{
-		uint64		current_size = GetZenithCurrentClusterSize();
+		uint64		current_size = GetNeonCurrentClusterSize();
 
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,
@@ -1912,7 +1912,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
 		!IsAutoVacuumWorkerProcess())
 	{
-		uint64		current_size = GetZenithCurrentClusterSize();
+		uint64		current_size = GetNeonCurrentClusterSize();
 
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,

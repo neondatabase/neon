@@ -282,6 +282,7 @@ WalproposerShmemInit(void)
 		memset(walprop_shared, 0, WalproposerShmemSize());
 		SpinLockInit(&walprop_shared->mutex);
 		pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
+		pg_atomic_init_u64(&walprop_shared->currentClusterSize, 0);
 	}
 	LWLockRelease(AddinShmemInitLock);
 
@@ -1972,7 +1973,7 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 
 		/* Only one main shard sends non-zero currentClusterSize */
 		if (sk->appendResponse.ps_feedback.currentClusterSize > 0)
-			SetZenithCurrentClusterSize(sk->appendResponse.ps_feedback.currentClusterSize);
+			SetNeonCurrentClusterSize(sk->appendResponse.ps_feedback.currentClusterSize);
 
 		if (min_feedback.disk_consistent_lsn != standby_apply_lsn)
 		{
@@ -2093,6 +2094,18 @@ GetLogRepRestartLSN(WalProposer *wp)
 	}
 	return lrRestartLsn;
 }
+
+void SetNeonCurrentClusterSize(uint64 size)
+{
+	pg_atomic_write_u64(&walprop_shared->currentClusterSize, size);
+}
+
+uint64 GetNeonCurrentClusterSize(void)
+{
+	return pg_atomic_read_u64(&walprop_shared->currentClusterSize);
+}
+uint64 GetNeonCurrentClusterSize(void);
+
 
 static const walproposer_api walprop_pg = {
 	.get_shmem_state = walprop_pg_get_shmem_state,

@@ -1,4 +1,9 @@
+use std::time::SystemTime;
+
+use chrono::{DateTime, Utc};
 use consumption_metrics::{Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
+use remote_storage::{GenericRemoteStorage, RemotePath};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -13,8 +18,9 @@ struct Ids {
     pub(super) timeline_id: Option<TimelineId>,
 }
 
+/// Serialize and write metrics to an HTTP endpoint
 #[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
-pub(super) async fn upload_metrics(
+pub(super) async fn upload_metrics_http(
     client: &reqwest::Client,
     metric_collection_endpoint: &reqwest::Url,
     cancel: &CancellationToken,
@@ -69,6 +75,60 @@ pub(super) async fn upload_metrics(
         failed,
         elapsed_ms = elapsed.as_millis(),
         "done sending metrics"
+    );
+
+    Ok(())
+}
+
+/// Serialize and write metrics to a remote storage object
+#[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
+pub(super) async fn upload_metrics_bucket(
+    client: &GenericRemoteStorage,
+    cancel: &CancellationToken,
+    node_id: &str,
+    metrics: &[RawMetric],
+) -> anyhow::Result<()> {
+    if metrics.is_empty() {
+        // Skip uploads if we have no metrics, so that readers don't have to handle the edge case
+        // of an empty object.
+        return Ok(());
+    }
+
+    // Compose object path
+    let datetime: DateTime<Utc> = SystemTime::now().into();
+    let ts_prefix = datetime.format("year=%Y/month=%m/day=%d/%H:%M:%SZ");
+    let path = RemotePath::from_string(&format!("{ts_prefix}_{node_id}.ndjson.gz"))?;
+
+    // Set up a gzip writer into a buffer
+    let mut compressed_bytes: Vec<u8> = Vec::new();
+    let compressed_writer = std::io::Cursor::new(&mut compressed_bytes);
+    let mut gzip_writer = async_compression::tokio::write::GzipEncoder::new(compressed_writer);
+
+    // Serialize and write into compressed buffer
+    let started_at = std::time::Instant::now();
+    for res in serialize_in_chunks(CHUNK_SIZE, metrics, node_id) {
+        let (_chunk, body) = res?;
+        gzip_writer.write_all(&body).await?;
+    }
+    gzip_writer.flush().await?;
+    gzip_writer.shutdown().await?;
+    let compressed_length = compressed_bytes.len();
+
+    // Write to remote storage
+    client
+        .upload_storage_object(
+            futures::stream::once(futures::future::ready(Ok(compressed_bytes.into()))),
+            compressed_length,
+            &path,
+            cancel,
+        )
+        .await?;
+    let elapsed = started_at.elapsed();
+
+    tracing::info!(
+        compressed_length,
+        elapsed_ms = elapsed.as_millis(),
+        "write metrics bucket at {path}",
     );
 
     Ok(())

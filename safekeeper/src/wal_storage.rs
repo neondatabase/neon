@@ -221,6 +221,7 @@ impl PhysicalStorage {
             // half initialized segment, first bake it under tmp filename and
             // then rename.
             let tmp_path = self.timeline_dir.join("waltmp");
+            #[allow(clippy::suspicious_open_options)]
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
