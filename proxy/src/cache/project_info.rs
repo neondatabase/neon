@@ -16,7 +16,7 @@ use crate::{
     config::ProjectInfoCacheOptions,
     console::AuthSecret,
     intern::{EndpointIdInt, ProjectIdInt, RoleNameInt},
-    EndpointId, ProjectId, RoleName,
+    EndpointId, Normalize, ProjectId, RoleName,
 };
 
 use super::{Cache, Cached};
@@ -219,6 +219,7 @@ impl ProjectInfoCacheImpl {
         role_name: &RoleName,
         secret: Option<AuthSecret>,
     ) {
+        let endpoint_id = &endpoint_id.normalize();
         let project_id = ProjectIdInt::from(project_id);
         let endpoint_id = EndpointIdInt::from(endpoint_id);
         let role_name = RoleNameInt::from(role_name);
@@ -238,6 +239,7 @@ impl ProjectInfoCacheImpl {
         endpoint_id: &EndpointId,
         allowed_ips: Arc<Vec<IpPattern>>,
     ) {
+        let endpoint_id = &endpoint_id.normalize();
         let project_id = ProjectIdInt::from(project_id);
         let endpoint_id = EndpointIdInt::from(endpoint_id);
         if self.cache.len() >= self.config.size {

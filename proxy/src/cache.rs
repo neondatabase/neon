@@ -1,4 +1,5 @@
 pub mod common;
+pub mod endpoints;
 pub mod project_info;
 mod timed_lru;
 

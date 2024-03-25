@@ -15,20 +15,20 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
 
-use crate::EndpointId;
+use crate::{EndpointId, Normalize};
 
 use super::{
     limit_algorithm::{LimitAlgorithm, Sample},
     RateLimiterConfig,
 };
 
-pub struct RedisRateLimiter {
+pub struct GlobalRateLimiter {
     data: Vec<RateBucket>,
-    info: &'static [RateBucketInfo],
+    info: Vec<RateBucketInfo>,
 }
 
-impl RedisRateLimiter {
-    pub fn new(info: &'static [RateBucketInfo]) -> Self {
+impl GlobalRateLimiter {
+    pub fn new(info: Vec<RateBucketInfo>) -> Self {
         Self {
             data: vec![
                 RateBucket {
@@ -48,7 +48,7 @@ impl RedisRateLimiter {
         let should_allow_request = self
             .data
             .iter_mut()
-            .zip(self.info)
+            .zip(&self.info)
             .all(|(bucket, info)| bucket.should_allow_request(info, now));
 
         if should_allow_request {
@@ -186,6 +186,7 @@ impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
     pub fn check(&self, endpoint: EndpointId) -> bool {
+        let endpoint = endpoint.normalize();
         // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
