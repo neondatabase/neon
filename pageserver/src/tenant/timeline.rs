@@ -4465,6 +4465,9 @@ impl<'a> TimelineWriter<'a> {
         let action = self.get_open_layer_action(last_record_lsn, 0);
         if action == OpenLayerAction::Roll {
             self.roll_layer(last_record_lsn).await?;
+        } else if let Some(writer_state) = &mut *self.write_guard {
+            // Periodic update of statistics
+            writer_state.open_layer.tick().await;
         }
 
         Ok(())
