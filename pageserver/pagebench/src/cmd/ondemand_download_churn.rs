@@ -2,6 +2,7 @@ use pageserver_api::{models::HistoricLayerInfo, shard::TenantShardId};
 
 use pageserver_client::mgmt_api;
 use rand::seq::SliceRandom;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use utils::id::{TenantTimelineId, TimelineId};
 
@@ -92,14 +93,19 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
+    let token = CancellationToken::new();
     let mut tasks = JoinSet::new();
 
     let live_stats = Arc::new(LiveStats::default());
     tasks.spawn({
         let live_stats = Arc::clone(&live_stats);
+        let cloned_token = token.clone();
         async move {
             let mut last_at = Instant::now();
             loop {
+                if cloned_token.is_cancelled() {
+                    return;
+                }
                 tokio::time::sleep_until((last_at + Duration::from_secs(1)).into()).await;
                 let now = Instant::now();
                 let delta: Duration = now - last_at;
@@ -125,8 +131,15 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 Arc::clone(&mgmt_api_client),
                 tl,
                 Arc::clone(&live_stats),
+                token.clone(),
             ));
         }
+    }
+    if let Some(runtime) = args.runtime {
+        tokio::spawn(async move {
+            tokio::time::sleep(runtime.into()).await;
+            token.cancel();
+        });
     }
 
     while let Some(res) = tasks.join_next().await {
@@ -140,6 +153,7 @@ async fn timeline_actor(
     mgmt_api_client: Arc<pageserver_client::mgmt_api::Client>,
     timeline: TenantTimelineId,
     live_stats: Arc<LiveStats>,
+    token: CancellationToken,
 ) {
     // TODO: support sharding
     let tenant_shard_id = TenantShardId::unsharded(timeline.tenant_id);
@@ -186,6 +200,10 @@ async fn timeline_actor(
         live_stats.timeline_restart_done();
 
         loop {
+            if token.is_cancelled() {
+                return;
+            }
+
             assert!(!timeline.joinset.is_empty());
             if let Some(res) = timeline.joinset.try_join_next() {
                 debug!(?res, "a layer actor exited, should not happen");
