@@ -364,3 +364,41 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     # Check that we can create slot with the same name
     ws_cur = ws_branch.connect().cursor()
     ws_cur.execute("select pg_create_logical_replication_slot('my_slot', 'pgoutput')")
+
+def test_replication_shutdown(neon_simple_env: NeonEnv):
+    # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_neon_superuser_publisher", "empty")
+    pub = env.endpoints.create("test_neon_superuser_publisher")
+
+    env.neon_cli.create_branch("test_neon_superuser_subscriber")
+    sub = env.endpoints.create("test_neon_superuser_subscriber")
+
+    pub.respec(skip_pg_catalog_updates=False)
+    pub.start()
+
+    sub.respec(skip_pg_catalog_updates=False)
+    sub.start()
+
+    pub.wait_for_migrations()
+    sub.wait_for_migrations()
+
+    with sub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as cur:
+        cur.execute("CREATE TABLE t (a int)")
+
+        pub_conn = f"host=localhost port={pub.pg_port} dbname=neondb user=mr_whiskers password=cat"
+        query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub"
+        log.info(f"Creating subscription: {query}")
+        cur.execute(query)
+
+        with pub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as pcur:
+            pcur.execute("INSERT INTO t VALUES (30), (40)")
+
+        def check_that_changes_propagated():
+            cur.execute("SELECT * FROM t")
+            res = cur.fetchall()
+            log.info(res)
+            assert len(res) == 4
+            assert [r[0] for r in res] == [10, 20, 30, 40]
+
+        wait_until(10, 0.5, check_that_changes_propagated)
