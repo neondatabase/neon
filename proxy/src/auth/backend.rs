@@ -176,6 +176,52 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
     }
 }
 
+impl AuthenticationConfig {
+    pub fn check_rate_limit(
+        &self,
+
+        ctx: &mut RequestMonitoring,
+        secret: AuthSecret,
+        endpoint: &EndpointId,
+        is_cleartext: bool,
+    ) -> auth::Result<AuthSecret> {
+        // we have validated the endpoint exists, so let's intern it.
+        let endpoint_int = EndpointIdInt::from(endpoint);
+
+        // only count the full hash count if password hack or websocket flow.
+        // in other words, if proxy needs to run the hashing
+        let password_weight = if is_cleartext {
+            match &secret {
+                #[cfg(any(test, feature = "testing"))]
+                AuthSecret::Md5(_) => 1,
+                AuthSecret::Scram(s) => s.iterations + 1,
+            }
+        } else {
+            // validating scram takes just 1 hmac_sha_256 operation.
+            1
+        };
+
+        let limit_not_exceeded = self
+            .rate_limiter
+            .check((endpoint_int, ctx.peer_addr), password_weight);
+
+        if !limit_not_exceeded {
+            warn!(
+                enabled = self.rate_limiter_enabled,
+                "rate limiting authentication"
+            );
+            AUTH_RATE_LIMIT_HITS.inc();
+            ENDPOINTS_AUTH_RATE_LIMITED.measure(endpoint);
+
+            if self.rate_limiter_enabled {
+                return Err(auth::AuthError::too_many_connections());
+            }
+        }
+
+        Ok(secret)
+    }
+}
+
 /// True to its name, this function encapsulates our current auth trade-offs.
 /// Here, we choose the appropriate auth flow based on circumstances.
 ///
@@ -219,45 +265,12 @@ async fn auth_quirks(
     let (cached_entry, secret) = cached_secret.take_value();
 
     let secret = match secret {
-        Some(secret) => {
-            // we have validated the endpoint exists, so let's intern it.
-            let endpoint = EndpointIdInt::from(&info.endpoint);
-
-            // only count the full hash count if password hack or websocket flow.
-            // in other words, if proxy needs to run the hashing
-            let password_weight = if unauthenticated_password.is_some() || allow_cleartext {
-                match &secret {
-                    #[cfg(any(test, feature = "testing"))]
-                    AuthSecret::Md5(_) => 1,
-                    AuthSecret::Scram(s) => s.iterations + 1,
-                }
-            } else {
-                // validating scram takes just 1 hmac_sha_256 operation.
-                1
-            };
-
-            let limit_not_exceeded = config
-                .rate_limiter
-                .check((endpoint, ctx.peer_addr), password_weight);
-
-            if !limit_not_exceeded {
-                warn!(
-                    enabled = config.rate_limiter_enabled,
-                    "rate limiting authentication"
-                );
-                AUTH_RATE_LIMIT_HITS.inc();
-                ENDPOINTS_AUTH_RATE_LIMITED.measure(&info.endpoint);
-            }
-
-            if limit_not_exceeded || !config.rate_limiter_enabled {
-                secret
-            } else {
-                // If we don't have an authentication secret, we mock one to
-                // prevent malicious probing (possible due to missing protocol steps).
-                // This mocked secret will never lead to successful authentication.
-                AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
-            }
-        }
+        Some(secret) => config.check_rate_limit(
+            ctx,
+            secret,
+            &info.endpoint,
+            unauthenticated_password.is_some() || allow_cleartext,
+        )?,
         None => {
             // If we don't have an authentication secret, we mock one to
             // prevent malicious probing (possible due to missing protocol steps).
