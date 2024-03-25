@@ -116,6 +116,12 @@ impl AsLayerDesc for Layer {
     }
 }
 
+impl PartialEq for Layer {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
+    }
+}
+
 impl Layer {
     /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
