@@ -88,6 +88,14 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     timeline_path = env.pageserver.timeline_dir(env.initial_tenant, leaf_timeline_id)
     assert timeline_path.exists()
 
+    # Before deleting, timeline metrics should be present
+    assert (
+        ps_http.get_metric_value(
+            "pageserver_current_logical_size", {"timeline_id": str(leaf_timeline_id)}
+        )
+        is not None
+    )
+
     # retry deletes when compaction or gc is running in pageserver
     # TODO: review whether this wait_until is actually necessary, we do an await() internally
     wait_until(
@@ -105,6 +113,14 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     ) as exc:
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
     assert exc.value.status_code == 404
+
+    # Check metrics were cleaned up
+    assert (
+        ps_http.get_metric_value(
+            "pageserver_current_logical_size", {"timeline_id": str(leaf_timeline_id)}
+        )
+        is None
+    )
 
     wait_until(
         number_of_iterations=3,

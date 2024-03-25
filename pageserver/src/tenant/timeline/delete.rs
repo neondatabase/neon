@@ -26,6 +26,10 @@ use crate::{
 use super::{Timeline, TimelineResources};
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
+///
+/// This is essentially a hand-crafted subset of Timeline::shutdown, which exists because we
+/// rely on keeping Timeline partially alive in order to access its RemoteTimelineClient for remote
+/// deletion.
 async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
     // Notify any timeline work to drop out of loops/requests
@@ -81,6 +85,8 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
             "failpoint: timeline-delete-before-index-deleted-at"
         ))?
     });
+
+    timeline.metrics.shutdown();
 
     tracing::debug!("Waiting for gate...");
     timeline.gate.close().await;
