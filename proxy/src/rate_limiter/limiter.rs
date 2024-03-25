@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "invalid endpoint RPS limits. 10@10s allows fewer requests per bucket than 300@1s (100 vs 300)"]
+    #[should_panic = "invalid bucket RPS limits. 10@10s allows fewer requests per bucket than 300@1s (100 vs 300)"]
     fn rate_buckets_validate() {
         let mut rates: Vec<RateBucketInfo> = ["300@1s", "10@10s"]
             .into_iter()
