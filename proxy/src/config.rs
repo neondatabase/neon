@@ -54,6 +54,7 @@ pub struct HttpConfig {
 
 pub struct AuthenticationConfig {
     pub scram_protocol_timeout: tokio::time::Duration,
+    pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
 }
 

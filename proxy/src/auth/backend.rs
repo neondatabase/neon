@@ -13,6 +13,7 @@ use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::{AuthSecret, NodeInfo};
 use crate::context::RequestMonitoring;
 use crate::intern::EndpointIdInt;
+use crate::metrics::{AUTH_RATE_LIMIT_HITS, ENDPOINTS_AUTH_RATE_LIMITED};
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::stream::Stream;
@@ -235,16 +236,25 @@ async fn auth_quirks(
                 1
             };
 
-            if config
+            let limit_not_exceeded = config
                 .rate_limiter
-                .check((endpoint, ctx.peer_addr), password_weight)
-            {
+                .check((endpoint, ctx.peer_addr), password_weight);
+
+            if !limit_not_exceeded {
+                warn!(
+                    enabled = config.rate_limiter_enabled,
+                    "rate limiting authentication"
+                );
+                AUTH_RATE_LIMIT_HITS.inc();
+                ENDPOINTS_AUTH_RATE_LIMITED.measure(&info.endpoint);
+            }
+
+            if limit_not_exceeded || !config.rate_limiter_enabled {
                 secret
             } else {
                 // If we don't have an authentication secret, we mock one to
                 // prevent malicious probing (possible due to missing protocol steps).
                 // This mocked secret will never lead to successful authentication.
-                warn!("rate limiting authentication, mocking it");
                 AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
             }
         }
@@ -512,6 +522,7 @@ mod tests {
 
     static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
         scram_protocol_timeout: std::time::Duration::from_secs(5),
+        rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
     });
 
