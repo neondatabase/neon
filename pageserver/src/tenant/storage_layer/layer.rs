@@ -1758,6 +1758,28 @@ impl ResidentLayer {
         }
     }
 
+    /// FIXME: truncate is bad name because we are not truncating anything, but copying the
+    /// filtered parts.
+    #[cfg(test)]
+    pub(super) async fn copy_delta_prefix(
+        &self,
+        writer: &mut super::delta_layer::DeltaLayerWriter,
+        truncate_at: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        use LayerKind::*;
+
+        let owner = &self.owner.0;
+
+        match self.downloaded.get(owner, ctx).await? {
+            Delta(ref d) => d
+                .copy_prefix(writer, truncate_at, ctx)
+                .await
+                .with_context(|| format!("truncate {self}")),
+            Image(_) => anyhow::bail!(format!("cannot truncate image layer {self}")),
+        }
+    }
+
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.owner.0.path
     }
@@ -1767,14 +1789,14 @@ impl ResidentLayer {
     }
 
     #[cfg(test)]
-    pub(crate) async fn get_inner_delta<'a>(
-        &'a self,
+    pub(crate) async fn as_delta(
+        &self,
         ctx: &RequestContext,
-    ) -> anyhow::Result<&'a delta_layer::DeltaLayerInner> {
-        let owner = &self.owner.0;
-        match self.downloaded.get(owner, ctx).await? {
-            LayerKind::Delta(d) => Ok(d),
-            LayerKind::Image(_) => Err(anyhow::anyhow!("Expected a delta layer")),
+    ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
+        use LayerKind::*;
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Delta(ref d) => Ok(d),
+            Image(_) => Err(anyhow::anyhow!("image layer")),
         }
     }
 }

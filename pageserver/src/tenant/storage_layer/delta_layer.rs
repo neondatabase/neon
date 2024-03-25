@@ -1108,6 +1108,186 @@ impl DeltaLayerInner {
         Ok(all_keys)
     }
 
+    /// Using the given writer, write out a truncated version, where LSNs higher than the
+    /// truncate_at are missing.
+    #[cfg(test)]
+    pub(super) async fn copy_prefix(
+        &self,
+        writer: &mut DeltaLayerWriter,
+        truncate_at: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        use crate::tenant::vectored_blob_io::{
+            BlobMeta, VectoredReadBuilder, VectoredReadExtended,
+        };
+        use futures::stream::TryStreamExt;
+
+        #[derive(Debug)]
+        enum Item {
+            Actual(Key, Lsn, BlobRef),
+            Sentinel,
+        }
+
+        impl From<Item> for Option<(Key, Lsn, BlobRef)> {
+            fn from(value: Item) -> Self {
+                match value {
+                    Item::Actual(key, lsn, blob) => Some((key, lsn, blob)),
+                    Item::Sentinel => None,
+                }
+            }
+        }
+
+        impl Item {
+            fn offset(&self) -> Option<BlobRef> {
+                match self {
+                    Item::Actual(_, _, blob) => Some(*blob),
+                    Item::Sentinel => None,
+                }
+            }
+
+            fn is_last(&self) -> bool {
+                matches!(self, Item::Sentinel)
+            }
+        }
+
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            block_reader,
+        );
+
+        let stream = self.stream_index_forwards(&tree_reader, &[0u8; DELTA_KEY_SIZE], ctx);
+        let stream = stream.map_ok(|(key, lsn, pos)| Item::Actual(key, lsn, pos));
+        // put in a sentinel value for getting the end offset for last item, and not having to
+        // repeat the whole read part
+        let stream = stream.chain(futures::stream::once(futures::future::ready(Ok(
+            Item::Sentinel,
+        ))));
+        let mut stream = std::pin::pin!(stream);
+
+        let mut prev: Option<(Key, Lsn, BlobRef)> = None;
+
+        let mut read_builder: Option<VectoredReadBuilder> = None;
+
+        let max_read_size = self
+            .max_vectored_read_bytes
+            .map(|x| x.0.get())
+            .unwrap_or(8192);
+
+        let mut buffer = Some(BytesMut::with_capacity(max_read_size));
+
+        // FIXME: buffering of DeltaLayerWriter
+        let mut per_blob_copy = Vec::new();
+
+        while let Some(item) = stream.try_next().await? {
+            tracing::debug!(?item, "popped");
+            let offset = item
+                .offset()
+                .unwrap_or(BlobRef::new(self.index_start_offset(), false));
+
+            let actionable = if let Some((key, lsn, start_offset)) = prev.take() {
+                let end_offset = offset;
+
+                Some((BlobMeta { key, lsn }, start_offset..end_offset))
+            } else {
+                None
+            };
+
+            let is_last = item.is_last();
+
+            prev = Option::from(item);
+
+            let actionable = actionable.filter(|x| x.0.lsn < truncate_at);
+
+            let builder = if let Some((meta, offsets)) = actionable {
+                // extend or create a new builder
+                if read_builder
+                    .as_mut()
+                    .map(|x| x.extend(offsets.start.pos(), offsets.end.pos(), meta))
+                    .unwrap_or(VectoredReadExtended::No)
+                    == VectoredReadExtended::Yes
+                {
+                    None
+                } else {
+                    read_builder.replace(VectoredReadBuilder::new(
+                        offsets.start.pos(),
+                        offsets.end.pos(),
+                        meta,
+                        max_read_size,
+                    ))
+                }
+            } else {
+                // nothing to do, except perhaps flush any existing for the last element
+                None
+            };
+
+            // flush the possible older builder and also the new one if the item was the last one
+            let builders = builder.into_iter();
+            let builders = if is_last {
+                builders.chain(read_builder.take())
+            } else {
+                builders.chain(None)
+            };
+
+            for builder in builders {
+                let read = builder.build();
+
+                let reader = VectoredBlobReader::new(&self.file);
+
+                let mut buf = buffer.take().unwrap();
+
+                buf.clear();
+                buf.reserve(read.size());
+                let res = reader.read_blobs(&read, buf).await?;
+
+                for blob in res.blobs {
+                    let key = blob.meta.key;
+                    let lsn = blob.meta.lsn;
+                    let data = &res.buf[blob.start..blob.end];
+
+                    #[cfg(debug_assertions)]
+                    Value::des(data)
+                        .with_context(|| {
+                            format!(
+                                "blob failed to deserialize for {}@{}, {}..{}: {:?}",
+                                blob.meta.key,
+                                blob.meta.lsn,
+                                blob.start,
+                                blob.end,
+                                utils::Hex(data)
+                            )
+                        })
+                        .unwrap();
+
+                    // is it an image or will_init walrecord?
+                    // FIXME: this could be handled by threading the BlobRef to the
+                    // VectoredReadBuilder
+                    let will_init =
+                        data[3] == 0 || (data[3] == 1 && data.len() > 8 && data[8] == 1);
+
+                    per_blob_copy.clear();
+                    per_blob_copy.extend_from_slice(data);
+
+                    let (tmp, res) = writer
+                        .put_value_bytes(key, lsn, std::mem::take(&mut per_blob_copy), will_init)
+                        .await;
+                    per_blob_copy = tmp;
+                    res?;
+                }
+
+                buffer = Some(res.buf);
+            }
+        }
+
+        assert!(
+            read_builder.is_none(),
+            "with the sentinel above loop should had handled all"
+        );
+
+        Ok(())
+    }
+
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         println!(
             "index_start_blk: {}, root {}",
@@ -1176,6 +1356,29 @@ impl DeltaLayerInner {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn stream_index_forwards<'a, R>(
+        &'a self,
+        reader: &'a DiskBtreeReader<R, DELTA_KEY_SIZE>,
+        start: &'a [u8; DELTA_KEY_SIZE],
+        ctx: &'a RequestContext,
+    ) -> impl futures::stream::Stream<
+        Item = Result<(Key, Lsn, BlobRef), crate::tenant::disk_btree::DiskBtreeError>,
+    > + 'a
+    where
+        R: BlockReader,
+    {
+        use futures::stream::TryStreamExt;
+        let stream = reader.get_stream_from(start, ctx);
+        stream.map_ok(|(key, value)| {
+            let key = DeltaKey::from_slice(&key);
+            let (key, lsn) = (key.key(), key.lsn());
+            let offset = BlobRef(value);
+
+            (key, lsn, offset)
+        })
     }
 
     /// The file offset to the first block of index.
@@ -1553,7 +1756,7 @@ mod test {
 
         let resident = writer.finish(entries_meta.key_range.end, &timeline).await?;
 
-        let inner = resident.get_inner_delta(&ctx).await?;
+        let inner = resident.as_delta(&ctx).await?;
 
         let file_size = inner.file.metadata().await?.len();
         tracing::info!(
@@ -1608,5 +1811,210 @@ mod test {
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn copy_delta_prefix_smoke() {
+        use crate::walrecord::NeonWalRecord;
+        use bytes::Bytes;
+
+        let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke").unwrap();
+        let (tenant, ctx) = h.load().await;
+        let ctx = &ctx;
+        let timeline = tenant
+            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, ctx)
+            .await
+            .unwrap();
+
+        let initdb_layer = timeline
+            .layers
+            .read()
+            .await
+            .likely_resident_layers()
+            .next()
+            .unwrap();
+
+        let key = Key::from_i128(12);
+
+        {
+            let mut writer = timeline.writer().await;
+
+            let data = [
+                (0x20, Value::Image(Bytes::from_static(b"foobar"))),
+                (
+                    0x30,
+                    Value::WalRecord(NeonWalRecord::Postgres {
+                        will_init: false,
+                        rec: Bytes::from_static(b"1"),
+                    }),
+                ),
+                (
+                    0x40,
+                    Value::WalRecord(NeonWalRecord::Postgres {
+                        will_init: true,
+                        rec: Bytes::from_static(b"2"),
+                    }),
+                ),
+                // build an oversized value so we cannot extend and existing read over
+                // this
+                (
+                    0x50,
+                    Value::WalRecord(NeonWalRecord::Postgres {
+                        will_init: true,
+                        rec: {
+                            let mut buf =
+                                vec![0u8; tenant.conf.max_vectored_read_bytes.0.get() + 1024];
+                            buf.iter_mut()
+                                .enumerate()
+                                .for_each(|(i, slot)| *slot = (i % 256) as u8);
+                            Bytes::from(buf)
+                        },
+                    }),
+                ),
+                // because the oversized read cannot be extended further, we are sure to exercise the
+                // builder created on the last round with this:
+                (
+                    0x60,
+                    Value::WalRecord(NeonWalRecord::Postgres {
+                        will_init: true,
+                        rec: Bytes::from_static(b"3"),
+                    }),
+                ),
+            ];
+
+            let mut last_lsn = None;
+
+            for (lsn, value) in data {
+                writer.put(key, Lsn(lsn), &value, ctx).await.unwrap();
+                last_lsn = Some(lsn);
+            }
+
+            writer.finish_write(Lsn(last_lsn.unwrap()));
+        }
+        timeline.freeze_and_flush().await.unwrap();
+
+        let new_layer = timeline
+            .layers
+            .read()
+            .await
+            .likely_resident_layers()
+            .find(|x| x != &initdb_layer)
+            .unwrap();
+
+        // create a copy for the timeline, so we don't overwrite the file
+        let branch = tenant
+            .branch_timeline_test(&timeline, TimelineId::generate(), None, ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(branch.get_ancestor_lsn(), Lsn(0x60));
+
+        // truncating at 0x61 gives us a full copy, otherwise just go backwards until there's just
+        // a single key
+
+        for truncate_at in [0x61, 0x51, 0x41, 0x31, 0x21] {
+            let truncate_at = Lsn(truncate_at);
+
+            let mut writer = DeltaLayerWriter::new(
+                tenant.conf,
+                branch.timeline_id,
+                tenant.tenant_shard_id,
+                Key::MIN,
+                Lsn(0x11)..truncate_at,
+            )
+            .await
+            .unwrap();
+
+            let new_layer = new_layer.download_and_keep_resident().await.unwrap();
+
+            new_layer
+                .copy_delta_prefix(&mut writer, truncate_at, ctx)
+                .await
+                .unwrap();
+
+            let copied_layer = writer.finish(Key::MAX, &branch).await.unwrap();
+
+            copied_layer.as_delta(ctx).await.unwrap();
+
+            assert_keys_and_values_eq(
+                new_layer.as_delta(ctx).await.unwrap(),
+                copied_layer.as_delta(ctx).await.unwrap(),
+                truncate_at,
+                ctx,
+            )
+            .await;
+        }
+    }
+
+    async fn assert_keys_and_values_eq(
+        source: &DeltaLayerInner,
+        truncated: &DeltaLayerInner,
+        truncated_at: Lsn,
+        ctx: &RequestContext,
+    ) {
+        use futures::future::ready;
+        use futures::stream::TryStreamExt;
+
+        let start_key = [0u8; DELTA_KEY_SIZE];
+
+        let source_reader = FileBlockReader::new(&source.file, source.file_id);
+        let source_tree = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            source.index_start_blk,
+            source.index_root_blk,
+            &source_reader,
+        );
+        let source_stream = source.stream_index_forwards(&source_tree, &start_key, ctx);
+        let source_stream = source_stream.filter(|res| match res {
+            Ok((_, lsn, _)) => ready(lsn < &truncated_at),
+            _ => ready(true),
+        });
+        let mut source_stream = std::pin::pin!(source_stream);
+
+        let truncated_reader = FileBlockReader::new(&truncated.file, truncated.file_id);
+        let truncated_tree = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            truncated.index_start_blk,
+            truncated.index_root_blk,
+            &truncated_reader,
+        );
+        let truncated_stream = truncated.stream_index_forwards(&truncated_tree, &start_key, ctx);
+        let mut truncated_stream = std::pin::pin!(truncated_stream);
+
+        let mut scratch_left = Vec::new();
+        let mut scratch_right = Vec::new();
+
+        loop {
+            let (src, truncated) = (source_stream.try_next(), truncated_stream.try_next());
+            let (src, truncated) = tokio::try_join!(src, truncated).unwrap();
+
+            if src.is_none() {
+                assert!(truncated.is_none());
+                break;
+            }
+
+            let (src, truncated) = (src.unwrap(), truncated.unwrap());
+
+            // because we've filtered the source with Lsn, we should always have the same keys from both.
+            assert_eq!(src.0, truncated.0);
+            assert_eq!(src.1, truncated.1);
+
+            // if this is needed for something else, just drop this assert.
+            assert!(
+                src.2.pos() >= truncated.2.pos(),
+                "value position should not go backwards {} vs. {}",
+                src.2.pos(),
+                truncated.2.pos()
+            );
+
+            scratch_left.clear();
+            let src_cursor = source_reader.block_cursor();
+            let left = src_cursor.read_blob_into_buf(src.2.pos(), &mut scratch_left, ctx);
+            scratch_right.clear();
+            let trunc_cursor = truncated_reader.block_cursor();
+            let right = trunc_cursor.read_blob_into_buf(truncated.2.pos(), &mut scratch_right, ctx);
+
+            tokio::try_join!(left, right).unwrap();
+
+            assert_eq!(utils::Hex(&scratch_left), utils::Hex(&scratch_right));
+        }
     }
 }
