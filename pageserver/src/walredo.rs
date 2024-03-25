@@ -98,9 +98,9 @@ impl PostgresRedoManager {
                         img,
                         base_img_lsn,
                         &records[batch_start..i],
-                        self.conf.wal_redo_timeout,
                         pg_version,
                     )
+                    .await
                 };
                 img = Some(result?);
 
@@ -118,9 +118,9 @@ impl PostgresRedoManager {
                 img,
                 base_img_lsn,
                 &records[batch_start..],
-                self.conf.wal_redo_timeout,
                 pg_version,
             )
+            .await
         }
     }
 
@@ -174,15 +174,17 @@ impl PostgresRedoManager {
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
+    /// # Cancel-Safety
+    ///
+    /// Cancellation safe.
     #[allow(clippy::too_many_arguments)]
-    fn apply_batch_postgres(
+    async fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
         base_img_lsn: Lsn,
         records: &[(Lsn, NeonWalRecord)],
-        wal_redo_timeout: Duration,
         pg_version: u32,
     ) -> anyhow::Result<Bytes> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
@@ -232,7 +234,8 @@ impl PostgresRedoManager {
 
             // Relational WAL records are applied using wal-redo-postgres
             let result = proc
-                .apply_wal_records(rel, blknum, &base_img, records, wal_redo_timeout)
+                .apply_wal_records(rel, blknum, &base_img, records)
+                .await
                 .context("apply_wal_records");
 
             let duration = started_at.elapsed();

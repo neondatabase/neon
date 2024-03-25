@@ -6,21 +6,17 @@ use crate::{
 };
 use anyhow::Context;
 use bytes::Bytes;
-use nix::poll::{PollFd, PollFlags};
 use pageserver_api::{reltag::RelTag, shard::TenantShardId};
 use postgres_ffi::BLCKSZ;
-use std::os::fd::AsRawFd;
 #[cfg(feature = "testing")]
 use std::sync::atomic::AtomicUsize;
 use std::{
     collections::VecDeque,
-    io::{Read, Write},
-    process::{ChildStdin, ChildStdout, Command, Stdio},
-    sync::{Mutex, MutexGuard},
-    time::Duration,
+    process::{Command, Stdio},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, instrument, Instrument};
-use utils::{lsn::Lsn, nonblock::set_nonblock};
+use utils::{lsn::Lsn, poison::Poison};
 
 mod no_leak_child;
 /// The IPC protocol that pageserver and walredo process speak over their shared pipe.
@@ -32,20 +28,20 @@ pub struct WalRedoProcess {
     tenant_shard_id: TenantShardId,
     // Some() on construction, only becomes None on Drop.
     child: Option<NoLeakChild>,
-    stdout: Mutex<ProcessOutput>,
-    stdin: Mutex<ProcessInput>,
+    stdout: tokio::sync::Mutex<Poison<ProcessOutput>>,
+    stdin: tokio::sync::Mutex<Poison<ProcessInput>>,
     /// Counter to separate same sized walredo inputs failing at the same millisecond.
     #[cfg(feature = "testing")]
     dump_sequence: AtomicUsize,
 }
 
 struct ProcessInput {
-    stdin: ChildStdin,
+    stdin: tokio::process::ChildStdin,
     n_requests: usize,
 }
 
 struct ProcessOutput {
-    stdout: ChildStdout,
+    stdout: tokio::process::ChildStdout,
     pending_responses: VecDeque<Option<Bytes>>,
     n_processed_responses: usize,
 }
@@ -100,17 +96,10 @@ impl WalRedoProcess {
         let stderr = child.stderr.take().unwrap();
         let stderr = tokio::process::ChildStderr::from_std(stderr)
             .context("convert to tokio::ChildStderr")?;
-        macro_rules! set_nonblock_or_log_err {
-        ($file:ident) => {{
-            let res = set_nonblock($file.as_raw_fd());
-            if let Err(e) = &res {
-                error!(error = %e, file = stringify!($file), pid = child.id(), "set_nonblock failed");
-            }
-            res
-        }};
-    }
-        set_nonblock_or_log_err!(stdin)?;
-        set_nonblock_or_log_err!(stdout)?;
+        let stdin =
+            tokio::process::ChildStdin::from_std(stdin).context("convert to tokio::ChildStdin")?;
+        let stdout = tokio::process::ChildStdout::from_std(stdout)
+            .context("convert to tokio::ChildStdout")?;
 
         // all fallible operations post-spawn are complete, so get rid of the guard
         let child = scopeguard::ScopeGuard::into_inner(child);
@@ -155,15 +144,21 @@ impl WalRedoProcess {
             conf,
             tenant_shard_id,
             child: Some(child),
-            stdin: Mutex::new(ProcessInput {
-                stdin,
-                n_requests: 0,
-            }),
-            stdout: Mutex::new(ProcessOutput {
-                stdout,
-                pending_responses: VecDeque::new(),
-                n_processed_responses: 0,
-            }),
+            stdin: tokio::sync::Mutex::new(Poison::new(
+                "stdin",
+                ProcessInput {
+                    stdin,
+                    n_requests: 0,
+                },
+            )),
+            stdout: tokio::sync::Mutex::new(Poison::new(
+                "stdout",
+                ProcessOutput {
+                    stdout,
+                    pending_responses: VecDeque::new(),
+                    n_processed_responses: 0,
+                },
+            )),
             #[cfg(feature = "testing")]
             dump_sequence: AtomicUsize::default(),
         })
@@ -176,20 +171,21 @@ impl WalRedoProcess {
             .id()
     }
 
-    // Apply given WAL records ('records') over an old page image. Returns
-    // new page image.
-    //
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
-    pub(crate) fn apply_wal_records(
+    /// Apply given WAL records ('records') over an old page image. Returns
+    /// new page image.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// Cancellation safe.
+    #[instrument(skip_all, level = tracing::Level::DEBUG, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
+    pub(crate) async fn apply_wal_records(
         &self,
         rel: RelTag,
         blknum: u32,
         base_img: &Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
-        wal_redo_timeout: Duration,
     ) -> anyhow::Result<Bytes> {
         let tag = protocol::BufferTag { rel, blknum };
-        let input = self.stdin.lock().unwrap();
 
         // Serialize all the messages to send the WAL redo process first.
         //
@@ -219,7 +215,7 @@ impl WalRedoProcess {
         protocol::build_get_page_msg(tag, &mut writebuf);
         WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
 
-        let res = self.apply_wal_records0(&writebuf, input, wal_redo_timeout);
+        let res = self.apply_wal_records0(&writebuf).await;
 
         if res.is_err() {
             // not all of these can be caused by this particular input, however these are so rare
@@ -230,41 +226,24 @@ impl WalRedoProcess {
         res
     }
 
-    fn apply_wal_records0(
-        &self,
-        writebuf: &[u8],
-        input: MutexGuard<ProcessInput>,
-        wal_redo_timeout: Duration,
-    ) -> anyhow::Result<Bytes> {
-        let mut proc = { input }; // TODO: remove this legacy rename, but this keep the patch small.
-        let mut nwrite = 0usize;
-
-        while nwrite < writebuf.len() {
-            let mut stdin_pollfds = [PollFd::new(&proc.stdin, PollFlags::POLLOUT)];
-            let n = loop {
-                match nix::poll::poll(&mut stdin_pollfds[..], wal_redo_timeout.as_millis() as i32) {
-                    Err(nix::errno::Errno::EINTR) => continue,
-                    res => break res,
-                }
-            }?;
-
-            if n == 0 {
-                anyhow::bail!("WAL redo timed out");
-            }
-
-            // If 'stdin' is writeable, do write.
-            let in_revents = stdin_pollfds[0].revents().unwrap();
-            if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
-                nwrite += proc.stdin.write(&writebuf[nwrite..])?;
-            }
-            if in_revents.contains(PollFlags::POLLHUP) {
-                // We still have more data to write, but the process closed the pipe.
-                anyhow::bail!("WAL redo process closed its stdin unexpectedly");
-            }
-        }
-        let request_no = proc.n_requests;
-        proc.n_requests += 1;
-        drop(proc);
+    /// # Cancel-Safety
+    ///
+    /// Cancellation safe (enforced through the use of [`utils::poison::Poison`]).
+    async fn apply_wal_records0(&self, writebuf: &[u8]) -> anyhow::Result<Bytes> {
+        let request_no = {
+            let mut lock_guard = self.stdin.lock().await;
+            let mut poison_guard = lock_guard.check_and_arm()?;
+            let input = poison_guard.data_mut();
+            input
+                .stdin
+                .write_all(writebuf)
+                .await
+                .context("write to walredo stdin")?;
+            let request_no = input.n_requests;
+            input.n_requests += 1;
+            poison_guard.disarm();
+            request_no
+        };
 
         // To improve walredo performance we separate sending requests and receiving
         // responses. Them are protected by different mutexes (output and input).
@@ -278,40 +257,19 @@ impl WalRedoProcess {
         // pending responses ring buffer and truncate all empty elements from the front,
         // advancing processed responses number.
 
-        let mut output = self.stdout.lock().unwrap();
+        let mut lock_guard = self.stdout.lock().await;
+        let mut poison_guard = lock_guard.check_and_arm()?;
+        let output = poison_guard.data_mut();
         let n_processed_responses = output.n_processed_responses;
         while n_processed_responses + output.pending_responses.len() <= request_no {
             // We expect the WAL redo process to respond with an 8k page image. We read it
             // into this buffer.
             let mut resultbuf = vec![0; BLCKSZ.into()];
-            let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
-            while nresult < BLCKSZ.into() {
-                let mut stdout_pollfds = [PollFd::new(&output.stdout, PollFlags::POLLIN)];
-                // We do two things simultaneously: reading response from stdout
-                // and forward any logging information that the child writes to its stderr to the page server's log.
-                let n = loop {
-                    match nix::poll::poll(
-                        &mut stdout_pollfds[..],
-                        wal_redo_timeout.as_millis() as i32,
-                    ) {
-                        Err(nix::errno::Errno::EINTR) => continue,
-                        res => break res,
-                    }
-                }?;
-
-                if n == 0 {
-                    anyhow::bail!("WAL redo timed out");
-                }
-
-                // If we have some data in stdout, read it to the result buffer.
-                let out_revents = stdout_pollfds[0].revents().unwrap();
-                if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
-                    nresult += output.stdout.read(&mut resultbuf[nresult..])?;
-                }
-                if out_revents.contains(PollFlags::POLLHUP) {
-                    anyhow::bail!("WAL redo process closed its stdout unexpectedly");
-                }
-            }
+            output
+                .stdout
+                .read_exact(&mut resultbuf)
+                .await
+                .context("read walredo stdout")?;
             output
                 .pending_responses
                 .push_back(Some(Bytes::from(resultbuf)));
@@ -359,6 +317,7 @@ impl WalRedoProcess {
                 break;
             }
         }
+        poison_guard.disarm();
         Ok(res)
     }
 
@@ -378,6 +337,7 @@ impl WalRedoProcess {
 
         let path = self.conf.tenant_path(&self.tenant_shard_id).join(&filename);
 
+        use std::io::Write;
         let res = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
