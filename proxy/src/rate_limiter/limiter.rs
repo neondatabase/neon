@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::hash_map::RandomState,
     hash::{BuildHasher, Hash},
     net::IpAddr,
@@ -79,7 +80,7 @@ pub type AuthRateLimiter = BucketRateLimiter<(EndpointIdInt, IpAddr), StdRng, Ra
 
 pub struct BucketRateLimiter<Key, Rand = StdRng, Hasher = RandomState> {
     map: DashMap<Key, Vec<RateBucket>, Hasher>,
-    info: &'static [RateBucketInfo],
+    info: Cow<'static, [RateBucketInfo]>,
     access_count: AtomicUsize,
     rand: Mutex<Rand>,
 }
@@ -187,13 +188,18 @@ impl RateBucketInfo {
 }
 
 impl<K: Hash + Eq> BucketRateLimiter<K> {
-    pub fn new(info: &'static [RateBucketInfo]) -> Self {
+    pub fn new(info: impl Into<Cow<'static, [RateBucketInfo]>>) -> Self {
         Self::new_with_rand_and_hasher(info, StdRng::from_entropy(), RandomState::new())
     }
 }
 
 impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
-    fn new_with_rand_and_hasher(info: &'static [RateBucketInfo], rand: R, hasher: S) -> Self {
+    fn new_with_rand_and_hasher(
+        info: impl Into<Cow<'static, [RateBucketInfo]>>,
+        rand: R,
+        hasher: S,
+    ) -> Self {
+        let info = info.into();
         info!(buckets = ?info, "endpoint rate limiter");
         Self {
             info,
@@ -226,7 +232,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
 
         let should_allow_request = entry
             .iter_mut()
-            .zip(self.info)
+            .zip(&*self.info)
             .all(|(bucket, info)| bucket.should_allow_request(info, now, n));
 
         if should_allow_request {
@@ -712,7 +718,7 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         RateBucketInfo::validate(&mut rates).unwrap();
-        let limiter = EndpointRateLimiter::new(Vec::leak(rates));
+        let limiter = EndpointRateLimiter::new(rates);
 
         let endpoint = EndpointId::from("ep-my-endpoint-1234");
 

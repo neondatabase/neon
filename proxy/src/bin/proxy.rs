@@ -144,6 +144,9 @@ struct ProxyCliArgs {
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
+    /// Authentication rate limiter max number of hashes per second.
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
+    auth_rate_limit: Vec<RateBucketInfo>,
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
@@ -511,7 +514,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
-        rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
+        rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
     };
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
