@@ -49,8 +49,8 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::{
-    GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
-    TenantSlotError, TenantSlotUpsertError, TenantStateError,
+    GetTenantError, TenantManager, TenantMapError, TenantMapInsertError, TenantSlotError,
+    TenantSlotUpsertError, TenantStateError,
 };
 use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
 use crate::tenant::remote_timeline_client;
@@ -249,9 +249,6 @@ impl From<GetTenantError> for ApiError {
     fn from(tse: GetTenantError) -> ApiError {
         match tse {
             GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            GetTenantError::Broken(reason) => {
-                ApiError::InternalServerError(anyhow!("tenant is broken: {}", reason))
-            }
             GetTenantError::NotActive(_) => {
                 // Why is this not `ApiError::NotFound`?
                 // Because we must be careful to never return 404 for a tenant if it does
@@ -267,24 +264,14 @@ impl From<GetTenantError> for ApiError {
 impl From<GetActiveTenantError> for ApiError {
     fn from(e: GetActiveTenantError) -> ApiError {
         match e {
+            GetActiveTenantError::Broken(reason) => {
+                ApiError::InternalServerError(anyhow!("tenant is broken: {}", reason))
+            }
             GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{}", e)),
             GetActiveTenantError::Cancelled => ApiError::ShuttingDown,
             GetActiveTenantError::NotFound(gte) => gte.into(),
             GetActiveTenantError::WaitForActiveTimeout { .. } => {
                 ApiError::ResourceUnavailable(format!("{}", e).into())
-            }
-        }
-    }
-}
-
-impl From<SetNewTenantConfigError> for ApiError {
-    fn from(e: SetNewTenantConfigError) -> ApiError {
-        match e {
-            SetNewTenantConfigError::GetTenant(tid) => {
-                ApiError::NotFound(anyhow!("tenant {}", tid).into())
-            }
-            e @ (SetNewTenantConfigError::Persist(_) | SetNewTenantConfigError::Other(_)) => {
-                ApiError::InternalServerError(anyhow::Error::new(e))
             }
         }
     }
@@ -1160,10 +1147,15 @@ async fn tenant_shard_split_handler(
     let state = get_state(&request);
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
     let new_shards = state
         .tenant_manager
         .shard_split(
-            tenant_shard_id,
+            tenant,
             ShardCount::new(req.new_shard_count),
             req.new_stripe_size,
             &ctx,
@@ -1413,15 +1405,31 @@ async fn update_tenant_config_handler(
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant_conf =
+    let new_tenant_conf =
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let state = get_state(&request);
-    state
+
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
+    let tenant = state
         .tenant_manager
-        .set_new_tenant_config(tenant_conf, tenant_id)
-        .instrument(info_span!("tenant_config", %tenant_id))
-        .await?;
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+    // This is a legacy API that only operates on attached tenants: the preferred
+    // API to use is the location_config/ endpoint, which lets the caller provide
+    // the full LocationConf.
+    let location_conf = LocationConf::attached_single(
+        new_tenant_conf.clone(),
+        tenant.get_generation(),
+        &ShardParameters::default(),
+    );
+
+    crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    tenant.set_new_tenant_config(new_tenant_conf);
 
     json_response(StatusCode::OK, ())
 }

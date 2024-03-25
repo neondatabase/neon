@@ -2068,7 +2068,12 @@ impl Tenant {
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
-                TenantState::Broken { .. } | TenantState::Stopping { .. } => {
+                TenantState::Broken { reason, .. } => {
+                    // This is fatal, and reported distinctly from the general case of "will never be active" because
+                    // it's logically a 500 to external API users (broken is always a bug).
+                    return Err(GetActiveTenantError::Broken(reason));
+                }
+                TenantState::Stopping { .. } => {
                     // There's no chance the tenant can transition back into ::Active
                     return Err(GetActiveTenantError::WillNotBecomeActive(current_state));
                 }
