@@ -263,6 +263,9 @@ impl Timeline {
             }
         }
 
+        stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
+        drop_rlock(guard);
+
         // Gather the files to compact in this iteration.
         //
         // Start with the oldest Level 0 delta file, and collect any other
@@ -347,6 +350,9 @@ impl Timeline {
 
         stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
 
+        let guard = self.layers.read().await;
+        let layers = guard.layer_map();
+
         for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
             if let Some(prev_key) = prev {
                 // just first fast filter
@@ -370,8 +376,6 @@ impl Timeline {
             }
             prev = Some(next_key.next());
         }
-        stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
-        drop_rlock(guard);
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
