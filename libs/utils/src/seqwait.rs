@@ -43,7 +43,21 @@ where
 {
     waiters: BinaryHeap<Waiter<V>>,
     current: S,
+    status_channel: Sender<Option<V>>,
     shutdown: bool,
+}
+
+impl<S, V> SeqWaitInt<S, V>
+where
+    S: MonotonicCounter<V>,
+    V: Ord + Copy,
+{
+    /// `status_channel` contains the number of the first waiter in the queue.
+    /// This function should be called whenever waiters queue changes.
+    fn update_status(&self) {
+        let first_waiter = self.waiters.peek().map(|w| w.wake_num);
+        let _ = self.status_channel.send_replace(first_waiter);
+    }
 }
 
 struct Waiter<T>
@@ -110,6 +124,7 @@ where
         let internal = SeqWaitInt {
             waiters: BinaryHeap::new(),
             current: starting_num,
+            status_channel: channel(None).0,
             shutdown: false,
         };
         SeqWait {
@@ -127,6 +142,9 @@ where
 
             // Block any future waiters from starting
             internal.shutdown = true;
+
+            // Update status: no active waiters.
+            internal.status_channel.send_replace(None);
 
             // This will steal the entire waiters map.
             // When we drop it all waiters will be woken.
@@ -211,6 +229,7 @@ where
             wake_num: num,
             wake_channel: tx,
         });
+        internal.update_status();
         // Drop the lock as we exit this scope.
         Ok(Some(rx))
     }
@@ -240,6 +259,7 @@ where
                 }
                 wake_these.push(internal.waiters.pop().unwrap().wake_channel);
             }
+            internal.update_status();
             wake_these
         };
 
@@ -254,6 +274,18 @@ where
     /// Read the current value, without waiting.
     pub fn load(&self) -> S {
         self.internal.lock().unwrap().current
+    }
+
+    /// Get a Receiver for the current status.
+    ///
+    /// The current status is the number of the first waiter in the queue,
+    /// or None if there are no waiters.
+    ///
+    /// This receiver will be notified whenever the status changes.
+    /// It is useful for receiving notifications when the first waiter
+    /// starts waiting for a number, or when there are no more waiters left.
+    pub fn status_receiver(&self) -> Receiver<Option<V>> {
+        self.internal.lock().unwrap().status_channel.subscribe()
     }
 }
 

@@ -22,10 +22,12 @@ use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeli
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
-use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
-use storage_broker::proto::SafekeeperTimelineInfo;
-use storage_broker::proto::SubscribeSafekeeperInfoRequest;
+
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
+use storage_broker::proto::{
+    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
+    SubscribeByFilterRequest, TypeSubscription, TypedMessage,
+};
 use storage_broker::{BrokerClientChannel, Code, Streaming};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -89,6 +91,16 @@ pub(super) async fn connection_manager_loop_step(
         .timeline
         .subscribe_for_state_updates();
 
+    let mut wait_lsn_status = connection_manager_state
+        .timeline
+        .subscribe_for_wait_lsn_updates();
+
+    // TODO: create a separate config option for discovery request interval
+    let discovery_request_interval = connection_manager_state.conf.lagging_wal_timeout;
+    let mut last_discovery_ts = Utc::now().naive_utc() - discovery_request_interval;
+    let discovery_request_interval = chrono::Duration::from_std(discovery_request_interval)
+        .expect("invalid discovery_request_interval duration");
+
     // Subscribe to the broker updates. Stream shares underlying TCP connection
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
@@ -97,10 +109,12 @@ pub(super) async fn connection_manager_loop_step(
 
     loop {
         let time_until_next_retry = connection_manager_state.time_until_next_retry();
+        let any_activity = connection_manager_state.wal_connection.is_some()
+            || !connection_manager_state.wal_stream_candidates.is_empty();
 
         // These things are happening concurrently:
         //
-        // - cancellation request
+        //  - cancellation request
         //  - keep receiving WAL on the current connection
         //      - if the shared state says we need to change connection, disconnect and return
         //      - this runs in a separate task and we receive updates via a watch channel
@@ -214,6 +228,52 @@ pub(super) async fn connection_manager_loop_step(
                     }
                 }
             } => debug!("Waking up for the next retry after waiting for {time_until_next_retry:?}"),
+
+            Some(()) = async {
+                // Calculating time needed to wait until sending the next discovery request.
+                // Current implementation is conservative and sends discovery requests only when there are no candidates.
+
+                if any_activity {
+                    // No need to send discovery requests if there is an active connection or candidates.
+                    return None;
+                }
+
+                // Waiting for an active wait_lsn request.
+                while wait_lsn_status.borrow().is_none() {
+                    wait_lsn_status.changed().await.ok();
+                }
+
+                // All preconditions met, preparing to send a discovery request.
+                let now = Utc::now().naive_utc();
+                let next_discovery_ts = last_discovery_ts
+                    .checked_add_signed(discovery_request_interval)
+                    .unwrap_or(now);
+
+                if next_discovery_ts > now {
+                    // Prevent sending discovery requests too frequently.
+                    tokio::time::sleep((next_discovery_ts - now).to_std().unwrap_or_default()).await;
+                }
+
+                let tenant_timeline_id = Some(ProtoTenantTimelineId {
+                    tenant_id: id.tenant_id.as_ref().to_owned(),
+                    timeline_id: id.timeline_id.as_ref().to_owned(),
+                });
+                let request = SafekeeperDiscoveryRequest { tenant_timeline_id };
+                let msg = TypedMessage {
+                    r#type: MessageType::SafekeeperDiscoveryRequest as i32,
+                    safekeeper_timeline_info: None,
+                    safekeeper_discovery_request: Some(request),
+                    safekeeper_discovery_response: None,
+                    };
+
+                last_discovery_ts = Utc::now().naive_utc();
+                debug!("No active connection and no candidates, sending discovery request to the broker");
+
+                // This is a fire-and-forget request, we don't care about the response
+                let _ = broker_client.publish_one(msg).await;
+                debug!("Discovery request sent to the broker");
+                None
+            } => {}
         }
 
         if let Some(new_candidate) = connection_manager_state.next_connection_candidate() {
@@ -231,7 +291,7 @@ async fn subscribe_for_timeline_updates(
     broker_client: &mut BrokerClientChannel,
     id: TenantTimelineId,
     cancel: &CancellationToken,
-) -> Result<Streaming<SafekeeperTimelineInfo>, Cancelled> {
+) -> Result<Streaming<TypedMessage>, Cancelled> {
     let mut attempt = 0;
     loop {
         exponential_backoff(
@@ -244,17 +304,27 @@ async fn subscribe_for_timeline_updates(
         attempt += 1;
 
         // subscribe to the specific timeline
-        let key = SubscriptionKey::TenantTimelineId(ProtoTenantTimelineId {
-            tenant_id: id.tenant_id.as_ref().to_owned(),
-            timeline_id: id.timeline_id.as_ref().to_owned(),
-        });
-        let request = SubscribeSafekeeperInfoRequest {
-            subscription_key: Some(key),
+        let request = SubscribeByFilterRequest {
+            types: vec![
+                TypeSubscription {
+                    r#type: MessageType::SafekeeperTimelineInfo as i32,
+                },
+                TypeSubscription {
+                    r#type: MessageType::SafekeeperDiscoveryResponse as i32,
+                },
+            ],
+            tenant_timeline_id: Some(FilterTenantTimelineId {
+                enabled: true,
+                tenant_timeline_id: Some(ProtoTenantTimelineId {
+                    tenant_id: id.tenant_id.as_ref().to_owned(),
+                    timeline_id: id.timeline_id.as_ref().to_owned(),
+                }),
+            }),
         };
 
         match {
             tokio::select! {
-                r = broker_client.subscribe_safekeeper_info(request) => { r }
+                r = broker_client.subscribe_by_filter(request) => { r }
                 _ = cancel.cancelled() => { return Err(Cancelled); }
             }
         } {
@@ -398,7 +468,7 @@ struct RetryInfo {
 /// Data about the timeline to connect to, received from the broker.
 #[derive(Debug, Clone)]
 struct BrokerSkTimeline {
-    timeline: SafekeeperTimelineInfo,
+    timeline: SafekeeperDiscoveryResponse,
     /// Time at which the data was fetched from the broker last time, to track the stale data.
     latest_update: NaiveDateTime,
 }
@@ -606,7 +676,34 @@ impl ConnectionManagerState {
     }
 
     /// Adds another broker timeline into the state, if its more recent than the one already added there for the same key.
-    fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
+    fn register_timeline_update(&mut self, typed_msg: TypedMessage) {
+        let mut is_discovery = false;
+        let timeline_update = match typed_msg.r#type() {
+            MessageType::SafekeeperTimelineInfo => {
+                let info = typed_msg
+                    .safekeeper_timeline_info
+                    .expect("proto type mismatch from broker message");
+                SafekeeperDiscoveryResponse {
+                    safekeeper_id: info.safekeeper_id,
+                    tenant_timeline_id: info.tenant_timeline_id,
+                    commit_lsn: info.commit_lsn,
+                    safekeeper_connstr: info.safekeeper_connstr,
+                    availability_zone: info.availability_zone,
+                }
+            }
+            MessageType::SafekeeperDiscoveryResponse => {
+                is_discovery = true;
+                typed_msg
+                    .safekeeper_discovery_response
+                    .expect("proto type mismatch from broker message")
+            }
+            _ => {
+                // unexpected message
+                return;
+            }
+        };
+
+        // TODO: make a separate metric for discovery requests
         WALRECEIVER_BROKER_UPDATES.inc();
 
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
@@ -619,7 +716,10 @@ impl ConnectionManagerState {
         );
 
         if old_entry.is_none() {
-            info!("New SK node was added: {new_safekeeper_id}");
+            info!(
+                "New SK node was added{}: {new_safekeeper_id}",
+                if is_discovery { " (discovery)" } else { "" },
+            );
             WALRECEIVER_CANDIDATES_ADDED.inc();
         }
     }
@@ -818,7 +918,7 @@ impl ConnectionManagerState {
     fn select_connection_candidate(
         &self,
         node_to_omit: Option<NodeId>,
-    ) -> Option<(NodeId, &SafekeeperTimelineInfo, PgConnectionConfig)> {
+    ) -> Option<(NodeId, &SafekeeperDiscoveryResponse, PgConnectionConfig)> {
         self.applicable_connection_candidates()
             .filter(|&(sk_id, _, _)| Some(sk_id) != node_to_omit)
             .max_by_key(|(_, info, _)| info.commit_lsn)
@@ -828,7 +928,7 @@ impl ConnectionManagerState {
     /// Some safekeepers are filtered by the retry cooldown.
     fn applicable_connection_candidates(
         &self,
-    ) -> impl Iterator<Item = (NodeId, &SafekeeperTimelineInfo, PgConnectionConfig)> {
+    ) -> impl Iterator<Item = (NodeId, &SafekeeperDiscoveryResponse, PgConnectionConfig)> {
         let now = Utc::now().naive_utc();
 
         self.wal_stream_candidates
@@ -968,19 +1068,11 @@ mod tests {
         latest_update: NaiveDateTime,
     ) -> BrokerSkTimeline {
         BrokerSkTimeline {
-            timeline: SafekeeperTimelineInfo {
+            timeline: SafekeeperDiscoveryResponse {
                 safekeeper_id: 0,
                 tenant_timeline_id: None,
-                term: 0,
-                last_log_term: 0,
-                flush_lsn: 0,
                 commit_lsn,
-                backup_lsn: 0,
-                remote_consistent_lsn: 0,
-                peer_horizon_lsn: 0,
-                local_start_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
-                http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,
             },
             latest_update,

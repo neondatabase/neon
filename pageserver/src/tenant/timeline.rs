@@ -1234,6 +1234,12 @@ impl Timeline {
         self.last_record_lsn.load()
     }
 
+    /// Subscribe to callers of wait_lsn(). The value of the channel is None if there are no
+    /// wait_lsn() calls in progress, and Some(Lsn) if there is an active waiter for wait_lsn().
+    pub(crate) fn subscribe_for_wait_lsn_updates(&self) -> watch::Receiver<Option<Lsn>> {
+        self.last_record_lsn.status_receiver()
+    }
+
     pub(crate) fn get_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn.load()
     }
