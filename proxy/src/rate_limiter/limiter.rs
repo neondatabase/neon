@@ -118,7 +118,7 @@ pub struct RateBucketInfo {
 
 impl std::fmt::Display for RateBucketInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let rps = self.max_rpi * 1000 / self.interval.as_millis() as u32;
+        let rps = (self.max_rpi as u64) * 1000 / self.interval.as_millis() as u64;
         write!(f, "{rps}@{}", humantime::format_duration(self.interval))
     }
 }
@@ -772,5 +772,32 @@ mod tests {
             limiter.check(i, 1);
         }
         assert!(limiter.map.len() < 150_000);
+    }
+
+    #[test]
+    fn test_default_auth_set() {
+        // these values used to exceed u32::MAX
+        assert_eq!(
+            RateBucketInfo::DEFAULT_AUTH_SET,
+            [
+                RateBucketInfo {
+                    interval: Duration::from_secs(1),
+                    max_rpi: 300 * 4096,
+                },
+                RateBucketInfo {
+                    interval: Duration::from_secs(60),
+                    max_rpi: 200 * 4096 * 60,
+                },
+                RateBucketInfo {
+                    interval: Duration::from_secs(600),
+                    max_rpi: 100 * 4096 * 600,
+                }
+            ]
+        );
+
+        for x in RateBucketInfo::DEFAULT_AUTH_SET {
+            let y = x.to_string().parse().unwrap();
+            assert_eq!(x, y);
+        }
     }
 }
