@@ -495,7 +495,7 @@ async fn timeline_create_handler(
     async {
         let tenant = state
             .tenant_manager
-            .get_attached_tenant_shard(tenant_shard_id, false)?;
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -581,7 +581,7 @@ async fn timeline_list_handler(
     let response_data = async {
         let tenant = state
             .tenant_manager
-            .get_attached_tenant_shard(tenant_shard_id, false)?;
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -668,7 +668,7 @@ async fn timeline_detail_handler(
     let timeline_info = async {
         let tenant = state
             .tenant_manager
-            .get_attached_tenant_shard(tenant_shard_id, false)?;
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -855,7 +855,7 @@ async fn timeline_delete_handler(
 
     let tenant = state
         .tenant_manager
-        .get_attached_tenant_shard(tenant_shard_id, false)
+        .get_attached_tenant_shard(tenant_shard_id)
         .map_err(|e| {
             match e {
                 // GetTenantError has a built-in conversion to ApiError, but in this context we don't
@@ -1881,7 +1881,7 @@ async fn active_timeline_of_active_tenant(
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
 ) -> Result<Arc<Timeline>, ApiError> {
-    let tenant = tenant_manager.get_attached_tenant_shard(tenant_shard_id, false)?;
+    let tenant = tenant_manager.get_attached_tenant_shard(tenant_shard_id)?;
 
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 

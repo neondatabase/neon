@@ -910,32 +910,21 @@ impl TenantManager {
         self.conf
     }
 
-    /// Gets the attached tenant from the in-memory data, erroring if it's absent, in secondary mode, or is not fitting to the query.
-    /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
+    /// Gets the attached tenant from the in-memory data, erroring if it's absent, in secondary mode, or currently
+    /// undergoing a state change (i.e. slot is InProgress).
+    ///
+    /// The return Tenant is not guaranteed to be active: check its status after obtaing it, or
+    /// use [`Tenant::wait_to_become_active`] before using it if you will do I/O on it.
     pub(crate) fn get_attached_tenant_shard(
         &self,
         tenant_shard_id: TenantShardId,
-        active_only: bool,
     ) -> Result<Arc<Tenant>, GetTenantError> {
         let locked = self.tenants.read().unwrap();
 
         let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)?;
 
         match peek_slot {
-            Some(TenantSlot::Attached(tenant)) => match tenant.current_state() {
-                TenantState::Broken {
-                    reason,
-                    backtrace: _,
-                } if active_only => Err(GetTenantError::Broken(reason)),
-                TenantState::Active => Ok(Arc::clone(tenant)),
-                _ => {
-                    if active_only {
-                        Err(GetTenantError::NotActive(tenant_shard_id))
-                    } else {
-                        Ok(Arc::clone(tenant))
-                    }
-                }
-            },
+            Some(TenantSlot::Attached(tenant)) => Ok(Arc::clone(tenant)),
             Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_shard_id)),
             None | Some(TenantSlot::Secondary(_)) => {
                 Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))

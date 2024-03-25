@@ -9,6 +9,7 @@ use crate::{
     metrics::SECONDARY_MODE,
     tenant::{
         config::AttachmentMode,
+        mgr::GetTenantError,
         mgr::TenantManager,
         remote_timeline_client::remote_heatmap_path,
         span::debug_assert_current_span_has_tenant_id,
@@ -292,8 +293,11 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             "Starting heatmap write on command");
         let tenant = self
             .tenant_manager
-            .get_attached_tenant_shard(*tenant_shard_id, true)
+            .get_attached_tenant_shard(*tenant_shard_id)
             .map_err(|e| anyhow::anyhow!(e))?;
+        if !tenant.is_active() {
+            return Err(GetTenantError::NotActive(*tenant_shard_id).into());
+        }
 
         Ok(UploadPending {
             // Ignore our state for last digest: this forces an upload even if nothing has changed
