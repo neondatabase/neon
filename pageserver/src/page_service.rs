@@ -759,6 +759,7 @@ impl PageServerHandler {
         let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &tenant.cancel)));
         timeline
             .import_basebackup_from_tar(
+                tenant.clone(),
                 &mut copyin_reader,
                 base_lsn,
                 self.broker_client.clone(),
