@@ -1,3 +1,23 @@
+//! Safekeeper timeline has a background task which is subscribed to `commit_lsn`
+//! and `flush_lsn` updates. After the partial segment was updated (`flush_lsn`
+//! was changed), the segment will be uploaded to S3 in about 15 minutes.
+//!
+//! The filename format for partial segments is
+//! `Segment_Term_Flush_Commit_skNN.partial`, where:
+//! - `Segment` – the segment name, like `000000010000000000000001`
+//! - `Term` – current term
+//! - `Flush` – flush_lsn in hex format `{:016X}`, e.g. `00000000346BC568`
+//! - `Commit` – commit_lsn in the same hex format
+//! - `NN` – safekeeper_id, like `1`
+//!
+//! The full object name example:
+//! `000000010000000000000002_2_0000000002534868_0000000002534410_sk1.partial`
+//!
+//! Each safekeeper will keep info about remote partial segments in its control
+//! file. Code updates state in the control file before doing any S3 operations.
+//! This way control file stores information about all potentially existing
+//! remote partial segments and can clean them up after uploading a newer version.
+
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
@@ -92,8 +112,8 @@ impl PartialBackup {
             "{}_{}_{:016X}_{:016X}_sk{}.partial",
             self.segment_name(segno),
             term,
-            commit_lsn.0,
             flush_lsn.0,
+            commit_lsn.0,
             self.conf.my_id.0,
         )
     }
@@ -297,7 +317,7 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
 
     debug!("state: {:?}", backup.state);
 
-    loop {
+    'outer: loop {
         // wait until we have something to upload
         let uploaded_segment = backup.state.uploaded_segment();
         if let Some(seg) = &uploaded_segment {
@@ -323,7 +343,8 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
         tokio::pin!(timeout);
         let mut timeout_expired = false;
 
-        loop {
+        // waiting until timeout expires OR segno changes
+        'inner: loop {
             tokio::select! {
                 _ = cancellation_rx.changed() => {
                     info!("timeline canceled");
@@ -334,27 +355,27 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
                     let segno = backup.segno(flush_lsn_rx.borrow().lsn);
                     if segno != pending_segno {
                         // previous segment is no longer partial, aborting the wait
-                        break;
+                        break 'inner;
                     }
                 }
                 _ = &mut timeout => {
                     // timeout expired, now we are ready for upload
                     timeout_expired = true;
-                    break;
+                    break 'inner;
                 }
             }
         }
 
         if !timeout_expired {
             // likely segno has changed, let's try again in the next iteration
-            continue;
+            continue 'outer;
         }
 
         let prepared = backup.prepare_upload().await;
         if let Some(seg) = &uploaded_segment {
             if seg.eq_without_status(&prepared) {
                 // we already uploaded this segment, nothing to do
-                continue;
+                continue 'outer;
             }
         }
 
