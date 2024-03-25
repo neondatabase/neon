@@ -993,10 +993,23 @@ async fn tenant_status(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
+    // In tests, sometimes we want to query the state of a tenant without auto-activating it if it's currently waiting.
+    let no_activate = parse_query_param(&request, "no_activate")?.unwrap_or(false);
+
     let tenant_info = async {
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
+
+        if !no_activate {
+            // This is advisory: we prefer to let the tenant activate on-demand when this function is
+            // called, but it is still valid to return 200 and describe the current state of the tenant
+            // if it doesn't make it into an active state.
+            tenant
+                .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
+                .await
+                .ok();
+        }
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;

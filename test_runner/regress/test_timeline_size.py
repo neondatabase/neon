@@ -727,7 +727,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         states = {}
         log.info(f"Tenant ids: {tenant_ids}")
         for tenant_id in tenant_ids:
-            tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
+            tenant = pageserver_http.tenant_status(tenant_id=tenant_id, no_activate=True)
             states[tenant_id] = tenant["state"]["slug"]
         log.info(f"Tenant states: {states}")
         return states
@@ -774,7 +774,10 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
     # That one that we successfully accessed is now Active
     expect_activated += 1
-    assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+    assert (
+        pageserver_http.tenant_status(tenant_id=stuck_tenant_id, no_activate=True)["state"]["slug"]
+        == "Active"
+    )
     wait_for_tenant_startup_completions(pageserver_http, count=expect_activated - 1)
 
     # The ones we didn't touch are still in Attaching
@@ -789,7 +792,10 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     )[0][0]
     pageserver_http.timeline_create(env.pg_version, stuck_tenant_id, TimelineId.generate())
     expect_activated += 1
-    assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+    assert (
+        pageserver_http.tenant_status(tenant_id=stuck_tenant_id, no_activate=True)["state"]["slug"]
+        == "Active"
+    )
     assert (
         len([s for s in get_tenant_states().values() if s == "Attaching"])
         == n_tenants - expect_activated
