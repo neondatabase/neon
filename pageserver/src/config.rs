@@ -230,6 +230,7 @@ pub struct PageServerConf {
     // How often to send unchanged cached metrics to the metrics endpoint.
     pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
+    pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
 
     pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
@@ -368,6 +369,7 @@ struct PageServerConfigBuilder {
     cached_metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
+    metric_collection_bucket: BuilderValue<Option<RemoteStorageConfig>>,
 
     disk_usage_based_eviction: BuilderValue<Option<DiskUsageEvictionTaskConfig>>,
 
@@ -447,6 +449,8 @@ impl PageServerConfigBuilder {
             )
             .expect("cannot parse default synthetic size calculation interval")),
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
+
+            metric_collection_bucket: Set(None),
 
             disk_usage_based_eviction: Set(None),
 
@@ -575,6 +579,13 @@ impl PageServerConfigBuilder {
         self.metric_collection_endpoint = BuilderValue::Set(metric_collection_endpoint)
     }
 
+    pub fn metric_collection_bucket(
+        &mut self,
+        metric_collection_bucket: Option<RemoteStorageConfig>,
+    ) {
+        self.metric_collection_bucket = BuilderValue::Set(metric_collection_bucket)
+    }
+
     pub fn synthetic_size_calculation_interval(
         &mut self,
         synthetic_size_calculation_interval: Duration,
@@ -682,6 +693,7 @@ impl PageServerConfigBuilder {
                 metric_collection_interval,
                 cached_metric_collection_interval,
                 metric_collection_endpoint,
+                metric_collection_bucket,
                 synthetic_size_calculation_interval,
                 disk_usage_based_eviction,
                 test_remote_failures,
@@ -929,6 +941,9 @@ impl PageServerConf {
                     let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
                     builder.metric_collection_endpoint(Some(endpoint));
                 },
+                "metric_collection_bucket" => {
+                    builder.metric_collection_bucket(RemoteStorageConfig::from_toml(item)?)
+                }
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
@@ -1043,6 +1058,7 @@ impl PageServerConf {
             metric_collection_interval: Duration::from_secs(60),
             cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+            metric_collection_bucket: None,
             synthetic_size_calculation_interval: Duration::from_secs(60),
             disk_usage_based_eviction: None,
             test_remote_failures: 0,
@@ -1273,6 +1289,7 @@ background_task_maximum_delay = '334 s'
                     defaults::DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL
                 )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+                metric_collection_bucket: None,
                 synthetic_size_calculation_interval: humantime::parse_duration(
                     defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
                 )?,
@@ -1346,6 +1363,7 @@ background_task_maximum_delay = '334 s'
                 metric_collection_interval: Duration::from_secs(222),
                 cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
+                metric_collection_bucket: None,
                 synthetic_size_calculation_interval: Duration::from_secs(333),
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,

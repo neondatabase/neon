@@ -1723,7 +1723,6 @@ impl Timeline {
             initdb_optimization_count: 0,
         };
         task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -2086,7 +2085,6 @@ impl Timeline {
             DownloadBehavior::Download,
         );
         task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -2264,7 +2262,6 @@ impl Timeline {
             DownloadBehavior::Download,
         );
         task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -3840,7 +3837,7 @@ impl Timeline {
         };
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
-        fail_point!("before-timeline-gc");
+        pausable_failpoint!("before-timeline-gc");
 
         // Is the timeline being deleted?
         if self.is_stopping() {
@@ -4151,7 +4148,6 @@ impl Timeline {
 
         let self_clone = Arc::clone(&self);
         let task_id = task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -4469,6 +4465,9 @@ impl<'a> TimelineWriter<'a> {
         let action = self.get_open_layer_action(last_record_lsn, 0);
         if action == OpenLayerAction::Roll {
             self.roll_layer(last_record_lsn).await?;
+        } else if let Some(writer_state) = &mut *self.write_guard {
+            // Periodic update of statistics
+            writer_state.open_layer.tick().await;
         }
 
         Ok(())

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
-use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr::TaskKind;
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
@@ -18,7 +18,7 @@ use utils::{backoff, completion};
 
 static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| {
-        let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
+        let total_threads = *crate::task_mgr::THE_RUNTIME_WORKER_THREADS;
         let permits = usize::max(
             1,
             // while a lot of the work is done on spawn_blocking, we still do
@@ -85,7 +85,6 @@ pub fn start_background_loops(
 ) {
     let tenant_shard_id = tenant.tenant_shard_id;
     task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
         Some(tenant_shard_id),
         None,
@@ -109,7 +108,6 @@ pub fn start_background_loops(
         },
     );
     task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
         Some(tenant_shard_id),
         None,

@@ -62,9 +62,7 @@ def wait_for_upload(
         )
         time.sleep(1)
     raise Exception(
-        "timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
-            lsn, current_lsn
-        )
+        f"timed out while waiting for {tenant}/{timeline} remote_consistent_lsn to reach {lsn}, was {current_lsn}"
     )
 
 
