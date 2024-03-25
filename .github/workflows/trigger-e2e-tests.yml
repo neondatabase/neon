@@ -62,14 +62,14 @@ jobs:
 
   trigger-e2e-tests:
     needs: [ tag ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: ubuntu-latest
     env:
       TAG: ${{ needs.tag.outputs.build-tag }}
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-      options: --init
     steps:
       - name: check if ecr image are present
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
         run: |
           for REPO in neon compute-tools compute-node-v14 vm-compute-node-v14 compute-node-v15 vm-compute-node-v15 compute-node-v16 vm-compute-node-v16; do
             OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
@@ -91,7 +91,7 @@ jobs:
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
         run: |
-          # Default set of plafforms to run e2e tests on
+          # Default set of platforms to run e2e tests on
           platforms='["docker", "k8s"]'
 
           # If the PR changes vendor/ or pgxn/ directories, or Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
@@ -111,41 +111,24 @@ jobs:
       - name: Set PR's status to pending and request a remote CI test
         env:
           E2E_PLATFORMS: ${{ steps.e2e-platforms.outputs.e2e-platforms }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
-          # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
-          # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
-          # to place a job run status update later.
-          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-          # For non-PR kinds of runs, the above will produce an empty variable, pick the original sha value for those
-          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
-
           REMOTE_REPO="${{ github.repository_owner }}/cloud"
 
-          curl -f -X POST \
-          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
-          -H "Accept: application/vnd.github.v3+json" \
-          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-          --data \
-            "{
-              \"state\": \"pending\",
-              \"context\": \"neon-cloud-e2e\",
-              \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
-            }"
+          gh api /repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+            --method POST \
+            --raw-field "state=pending" \
+            --raw-field "description=[$REMOTE_REPO] Remote CI job is about to start" \
+            --raw-field "context=neon-cloud-e2e"
 
-          curl -f -X POST \
-          https://api.github.com/repos/$REMOTE_REPO/actions/workflows/testing.yml/dispatches \
-          -H "Accept: application/vnd.github.v3+json" \
-          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-          --data \
-            "{
-              \"ref\": \"main\",
-              \"inputs\": {
-                \"ci_job_name\": \"neon-cloud-e2e\",
-                \"commit_hash\": \"$COMMIT_SHA\",
-                \"remote_repo\": \"${{ github.repository }}\",
-                \"storage_image_tag\": \"${TAG}\",
-                \"compute_image_tag\": \"${TAG}\",
-                \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\",
-                \"e2e-platforms": \""'"${E2E_PLATFORMS}"'"\"
-              }
-            }"
+          gh workflow --repo $REMOTE_REPO \
+            run testing.yml \
+              --ref "main" \
+              --raw-field "ci_job_name=neon-cloud-e2e" \
+              --raw-field "commit_hash=$COMMIT_SHA" \
+              --raw-field "remote_repo=${{ github.repository }}" \
+              --raw-field "storage_image_tag=${TAG}" \
+              --raw-field "compute_image_tag=${TAG}" \
+              --raw-field "concurrency_group=${{ env.E2E_CONCURRENCY_GROUP }}" \
+              --raw-field "e2e-platforms=${E2E_PLATFORMS}"
