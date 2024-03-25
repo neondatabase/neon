@@ -1876,6 +1876,7 @@ impl StorageTimeMetrics {
 
 #[derive(Debug)]
 pub(crate) struct TimelineMetrics {
+    registered: AtomicBool,
     tenant_id: String,
     shard_id: String,
     timeline_id: String,
@@ -1979,6 +1980,7 @@ impl TimelineMetrics {
             .build(&tenant_id, &shard_id, &timeline_id);
 
         TimelineMetrics {
+            registered: AtomicBool::new(true),
             tenant_id,
             shard_id,
             timeline_id,
@@ -2018,6 +2020,9 @@ impl TimelineMetrics {
         self.resident_physical_size_gauge.get()
     }
 
+    /// For use when callers would like to de-register statistics before dropping the object, for example
+    /// because the Timeline might outlive its logical lifetime due to Arc references, and we don't want
+    /// to risk two timelines with the same ID fighting for the metrics.
     pub(crate) fn shutdown(&self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
@@ -2070,6 +2075,19 @@ impl TimelineMetrics {
                 timeline_id,
             ]);
         }
+
+        self.registered
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Drop for TimelineMetrics {
+    fn drop(&mut self) {
+        // We usually expect shutdown() to have been called explicitly, but to avoid a fragile dependency on
+        // well behaved callers, also de-register on drop.
+        if self.registered.load(std::sync::atomic::Ordering::Relaxed) {
+            self.shutdown();
+        }
     }
 }
 
@@ -2087,6 +2105,7 @@ use futures::Future;
 use pin_project_lite::pin_project;
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
