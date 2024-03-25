@@ -79,6 +79,7 @@ pub struct SafeKeeperConf {
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
     pub current_thread_runtime: bool,
     pub walsenders_keep_horizon: bool,
+    pub disable_periodic_broker_push: bool,
 }
 
 impl SafeKeeperConf {
@@ -123,6 +124,7 @@ impl SafeKeeperConf {
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,
             walsenders_keep_horizon: false,
+            disable_periodic_broker_push: false,
         }
     }
 }
