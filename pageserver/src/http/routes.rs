@@ -619,6 +619,7 @@ async fn timeline_preserve_initdb_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
     // Part of the process for disaster recovery from safekeeper-stored WAL:
     // If we don't recover into a new timeline but want to keep the timeline ID,
@@ -626,7 +627,9 @@ async fn timeline_preserve_initdb_handler(
     // location where timeline recreation cand find it.
 
     async {
-        let tenant = mgr::get_tenant(tenant_shard_id, false)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -999,9 +1002,12 @@ async fn tenant_status(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
     let tenant_info = async {
-        let tenant = mgr::get_tenant(tenant_shard_id, false)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
@@ -1074,9 +1080,12 @@ async fn tenant_size_handler(
     let inputs_only: Option<bool> = parse_query_param(&request, "inputs_only")?;
     let retention_period: Option<u64> = parse_query_param(&request, "retention_period")?;
     let headers = request.headers();
+    let state = get_state(&request);
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
 
     if !tenant_shard_id.is_zero() {
         return Err(ApiError::BadRequest(anyhow!(
@@ -1373,8 +1382,11 @@ async fn get_tenant_config_handler(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
-    let tenant = mgr::get_tenant(tenant_shard_id, false)?;
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
 
     let response = HashMap::from([
         (
@@ -1634,10 +1646,12 @@ async fn handle_tenant_break(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&r, "tenant_shard_id")?;
 
-    let tenant = crate::tenant::mgr::get_tenant(tenant_shard_id, true)
-        .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
-
-    tenant.set_broken("broken from test".to_owned()).await;
+    let state = get_state(&r);
+    state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?
+        .set_broken("broken from test".to_owned())
+        .await;
 
     json_response(StatusCode::OK, ())
 }
