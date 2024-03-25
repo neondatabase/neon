@@ -384,12 +384,13 @@ async fn main() -> anyhow::Result<()> {
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
+        // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
+        client_tasks.spawn(usage_metrics::task_backup(
+            &config.backup_metric_collection,
+            cancellation_token,
+        ));
     }
-    client_tasks.spawn(usage_metrics::task_backup(
-        &config.backup_metric_collection,
-        cancellation_token,
-    ));
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
