@@ -387,7 +387,7 @@ async fn main() -> anyhow::Result<()> {
         // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
         client_tasks.spawn(usage_metrics::task_backup(
-            &config.backup_metric_collection,
+            &metrics_config.backup_metric_collection_config,
             cancellation_token,
         ));
     }
@@ -446,6 +446,13 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     if args.allow_self_signed_compute {
         warn!("allowing self-signed compute certificates");
     }
+    let backup_metric_collection_config = config::MetricBackupCollectionConfig {
+        interval: args.metric_backup_collection_interval,
+        remote_storage_config: remote_storage_from_toml(
+            &args.metric_backup_collection_remote_storage,
+        )?,
+        chunk_size: args.metric_backup_collection_chunk_size,
+    };
 
     let metric_collection = match (
         &args.metric_collection_endpoint,
@@ -454,19 +461,13 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         (Some(endpoint), Some(interval)) => Some(config::MetricCollectionConfig {
             endpoint: endpoint.parse()?,
             interval: humantime::parse_duration(interval)?,
+            backup_metric_collection_config,
         }),
         (None, None) => None,
         _ => bail!(
             "either both or neither metric-collection-endpoint \
              and metric-collection-interval must be specified"
         ),
-    };
-    let backup_metric_collection = config::MetricBackupCollectionConfig {
-        interval: args.metric_backup_collection_interval,
-        remote_storage_config: remote_storage_from_toml(
-            &args.metric_backup_collection_remote_storage,
-        )?,
-        chunk_size: args.metric_backup_collection_chunk_size,
     };
     let rate_limiter_config = RateLimiterConfig {
         disable: args.disable_dynamic_rate_limiter,
@@ -557,7 +558,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
         aws_region: args.aws_region.clone(),
-        backup_metric_collection,
     }));
 
     Ok(config)
