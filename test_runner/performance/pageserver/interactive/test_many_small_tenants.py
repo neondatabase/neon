@@ -29,7 +29,7 @@ def test_many_small_tenants(
     pg_bin: PgBin,
 ):
 
-    page_cache_size = int(40 * (1024**3) / 8192)
+    page_cache_size = int(70 * (1024**3) / 8192)
     max_file_descriptors = 500000
     neon_env_builder.pageserver_config_override = (
         f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
