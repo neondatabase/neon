@@ -365,14 +365,15 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     ws_cur = ws_branch.connect().cursor()
     ws_cur.execute("select pg_create_logical_replication_slot('my_slot', 'pgoutput')")
 
+
 def test_replication_shutdown(neon_simple_env: NeonEnv):
     # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
     env = neon_simple_env
-    env.neon_cli.create_branch("test_neon_superuser_publisher", "empty")
-    pub = env.endpoints.create("test_neon_superuser_publisher")
+    env.neon_cli.create_branch("test_replication_shutdown_publisher", "empty")
+    pub = env.endpoints.create("test_replication_shutdown_publisher")
 
-    env.neon_cli.create_branch("test_neon_superuser_subscriber")
-    sub = env.endpoints.create("test_neon_superuser_subscriber")
+    env.neon_cli.create_branch("test_replication_shutdown_subscriber")
+    sub = env.endpoints.create("test_replication_shutdown_subscriber")
 
     pub.respec(skip_pg_catalog_updates=False)
     pub.start()
@@ -382,6 +383,31 @@ def test_replication_shutdown(neon_simple_env: NeonEnv):
 
     pub.wait_for_migrations()
     sub.wait_for_migrations()
+
+    with pub.cursor() as cur:
+        cur.execute(
+            "CREATE ROLE mr_whiskers WITH PASSWORD 'cat' LOGIN INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser"
+        )
+        cur.execute("CREATE DATABASE neondb WITH OWNER mr_whiskers")
+        cur.execute("GRANT ALL PRIVILEGES ON DATABASE neondb TO neon_superuser")
+
+        # If we don't do this, creating the subscription will fail later on PG16
+        pub.edit_hba(["host all mr_whiskers 0.0.0.0/0 md5"])
+
+    with sub.cursor() as cur:
+        cur.execute(
+            "CREATE ROLE mr_whiskers WITH PASSWORD 'cat' LOGIN INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser"
+        )
+        cur.execute("CREATE DATABASE neondb WITH OWNER mr_whiskers")
+        cur.execute("GRANT ALL PRIVILEGES ON DATABASE neondb TO neon_superuser")
+
+    with pub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as cur:
+        cur.execute("CREATE PUBLICATION pub FOR ALL TABLES")
+        cur.execute("CREATE TABLE t (a int)")
+        cur.execute("INSERT INTO t VALUES (10), (20)")
+        cur.execute("SELECT * from t")
+        res = cur.fetchall()
+        assert [r[0] for r in res] == [10, 20]
 
     with sub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as cur:
         cur.execute("CREATE TABLE t (a int)")
