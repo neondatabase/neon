@@ -257,8 +257,6 @@ impl From<GetTenantError> for ApiError {
                 // Because we must be careful to never return 404 for a tenant if it does
                 // in fact exist locally. If we did, the caller could draw the conclusion
                 // that it can attach the tenant to another PS and we'd be in split-brain.
-                //
-                // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
                 ApiError::ResourceUnavailable("Tenant not yet active".into())
             }
             GetTenantError::MapState(e) => ApiError::ResourceUnavailable(format!("{e}").into()),
@@ -976,10 +974,11 @@ async fn tenant_list_handler(
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
+    let state = get_state(&request);
 
-    let response_data = mgr::list_tenants()
-        .instrument(info_span!("tenant_list"))
-        .await
+    let response_data = state
+        .tenant_manager
+        .list_tenants()
         .map_err(|_| {
             ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
         })?

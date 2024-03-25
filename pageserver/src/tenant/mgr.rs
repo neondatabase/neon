@@ -1957,6 +1957,25 @@ impl TenantManager {
         tenant.set_new_tenant_config(new_tenant_conf);
         Ok(())
     }
+
+    pub(crate) fn list_tenants(
+        &self,
+    ) -> Result<Vec<(TenantShardId, TenantState, Generation)>, TenantMapListError> {
+        let tenants = TENANTS.read().unwrap();
+        let m = match &*tenants {
+            TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
+        };
+        Ok(m.iter()
+            .filter_map(|(id, tenant)| match tenant {
+                TenantSlot::Attached(tenant) => {
+                    Some((*id, tenant.current_state(), tenant.generation()))
+                }
+                TenantSlot::Secondary(_) => None,
+                TenantSlot::InProgress(_) => None,
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2253,27 +2272,6 @@ async fn ignore_tenant0(
 pub(crate) enum TenantMapListError {
     #[error("tenant map is still initiailizing")]
     Initializing,
-}
-
-///
-/// Get list of tenants, for the mgmt API
-///
-pub(crate) async fn list_tenants(
-) -> Result<Vec<(TenantShardId, TenantState, Generation)>, TenantMapListError> {
-    let tenants = TENANTS.read().unwrap();
-    let m = match &*tenants {
-        TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
-        TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
-    };
-    Ok(m.iter()
-        .filter_map(|(id, tenant)| match tenant {
-            TenantSlot::Attached(tenant) => {
-                Some((*id, tenant.current_state(), tenant.generation()))
-            }
-            TenantSlot::Secondary(_) => None,
-            TenantSlot::InProgress(_) => None,
-        })
-        .collect())
 }
 
 #[derive(Debug, thiserror::Error)]
