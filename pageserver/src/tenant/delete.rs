@@ -111,6 +111,7 @@ async fn create_local_delete_mark(
     let _ = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&marker_path)
         .with_context(|| format!("could not create delete marker file {marker_path:?}"))?;
 
@@ -481,7 +482,6 @@ impl DeleteTenantFlow {
         let tenant_shard_id = tenant.tenant_shard_id;
 
         task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
             Some(tenant_shard_id),
             None,

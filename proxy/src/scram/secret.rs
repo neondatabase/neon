@@ -1,5 +1,7 @@
 //! Tools for SCRAM server secret management.
 
+use subtle::{Choice, ConstantTimeEq};
+
 use super::base64_decode_array;
 use super::key::ScramKey;
 
@@ -40,6 +42,11 @@ impl ServerSecret {
         Some(secret)
     }
 
+    pub fn is_password_invalid(&self, client_key: &ScramKey) -> Choice {
+        // constant time to not leak partial key match
+        client_key.sha256().ct_ne(&self.stored_key) | Choice::from(self.doomed as u8)
+    }
+
     /// To avoid revealing information to an attacker, we use a
     /// mocked server secret even if the user doesn't exist.
     /// See `auth-scram.c : mock_scram_secret` for details.
@@ -59,10 +66,8 @@ impl ServerSecret {
     /// Build a new server secret from the prerequisites.
     /// XXX: We only use this function in tests.
     #[cfg(test)]
-    pub fn build(password: &str) -> Option<Self> {
-        Self::parse(&postgres_protocol::password::scram_sha_256(
-            password.as_bytes(),
-        ))
+    pub async fn build(password: &str) -> Option<Self> {
+        Self::parse(&postgres_protocol::password::scram_sha_256(password.as_bytes()).await)
     }
 }
 

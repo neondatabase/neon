@@ -32,6 +32,29 @@ compute_ctl -D /var/db/postgres/compute \
             -b /usr/local/bin/postgres
 ```
 
+## State Diagram
+
+Computes can be in various states. Below is a diagram that details how a
+compute moves between states.
+
+```mermaid
+%% https://mermaid.js.org/syntax/stateDiagram.html
+stateDiagram-v2
+  [*] --> Empty : Compute spawned
+  Empty --> ConfigurationPending : Waiting for compute spec
+  ConfigurationPending --> Configuration : Received compute spec
+  Configuration --> Failed : Failed to configure the compute
+  Configuration --> Running : Compute has been configured
+  Empty --> Init : Compute spec is immediately available
+  Empty --> TerminationPending : Requested termination
+  Init --> Failed : Failed to start Postgres
+  Init --> Running : Started Postgres
+  Running --> TerminationPending : Requested termination
+  TerminationPending --> Terminated : Terminated compute
+  Failed --> [*] : Compute exited
+  Terminated --> [*] : Compute exited
+```
+
 ## Tests
 
 Cargo formatter:

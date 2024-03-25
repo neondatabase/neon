@@ -11,7 +11,6 @@ use std::{
 use anyhow::{anyhow, Context};
 use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
-use fail::fail_point;
 use futures::StreamExt;
 use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::WAL_SEGMENT_SIZE;
@@ -27,9 +26,7 @@ use super::TaskStateUpdate;
 use crate::{
     context::RequestContext,
     metrics::{LIVE_CONNECTIONS_COUNT, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
-    task_mgr,
-    task_mgr::TaskKind,
-    task_mgr::WALRECEIVER_RUNTIME,
+    task_mgr::{self, TaskKind},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
@@ -163,7 +160,6 @@ pub(super) async fn handle_walreceiver_connection(
     );
     let connection_cancellation = cancellation.clone();
     task_mgr::spawn(
-        WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverConnectionPoller,
         Some(timeline.tenant_shard_id),
         Some(timeline.timeline_id),
@@ -329,7 +325,17 @@ pub(super) async fn handle_walreceiver_connection(
                             filtered_records += 1;
                         }
 
-                        fail_point!("walreceiver-after-ingest");
+                        // don't simply use pausable_failpoint here because its spawn_blocking slows
+                        // slows down the tests too much.
+                        fail::fail_point!("walreceiver-after-ingest-blocking");
+                        if let Err(()) = (|| {
+                            fail::fail_point!("walreceiver-after-ingest-pause-activate", |_| {
+                                Err(())
+                            });
+                            Ok(())
+                        })() {
+                            pausable_failpoint!("walreceiver-after-ingest-pause");
+                        }
 
                         last_rec_lsn = lsn;
 
@@ -448,6 +454,7 @@ pub(super) async fn handle_walreceiver_connection(
                 disk_consistent_lsn,
                 remote_consistent_lsn,
                 replytime: ts,
+                shard_number: timeline.tenant_shard_id.shard_number.0 as u32,
             };
 
             debug!("neon_status_update {status_update:?}");

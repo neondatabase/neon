@@ -1,12 +1,13 @@
 //! Periodically collect consumption metrics for all active tenants
 //! and push them to a HTTP endpoint.
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::task_mgr::{self, TaskKind};
 use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::{mgr, LogicalSizeCalculationCause, PageReconstructError, Tenant};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
+use remote_storage::{GenericRemoteStorage, RemoteStorageConfig};
 use reqwest::Url;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,6 +42,7 @@ type Cache = HashMap<MetricsKey, (EventType, u64)>;
 #[allow(clippy::too_many_arguments)]
 pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
+    metric_collection_bucket: &Option<RemoteStorageConfig>,
     metric_collection_interval: Duration,
     _cached_metric_collection_interval: Duration,
     synthetic_size_calculation_interval: Duration,
@@ -59,7 +61,6 @@ pub async fn collect_metrics(
     let worker_ctx =
         ctx.detached_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);
     task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
         TaskKind::CalculateSyntheticSize,
         None,
         None,
@@ -94,6 +95,20 @@ pub async fn collect_metrics(
         .build()
         .expect("Failed to create http client with timeout");
 
+    let bucket_client = if let Some(bucket_config) = metric_collection_bucket {
+        match GenericRemoteStorage::from_config(bucket_config) {
+            Ok(client) => Some(client),
+            Err(e) => {
+                // Non-fatal error: if we were given an invalid config, we will proceed
+                // with sending metrics over the network, but not to S3.
+                tracing::warn!("Invalid configuration for metric_collection_bucket: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let node_id = node_id.to_string();
 
     loop {
@@ -118,10 +133,18 @@ pub async fn collect_metrics(
                     tracing::error!("failed to persist metrics to {path:?}: {e:#}");
                 }
             }
+
+            if let Some(bucket_client) = &bucket_client {
+                let res =
+                    upload::upload_metrics_bucket(bucket_client, &cancel, &node_id, &metrics).await;
+                if let Err(e) = res {
+                    tracing::error!("failed to upload to S3: {e:#}");
+                }
+            }
         };
 
         let upload = async {
-            let res = upload::upload_metrics(
+            let res = upload::upload_metrics_http(
                 &client,
                 metric_collection_endpoint,
                 &cancel,
@@ -132,7 +155,7 @@ pub async fn collect_metrics(
             .await;
             if let Err(e) = res {
                 // serialization error which should never happen
-                tracing::error!("failed to upload due to {e:#}");
+                tracing::error!("failed to upload via HTTP due to {e:#}");
             }
         };
 

@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId};
 
+use crate::metrics::{
+    DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
+};
 use crate::node::Node;
 
 /// ## What do we store?
@@ -75,6 +78,25 @@ pub(crate) enum DatabaseError {
     Logical(String),
 }
 
+#[derive(measured::FixedCardinalityLabel, Clone)]
+pub(crate) enum DatabaseOperation {
+    InsertNode,
+    UpdateNode,
+    DeleteNode,
+    ListNodes,
+    BeginShardSplit,
+    CompleteShardSplit,
+    AbortShardSplit,
+    Detach,
+    ReAttach,
+    IncrementGeneration,
+    ListTenantShards,
+    InsertTenantShards,
+    UpdateTenantShard,
+    DeleteTenant,
+    UpdateTenantConfig,
+}
+
 #[must_use]
 pub(crate) enum AbortShardSplitStatus {
     /// We aborted the split in the database by reverting to the parent shards
@@ -115,6 +137,34 @@ impl Persistence {
         }
     }
 
+    /// Wraps `with_conn` in order to collect latency and error metrics
+    async fn with_measured_conn<F, R>(&self, op: DatabaseOperation, func: F) -> DatabaseResult<R>
+    where
+        F: Fn(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let latency = &METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_database_query_latency;
+        let _timer = latency.start_timer(DatabaseQueryLatencyLabelGroup {
+            operation: op.clone(),
+        });
+
+        let res = self.with_conn(func).await;
+
+        if let Err(err) = &res {
+            let error_counter = &METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_database_query_error;
+            error_counter.inc(DatabaseQueryErrorLabelGroup {
+                error_type: err.error_label(),
+                operation: op,
+            })
+        }
+
+        res
+    }
+
     /// Call the provided function in a tokio blocking thread, with a Diesel database connection.
     async fn with_conn<F, R>(&self, func: F) -> DatabaseResult<R>
     where
@@ -130,21 +180,27 @@ impl Persistence {
     /// When a node is first registered, persist it before using it for anything
     pub(crate) async fn insert_node(&self, node: &Node) -> DatabaseResult<()> {
         let np = node.to_persistent();
-        self.with_conn(move |conn| -> DatabaseResult<()> {
-            diesel::insert_into(crate::schema::nodes::table)
-                .values(&np)
-                .execute(conn)?;
-            Ok(())
-        })
+        self.with_measured_conn(
+            DatabaseOperation::InsertNode,
+            move |conn| -> DatabaseResult<()> {
+                diesel::insert_into(crate::schema::nodes::table)
+                    .values(&np)
+                    .execute(conn)?;
+                Ok(())
+            },
+        )
         .await
     }
 
     /// At startup, populate the list of nodes which our shards may be placed on
     pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
         let nodes: Vec<NodePersistence> = self
-            .with_conn(move |conn| -> DatabaseResult<_> {
-                Ok(crate::schema::nodes::table.load::<NodePersistence>(conn)?)
-            })
+            .with_measured_conn(
+                DatabaseOperation::ListNodes,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(crate::schema::nodes::table.load::<NodePersistence>(conn)?)
+                },
+            )
             .await?;
 
         tracing::info!("list_nodes: loaded {} nodes", nodes.len());
@@ -159,7 +215,7 @@ impl Persistence {
     ) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
         let updated = self
-            .with_conn(move |conn| {
+            .with_measured_conn(DatabaseOperation::UpdateNode, move |conn| {
                 let updated = diesel::update(nodes)
                     .filter(node_id.eq(input_node_id.0 as i64))
                     .set((scheduling_policy.eq(String::from(input_scheduling)),))
@@ -181,9 +237,12 @@ impl Persistence {
     /// be enriched at runtime with state discovered on pageservers.
     pub(crate) async fn list_tenant_shards(&self) -> DatabaseResult<Vec<TenantShardPersistence>> {
         let loaded = self
-            .with_conn(move |conn| -> DatabaseResult<_> {
-                Ok(crate::schema::tenant_shards::table.load::<TenantShardPersistence>(conn)?)
-            })
+            .with_measured_conn(
+                DatabaseOperation::ListTenantShards,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(crate::schema::tenant_shards::table.load::<TenantShardPersistence>(conn)?)
+                },
+            )
             .await?;
 
         if loaded.is_empty() {
@@ -211,15 +270,10 @@ impl Persistence {
 
         let mut decoded = serde_json::from_slice::<JsonPersistence>(&bytes)
             .map_err(|e| DatabaseError::Logical(format!("Deserialization error: {e}")))?;
-        for (tenant_id, tenant) in &mut decoded.tenants {
-            // Backward compat: an old attachments.json from before PR #6251, replace
-            // empty strings with proper defaults.
-            if tenant.tenant_id.is_empty() {
-                tenant.tenant_id = tenant_id.to_string();
-                tenant.config = serde_json::to_string(&TenantConfig::default())
-                    .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
-                tenant.placement_policy = serde_json::to_string(&PlacementPolicy::Single)
-                    .map_err(|e| DatabaseError::Logical(format!("Serialization error: {e}")))?;
+        for shard in decoded.tenants.values_mut() {
+            if shard.placement_policy == "\"Single\"" {
+                // Backward compat for test data after PR https://github.com/neondatabase/neon/pull/7165
+                shard.placement_policy = "{\"Attached\":0}".to_string();
             }
         }
 
@@ -265,17 +319,20 @@ impl Persistence {
         shards: Vec<TenantShardPersistence>,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
-        self.with_conn(move |conn| -> DatabaseResult<()> {
-            conn.transaction(|conn| -> QueryResult<()> {
-                for tenant in &shards {
-                    diesel::insert_into(tenant_shards)
-                        .values(tenant)
-                        .execute(conn)?;
-                }
+        self.with_measured_conn(
+            DatabaseOperation::InsertTenantShards,
+            move |conn| -> DatabaseResult<()> {
+                conn.transaction(|conn| -> QueryResult<()> {
+                    for tenant in &shards {
+                        diesel::insert_into(tenant_shards)
+                            .values(tenant)
+                            .execute(conn)?;
+                    }
+                    Ok(())
+                })?;
                 Ok(())
-            })?;
-            Ok(())
-        })
+            },
+        )
         .await
     }
 
@@ -283,25 +340,31 @@ impl Persistence {
     /// the tenant from memory on this server.
     pub(crate) async fn delete_tenant(&self, del_tenant_id: TenantId) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
-        self.with_conn(move |conn| -> DatabaseResult<()> {
-            diesel::delete(tenant_shards)
-                .filter(tenant_id.eq(del_tenant_id.to_string()))
-                .execute(conn)?;
+        self.with_measured_conn(
+            DatabaseOperation::DeleteTenant,
+            move |conn| -> DatabaseResult<()> {
+                diesel::delete(tenant_shards)
+                    .filter(tenant_id.eq(del_tenant_id.to_string()))
+                    .execute(conn)?;
 
-            Ok(())
-        })
+                Ok(())
+            },
+        )
         .await
     }
 
     pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
-        self.with_conn(move |conn| -> DatabaseResult<()> {
-            diesel::delete(nodes)
-                .filter(node_id.eq(del_node_id.0 as i64))
-                .execute(conn)?;
+        self.with_measured_conn(
+            DatabaseOperation::DeleteNode,
+            move |conn| -> DatabaseResult<()> {
+                diesel::delete(nodes)
+                    .filter(node_id.eq(del_node_id.0 as i64))
+                    .execute(conn)?;
 
-            Ok(())
-        })
+                Ok(())
+            },
+        )
         .await
     }
 
@@ -315,7 +378,7 @@ impl Persistence {
     ) -> DatabaseResult<HashMap<TenantShardId, Generation>> {
         use crate::schema::tenant_shards::dsl::*;
         let updated = self
-            .with_conn(move |conn| {
+            .with_measured_conn(DatabaseOperation::ReAttach, move |conn| {
                 let rows_updated = diesel::update(tenant_shards)
                     .filter(generation_pageserver.eq(node_id.0 as i64))
                     .set(generation.eq(generation + 1))
@@ -365,7 +428,7 @@ impl Persistence {
     ) -> anyhow::Result<Generation> {
         use crate::schema::tenant_shards::dsl::*;
         let updated = self
-            .with_conn(move |conn| {
+            .with_measured_conn(DatabaseOperation::IncrementGeneration, move |conn| {
                 let updated = diesel::update(tenant_shards)
                     .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                     .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
@@ -409,7 +472,7 @@ impl Persistence {
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
 
-        self.with_conn(move |conn| {
+        self.with_measured_conn(DatabaseOperation::UpdateTenantShard, move |conn| {
             let query = diesel::update(tenant_shards)
                 .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                 .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
@@ -450,7 +513,7 @@ impl Persistence {
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
 
-        self.with_conn(move |conn| {
+        self.with_measured_conn(DatabaseOperation::UpdateTenantConfig, move |conn| {
             diesel::update(tenant_shards)
                 .filter(tenant_id.eq(input_tenant_id.to_string()))
                 .set((config.eq(serde_json::to_string(&input_config).unwrap()),))
@@ -465,7 +528,7 @@ impl Persistence {
 
     pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
         use crate::schema::tenant_shards::dsl::*;
-        self.with_conn(move |conn| {
+        self.with_measured_conn(DatabaseOperation::Detach, move |conn| {
             let updated = diesel::update(tenant_shards)
                 .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                 .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
@@ -495,7 +558,7 @@ impl Persistence {
         parent_to_children: Vec<(TenantShardId, Vec<TenantShardPersistence>)>,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
-        self.with_conn(move |conn| -> DatabaseResult<()> {
+        self.with_measured_conn(DatabaseOperation::BeginShardSplit, move |conn| -> DatabaseResult<()> {
             conn.transaction(|conn| -> DatabaseResult<()> {
                 // Mark parent shards as splitting
 
@@ -559,26 +622,29 @@ impl Persistence {
         old_shard_count: ShardCount,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
-        self.with_conn(move |conn| -> DatabaseResult<()> {
-            conn.transaction(|conn| -> QueryResult<()> {
-                // Drop parent shards
-                diesel::delete(tenant_shards)
-                    .filter(tenant_id.eq(split_tenant_id.to_string()))
-                    .filter(shard_count.eq(old_shard_count.literal() as i32))
-                    .execute(conn)?;
+        self.with_measured_conn(
+            DatabaseOperation::CompleteShardSplit,
+            move |conn| -> DatabaseResult<()> {
+                conn.transaction(|conn| -> QueryResult<()> {
+                    // Drop parent shards
+                    diesel::delete(tenant_shards)
+                        .filter(tenant_id.eq(split_tenant_id.to_string()))
+                        .filter(shard_count.eq(old_shard_count.literal() as i32))
+                        .execute(conn)?;
 
-                // Clear sharding flag
-                let updated = diesel::update(tenant_shards)
-                    .filter(tenant_id.eq(split_tenant_id.to_string()))
-                    .set((splitting.eq(0),))
-                    .execute(conn)?;
-                debug_assert!(updated > 0);
+                    // Clear sharding flag
+                    let updated = diesel::update(tenant_shards)
+                        .filter(tenant_id.eq(split_tenant_id.to_string()))
+                        .set((splitting.eq(0),))
+                        .execute(conn)?;
+                    debug_assert!(updated > 0);
+
+                    Ok(())
+                })?;
 
                 Ok(())
-            })?;
-
-            Ok(())
-        })
+            },
+        )
         .await
     }
 
@@ -590,40 +656,44 @@ impl Persistence {
         new_shard_count: ShardCount,
     ) -> DatabaseResult<AbortShardSplitStatus> {
         use crate::schema::tenant_shards::dsl::*;
-        self.with_conn(move |conn| -> DatabaseResult<AbortShardSplitStatus> {
-            let aborted = conn.transaction(|conn| -> DatabaseResult<AbortShardSplitStatus> {
-                // Clear the splitting state on parent shards
-                let updated = diesel::update(tenant_shards)
-                    .filter(tenant_id.eq(split_tenant_id.to_string()))
-                    .filter(shard_count.ne(new_shard_count.literal() as i32))
-                    .set((splitting.eq(0),))
-                    .execute(conn)?;
+        self.with_measured_conn(
+            DatabaseOperation::AbortShardSplit,
+            move |conn| -> DatabaseResult<AbortShardSplitStatus> {
+                let aborted =
+                    conn.transaction(|conn| -> DatabaseResult<AbortShardSplitStatus> {
+                        // Clear the splitting state on parent shards
+                        let updated = diesel::update(tenant_shards)
+                            .filter(tenant_id.eq(split_tenant_id.to_string()))
+                            .filter(shard_count.ne(new_shard_count.literal() as i32))
+                            .set((splitting.eq(0),))
+                            .execute(conn)?;
 
-                // Parent shards are already gone: we cannot abort.
-                if updated == 0 {
-                    return Ok(AbortShardSplitStatus::Complete);
-                }
+                        // Parent shards are already gone: we cannot abort.
+                        if updated == 0 {
+                            return Ok(AbortShardSplitStatus::Complete);
+                        }
 
-                // Sanity check: if parent shards were present, their cardinality should
-                // be less than the number of child shards.
-                if updated >= new_shard_count.count() as usize {
-                    return Err(DatabaseError::Logical(format!(
-                        "Unexpected parent shard count {updated} while aborting split to \
+                        // Sanity check: if parent shards were present, their cardinality should
+                        // be less than the number of child shards.
+                        if updated >= new_shard_count.count() as usize {
+                            return Err(DatabaseError::Logical(format!(
+                                "Unexpected parent shard count {updated} while aborting split to \
                             count {new_shard_count:?} on tenant {split_tenant_id}"
-                    )));
-                }
+                            )));
+                        }
 
-                // Erase child shards
-                diesel::delete(tenant_shards)
-                    .filter(tenant_id.eq(split_tenant_id.to_string()))
-                    .filter(shard_count.eq(new_shard_count.literal() as i32))
-                    .execute(conn)?;
+                        // Erase child shards
+                        diesel::delete(tenant_shards)
+                            .filter(tenant_id.eq(split_tenant_id.to_string()))
+                            .filter(shard_count.eq(new_shard_count.literal() as i32))
+                            .execute(conn)?;
 
-                Ok(AbortShardSplitStatus::Aborted)
-            })?;
+                        Ok(AbortShardSplitStatus::Aborted)
+                    })?;
 
-            Ok(aborted)
-        })
+                Ok(aborted)
+            },
+        )
         .await
     }
 }

@@ -6,7 +6,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use utils::id::NodeId;
 
-use crate::{models::ShardParameters, shard::TenantShardId};
+use crate::{
+    models::{ShardParameters, TenantConfig},
+    shard::{ShardStripeSize, TenantShardId},
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantCreateResponseShard {
@@ -55,6 +58,31 @@ pub struct TenantLocateResponseShard {
 pub struct TenantLocateResponse {
     pub shards: Vec<TenantLocateResponseShard>,
     pub shard_params: ShardParameters,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantDescribeResponse {
+    pub shards: Vec<TenantDescribeResponseShard>,
+    pub stripe_size: ShardStripeSize,
+    pub policy: PlacementPolicy,
+    pub config: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantDescribeResponseShard {
+    pub tenant_shard_id: TenantShardId,
+
+    pub node_attached: Option<NodeId>,
+    pub node_secondary: Vec<NodeId>,
+
+    pub last_error: String,
+
+    /// A task is currently running to reconcile this tenant's intent state with the state on pageservers
+    pub is_reconciling: bool,
+    /// This shard failed in sending a compute notification to the cloud control plane, and a retry is pending.
+    pub is_pending_compute_notification: bool,
+    /// A shard split is currently underway
+    pub is_splitting: bool,
 }
 
 /// Explicitly migrating a particular shard is a low level operation
@@ -181,11 +209,8 @@ impl From<NodeSchedulingPolicy> for String {
 /// to create secondary locations.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum PlacementPolicy {
-    /// Cheapest way to attach a tenant: just one pageserver, no secondary
-    Single,
-    /// Production-ready way to attach a tenant: one attached pageserver and
-    /// some number of secondaries.
-    Double(usize),
+    /// Normal live state: one attached pageserver and zero or more secondaries.
+    Attached(usize),
     /// Create one secondary mode locations. This is useful when onboarding
     /// a tenant, or for an idle tenant that we might want to bring online quickly.
     Secondary,
@@ -207,14 +232,14 @@ mod test {
     /// Check stability of PlacementPolicy's serialization
     #[test]
     fn placement_policy_encoding() -> anyhow::Result<()> {
-        let v = PlacementPolicy::Double(1);
+        let v = PlacementPolicy::Attached(1);
         let encoded = serde_json::to_string(&v)?;
-        assert_eq!(encoded, "{\"Double\":1}");
+        assert_eq!(encoded, "{\"Attached\":1}");
         assert_eq!(serde_json::from_str::<PlacementPolicy>(&encoded)?, v);
 
-        let v = PlacementPolicy::Single;
+        let v = PlacementPolicy::Detached;
         let encoded = serde_json::to_string(&v)?;
-        assert_eq!(encoded, "\"Single\"");
+        assert_eq!(encoded, "\"Detached\"");
         assert_eq!(serde_json::from_str::<PlacementPolicy>(&encoded)?, v);
         Ok(())
     }

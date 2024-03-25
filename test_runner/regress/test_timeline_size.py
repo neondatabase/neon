@@ -20,6 +20,7 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
@@ -684,6 +685,13 @@ def assert_physical_size_invariants(sizes: TimelinePhysicalSizeValues):
     # XXX would be nice to assert layer file physical storage utilization here as well, but we can only do that for LocalFS
 
 
+def wait_for_tenant_startup_completions(client: PageserverHttpClient, count: int):
+    def condition():
+        assert client.get_metric_value("pageserver_tenant_startup_complete_total") == count
+
+    wait_until(5, 1.0, condition)
+
+
 def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     """
     Tenants warmuping up opportunistically will wait for one another's logical size calculations to complete
@@ -767,10 +775,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     # That one that we successfully accessed is now Active
     expect_activated += 1
     assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
-    assert (
-        pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total")
-        == expect_activated - 1
-    )
+    wait_for_tenant_startup_completions(pageserver_http, count=expect_activated - 1)
 
     # The ones we didn't touch are still in Attaching
     assert (
@@ -790,10 +795,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         == n_tenants - expect_activated
     )
 
-    assert (
-        pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total")
-        == expect_activated - 1
-    )
+    wait_for_tenant_startup_completions(pageserver_http, count=expect_activated - 1)
 
     # When we unblock logical size calculation, all tenants should proceed to active state via
     # the warmup route.
@@ -813,7 +815,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     assert (
         pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
     )
-    assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == n_tenants
+    wait_for_tenant_startup_completions(pageserver_http, count=n_tenants)
 
     # Check that tenant deletion/detach proactively wakes tenants: this is done separately to the main
     # body of the test because it will disrupt tenant counts
@@ -929,7 +931,7 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest=pause"
+            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest-pause-activate=return(1);walreceiver-after-ingest-pause=pause"
         }
     )
 
@@ -951,7 +953,11 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     assert details["current_logical_size_is_accurate"] is True
 
     client.configure_failpoints(
-        [("initial-size-calculation-permit-pause", "off"), ("walreceiver-after-ingest", "off")]
+        [
+            ("initial-size-calculation-permit-pause", "off"),
+            ("walreceiver-after-ingest-pause-activate", "off"),
+            ("walreceiver-after-ingest-pause", "off"),
+        ]
     )
 
 
@@ -981,7 +987,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
     # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest=pause"
+            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest-pause-activate=return(1);walreceiver-after-ingest-pause=pause"
         }
     )
 
@@ -1027,7 +1033,11 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
     other_is_attaching()
 
     client.configure_failpoints(
-        [("timeline-calculate-logical-size-pause", "off"), ("walreceiver-after-ingest", "off")]
+        [
+            ("timeline-calculate-logical-size-pause", "off"),
+            ("walreceiver-after-ingest-pause-activate", "off"),
+            ("walreceiver-after-ingest-pause", "off"),
+        ]
     )
 
 
@@ -1057,7 +1067,7 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
     # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest=pause"
+            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest-pause-activate=return(1);walreceiver-after-ingest-pause=pause"
         }
     )
 
@@ -1109,3 +1119,11 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
         delete_lazy_activating(lazy_tenant, env.pageserver, expect_attaching=True)
     else:
         raise RuntimeError(activation_method)
+
+    client.configure_failpoints(
+        [
+            ("timeline-calculate-logical-size-pause", "off"),
+            ("walreceiver-after-ingest-pause-activate", "off"),
+            ("walreceiver-after-ingest-pause", "off"),
+        ]
+    )

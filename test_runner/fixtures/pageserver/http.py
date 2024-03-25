@@ -626,6 +626,17 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         return res_json
 
+    def timeline_layer_map_info(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ):
+        log.info(f"Requesting layer map info of tenant {tenant_id}, timeline {timeline_id}")
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
     def timeline_checkpoint(
         self,
         tenant_id: Union[TenantId, TenantShardId],

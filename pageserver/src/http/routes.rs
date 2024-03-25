@@ -36,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
 use utils::failpoint_support::failpoints_handler;
+use utils::http::endpoint::prometheus_metrics_handler;
 use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
@@ -885,14 +886,16 @@ async fn tenant_detach_handler(
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(
-        conf,
-        tenant_shard_id,
-        detach_ignored.unwrap_or(false),
-        &state.deletion_queue_client,
-    )
-    .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
-    .await?;
+    state
+        .tenant_manager
+        .detach_tenant(
+            conf,
+            tenant_shard_id,
+            detach_ignored.unwrap_or(false),
+            &state.deletion_queue_client,
+        )
+        .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
+        .await?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1403,7 +1406,9 @@ async fn update_tenant_config_handler(
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let state = get_state(&request);
-    mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
+    state
+        .tenant_manager
+        .set_new_tenant_config(tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", %tenant_id))
         .await?;
 
@@ -1428,13 +1433,14 @@ async fn put_tenant_location_config_handler(
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
     if let LocationConfigMode::Detached = request_data.config.mode {
-        if let Err(e) =
-            mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
-                .instrument(info_span!("tenant_detach",
-                    tenant_id = %tenant_shard_id.tenant_id,
-                    shard_id = %tenant_shard_id.shard_slug()
-                ))
-                .await
+        if let Err(e) = state
+            .tenant_manager
+            .detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
+            .instrument(info_span!("tenant_detach",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug()
+            ))
+            .await
         {
             match e {
                 TenantStateError::SlotError(TenantSlotError::NotFound(_)) => {
@@ -1648,8 +1654,7 @@ async fn timeline_gc_handler(
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let wait_task_done =
-        mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx).await?;
+    let wait_task_done = mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx)?;
     let gc_result = wait_task_done
         .await
         .context("wait for gc task")
@@ -2262,6 +2267,7 @@ pub fn make_router(
 
     Ok(router
         .data(state)
+        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         .get("/v1/status", |r| api_handler(r, status_handler))
         .put("/v1/failpoints", |r| {
             testing_api_handler("manage failpoints", r, failpoints_handler)
