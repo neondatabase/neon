@@ -309,6 +309,8 @@ pub struct Timeline {
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
 
+    last_image_layer_creation_check_at: AtomicLsn,
+
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
 
@@ -1515,6 +1517,15 @@ impl Timeline {
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
     }
 
+    fn get_image_layer_creation_check_threshold(&self) -> u8 {
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        tenant_conf.image_layer_creation_check_threshold.unwrap_or(
+            self.conf
+                .default_tenant_conf
+                .image_layer_creation_check_threshold,
+        )
+    }
+
     pub(super) fn tenant_conf_updated(&self) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
@@ -1652,6 +1663,7 @@ impl Timeline {
                 },
                 partitioning: tokio::sync::Mutex::new((KeyPartitioning::new(), Lsn(0))),
                 repartition_threshold: 0,
+                last_image_layer_creation_check_at: AtomicLsn::new(0),
 
                 last_received_wal: Mutex::new(None),
                 rel_size_cache: RwLock::new(HashMap::new()),
@@ -1680,6 +1692,7 @@ impl Timeline {
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
+
             result
                 .metrics
                 .last_record_gauge
@@ -3377,6 +3390,24 @@ impl Timeline {
 
     // Is it time to create a new image layer for the given partition?
     async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
+        let last = self.last_image_layer_creation_check_at.load();
+        if lsn != Lsn(0) {
+            let distance = lsn
+                .checked_sub(last)
+                .expect("Attempt to compact with LSN going backwards");
+
+            let min_distance = self.get_image_layer_creation_check_threshold() as u64
+                * self.get_checkpoint_distance();
+
+            // Skip the expensive delta layer counting below if we've not ingested
+            // sufficient WAL since the last check.
+            if distance.0 < min_distance {
+                return false;
+            }
+        }
+
+        self.last_image_layer_creation_check_at.store(lsn);
+
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;

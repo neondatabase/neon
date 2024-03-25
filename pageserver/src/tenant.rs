@@ -3643,6 +3643,9 @@ pub(crate) mod harness {
                 heatmap_period: Some(tenant_conf.heatmap_period),
                 lazy_slru_download: Some(tenant_conf.lazy_slru_download),
                 timeline_get_throttle: Some(tenant_conf.timeline_get_throttle),
+                image_layer_creation_check_threshold: Some(
+                    tenant_conf.image_layer_creation_check_threshold,
+                ),
             }
         }
     }
