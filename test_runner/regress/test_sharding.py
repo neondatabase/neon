@@ -874,11 +874,17 @@ def test_sharding_split_failures(
         workload.validate()
 
     if failure.expect_available():
-        # Even though the split failed partway through, this should not have interrupted
-        # clients.  Disable waiting for pageservers in the workload helper, because our
-        # failpoints may prevent API access.
-        # This only applies for failure modes that leave pageserver page_service API available.
-        workload.churn_rows(10, upload=False, ingest=False)
+        # Even though the split failed partway through, this should not leave the tenant in
+        # an unavailable state.
+        # - Disable waiting for pageservers in the workload helper, because our
+        #   failpoints may prevent API access. This only applies for failure modes that
+        #   leave pageserver page_service API available.
+        # - This is a wait_until because clients may see transient errors in some split error cases,
+        #   e.g. while waiting for a storage controller to re-attach a parent shard if we failed
+        #   inside the pageserver and the storage controller responds by detaching children and attaching
+        #   parents concurrently (https://github.com/neondatabase/neon/issues/7148)
+        wait_until(10, 1, lambda: workload.churn_rows(10, upload=False, ingest=False))  # type: ignore
+
         workload.validate()
 
     if failure.fails_forward(env):
