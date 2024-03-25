@@ -195,8 +195,8 @@ struct ProxyCliArgs {
     #[clap(long, default_value = "{}")]
     metric_backup_collection_remote_storage: String,
     /// chunk size for backup metric collection
-    /// Size of each event is no more than 400 bytes, so 2**18 is about 12.5MB.
-    #[clap(long, default_value = "262144")]
+    /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
+    #[clap(long, default_value = "4194304")]
     metric_backup_collection_chunk_size: usize,
 }
 
