@@ -54,6 +54,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -64,7 +65,6 @@ use crate::{
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
-use crate::{deletion_queue::DeletionQueueClient, tenant::remote_timeline_client::StopError};
 use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
@@ -1241,11 +1241,7 @@ impl Timeline {
                     // what is problematic is the shutting down of RemoteTimelineClient, because
                     // obviously it does not make sense to stop while we wait for it, but what
                     // about corner cases like s3 suddenly hanging up?
-                    if let Err(e) = client.shutdown().await {
-                        // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
-                        // we have some extra WAL replay to do next time the timeline starts.
-                        warn!("failed to flush to remote storage: {e:#}");
-                    }
+                    client.shutdown().await;
                 }
             }
             Err(e) => {
@@ -1282,12 +1278,7 @@ impl Timeline {
         // Shut down remote timeline client: this gracefully moves its metadata into its Stopping state in
         // case our caller wants to use that for a deletion
         if let Some(remote_client) = self.remote_client.as_ref() {
-            match remote_client.stop() {
-                Ok(()) => {}
-                Err(StopError::QueueUninitialized) => {
-                    // Shutting down during initialization is legal
-                }
-            }
+            remote_client.stop();
         }
 
         tracing::debug!("Waiting for tasks...");

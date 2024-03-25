@@ -217,7 +217,7 @@ use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::download::download_retry;
 use crate::tenant::storage_layer::AsLayerDesc;
-use crate::tenant::upload_queue::Delete;
+use crate::tenant::upload_queue::{Delete, UploadQueueStoppedDeletable};
 use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::{
     config::PageServerConf,
@@ -263,15 +263,6 @@ pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
-}
-
-/// Errors that can arise when calling [`RemoteTimelineClient::stop`].
-#[derive(Debug, thiserror::Error)]
-pub enum StopError {
-    /// Returned if the upload queue was never initialized.
-    /// See [`RemoteTimelineClient::init_upload_queue`] and [`RemoteTimelineClient::init_upload_queue_for_empty_remote`].
-    #[error("queue is not initialized")]
-    QueueUninitialized,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -390,15 +381,10 @@ impl RemoteTimelineClient {
             "bug: it is responsibility of the caller to provide index part from MaybeDeletedIndexPart::Deleted"
         ))?;
 
-        {
-            let mut upload_queue = self.upload_queue.lock().unwrap();
-            upload_queue.initialize_with_current_remote_index_part(index_part)?;
-            self.update_remote_physical_size_gauge(Some(index_part));
-        }
-        // also locks upload queue, without dropping the guard above it will be a deadlock
-        self.stop().expect("initialized line above");
-
         let mut upload_queue = self.upload_queue.lock().unwrap();
+        upload_queue.initialize_with_current_remote_index_part(index_part)?;
+        self.update_remote_physical_size_gauge(Some(index_part));
+        self.stop_impl(&mut upload_queue);
 
         upload_queue
             .stopped_mut()
@@ -412,7 +398,8 @@ impl RemoteTimelineClient {
         match &mut *self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
             UploadQueue::Initialized(q) => q.get_last_remote_consistent_lsn_projected(),
-            UploadQueue::Stopped(q) => q
+            UploadQueue::Stopped(UploadQueueStopped::Uninitialized) => None,
+            UploadQueue::Stopped(UploadQueueStopped::Deletable(q)) => q
                 .upload_queue_for_deletion
                 .get_last_remote_consistent_lsn_projected(),
         }
@@ -422,7 +409,8 @@ impl RemoteTimelineClient {
         match &mut *self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
             UploadQueue::Initialized(q) => Some(q.get_last_remote_consistent_lsn_visible()),
-            UploadQueue::Stopped(q) => Some(
+            UploadQueue::Stopped(UploadQueueStopped::Uninitialized) => None,
+            UploadQueue::Stopped(UploadQueueStopped::Deletable(q)) => Some(
                 q.upload_queue_for_deletion
                     .get_last_remote_consistent_lsn_visible(),
             ),
@@ -889,7 +877,7 @@ impl RemoteTimelineClient {
     /// Wait for all previously scheduled operations to complete, and then stop.
     ///
     /// Not cancellation safe
-    pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), StopError> {
+    pub(crate) async fn shutdown(self: &Arc<Self>) {
         // On cancellation the queue is left in ackward state of refusing new operations but
         // proper stop is yet to be called. On cancel the original or some later task must call
         // `stop` or `shutdown`.
@@ -900,8 +888,12 @@ impl RemoteTimelineClient {
         let fut = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = match &mut *guard {
-                UploadQueue::Stopped(_) => return Ok(()),
-                UploadQueue::Uninitialized => return Err(StopError::QueueUninitialized),
+                UploadQueue::Stopped(_) => return,
+                UploadQueue::Uninitialized => {
+                    // transition into Stopped state
+                    self.stop_impl(&mut guard);
+                    return;
+                }
                 UploadQueue::Initialized(ref mut init) => init,
             };
 
@@ -933,7 +925,7 @@ impl RemoteTimelineClient {
             }
         }
 
-        self.stop()
+        self.stop();
     }
 
     /// Set the deleted_at field in the remote index file.
@@ -1314,12 +1306,7 @@ impl RemoteTimelineClient {
             // upload finishes or times out soon enough.
             if cancel.is_cancelled() {
                 info!("upload task cancelled by shutdown request");
-                match self.stop() {
-                    Ok(()) => {}
-                    Err(StopError::QueueUninitialized) => {
-                        unreachable!("we never launch an upload task if the queue is uninitialized, and once it is initialized, we never go back")
-                    }
-                }
+                self.stop();
                 return;
             }
 
@@ -1574,17 +1561,23 @@ impl RemoteTimelineClient {
     /// In-progress operations will still be running after this function returns.
     /// Use `task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id))`
     /// to wait for them to complete, after calling this function.
-    pub(crate) fn stop(&self) -> Result<(), StopError> {
+    pub(crate) fn stop(&self) {
         // Whichever *task* for this RemoteTimelineClient grabs the mutex first will transition the queue
         // into stopped state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
         // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
         let mut guard = self.upload_queue.lock().unwrap();
-        match &mut *guard {
-            UploadQueue::Uninitialized => Err(StopError::QueueUninitialized),
+        self.stop_impl(&mut guard);
+    }
+
+    fn stop_impl(&self, guard: &mut std::sync::MutexGuard<UploadQueue>) {
+        match &mut **guard {
+            UploadQueue::Uninitialized => {
+                info!("UploadQueue is in state Uninitialized, nothing to do");
+                **guard = UploadQueue::Stopped(UploadQueueStopped::Uninitialized);
+            }
             UploadQueue::Stopped(_) => {
                 // nothing to do
                 info!("another concurrent task already shut down the queue");
-                Ok(())
             }
             UploadQueue::Initialized(initialized) => {
                 info!("shutting down upload queue");
@@ -1617,11 +1610,13 @@ impl RemoteTimelineClient {
                     };
 
                     let upload_queue = std::mem::replace(
-                        &mut *guard,
-                        UploadQueue::Stopped(UploadQueueStopped {
-                            upload_queue_for_deletion,
-                            deleted_at: SetDeletedFlagProgress::NotRunning,
-                        }),
+                        &mut **guard,
+                        UploadQueue::Stopped(UploadQueueStopped::Deletable(
+                            UploadQueueStoppedDeletable {
+                                upload_queue_for_deletion,
+                                deleted_at: SetDeletedFlagProgress::NotRunning,
+                            },
+                        )),
                     );
                     if let UploadQueue::Initialized(qi) = upload_queue {
                         qi
@@ -1650,10 +1645,6 @@ impl RemoteTimelineClient {
                     // which is exactly what we want to happen.
                     drop(op);
                 }
-
-                // We're done.
-                drop(guard);
-                Ok(())
             }
         }
     }
