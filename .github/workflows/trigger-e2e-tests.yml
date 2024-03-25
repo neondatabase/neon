@@ -79,7 +79,38 @@ jobs:
             fi
           done
 
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Set e2e-platforms
+        id: e2e-platforms
+        env:
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          # Default set of plafforms to run e2e tests on
+          platforms='["docker", "k8s"]'
+
+          # If the PR changes vendor/ or pgxn/ directories, or Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
+          # If the workflow run is not a pull request, add k8s-neonvm to the list.
+          if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+            for f in $(git diff --name-only ${BASE_SHA} ${COMMIT_SHA}); do
+              if [[ $f == "vendor/"* ]] || [[ $f == "pgxn/*" ]] || [[ $f == "Dockerfile.compute-node" ]]; then
+                platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
+              fi
+            done
+          else
+            platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
+          fi
+
+          echo "e2e-platforms=${platforms}" | tee -a $GITHUB_OUTPUT
+
       - name: Set PR's status to pending and request a remote CI test
+        env:
+          E2E_PLATFORMS: ${{ steps.e2e-platforms.outputs.e2e-platforms }}
         run: |
           # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
           # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
@@ -114,6 +145,7 @@ jobs:
                 \"remote_repo\": \"${{ github.repository }}\",
                 \"storage_image_tag\": \"${TAG}\",
                 \"compute_image_tag\": \"${TAG}\",
-                \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\"
+                \"concurrency_group\": \"${{ env.E2E_CONCURRENCY_GROUP }}\",
+                \"e2e-platforms": \""'"${E2E_PLATFORMS}"'"\"
               }
             }"
