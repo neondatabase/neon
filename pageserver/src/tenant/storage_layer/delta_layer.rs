@@ -20,8 +20,8 @@
 //!    000000067F000032BE0000400000000020B6-000000067F000032BE0000400000000030B6__000000578C6B29-0000000057A50051
 //! ```
 //!
-//! Every delta file consists of three parts: "summary", "index", and
-//! "values". The summary is a fixed size header at the beginning of the file,
+//! Every delta file consists of three parts: "summary", "values", and
+//! "index". The summary is a fixed size header at the beginning of the file,
 //! and it contains basic information about the layer, and offsets to the other
 //! parts. The "index" is a B-tree, mapping from Key and LSN to an offset in the
 //! "values" part.  The actual page images and WAL records are stored in the
@@ -863,7 +863,7 @@ impl DeltaLayerInner {
                 .into(),
         );
 
-        let data_end_offset = self.index_start_blk as u64 * PAGE_SZ as u64;
+        let data_end_offset = self.index_start_offset();
 
         let reads = Self::plan_reads(
             keyspace,
@@ -1103,7 +1103,7 @@ impl DeltaLayerInner {
         if let Some(last) = all_keys.last_mut() {
             // Last key occupies all space till end of value storage,
             // which corresponds to beginning of the index
-            last.size = self.index_start_blk as u64 * PAGE_SZ as u64 - last.size;
+            last.size = self.index_start_offset() - last.size;
         }
         Ok(all_keys)
     }
@@ -1176,6 +1176,21 @@ impl DeltaLayerInner {
         }
 
         Ok(())
+    }
+
+    /// The file offset to the first block of index.
+    ///
+    /// The file structure is summary, values, and index. We often need this for the size of last blob.
+    fn index_start_offset(&self) -> u64 {
+        let offset = self.index_start_blk as u64 * PAGE_SZ as u64;
+        let bref = BlobRef(offset);
+        tracing::debug!(
+            index_start_blk = self.index_start_blk,
+            offset,
+            pos = bref.pos(),
+            "index_start_offset"
+        );
+        offset
     }
 }
 
