@@ -11,6 +11,7 @@ from fixtures.pageserver.utils import (
     assert_prefix_empty,
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
+    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
 from fixtures.types import TenantId, TimelineId
@@ -472,6 +473,10 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     log.info("Synchronizing after initial write...")
     ps_attached.http_client().tenant_heatmap_upload(tenant_id)
 
+    # Ensure that everything which appears in the heatmap is also present in S3: heatmap writers
+    # are allowed to upload heatmaps that reference layers which are only enqueued for upload
+    wait_for_upload_queue_empty(ps_attached.http_client(), tenant_id, timeline_id)
+
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
     assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
@@ -484,6 +489,11 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     workload.churn_rows(128, ps_attached.id)
 
     ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+
+    # Ensure that everything which appears in the heatmap is also present in S3: heatmap writers
+    # are allowed to upload heatmaps that reference layers which are only enqueued for upload
+    wait_for_upload_queue_empty(ps_attached.http_client(), tenant_id, timeline_id)
+
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
     assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
