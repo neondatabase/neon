@@ -6,6 +6,7 @@ use crate::{
     http, BranchId, EndpointId,
 };
 use anyhow::Context;
+use async_compression::tokio::write::GzipEncoder;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
@@ -23,6 +24,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, trace};
 use utils::backoff;
@@ -449,12 +451,14 @@ async fn upload_events_chunk(
             return Ok(());
         }
     };
-    let data: Bytes = serde_json::to_vec(&chunk)
-        .context("serialize metrics")?
-        .into();
+    let data = serde_json::to_vec(&chunk).context("serialize metrics")?;
+    let mut encoder = GzipEncoder::new(Vec::new());
+    encoder.write_all(&data).await.context("compress metrics")?;
+    encoder.shutdown().await.context("compress metrics")?;
+    let compressed_data: Bytes = encoder.get_ref().clone().into();
     backoff::retry(
         || async {
-            let stream = futures::stream::once(futures::future::ready(Ok(data.clone())));
+            let stream = futures::stream::once(futures::future::ready(Ok(compressed_data.clone())));
             storage
                 .upload(stream, data.len(), remote_path, None, cancel)
                 .await

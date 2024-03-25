@@ -4222,6 +4222,7 @@ name = "proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "async-trait",
  "aws-config",
  "aws-sdk-iam",
