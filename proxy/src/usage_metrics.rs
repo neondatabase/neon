@@ -567,9 +567,13 @@ mod tests {
 
         // counter is unregistered
         assert!(metrics.endpoints.is_empty());
+
         collect_metrics_backup_iteration(&metrics.backup_endpoints, &None, "foo", now, now, 1000)
             .await;
-        // backup counter is unregistered
+        assert!(!metrics.backup_endpoints.is_empty());
+        collect_metrics_backup_iteration(&metrics.backup_endpoints, &None, "foo", now, now, 1000)
+            .await;
+        // backup counter is unregistered after the second iteration
         assert!(metrics.backup_endpoints.is_empty());
     }
 }
