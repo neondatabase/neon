@@ -400,6 +400,7 @@ async fn collect_metrics_backup_iteration(
     let day = now.day();
     let hour = now.hour();
     let minute = now.minute();
+    let second = now.second();
     let cancel = CancellationToken::new();
 
     info!("starting collect_metrics_backup_iteration");
@@ -418,7 +419,7 @@ async fn collect_metrics_backup_iteration(
             real_now.second().into(),
             real_now.nanosecond(),
         ));
-        let path = format!("{year:04}/{month:02}/{day:02}/{hour:02}:{minute:02}/events-{id}.json");
+        let path = format!("year={year:04}/month={month:02}/day={day:02}/{hour:02}:{minute:02}:{second:02}Z_{id}.json.gz");
         let remote_path = match RemotePath::from_string(&path) {
             Ok(remote_path) => remote_path,
             Err(e) => {
