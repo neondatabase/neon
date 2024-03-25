@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use pq_proto::CancelKeyData;
 use redis::AsyncCommands;
 use tokio::sync::Mutex;
@@ -13,8 +12,8 @@ use super::{
     notifications::{CancelSession, Notification, PROXY_CHANNEL_NAME},
 };
 
-#[async_trait]
 pub trait CancellationPublisherMut: Send + Sync + 'static {
+    #[allow(async_fn_in_trait)]
     async fn try_publish(
         &mut self,
         cancel_key_data: CancelKeyData,
@@ -22,8 +21,8 @@ pub trait CancellationPublisherMut: Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 }
 
-#[async_trait]
 pub trait CancellationPublisher: Send + Sync + 'static {
+    #[allow(async_fn_in_trait)]
     async fn try_publish(
         &self,
         cancel_key_data: CancelKeyData,
@@ -31,10 +30,9 @@ pub trait CancellationPublisher: Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 }
 
-#[async_trait]
-impl CancellationPublisherMut for () {
+impl CancellationPublisher for () {
     async fn try_publish(
-        &mut self,
+        &self,
         _cancel_key_data: CancelKeyData,
         _session_id: Uuid,
     ) -> anyhow::Result<()> {
@@ -42,18 +40,16 @@ impl CancellationPublisherMut for () {
     }
 }
 
-#[async_trait]
-impl<P: CancellationPublisherMut> CancellationPublisher for P {
+impl<P: CancellationPublisher> CancellationPublisherMut for P {
     async fn try_publish(
-        &self,
-        _cancel_key_data: CancelKeyData,
-        _session_id: Uuid,
+        &mut self,
+        cancel_key_data: CancelKeyData,
+        session_id: Uuid,
     ) -> anyhow::Result<()> {
-        self.try_publish(_cancel_key_data, _session_id).await
+        <P as CancellationPublisher>::try_publish(self, cancel_key_data, session_id).await
     }
 }
 
-#[async_trait]
 impl<P: CancellationPublisher> CancellationPublisher for Option<P> {
     async fn try_publish(
         &self,
@@ -68,7 +64,6 @@ impl<P: CancellationPublisher> CancellationPublisher for Option<P> {
     }
 }
 
-#[async_trait]
 impl<P: CancellationPublisherMut> CancellationPublisher for Arc<Mutex<P>> {
     async fn try_publish(
         &self,
@@ -145,7 +140,6 @@ impl RedisPublisherClient {
     }
 }
 
-#[async_trait]
 impl CancellationPublisherMut for RedisPublisherClient {
     async fn try_publish(
         &mut self,

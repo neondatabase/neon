@@ -1,4 +1,6 @@
+import gzip
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +12,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
-from fixtures.remote_storage import RemoteStorageKind
+from fixtures.remote_storage import (
+    LocalFsStorage,
+    RemoteStorageKind,
+    remote_storage_to_toml_inline_table,
+)
 from fixtures.types import TenantId, TimelineId
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
@@ -40,6 +46,9 @@ def test_metric_collection(
         uploads.put((events, is_last == "true"))
         return Response(status=200)
 
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+    assert neon_env_builder.pageserver_remote_storage is not None
+
     # Require collecting metrics frequently, since we change
     # the timeline and want something to be logged about it.
     #
@@ -48,11 +57,10 @@ def test_metric_collection(
     neon_env_builder.pageserver_config_override = f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
+        metric_collection_bucket={remote_storage_to_toml_inline_table(neon_env_builder.pageserver_remote_storage)}
         cached_metric_collection_interval="0s"
         synthetic_size_calculation_interval="3s"
         """
-
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")
 
@@ -166,6 +174,20 @@ def test_metric_collection(
             v.ingest(events, is_last)
 
     httpserver.check()
+
+    # Check that at least one bucket output object is present, and that all
+    # can be decompressed and decoded.
+    bucket_dumps = {}
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+    for dirpath, _dirs, files in os.walk(env.pageserver_remote_storage.root):
+        for file in files:
+            file_path = os.path.join(dirpath, file)
+            log.info(file_path)
+            if file.endswith(".gz"):
+                bucket_dumps[file_path] = json.load(gzip.open(file_path))
+
+    assert len(bucket_dumps) >= 1
+    assert all("events" in data for data in bucket_dumps.values())
 
 
 def test_metric_collection_cleans_up_tempfile(
