@@ -1214,58 +1214,59 @@ impl Timeline {
     ///
     /// While we are flushing, we continue to accept read I/O.
     pub(crate) async fn flush_and_shutdown(&self) {
-        debug_assert_current_span_has_tenant_and_timeline_id();
-
-        // Stop ingesting data, so that we are not still writing to an InMemoryLayer while
-        // trying to flush
-        tracing::debug!("Waiting for WalReceiverManager...");
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_shard_id),
-            Some(self.timeline_id),
-        )
-        .await;
-
-        // Since we have shut down WAL ingest, we should not let anyone start waiting for the LSN to advance
-        self.last_record_lsn.shutdown();
-
-        // now all writers to InMemory layer are gone, do the final flush if requested
-        match self.freeze_and_flush().await {
-            Ok(_) => {
-                // drain the upload queue
-                if let Some(client) = self.remote_client.as_ref() {
-                    // if we did not wait for completion here, it might be our shutdown process
-                    // didn't wait for remote uploads to complete at all, as new tasks can forever
-                    // be spawned.
-                    //
-                    // what is problematic is the shutting down of RemoteTimelineClient, because
-                    // obviously it does not make sense to stop while we wait for it, but what
-                    // about corner cases like s3 suddenly hanging up?
-                    client.shutdown().await;
-                }
-            }
-            Err(e) => {
-                // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
-                // we have some extra WAL replay to do next time the timeline starts.
-                warn!("failed to freeze and flush: {e:#}");
-            }
-        }
-
-        self.shutdown().await;
+        self.shutdown_impl(true).await
     }
 
     /// Shut down immediately, without waiting for any open layers to flush to disk.  This is a subset of
     /// the graceful [`Timeline::flush_and_shutdown`] function.
     pub(crate) async fn shutdown(&self) {
+        self.shutdown_impl(false).await
+    }
+
+    async fn shutdown_impl(&self, try_freeze_and_flush: bool) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Signal any subscribers to our cancellation token to drop out
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
-        // Page request handlers might be waiting for LSN to advance: they do not respect Timeline::cancel
-        // while doing so.
+        // Stop ingesting data, so that we are not still writing to an InMemoryLayer while
+        // trying to flush
+        let walreceiver = self.walreceiver.lock().unwrap().take();
+        tracing::debug!(
+            is_some = walreceiver.is_some(),
+            "Waiting for WalReceiverManager..."
+        );
+        if let Some(walreceiver) = walreceiver {
+            walreceiver.stop().await;
+        }
+
+        // Since we have shut down WAL ingest, we should not let anyone start waiting for the LSN to advance
         self.last_record_lsn.shutdown();
+
+        if try_freeze_and_flush {
+            // now all writers to InMemory layer are gone, do the final flush if requested
+            match self.freeze_and_flush().await {
+                Ok(_) => {
+                    // drain the upload queue
+                    if let Some(client) = self.remote_client.as_ref() {
+                        // if we did not wait for completion here, it might be our shutdown process
+                        // didn't wait for remote uploads to complete at all, as new tasks can forever
+                        // be spawned.
+                        //
+                        // what is problematic is the shutting down of RemoteTimelineClient, because
+                        // obviously it does not make sense to stop while we wait for it, but what
+                        // about corner cases like s3 suddenly hanging up?
+                        client.shutdown().await;
+                    }
+                }
+                Err(e) => {
+                    // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
+                    // we have some extra WAL replay to do next time the timeline starts.
+                    warn!("failed to freeze and flush: {e:#}");
+                }
+            }
+        }
 
         // Shut down the layer flush task before the remote client, as one depends on the other
         task_mgr::shutdown_tasks(
