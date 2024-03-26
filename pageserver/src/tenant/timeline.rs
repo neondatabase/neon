@@ -54,6 +54,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -64,7 +65,6 @@ use crate::{
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
-use crate::{deletion_queue::DeletionQueueClient, tenant::remote_timeline_client::StopError};
 use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
@@ -1241,11 +1241,7 @@ impl Timeline {
                     // what is problematic is the shutting down of RemoteTimelineClient, because
                     // obviously it does not make sense to stop while we wait for it, but what
                     // about corner cases like s3 suddenly hanging up?
-                    if let Err(e) = client.shutdown().await {
-                        // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
-                        // we have some extra WAL replay to do next time the timeline starts.
-                        warn!("failed to flush to remote storage: {e:#}");
-                    }
+                    client.shutdown().await;
                 }
             }
             Err(e) => {
@@ -1282,12 +1278,7 @@ impl Timeline {
         // Shut down remote timeline client: this gracefully moves its metadata into its Stopping state in
         // case our caller wants to use that for a deletion
         if let Some(remote_client) = self.remote_client.as_ref() {
-            match remote_client.stop() {
-                Ok(()) => {}
-                Err(StopError::QueueUninitialized) => {
-                    // Shutting down during initialization is legal
-                }
-            }
+            remote_client.stop();
         }
 
         tracing::debug!("Waiting for tasks...");
@@ -1723,6 +1714,7 @@ impl Timeline {
             initdb_optimization_count: 0,
         };
         task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -2085,6 +2077,7 @@ impl Timeline {
             DownloadBehavior::Download,
         );
         task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -2262,6 +2255,7 @@ impl Timeline {
             DownloadBehavior::Download,
         );
         task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -3837,7 +3831,7 @@ impl Timeline {
         };
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
-        pausable_failpoint!("before-timeline-gc");
+        fail_point!("before-timeline-gc");
 
         // Is the timeline being deleted?
         if self.is_stopping() {
@@ -4148,6 +4142,7 @@ impl Timeline {
 
         let self_clone = Arc::clone(&self);
         let task_id = task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
@@ -4465,6 +4460,9 @@ impl<'a> TimelineWriter<'a> {
         let action = self.get_open_layer_action(last_record_lsn, 0);
         if action == OpenLayerAction::Roll {
             self.roll_layer(last_record_lsn).await?;
+        } else if let Some(writer_state) = &mut *self.write_guard {
+            // Periodic update of statistics
+            writer_state.open_layer.tick().await;
         }
 
         Ok(())

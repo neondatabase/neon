@@ -144,7 +144,6 @@ macro_rules! pausable_failpoint {
         }
     };
 }
-pub(crate) use pausable_failpoint;
 
 pub mod blob_io;
 pub mod block_io;
@@ -662,6 +661,7 @@ impl Tenant {
         let tenant_clone = Arc::clone(&tenant);
         let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
         task_mgr::spawn(
+            &tokio::runtime::Handle::current(),
             TaskKind::Attach,
             Some(tenant_shard_id),
             None,
@@ -2141,7 +2141,7 @@ impl Tenant {
 
             // Shut down the timeline's remote client: this means that the indices we write
             // for child shards will not be invalidated by the parent shard deleting layers.
-            tl_client.shutdown().await?;
+            tl_client.shutdown().await;
 
             // Download methods can still be used after shutdown, as they don't flow through the remote client's
             // queue.  In principal the RemoteTimelineClient could provide this without downloading it, but this

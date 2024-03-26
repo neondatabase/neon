@@ -28,7 +28,7 @@ use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 use crate::{
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::CollectKeySpaceError,
-    task_mgr::{self, TaskKind},
+    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
     },
@@ -56,6 +56,7 @@ impl Timeline {
         let self_clone = Arc::clone(self);
         let background_tasks_can_start = background_tasks_can_start.cloned();
         task_mgr::spawn(
+            BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),

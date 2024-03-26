@@ -1155,13 +1155,17 @@ class NeonEnv:
         After this method returns, there should be no child processes running.
         """
         self.endpoints.stop_all()
+
+        # Stop storage controller before pageservers: we don't want it to spuriously
+        # detect a pageserver "failure" during test teardown
+        self.storage_controller.stop(immediate=immediate)
+
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
         for pageserver in self.pageservers:
             if ps_assert_metric_no_errors:
                 pageserver.assert_no_metric_errors()
             pageserver.stop(immediate=immediate)
-        self.storage_controller.stop(immediate=immediate)
         self.broker.stop(immediate=immediate)
 
     @property

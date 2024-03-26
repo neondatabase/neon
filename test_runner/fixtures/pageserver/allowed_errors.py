@@ -96,6 +96,8 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     ".*Call to node.*management API.*failed.*ReceiveBody.*",
     # Many tests will start up with a node offline
     ".*startup_reconcile: Could not scan node.*",
+    # Tests run in dev mode
+    ".*Starting in dev mode.*",
 ]
 
 
