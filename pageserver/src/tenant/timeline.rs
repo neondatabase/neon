@@ -3610,6 +3610,121 @@ impl Timeline {
             _ = self.cancel.cancelled() => {}
         )
     }
+
+    /// Detach this timeline from its ancestor by copying all of ancestors layers as this
+    /// Timelines layers up to the ancestor_lsn.
+    ///
+    /// Requires a timeline that:
+    /// - has an ancestor to detach from
+    /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
+    /// a technical requirement
+    ///
+    /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
+    /// polled again until completion.
+    ///
+    /// During the operation all timelines sharing the data with this timeline will be reparented
+    /// from our ancestor to be branches from this timeline.
+    pub(crate) async fn detach_from_ancestor(&self) -> Result<(), DetachFromAncestorError> {
+        use DetachFromAncestorError::*;
+
+        let Some(ancestor) = self.ancestor_timeline.clone() else {
+            // FIXME: it would be great to check here if we've previously been detached, and now
+            // just report "OK"
+            return Err(NoAncestor);
+        };
+
+        if !self.ancestor_lsn.is_valid() {
+            return Err(NoAncestor);
+        }
+
+        let ancestor_lsn = self.ancestor_lsn;
+
+        if ancestor.ancestor_timeline.is_some() {
+            // non-technical requirement; we could flatten N ancestors just as easily
+            return Err(TooManyAncestors);
+        }
+
+        // shutdown order: if we would shut down from the roots, wouldn't it mean that we would
+        // only need a single cancellation token? perhaps anyways we need to be mindful of shutdown
+        // failing our copys
+        let _gate_entered = self.gate.enter().map_err(|_| ShuttingDown)?;
+
+        // these we will need to copy the prefix of, if we haven't already
+        //
+        // idea: if any of these are empty, we should temporarily upload an .empty to show we don't
+        // need to walk them again
+        let mut straddling_branchpoint = vec![];
+        // these we will need to remote copy, if we haven't already
+        let mut rest_of_historic = vec![];
+
+        if ancestor_lsn >= ancestor.get_disk_consistent_lsn() {
+            ancestor
+                .freeze_and_flush()
+                .await
+                .map_err(DetachFromAncestorError::FlushAncestor)?;
+        }
+
+        // we do not need to start from our layers, because they can only be layers that come
+        // *after* our
+        let layers = tokio::select! {
+            guard = ancestor.layers.read() => guard,
+            _ = self.cancel.cancelled() => {
+                return Err(ShuttingDown);
+            }
+        };
+
+        for desc in layers.layer_map().iter_historic_layers() {
+            // off by one chances here:
+            // - start is inclusive
+            // - end is exclusive
+            if desc.lsn_range.start >= ancestor_lsn {
+                continue;
+            }
+
+            if desc.lsn_range.start <= ancestor_lsn && desc.lsn_range.end > ancestor_lsn {
+                straddling_branchpoint.push(layers.get_from_desc(&desc));
+            } else {
+                rest_of_historic.push(layers.get_from_desc(&desc));
+            }
+        }
+
+        if straddling_branchpoint.is_empty() {
+            // as we flushed the inmem layer to disk, only reason: this branch has been created from a L1 layer LSN boundary, or
+            // checkpoint.
+            todo!("is there anything to here?");
+        } else {
+            // we should really have just one lsn, but be ready for
+            straddling_branchpoint.sort_by_key(|layer| {
+                (
+                    layer.layer_desc().key_range.start,
+                    layer.layer_desc().lsn_range.start,
+                )
+            });
+
+            // how to assert this is looking like as expected?
+        }
+
+        // process the remote layers in descending order by Lsn to leak less layers if we are
+        // restarted and a gc happens before we retry
+        rest_of_historic.sort_by_key(|layer| {
+            std::cmp::Reverse((
+                layer.layer_desc().lsn_range.start,
+                layer.layer_desc().key_range.start,
+            ))
+        });
+
+        // before making the layermap changes, should the resident ones be hardlinked?
+        // ResidentLayer being held here would help nicely.
+
+        todo!();
+    }
+}
+
+pub(crate) enum DetachFromAncestorError {
+    NoAncestor,
+    TooManyAncestors,
+    ShuttingDown,
+    FlushAncestor(anyhow::Error),
 }
 
 /// Top-level failure to compact.
