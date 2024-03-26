@@ -138,7 +138,6 @@ pub(super) async fn connection_manager_loop_step(
                             Ok(()) => debug!("WAL receiving task finished"),
                             Err(e) => error!("wal receiver task finished with an error: {e:?}"),
                         }
-                        // TODO: can this use the `cancel` token?
                         connection_manager_state.drop_old_connection(false).await;
                     },
                 }
