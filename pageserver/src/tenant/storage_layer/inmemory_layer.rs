@@ -89,7 +89,10 @@ impl std::fmt::Debug for InMemoryLayerInner {
 ///
 /// This global state is used to implement behaviors that require a global view of the system, e.g.
 /// rolling layers proactively to limit the total amount of dirty data.
-struct GlobalResources {
+pub(crate) struct GlobalResources {
+    // Limit on how high dirty_bytes may grow before we start freezing layers to reduce it.
+    // Zero means unlimited.
+    pub(crate) max_dirty_bytes: AtomicU64,
     // How many bytes are in all EphemeralFile objects
     dirty_bytes: AtomicU64,
     // How many layers are contributing to dirty_bytes
@@ -118,11 +121,12 @@ impl GlobalResourceUnits {
 
     /// Do not call this frequently: all timelines will write to these same global atomics,
     /// so this is a relatively expensive operation.  Wait at least a few seconds between calls.
-    fn publish_size(&mut self, size: u64) {
+    ///
+    /// Returns the effective layer size limit that should be applied, if any, to keep
+    /// the total number of dirty bytes below the configured maximum.
+    fn publish_size(&mut self, size: u64) -> Option<u64> {
         let new_global_dirty_bytes = match size.cmp(&self.dirty_bytes) {
-            Ordering::Equal => {
-                return;
-            }
+            Ordering::Equal => GLOBAL_RESOURCES.dirty_bytes.load(AtomicOrdering::Relaxed),
             Ordering::Greater => {
                 let delta = size - self.dirty_bytes;
                 let old = GLOBAL_RESOURCES
@@ -146,6 +150,21 @@ impl GlobalResourceUnits {
         TIMELINE_EPHEMERAL_BYTES.set(new_global_dirty_bytes);
 
         self.dirty_bytes = size;
+
+        let max_dirty_bytes = GLOBAL_RESOURCES
+            .max_dirty_bytes
+            .load(AtomicOrdering::Relaxed);
+        if max_dirty_bytes > 0 && new_global_dirty_bytes > max_dirty_bytes {
+            // Set the layer file limit to the average layer size: this implies that all above-average
+            // sized layers will be elegible for freezing.  They will be frozen in the order they
+            // next enter publish_size.
+            Some(
+                new_global_dirty_bytes
+                    / GLOBAL_RESOURCES.dirty_layers.load(AtomicOrdering::Relaxed) as u64,
+            )
+        } else {
+            None
+        }
     }
 
     // Call publish_size if the input size differs from last published size by more than
@@ -174,7 +193,8 @@ impl Drop for GlobalResourceUnits {
     }
 }
 
-static GLOBAL_RESOURCES: GlobalResources = GlobalResources {
+pub(crate) static GLOBAL_RESOURCES: GlobalResources = GlobalResources {
+    max_dirty_bytes: AtomicU64::new(0),
     dirty_bytes: AtomicU64::new(0),
     dirty_layers: AtomicUsize::new(0),
 };
@@ -192,6 +212,10 @@ impl InMemoryLayer {
         } else {
             InMemoryLayerInfo::Open { lsn_start }
         }
+    }
+
+    pub(crate) fn try_len(&self) -> Option<u64> {
+        self.inner.try_read().map(|i| i.file.len()).ok()
     }
 
     pub(crate) fn assert_writable(&self) {
@@ -486,10 +510,10 @@ impl InMemoryLayer {
         Ok(())
     }
 
-    pub(crate) async fn tick(&self) {
+    pub(crate) async fn tick(&self) -> Option<u64> {
         let mut inner = self.inner.write().await;
         let size = inner.file.len();
-        inner.resource_units.publish_size(size);
+        inner.resource_units.publish_size(size)
     }
 
     pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
