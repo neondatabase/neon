@@ -299,6 +299,7 @@ pub(super) async fn handle_walreceiver_connection(
 
                 trace!("received XLogData between {startlsn} and {endlsn}");
 
+                WAL_INGEST.bytes_received.inc_by(data.len() as u64);
                 waldecoder.feed_bytes(data);
 
                 {
