@@ -8,7 +8,7 @@ use std::{sync::Arc, time::SystemTime};
 use crate::{
     config::PageServerConf,
     disk_usage_eviction_task::DiskUsageEvictionInfo,
-    task_mgr::{self, TaskKind},
+    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     virtual_file::MaybeFatalIo,
 };
 
@@ -317,6 +317,7 @@ pub fn spawn_tasks(
         tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
 
     task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::SecondaryDownloads,
         None,
         None,
@@ -337,6 +338,7 @@ pub fn spawn_tasks(
     );
 
     task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::SecondaryUploads,
         None,
         None,

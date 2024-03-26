@@ -59,7 +59,7 @@ use utils::{completion, id::TimelineId};
 use crate::{
     config::PageServerConf,
     metrics::disk_usage_based_eviction::METRICS,
-    task_mgr::{self, TaskKind},
+    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         self,
         mgr::TenantManager,
@@ -202,6 +202,7 @@ pub fn launch_disk_usage_global_eviction_task(
     info!("launching disk usage based eviction task");
 
     task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::DiskUsageEviction,
         None,
         None,
