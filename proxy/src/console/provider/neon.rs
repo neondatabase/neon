@@ -55,7 +55,7 @@ impl Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = ctx.session_id.to_string();
         let application_name = ctx.console_application_name();
         async {
             let request = self
@@ -112,7 +112,7 @@ impl Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = ctx.session_id.to_string();
         let application_name = ctx.console_application_name();
         async {
             let mut request_builder = self
