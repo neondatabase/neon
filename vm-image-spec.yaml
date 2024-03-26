@@ -187,6 +187,13 @@ files:
         query: |
           select sum(pg_database_size(datname)) as total from pg_database;
 
+      - metric_name: lfc_approximate_working_set_size
+        type: gauge
+        help: 'Approximate working set size'
+        key_labels:
+        values: [approximate_working_set_size]
+          select approximate_working_set_size(false) as approximate_working_set_size;
+
 build: |
   # Build cgroup-tools
   #
