@@ -235,6 +235,15 @@ operation, the control plane should wait until all branches are created and not
 allow any branches to be created before the branch point on the ancestor branch
 while the operation is ongoing.
 
+## WAL based disaster recovery
+
+WAL based disaster recovery currently supports only restoring of the main
+branch. Enabling WAL based disaster recovery in the future requires that we
+keep a record which timeline generated the WAL and at which LSN was a parent
+merged. Keep a list of timeline ids and the LSN in which they were merged in
+the `index_part.json`. Limit the size of the list to 100 first entries, after
+which the WAL disaster recovery will not be possible.
+
 ## Sharded tenants
 
 For sharded tenants, calls to the merge API will pass through the storage
