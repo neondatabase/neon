@@ -221,7 +221,7 @@ pub(crate) enum ReadableLayer {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ReadDesc {
+struct ReadDesc {
     layer_key: LayerKey,
     lsn_range: Range<Lsn>,
 }
