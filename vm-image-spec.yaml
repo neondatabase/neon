@@ -192,7 +192,8 @@ files:
         help: 'Approximate working set size'
         key_labels:
         values: [approximate_working_set_size]
-          select approximate_working_set_size(false) as approximate_working_set_size;
+        query: |
+          select neon.approximate_working_set_size(false) as approximate_working_set_size;
 
 build: |
   # Build cgroup-tools
