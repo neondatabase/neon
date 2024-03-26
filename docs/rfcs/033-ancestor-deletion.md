@@ -230,6 +230,11 @@ worry about as the storage layer: a user who wants to delete their parent timeli
 new children, and if they do, they can choose to delete those children to
 enable deleting the parent.
 
+For the least surprise to the user, before starting the merge ancestor branch
+operation, the control plane should wait until all branches are created and not
+allow any branches to be created before the branch point on the ancestor branch
+while the operation is ongoing.
+
 ## Sharded tenants
 
 For sharded tenants, calls to the merge API will pass through the storage
