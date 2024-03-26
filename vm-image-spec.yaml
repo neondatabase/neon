@@ -189,7 +189,7 @@ files:
 
       - metric_name: lfc_approximate_working_set_size
         type: gauge
-        help: 'Approximate working set size'
+        help: 'Approximate working set size in pages of 8192 bytes'
         key_labels:
         values: [approximate_working_set_size]
         query: |
