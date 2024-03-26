@@ -222,7 +222,7 @@ restart the Timeline.
 ## Concurrent timeline creation
 
 If new historic timelines are created using the parent as an ancestor while the merge API is running, they will not be re-parented to the child. This doesn't break
-anything, but it leave the parent in a state where it might not be possible
+anything, but it leaves the parent in a state where it might not be possible
 to delete it.
 
 Since timeline creations are an explicit user action, this is not something we need to
