@@ -1559,7 +1559,7 @@ impl RemoteTimelineClient {
     /// Use [`RemoteTimelineClient::shutdown`] for graceful stop.
     ///
     /// In-progress operations will still be running after this function returns.
-    /// Use `task_mgr::shutdown_tasks(Some(TaskKind::RemoteUploadTask), Some(self.tenant_shard_id), Some(timeline_id))`
+    /// Use `task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id))`
     /// to wait for them to complete, after calling this function.
     pub(crate) fn stop(&self) {
         // Whichever *task* for this RemoteTimelineClient grabs the mutex first will transition the queue

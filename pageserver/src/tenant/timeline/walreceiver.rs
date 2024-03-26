@@ -88,7 +88,7 @@ impl WalReceiver {
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
                 debug!("WAL receiver manager started, connecting to broker");
-                let cancel = timeline.cancel.clone();
+                let cancel = task_mgr::shutdown_token();
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
