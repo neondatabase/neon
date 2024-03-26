@@ -284,7 +284,7 @@ pub struct PageServerConf {
 
     pub validate_vectored_get: bool,
 
-    /// How many bytes of ephemeral layer content will we allow per byte of RAM.  When this
+    /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
     /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
     /// of ephemeral data.
     ///
