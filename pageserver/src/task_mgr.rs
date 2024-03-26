@@ -437,6 +437,7 @@ async fn task_finish(
 #[derive(Debug, Default)]
 pub struct ShutdownTasksReport {
     pub planned: usize,
+    planned_names: Vec<String>,
     pub not_joined: usize,
     pub joined_fast: usize,
     pub joined_slow: usize,
@@ -482,6 +483,15 @@ pub async fn shutdown_tasks(
         }
     }
     report.planned = victim_tasks.len();
+    report.planned_names = victim_tasks
+        .iter()
+        .map(|(task, _, _, _)| {
+            format!(
+                "{:?} {:?} {:?} {:?}",
+                task.kind, task.name, task.tenant_shard_id, task.timeline_id
+            )
+        })
+        .collect();
 
     let log_all = kind.is_none() && tenant_shard_id.is_none() && timeline_id.is_none();
 
