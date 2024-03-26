@@ -9,11 +9,12 @@ from _pytest.fixtures import FixtureRequest
 
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import (
-    NeonEnv,
+    NeonEnvBuilder,
     PgBin,
     PgProtocol,
     RemotePostgres,
     VanillaPostgres,
+    tenant_get_shards,
     wait_for_last_flush_lsn,
 )
 from fixtures.pg_stats import PgStatTable
@@ -96,14 +97,20 @@ class NeonCompare(PgCompare):
     def __init__(
         self,
         zenbenchmark: NeonBenchmarker,
-        neon_simple_env: NeonEnv,
+        neon_env_builder: NeonEnvBuilder,
         pg_bin: PgBin,
         branch_name: str,
+        shard_count: int,
+        shard_stripe_size: int,
     ):
-        self.env = neon_simple_env
+        if shard_count is not None and shard_count > 1:
+            neon_env_builder.num_pageservers = 2
+
+        self.shard_count = shard_count
+
+        self.env = neon_env_builder.init_start()
         self._zenbenchmark = zenbenchmark
         self._pg_bin = pg_bin
-        self.pageserver_http_client = self.env.pageserver.http_client()
 
         # note that neon_simple_env now uses LOCAL_FS remote storage
 
@@ -111,7 +118,11 @@ class NeonCompare(PgCompare):
         tenant_conf: Dict[str, str] = {}
         if False:  # TODO add pytest setting for this
             tenant_conf["trace_read_requests"] = "true"
-        self.tenant, _ = self.env.neon_cli.create_tenant(conf=tenant_conf)
+        self.tenant, _ = self.env.neon_cli.create_tenant(
+            conf=tenant_conf,
+            shard_count=shard_count if shard_count > 1 else None,
+            shard_stripe_size=shard_stripe_size,
+        )
 
         # Create timeline
         self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
@@ -133,21 +144,34 @@ class NeonCompare(PgCompare):
 
     def flush(self):
         wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
+        for tenant_shard_id, pageserver in tenant_get_shards(self.env, self.tenant):
+            ps_http = pageserver.http_client()
+            ps_http.timeline_checkpoint(tenant_shard_id, self.timeline)
+            ps_http.timeline_gc(tenant_shard_id, self.timeline, 0)
 
     def compact(self):
-        self.pageserver_http_client.timeline_compact(self.tenant, self.timeline)
+        for tenant_shard_id, pageserver in tenant_get_shards(self.env, self.tenant):
+            ps_http = pageserver.http_client()
+            ps_http.timeline_compact(tenant_shard_id, self.timeline)
 
     def report_peak_memory_use(self):
+        max_mem = max(
+            self.zenbenchmark.get_peak_mem(pageserver)
+            for _tenant_shard_id, pageserver in tenant_get_shards(self.env, self.tenant)
+        )
+
         self.zenbenchmark.record(
             "peak_mem",
-            self.zenbenchmark.get_peak_mem(self.env.pageserver) / 1024,
+            max_mem / 1024,
             "MB",
             report=MetricReport.LOWER_IS_BETTER,
         )
 
     def report_size(self):
+        # Pick an arbitrary pageserver whose stats to report
+        # TODO: make stats reporting handle multiple pageservers
+        pageserver = self.env.pageservers[0]
+
         timeline_size = self.zenbenchmark.get_timeline_size(
             self.env.repo_dir, self.tenant, self.timeline
         )
@@ -161,15 +185,16 @@ class NeonCompare(PgCompare):
             "file_kind": "layer",
             "op_kind": "upload",
         }
+
         # use `started` (not `finished`) counters here, because some callers
         # don't wait for upload queue to drain
-        total_files = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver,
+        total_files = self.zenbenchmark.get_int_counter_sum(
+            pageserver,
             "pageserver_remote_timeline_client_calls_started_total",
             metric_filters,
         )
-        total_bytes = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver,
+        total_bytes = self.zenbenchmark.get_int_counter_sum(
+            pageserver,
             "pageserver_remote_timeline_client_bytes_started_total",
             metric_filters,
         )
@@ -181,7 +206,10 @@ class NeonCompare(PgCompare):
         )
 
     def record_pageserver_writes(self, out_name: str) -> _GeneratorContextManager[None]:
-        return self.zenbenchmark.record_pageserver_writes(self.env.pageserver, out_name)
+        # Pick an arbitrary pageserver whose stats to report
+        # TODO: make stats reporting handle multiple pageservers
+        pageserver = self.env.pageservers[0]
+        return self.zenbenchmark.record_pageserver_writes(pageserver, out_name)
 
     def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
@@ -289,10 +317,64 @@ def neon_compare(
     request: FixtureRequest,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    neon_simple_env: NeonEnv,
+    neon_env_builder: NeonEnvBuilder,
 ) -> NeonCompare:
     branch_name = request.node.name
-    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
+    return NeonCompare(
+        zenbenchmark, neon_env_builder, pg_bin, branch_name, shard_count=1, shard_stripe_size=32768
+    )
+
+
+@pytest.fixture(scope="function")
+def neon_compare_sharded_2_2048(
+    request: FixtureRequest,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    neon_env_builder: NeonEnvBuilder,
+) -> NeonCompare:
+    branch_name = request.node.name
+    return NeonCompare(
+        zenbenchmark, neon_env_builder, pg_bin, branch_name, shard_count=2, shard_stripe_size=2048
+    )
+
+
+@pytest.fixture(scope="function")
+def neon_compare_sharded_8_2048(
+    request: FixtureRequest,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    neon_env_builder: NeonEnvBuilder,
+) -> NeonCompare:
+    branch_name = request.node.name
+    return NeonCompare(
+        zenbenchmark, neon_env_builder, pg_bin, branch_name, shard_count=8, shard_stripe_size=2048
+    )
+
+
+@pytest.fixture(scope="function")
+def neon_compare_sharded_2_32768(
+    request: FixtureRequest,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    neon_env_builder: NeonEnvBuilder,
+) -> NeonCompare:
+    branch_name = request.node.name
+    return NeonCompare(
+        zenbenchmark, neon_env_builder, pg_bin, branch_name, shard_count=2, shard_stripe_size=32768
+    )
+
+
+@pytest.fixture(scope="function")
+def neon_compare_sharded_8_32768(
+    request: FixtureRequest,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    neon_env_builder: NeonEnvBuilder,
+) -> NeonCompare:
+    branch_name = request.node.name
+    return NeonCompare(
+        zenbenchmark, neon_env_builder, pg_bin, branch_name, shard_count=8, shard_stripe_size=32768
+    )
 
 
 @pytest.fixture(scope="function")
@@ -327,6 +409,23 @@ def neon_with_baseline(request: FixtureRequest) -> PgCompare:
     implementation-specific logic is widely useful across multiple tests, it might
     make sense to add methods to the PgCompare class.
     """
+    fixture = request.getfixturevalue(request.param)
+    assert isinstance(fixture, PgCompare), f"test error: fixture {fixture} is not PgCompare"
+    return fixture
+
+
+@pytest.fixture(
+    params=[
+        "neon_compare",
+        "neon_compare_sharded_2_2048",
+        "neon_compare_sharded_8_2048",
+        "neon_compare_sharded_2_32768",
+        "neon_compare_sharded_8_32768",
+    ],
+    ids=["unsharded", "sharded_2_2048", "sharded_8_2048", "sharded_2_32768", "sharded_8_32768"],
+)
+def neon_sharded_with_baseline(request: FixtureRequest) -> PgCompare:
+    """Parameterized fixture that compares neon with & without sharding"""
     fixture = request.getfixturevalue(request.param)
     assert isinstance(fixture, PgCompare), f"test error: fixture {fixture} is not PgCompare"
     return fixture
