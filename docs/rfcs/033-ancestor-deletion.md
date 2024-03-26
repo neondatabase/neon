@@ -25,16 +25,16 @@ Retaining parent timelines currently has two costs:
 
 # Solution
 
-A new pageserver API `PUT /v1/tenant/:tenant_id/timeline/:timeline_id/merge_parent`
+A new pageserver API `PUT /v1/tenant/:tenant_id/timeline/:timeline_id/detach_ancestor`
 will be added. The `timeline_id` in this URL is that of the _child_ timeline that we
 wish to detach from its parent.
 
 On success, this API will leave the following state:
 
-- The merged child timeline will no longer have an ancestor, and will contain all
+- The detached child timeline will no longer have an ancestor, and will contain all
   the data needed to service reads without recursing into an ancestor.
 - Any other children of the parent whose timeline points were at a lower LSN than
-  the merged child timeline will be modified to have the child timeline as their
+  the detached child timeline will be modified to have the child timeline as their
   new parent.
 - The parent timeline will still exist, but the child will no longer have it as an
   ancestor. If this was the last timeline that depended on the parent, then the
@@ -63,7 +63,7 @@ and B is from after the rollback point.
 
 ```
 
-### After calling merge API
+### After calling detach ancestor API
 
 The "new main" timeline is no longer dependent on old main, and neither
 is child A, because it had a branch point before X.
@@ -105,23 +105,23 @@ ever happened: there is only one root timeline.
 Important things for API users to bear in mind:
 
 - this API does not delete the parent timeline: you must still do that explicitly.
-- if there are other child timelines ahead of the branch point of the merged
-  child, the parent won't be deletable: you must either delete or merge those
+- if there are other child timelines ahead of the branch point of the detached
+  child, the parent won't be deletable: you must either delete or detach those
   children.
-- do _not_ simply loop over all children and merge them all: this can have an
-  extremely high storage cost. The merge API is intended for use on a single
+- do _not_ simply loop over all children and detach them all: this can have an
+  extremely high storage cost. The detach ancestor API is intended for use on a single
   timeline to make it the new "main".
-- The merge API should also not be
+- The detach ancestor API should also not be
   exposed directly to the user as button/API, because they might decide
   to click it for all the children and thereby generate many copies of the
-  parent's data -- the merge API should be used as part
+  parent's data -- the detach ancestor API should be used as part
   of a high level "clean up after rollback" feature.
 
-## `merge_parent` API implementation
+## `detach_ancestor` API implementation
 
 Terms used in the following sections:
 
-- "the child": the timeline whose ID is specified in the merge API URL, also
+- "the child": the timeline whose ID is specified in the detach ancestor API URL, also
   called "new main" in the example.
 - "the parent": the parent of "the child". Also called "old main" in the example.
 - "the branch point" the ancestor_lsn of "the child"
@@ -221,7 +221,7 @@ restart the Timeline.
 
 ## Concurrent timeline creation
 
-If new historic timelines are created using the parent as an ancestor while the merge API is running, they will not be re-parented to the child. This doesn't break
+If new historic timelines are created using the parent as an ancestor while the detach ancestor API is running, they will not be re-parented to the child. This doesn't break
 anything, but it leaves the parent in a state where it might not be possible
 to delete it.
 
@@ -230,7 +230,7 @@ worry about as the storage layer: a user who wants to delete their parent timeli
 new children, and if they do, they can choose to delete those children to
 enable deleting the parent.
 
-For the least surprise to the user, before starting the merge ancestor branch
+For the least surprise to the user, before starting the detach ancestor branch
 operation, the control plane should wait until all branches are created and not
 allow any branches to be created before the branch point on the ancestor branch
 while the operation is ongoing.
@@ -240,12 +240,12 @@ while the operation is ongoing.
 WAL based disaster recovery currently supports only restoring of the main
 branch. Enabling WAL based disaster recovery in the future requires that we
 keep a record which timeline generated the WAL and at which LSN was a parent
-merged. Keep a list of timeline ids and the LSN in which they were merged in
+detached. Keep a list of timeline ids and the LSN in which they were detached in
 the `index_part.json`. Limit the size of the list to 100 first entries, after
 which the WAL disaster recovery will not be possible.
 
 ## Sharded tenants
 
-For sharded tenants, calls to the merge API will pass through the storage
+For sharded tenants, calls to the detach ancestor API will pass through the storage
 controller, which will handle them the same as timeline creations: invoke first
 on shard zero, and then on all the other shards.
