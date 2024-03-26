@@ -299,17 +299,46 @@ struct PageServerTask {
     timeline_id: Option<TimelineId>,
 
     mutable: Mutex<MutableTaskState>,
+
+    baggage: Option<Box<dyn Any>>,
 }
 
-/// Launch a new task
+/// Launch a new task.
+///
 /// Note: if shutdown_process_on_error is set to true failure
 ///   of the task will lead to shutdown of entire process
-pub fn spawn<F>(
+#[inline(always)]
+pub fn spawn(
     kind: TaskKind,
     tenant_shard_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
     name: &str,
     shutdown_process_on_error: bool,
+    baggage: Box<dyn Any>,
+    future: F,
+) -> PageserverTaskId
+where
+    F: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    spawnw_with_baggage(
+        kind,
+        tenant_shard_id,
+        timeline_id,
+        name,
+        shutdown_process_on_error,
+        None,
+        future,
+    )
+}
+
+/// Like [`spawn`], but additionally the task structure carries a piece of "baggage".
+pub fn spawnw_with_baggage<F>(
+    kind: TaskKind,
+    tenant_shard_id: Option<TenantShardId>,
+    timeline_id: Option<TimelineId>,
+    name: &str,
+    shutdown_process_on_error: bool,
+    baggage: Option<Box<dyn Any>>,
     future: F,
 ) -> PageserverTaskId
 where
@@ -325,6 +354,7 @@ where
         tenant_shard_id,
         timeline_id,
         mutable: Mutex::new(MutableTaskState { join_handle: None }),
+        baggage,
     });
 
     TASKS.lock().unwrap().insert(task_id, Arc::clone(&task));
