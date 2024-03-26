@@ -2126,6 +2126,8 @@ class NeonStorageController(MetricsGetter):
             shard_params = {"count": shard_count}
             if shard_stripe_size is not None:
                 shard_params["stripe_size"] = shard_stripe_size
+            else:
+                shard_params["stripe_size"] = 32768
 
             body["shard_parameters"] = shard_params
 
@@ -2139,6 +2141,7 @@ class NeonStorageController(MetricsGetter):
             json=body,
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
+        response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
