@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use utils::id::{TenantTimelineId, TimelineId};
 
+use std::sync::{Arc, Mutex};
 use tokio::{
     sync::{mpsc, OwnedSemaphorePermit},
     task::JoinSet,
@@ -13,12 +14,19 @@ use tokio::{
 
 use std::{
     num::NonZeroUsize,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
+
+use crate::util::{
+    request_stats,
+    tokio_thread_local_stats::{self, AllThreadLocalStats},
+};
+
+#[derive(serde::Serialize)]
+struct Output {
+    total: request_stats::Output,
+}
 
 /// Evict & on-demand download random layers.
 #[derive(clap::Parser)]
@@ -43,13 +51,12 @@ pub(crate) struct Args {
     targets: Option<Vec<TenantTimelineId>>,
 }
 
+tokio_thread_local_stats::declare!(STATS: request_stats::Stats);
+
 pub(crate) fn main(args: Args) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let task = rt.spawn(main_impl(args));
-    rt.block_on(task).unwrap().unwrap();
-    Ok(())
+    tokio_thread_local_stats::main!(STATS, move |thread_local_stats| {
+        main_impl(args, thread_local_stats)
+    })
 }
 
 #[derive(Debug, Default)]
@@ -71,7 +78,10 @@ impl LiveStats {
     }
 }
 
-async fn main_impl(args: Args) -> anyhow::Result<()> {
+async fn main_impl(
+    args: Args,
+    all_thread_local_stats: AllThreadLocalStats<request_stats::Stats>,
+) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
@@ -145,6 +155,21 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     while let Some(res) = tasks.join_next().await {
         res.unwrap();
     }
+
+    let output = Output {
+        total: {
+            let mut agg_stats = request_stats::Stats::new();
+            for stats in all_thread_local_stats.lock().unwrap().iter() {
+                let stats = stats.lock().unwrap();
+                agg_stats.add(&stats);
+            }
+            agg_stats.output()
+        },
+    };
+
+    let output = serde_json::to_string_pretty(&output).unwrap();
+    println!("{output}");
+
     Ok(())
 }
 
@@ -204,6 +229,7 @@ async fn timeline_actor(
                 return;
             }
 
+            let start = std::time::Instant::now();
             assert!(!timeline.joinset.is_empty());
             if let Some(res) = timeline.joinset.try_join_next() {
                 debug!(?res, "a layer actor exited, should not happen");
@@ -234,6 +260,15 @@ async fn timeline_actor(
                     },
                 }
             }
+            let end = Instant::now();
+            STATS.with(|stats| {
+                stats
+                    .borrow()
+                    .lock()
+                    .unwrap()
+                    .observe(end.duration_since(start))
+                    .unwrap();
+            });
         }
     }
 }

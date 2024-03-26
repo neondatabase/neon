@@ -6,7 +6,7 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.utils import humantime_to_ms
+from fixtures.utils import get_scale_for_db, humantime_to_ms
 
 from performance.pageserver.util import (
     setup_pageserver_with_tenants,
@@ -14,9 +14,9 @@ from performance.pageserver.util import (
 
 
 @pytest.mark.parametrize("duration", [30])
-@pytest.mark.parametrize("pgbench_scale", [200])
-@pytest.mark.parametrize("io_engine", ["tokio-epoll-uring"])
-@pytest.mark.parametrize("concurrency_per_target", [1])
+@pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
+@pytest.mark.parametrize("io_engine", ["tokio-epoll-uring", "std-fs"])
+@pytest.mark.parametrize("concurrency_per_target", [1, 10, 100])
 @pytest.mark.parametrize("n_tenants", [1])
 @pytest.mark.timeout(1000)
 def test_download_churn(
@@ -67,7 +67,7 @@ def test_download_churn(
 
     env = setup_pageserver_with_tenants(
         neon_env_builder,
-        f"download_churn-{n_tenants}-{pgbench_scale}",
+        f"download_churn-{n_tenants}-{pgbench_scale}-{io_engine}-{concurrency_per_target}",
         n_tenants,
         setup_wrapper,
     )
