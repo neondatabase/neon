@@ -1273,6 +1273,15 @@ impl Timeline {
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         if let Some(remote_client) = self.remote_client.as_ref() {
             remote_client.stop();
+            // As documented in remote_client.stop()'s doc comment, it's our responsibility
+            // to shut down the upload queue tasks.
+            // TODO: fix that, task management should be encapsulated inside remote_client.
+            task_mgr::shutdown_tasks(
+                Some(TaskKind::RemoteUploadTask),
+                Some(self.tenant_shard_id),
+                Some(self.timeline_id),
+            )
+            .await;
         }
 
         // Finally wait until any gate-holders are complete
