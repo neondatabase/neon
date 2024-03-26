@@ -70,7 +70,8 @@ use rlimit::{setrlimit, Resource};
 // in-case of not-set environment var
 const BUILD_TAG_DEFAULT: &str = "latest";
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let (build_tag, clap_args) = init()?;
 
     // enable core dumping for all child processes
@@ -86,7 +87,7 @@ fn main() -> Result<()> {
 
         let wait_spec_result = wait_spec(build_tag, cli_args, cli_spec)?;
 
-        start_postgres(&clap_args, wait_spec_result)?
+        start_postgres(&clap_args, wait_spec_result).await?
 
         // Startup is finished, exit the startup tracing span
     };
@@ -383,7 +384,7 @@ struct WaitSpecResult {
     resize_swap_on_bind: bool,
 }
 
-fn start_postgres(
+async fn start_postgres(
     // need to allow unused because `matches` is only used if target_os = "linux"
     #[allow(unused_variables)] matches: &clap::ArgMatches,
     WaitSpecResult {
@@ -446,7 +447,7 @@ fn start_postgres(
     // Start Postgres
     let mut pg = None;
     if !prestartup_failed {
-        pg = match compute.start_compute(extension_server_port) {
+        pg = match compute.start_compute(extension_server_port).await {
             Ok(pg) => Some(pg),
             Err(err) => {
                 error!("could not start the compute node: {:#}", err);

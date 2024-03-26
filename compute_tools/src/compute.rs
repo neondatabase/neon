@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::BufRead;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -13,6 +12,7 @@ use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use bytes::{Buf, BufMut};
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
@@ -26,7 +26,6 @@ use utils::lsn::Lsn;
 
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
-use utils::measured_stream::MeasuredReader;
 
 use nix::sys::signal::{kill, Signal};
 
@@ -323,12 +322,12 @@ impl ComputeNode {
     // Get basebackup from the libpq connection to pageserver using `connstr` and
     // unarchive it to `pgdata` directory overriding all its previous content.
     #[instrument(skip_all, fields(%lsn))]
-    fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
+    async fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Instant::now();
 
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
-        let mut config = postgres::Config::from_str(shard0_connstr)?;
+        let mut config = tokio_postgres::Config::from_str(shard0_connstr)?;
 
         // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.
@@ -340,7 +339,12 @@ impl ComputeNode {
         }
 
         // Connect to pageserver
-        let mut client = config.connect(NoTls)?;
+        let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
         let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
 
         let basebackup_cmd = match lsn {
@@ -352,8 +356,18 @@ impl ComputeNode {
             ),
         };
 
-        let copyreader = client.copy_out(basebackup_cmd.as_str())?;
-        let mut measured_reader = MeasuredReader::new(copyreader);
+        let mut copystream = std::pin::pin!(client.copy_out(basebackup_cmd.as_str()).await?);
+        let mut buf = bytes::BytesMut::with_capacity(1024);
+        while let Some(i) = copystream.next().await {
+            match i {
+                Ok(b) => {
+                    buf.put(b);
+                }
+                Err(e) => return Err(anyhow::anyhow!(e)),
+            }
+        }
+
+        let basebackup_bytes = buf.len();
 
         // Check the magic number to see if it's a gzip or not. Even though
         // we might explicitly ask for gzip, an old pageserver with no implementation
@@ -366,11 +380,9 @@ impl ComputeNode {
         // and 0x1f and 0x8b are unlikely first characters for any filename. Moreover,
         // we send the "global" directory first from the pageserver, so it definitely
         // won't be recognized as gzip.
-        let mut bufreader = std::io::BufReader::new(&mut measured_reader);
-        let gzip = {
-            let peek = bufreader.fill_buf().unwrap();
-            peek[0] == 0x1f && peek[1] == 0x8b
-        };
+        let gzip = buf[0] == 0x1f && buf[1] == 0x8b;
+
+        let mut bufreader = buf.reader();
 
         // Read the archive directly from the `CopyOutReader`
         //
@@ -390,14 +402,14 @@ impl ComputeNode {
         // Report metrics
         let mut state = self.state.lock().unwrap();
         state.metrics.pageserver_connect_micros = pageserver_connect_micros;
-        state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
+        state.metrics.basebackup_bytes = basebackup_bytes as u64;
         state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
         Ok(())
     }
 
     // Gets the basebackup in a retry loop
     #[instrument(skip_all, fields(%lsn))]
-    pub fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
+    pub async fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let mut retry_period_ms = 500.0;
         let mut attempts = 0;
         const DEFAULT_ATTEMPTS: u16 = 10;
@@ -410,7 +422,7 @@ impl ComputeNode {
         #[cfg(not(feature = "testing"))]
         let max_attempts = DEFAULT_ATTEMPTS;
         loop {
-            let result = self.try_get_basebackup(compute_state, lsn);
+            let result = self.try_get_basebackup(compute_state, lsn).await;
             match result {
                 Ok(_) => {
                     return result;
@@ -431,10 +443,14 @@ impl ComputeNode {
         }
     }
 
-    pub async fn check_safekeepers_synced_async(
+    // Fast path for sync_safekeepers. If they're already synced we get the lsn
+    // in one roundtrip. If not, we should do a full sync_safekeepers.
+    pub async fn check_safekeepers_synced(
         &self,
         compute_state: &ComputeState,
     ) -> Result<Option<Lsn>> {
+        let start_time = Utc::now();
+
         // Construct a connection config for each safekeeper
         let pspec: ParsedSpec = compute_state
             .pspec
@@ -503,20 +519,7 @@ impl ComputeNode {
             return Ok(None);
         }
 
-        Ok(check_if_synced(responses))
-    }
-
-    // Fast path for sync_safekeepers. If they're already synced we get the lsn
-    // in one roundtrip. If not, we should do a full sync_safekeepers.
-    pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
-        let start_time = Utc::now();
-
-        // Run actual work with new tokio runtime
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create rt");
-        let result = rt.block_on(self.check_safekeepers_synced_async(compute_state));
+        let lsn = check_if_synced(responses);
 
         // Record runtime
         self.state.lock().unwrap().metrics.sync_sk_check_ms = Utc::now()
@@ -524,7 +527,8 @@ impl ComputeNode {
             .to_std()
             .unwrap()
             .as_millis() as u64;
-        result
+
+        Ok(lsn)
     }
 
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
@@ -589,7 +593,7 @@ impl ComputeNode {
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip_all)]
-    pub fn prepare_pgdata(
+    pub async fn prepare_pgdata(
         &self,
         compute_state: &ComputeState,
         extension_server_port: u16,
@@ -612,7 +616,8 @@ impl ComputeNode {
         let lsn = match spec.mode {
             ComputeMode::Primary => {
                 info!("checking if safekeepers are synced");
-                let lsn = if let Ok(Some(lsn)) = self.check_safekeepers_synced(compute_state) {
+                let lsn = if let Ok(Some(lsn)) = self.check_safekeepers_synced(compute_state).await
+                {
                     lsn
                 } else {
                     info!("starting safekeepers syncing");
@@ -636,12 +641,14 @@ impl ComputeNode {
             "getting basebackup@{} from pageserver {}",
             lsn, &pspec.pageserver_connstr
         );
-        self.get_basebackup(compute_state, lsn).with_context(|| {
-            format!(
-                "failed to get basebackup@{} from pageserver {}",
-                lsn, &pspec.pageserver_connstr
-            )
-        })?;
+        self.get_basebackup(compute_state, lsn)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to get basebackup@{} from pageserver {}",
+                    lsn, &pspec.pageserver_connstr
+                )
+            })?;
 
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
@@ -981,7 +988,7 @@ impl ComputeNode {
     }
 
     #[instrument(skip_all)]
-    pub fn start_compute(
+    pub async fn start_compute(
         &self,
         extension_server_port: u16,
     ) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
@@ -1046,7 +1053,8 @@ impl ComputeNode {
             info!("{:?}", remote_ext_metrics);
         }
 
-        self.prepare_pgdata(&compute_state, extension_server_port)?;
+        self.prepare_pgdata(&compute_state, extension_server_port)
+            .await?;
 
         let start_time = Utc::now();
         let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
