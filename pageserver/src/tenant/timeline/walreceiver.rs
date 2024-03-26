@@ -33,11 +33,9 @@ use crate::tenant::timeline::walreceiver::connection_manager::{
 use pageserver_api::shard::TenantShardId;
 use std::future::Future;
 use std::num::NonZeroU64;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::BrokerClientChannel;
-use tokio::select;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -90,31 +88,27 @@ impl WalReceiver {
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
                 debug!("WAL receiver manager started, connecting to broker");
+                let cancel = timeline.cancel.clone();
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
                 );
-                loop {
-                    select! {
-                        _ = task_mgr::shutdown_watcher() => {
-                            trace!("WAL receiver shutdown requested, shutting down");
+                while !cancel.is_cancelled() {
+                    let loop_step_result = connection_manager_loop_step(
+                        &mut broker_client,
+                        &mut connection_manager_state,
+                        &walreceiver_ctx,
+                        &cancel,
+                        &loop_status,
+                    ).await;
+                    match loop_step_result {
+                        Ok(()) => continue,
+                        Err(_cancelled) => {
+                            trace!("Connection manager loop ended, shutting down");
                             break;
-                        },
-                        loop_step_result = connection_manager_loop_step(
-                            &mut broker_client,
-                            &mut connection_manager_state,
-                            &walreceiver_ctx,
-                            &loop_status,
-                        ) => match loop_step_result {
-                            ControlFlow::Continue(()) => continue,
-                            ControlFlow::Break(()) => {
-                                trace!("Connection manager loop ended, shutting down");
-                                break;
-                            }
-                        },
+                        }
                     }
                 }
-
                 connection_manager_state.shutdown().await;
                 *loop_status.write().unwrap() = None;
                 Ok(())
@@ -196,6 +190,9 @@ impl<E: Clone> TaskHandle<E> {
         }
     }
 
+    /// # Cancel-Safety
+    ///
+    /// Cancellation-safe.
     async fn next_task_event(&mut self) -> TaskEvent<E> {
         match self.events_receiver.changed().await {
             Ok(()) => TaskEvent::Update((self.events_receiver.borrow()).clone()),

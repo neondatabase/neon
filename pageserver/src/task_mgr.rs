@@ -434,6 +434,14 @@ async fn task_finish(
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ShutdownTasksReport {
+    pub planned: usize,
+    pub not_joined: usize,
+    pub joined_fast: usize,
+    pub joined_slow: usize,
+}
+
 /// Signal and wait for tasks to shut down.
 ///
 ///
@@ -450,7 +458,10 @@ pub async fn shutdown_tasks(
     kind: Option<TaskKind>,
     tenant_shard_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
-) {
+) -> ShutdownTasksReport {
+
+    let mut report = ShutdownTasksReport::default();
+
     let mut victim_tasks = Vec::new();
 
     {
@@ -470,6 +481,7 @@ pub async fn shutdown_tasks(
             }
         }
     }
+    report.planned = victim_tasks.len();
 
     let log_all = kind.is_none() && tenant_shard_id.is_none() && timeline_id.is_none();
 
@@ -501,13 +513,19 @@ pub async fn shutdown_tasks(
                 // - task errors are already logged in the wrapper
                 let _ = join_handle.await;
                 info!("task {} completed", task.name);
+                report.joined_slow += 1;
+            } else {
+                report.joined_fast += 1;
             }
         } else {
             // Possibly one of:
             //  * The task had not even fully started yet.
             //  * It was shut down concurrently and already exited
+            report.not_joined += 1;
         }
     }
+
+    report
 }
 
 pub fn current_task_kind() -> Option<TaskKind> {

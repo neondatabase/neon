@@ -1217,8 +1217,7 @@ impl Timeline {
         self.shutdown_impl(true).await
     }
 
-    /// Shut down immediately, without waiting for any open layers to flush to disk.  This is a subset of
-    /// the graceful [`Timeline::flush_and_shutdown`] function.
+    /// Shut down immediately, without waiting for any open layers to flush.
     pub(crate) async fn shutdown(&self) {
         self.shutdown_impl(false).await
     }
@@ -1226,12 +1225,8 @@ impl Timeline {
     async fn shutdown_impl(&self, try_freeze_and_flush: bool) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        // Signal any subscribers to our cancellation token to drop out
-        tracing::debug!("Cancelling CancellationToken");
-        self.cancel.cancel();
-
-        // Stop ingesting data, so that we are not still writing to an InMemoryLayer while
-        // trying to flush
+        // Regardless of whether we're going to try_freeze_and_flush
+        // or not, stop ingesting any more data ...
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
@@ -1240,12 +1235,14 @@ impl Timeline {
         if let Some(walreceiver) = walreceiver {
             walreceiver.stop().await;
         }
-
-        // Since we have shut down WAL ingest, we should not let anyone start waiting for the LSN to advance
+        // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
 
         if try_freeze_and_flush {
-            // now all writers to InMemory layer are gone, do the final flush if requested
+            // we shut down walreceiver above, so, we won't add anything more
+            // to the InMemoryLayer; freeze it and wait for all frozen layers
+            // to reach the disk & upload queue, then shut the upload queue and
+            // wait for it to drain.
             match self.freeze_and_flush().await {
                 Ok(_) => {
                     // drain the upload queue
@@ -1268,26 +1265,30 @@ impl Timeline {
             }
         }
 
-        // Shut down the layer flush task before the remote client, as one depends on the other
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::LayerFlushTask),
-            Some(self.tenant_shard_id),
-            Some(self.timeline_id),
-        )
-        .await;
+        // All tasks except walreceiver and remote_client are sensitve to Timeline::cancel.
+        tracing::debug!("Cancelling CancellationToken");
+        self.cancel.cancel();
 
-        // Shut down remote timeline client: this gracefully moves its metadata into its Stopping state in
-        // case our caller wants to use that for a deletion
+        // Transition the remote_client into a state where it's only useful for timeline deletion.
+        // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         if let Some(remote_client) = self.remote_client.as_ref() {
             remote_client.stop();
         }
 
-        tracing::debug!("Waiting for tasks...");
-
-        task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
-
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
+
+        // We're not fully confident that everything is sensitive to Self::cancel yet.
+        tracing::debug!("Waiting for tasks...");
+        let report =
+            task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id))
+                .await;
+        if report.planned > 0 {
+            tracing::warn!(
+                ?report,
+                "shut down stray task_mgr timeline-scoped tasks, this should not happen"
+            );
+        }
 
         self.metrics.shutdown();
     }
@@ -2306,10 +2307,6 @@ impl Timeline {
                 debug!("cancelling logical size calculation for timeline shutdown");
                 calculation.await
             }
-            _ = task_mgr::shutdown_watcher() => {
-                debug!("cancelling logical size calculation for task shutdown");
-                calculation.await
-            }
         }
     }
 
@@ -2984,16 +2981,11 @@ impl Timeline {
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
-                    info!("shutting down layer flush task");
-                    break;
-                },
-                _ = task_mgr::shutdown_watcher() => {
-                    info!("shutting down layer flush task");
+                    info!("shutting down layer flush task due to Timeline::cancel");
                     break;
                 },
                 _ = layer_flush_start_rx.changed() => {}
             }
-
             trace!("waking up");
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {

@@ -473,6 +473,9 @@ impl BrokerService for Broker {
     type SubscribeSafekeeperInfoStream =
         Pin<Box<dyn Stream<Item = Result<SafekeeperTimelineInfo, Status>> + Send + 'static>>;
 
+    /// # Cancel-Safety
+    ///
+    /// TODO audit; caller assumes it is
     async fn subscribe_safekeeper_info(
         &self,
         request: Request<SubscribeSafekeeperInfoRequest>,
