@@ -1300,7 +1300,7 @@ impl DeltaLayerInner {
                     let will_init = crate::repository::ValueBytes::will_init(data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
-                            tracing::error!(data=?utils::Hex(data), err=?_e, "failed to parse will_init out of serialized value");
+                            tracing::error!(data=?utils::Hex(data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
                         })
                         .unwrap_or(false);
 
