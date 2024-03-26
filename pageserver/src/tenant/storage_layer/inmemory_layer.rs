@@ -12,7 +12,7 @@ use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{PageReconstructError, Timeline};
-use crate::walrecord;
+use crate::{page_cache, walrecord};
 use anyhow::{anyhow, ensure, Result};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
@@ -32,8 +32,8 @@ use super::{
     ValuesReconstructState,
 };
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
-pub(crate) struct InMemoryLayerKey(camino::Utf8PathBuf);
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub(crate) struct InMemoryLayerKey(page_cache::FileId);
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -84,7 +84,7 @@ impl std::fmt::Debug for InMemoryLayerInner {
 
 impl InMemoryLayer {
     pub(crate) fn key(&self) -> InMemoryLayerKey {
-        self.key.clone()
+        self.key
     }
 
     pub(crate) fn get_timeline_id(&self) -> TimelineId {
@@ -326,7 +326,7 @@ impl InMemoryLayer {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
         let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id).await?;
-        let key = InMemoryLayerKey(file.path());
+        let key = InMemoryLayerKey(file.id());
 
         Ok(InMemoryLayer {
             key,

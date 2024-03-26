@@ -72,8 +72,8 @@ impl EphemeralFile {
         self.len
     }
 
-    pub(crate) fn path(&self) -> Utf8PathBuf {
-        self.file.path.clone()
+    pub(crate) fn id(&self) -> page_cache::FileId {
+        self.page_cache_file_id
     }
 
     pub(crate) async fn read_blk(
