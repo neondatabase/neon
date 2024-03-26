@@ -176,6 +176,19 @@ def test_pgbench(neon_with_baseline: PgCompare, scale: int, duration: int):
     run_test_pgbench(neon_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
 
+@pytest.mark.parametrize("scale", get_scales_matrix())
+@pytest.mark.parametrize("duration", get_durations_matrix())
+def test_pgbench_sharded(neon_sharded_with_baseline: PgCompare, scale: int, duration: int):
+    """
+    Compare performance of Neon with & without sharding.  This aims to detect any unexpected
+    degradation in performance when enabling sharding (it should be at least as fast as an unsharded
+    tenant, if not faster).
+    """
+    run_test_pgbench(neon_sharded_with_baseline, scale, duration, PgBenchLoadType.INIT)
+    run_test_pgbench(neon_sharded_with_baseline, scale, duration, PgBenchLoadType.SIMPLE_UPDATE)
+    run_test_pgbench(neon_sharded_with_baseline, scale, duration, PgBenchLoadType.SELECT_ONLY)
+
+
 # The following 3 tests run on an existing database as it was set up by previous tests,
 # and leaves the database in a state that would be used in the next tests.
 # Modifying the definition order of these functions or adding other remote tests in between will alter results.

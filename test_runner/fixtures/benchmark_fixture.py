@@ -378,6 +378,17 @@ class NeonBenchmarker:
         sample = all_metrics.query_one(metric_name, label_filters)
         return int(round(sample.value))
 
+    def get_int_counter_sum(
+        self,
+        pageserver: NeonPageserver,
+        metric_name: str,
+        label_filters: Optional[Dict[str, str]] = None,
+    ) -> int:
+        """Fetch the value of given int counter from pageserver metrics."""
+        all_metrics = pageserver.http_client().get_metrics()
+        value_sum = sum(s.value for s in all_metrics.query_all(metric_name, label_filters))
+        return int(round(value_sum))
+
     def get_timeline_size(
         self, repo_dir: Path, tenant_id: TenantId, timeline_id: TimelineId
     ) -> int:
