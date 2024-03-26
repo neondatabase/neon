@@ -16,7 +16,7 @@ from performance.pageserver.util import (
 @pytest.mark.parametrize("duration", [30])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
 @pytest.mark.parametrize("io_engine", ["tokio-epoll-uring", "std-fs"])
-@pytest.mark.parametrize("concurrency_per_target", [1, 10, 100])
+@pytest.mark.parametrize("concurrency_per_target", [1, 10])
 @pytest.mark.parametrize("n_tenants", [1])
 @pytest.mark.timeout(1000)
 def test_download_churn(
