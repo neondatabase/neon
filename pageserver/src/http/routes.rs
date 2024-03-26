@@ -535,10 +535,13 @@ async fn timeline_create_handler(
                     HttpErrorBody::from_msg("Tenant shutting down".to_string()),
                 )
             }
-            Err(
-                e @ tenant::CreateTimelineError::Conflict
-                | e @ tenant::CreateTimelineError::AlreadyCreating,
-            ) => json_response(StatusCode::CONFLICT, HttpErrorBody::from_msg(e.to_string())),
+            Err(e @ tenant::CreateTimelineError::Conflict) => {
+                json_response(StatusCode::CONFLICT, HttpErrorBody::from_msg(e.to_string()))
+            }
+            Err(e @ tenant::CreateTimelineError::AlreadyCreating) => json_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => json_response(
                 StatusCode::NOT_ACCEPTABLE,
                 HttpErrorBody::from_msg(format!("{err:#}")),
