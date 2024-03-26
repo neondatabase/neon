@@ -65,20 +65,19 @@ impl Timeline {
             ),
             false,
             async move {
-                let cancel = task_mgr::shutdown_token();
                 tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); }
+                    _ = self_clone.cancel.cancelled() => { return Ok(()); }
                     _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
                 };
 
-                self_clone.eviction_task(cancel).await;
+                self_clone.eviction_task().await;
                 Ok(())
             },
         );
     }
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
-    async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
+    async fn eviction_task(self: Arc<Self>) {
         use crate::tenant::tasks::random_init_delay;
 
         // acquire the gate guard only once within a useful span
@@ -93,7 +92,7 @@ impl Timeline {
                 EvictionPolicy::OnlyImitiate(lat) => lat.period,
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
-            if random_init_delay(period, &cancel).await.is_err() {
+            if random_init_delay(period, &self.cancel).await.is_err() {
                 return;
             }
         }
@@ -102,13 +101,13 @@ impl Timeline {
         loop {
             let policy = self.get_eviction_policy();
             let cf = self
-                .eviction_iteration(&policy, &cancel, &guard, &ctx)
+                .eviction_iteration(&policy, &self.cancel, &guard, &ctx)
                 .await;
 
             match cf {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(sleep_until) => {
-                    if tokio::time::timeout_at(sleep_until, cancel.cancelled())
+                    if tokio::time::timeout_at(sleep_until, self.cancel.cancelled())
                         .await
                         .is_ok()
                     {
