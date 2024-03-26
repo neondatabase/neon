@@ -1274,6 +1274,7 @@ impl Timeline {
 
     pub(crate) fn activate(
         self: &Arc<Self>,
+        parent: Arc<crate::tenant::Tenant>,
         broker_client: BrokerClientChannel,
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
@@ -1284,7 +1285,7 @@ impl Timeline {
         }
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
-        self.launch_eviction_task(background_jobs_can_start);
+        self.launch_eviction_task(parent, background_jobs_can_start);
     }
 
     /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then

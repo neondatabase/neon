@@ -90,6 +90,8 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                 # this shutdown case is logged at WARN severity by the time it bubbles up to logical size calculation code
                 # WARN ...: initial size calculation failed: downloading failed, possibly for shutdown
                 ".*downloading failed, possibly for shutdown",
+                # {tenant_id=... timeline_id=...}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1664/0/1260 blkno=0 req_lsn=0/149F0D8}: error reading relation or page version: Not found: will not become active.  Current state: Stopping\n'
+                ".*page_service.*will not become active.*",
             ]
         )
 
