@@ -1080,7 +1080,8 @@ impl DeltaLayerInner {
 
     /// Using the given writer, write out a truncated version, where LSNs higher than the
     /// truncate_at are missing.
-    #[cfg(test)]
+    ///
+    /// Return the amount of key value records pushed to the writer.
     pub(super) async fn copy_prefix(
         &self,
         writer: &mut DeltaLayerWriter,
@@ -1328,7 +1329,6 @@ impl DeltaLayerInner {
         Ok(())
     }
 
-    #[cfg(test)]
     fn stream_index_forwards<'a, R>(
         &'a self,
         reader: &'a DiskBtreeReader<R, DELTA_KEY_SIZE>,

@@ -1760,8 +1760,7 @@ impl ResidentLayer {
 
     /// FIXME: truncate is bad name because we are not truncating anything, but copying the
     /// filtered parts.
-    #[cfg(test)]
-    pub(super) async fn copy_delta_prefix(
+    pub(crate) async fn copy_delta_prefix(
         &self,
         writer: &mut super::delta_layer::DeltaLayerWriter,
         truncate_at: Lsn,
