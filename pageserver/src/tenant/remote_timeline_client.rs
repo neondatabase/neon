@@ -1251,7 +1251,7 @@ impl RemoteTimelineClient {
         while let Some(next_op) = upload_queue.queued_operations.front() {
             // Can we run this task now?
             let can_run_now = match next_op {
-                UploadOp::UploadLayer(..) | UploadOp::AdoptLayer(..) => {
+                UploadOp::UploadLayer(..) | UploadOp::AdoptLayer { .. } => {
                     // Can always be scheduled.
                     true
                 }
