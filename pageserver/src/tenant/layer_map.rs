@@ -346,35 +346,6 @@ where
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Debug, Clone)]
-pub enum InMemoryLayerHandle {
-    Open {
-        lsn_floor: Lsn,
-        end_lsn: Lsn,
-    },
-    Frozen {
-        idx: usize,
-        lsn_floor: Lsn,
-        end_lsn: Lsn,
-    },
-}
-
-impl InMemoryLayerHandle {
-    pub fn get_lsn_floor(&self) -> Lsn {
-        match self {
-            InMemoryLayerHandle::Open { lsn_floor, .. } => *lsn_floor,
-            InMemoryLayerHandle::Frozen { lsn_floor, .. } => *lsn_floor,
-        }
-    }
-
-    pub fn get_end_lsn(&self) -> Lsn {
-        match self {
-            InMemoryLayerHandle::Open { end_lsn, .. } => *end_lsn,
-            InMemoryLayerHandle::Frozen { end_lsn, .. } => *end_lsn,
-        }
-    }
-}
-
 impl LayerMap {
     ///
     /// Find the latest layer (by lsn.end) that covers the given
