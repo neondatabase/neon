@@ -86,6 +86,9 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # This is especially pronounced in tests that set small checkpoint
     # distances.
     ".*Flushed oversized open layer with size.*",
+    # During teardown, we stop the storage controller before the pageservers, so pageservers
+    # can experience connection errors doing background deletion queue work.
+    ".*WARN deletion backend: calling control plane generation validation API failed.*Connection refused.*",
 )
 
 

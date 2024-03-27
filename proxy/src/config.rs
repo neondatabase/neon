@@ -1,4 +1,8 @@
-use crate::{auth, rate_limiter::RateBucketInfo, serverless::GlobalConnPoolOptions};
+use crate::{
+    auth,
+    rate_limiter::{AuthRateLimiter, RateBucketInfo},
+    serverless::GlobalConnPoolOptions,
+};
 use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
 use rustls::{
@@ -50,6 +54,8 @@ pub struct HttpConfig {
 
 pub struct AuthenticationConfig {
     pub scram_protocol_timeout: tokio::time::Duration,
+    pub rate_limiter_enabled: bool,
+    pub rate_limiter: AuthRateLimiter,
 }
 
 impl TlsConfig {

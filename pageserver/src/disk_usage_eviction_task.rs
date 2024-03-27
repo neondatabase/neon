@@ -59,9 +59,8 @@ use utils::{completion, id::TimelineId};
 use crate::{
     config::PageServerConf,
     metrics::disk_usage_based_eviction::METRICS,
-    task_mgr::{self, TaskKind},
+    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        self,
         mgr::TenantManager,
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
@@ -202,6 +201,7 @@ pub fn launch_disk_usage_global_eviction_task(
     info!("launching disk usage based eviction task");
 
     task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::DiskUsageEviction,
         None,
         None,
@@ -813,8 +813,8 @@ async fn collect_eviction_candidates(
     const LOG_DURATION_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
     // get a snapshot of the list of tenants
-    let tenants = tenant::mgr::list_tenants()
-        .await
+    let tenants = tenant_manager
+        .list_tenants()
         .context("get list of tenants")?;
 
     // TODO: avoid listing every layer in every tenant: this loop can block the executor,
@@ -826,8 +826,12 @@ async fn collect_eviction_candidates(
         if cancel.is_cancelled() {
             return Ok(EvictionCandidates::Cancelled);
         }
-        let tenant = match tenant::mgr::get_tenant(tenant_id, true) {
-            Ok(tenant) => tenant,
+        let tenant = match tenant_manager.get_attached_tenant_shard(tenant_id) {
+            Ok(tenant) if tenant.is_active() => tenant,
+            Ok(_) => {
+                debug!(tenant_id=%tenant_id.tenant_id, shard_id=%tenant_id.shard_slug(), "Tenant shard is not active");
+                continue;
+            }
             Err(e) => {
                 // this can happen if tenant has lifecycle transition after we fetched it
                 debug!("failed to get tenant: {e:#}");

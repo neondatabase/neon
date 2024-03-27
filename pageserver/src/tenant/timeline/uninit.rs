@@ -86,6 +86,7 @@ impl<'t> UninitializedTimeline<'t> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub(crate) async fn import_basebackup_from_tar(
         self,
+        tenant: Arc<Tenant>,
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
         broker_client: storage_broker::BrokerClientChannel,
@@ -114,7 +115,7 @@ impl<'t> UninitializedTimeline<'t> {
 
         // All the data has been imported. Insert the Timeline into the tenant's timelines map
         let tl = self.finish_creation()?;
-        tl.activate(broker_client, None, ctx);
+        tl.activate(tenant, broker_client, None, ctx);
         Ok(tl)
     }
 

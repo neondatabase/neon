@@ -517,10 +517,10 @@ impl ConnectionManagerState {
             wal_connection
                 .connection_task
                 .shutdown()
-                // if we get cancelled here because task_mgr::shutdown_watcher() becomes Ready
-                // at https://github.com/neondatabase/neon/blob/fb518aea0db046817987a463b1556ad950e97f09/pageserver/src/tenant/timeline/walreceiver.rs#L84-L104
-                // then self.wal_connection is already None and so the cleanup
-                // code running there after the select! will not shut down the task => task is leaked
+                // This here is why this function isn't cancellation-safe.
+                // If we got cancelled here, then self.wal_connection is already None and we lose track of the task.
+                // Even if our caller diligently calls Self::shutdown(), it will find a self.wal_connection=None
+                // and thus be ineffective.
                 .await;
         }
 

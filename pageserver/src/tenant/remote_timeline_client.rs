@@ -223,6 +223,7 @@ use crate::{
     config::PageServerConf,
     task_mgr,
     task_mgr::TaskKind,
+    task_mgr::BACKGROUND_RUNTIME,
     tenant::metadata::TimelineMetadata,
     tenant::upload_queue::{
         UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
@@ -297,6 +298,8 @@ pub enum PersistIndexPartWithDeletedFlagError {
 pub struct RemoteTimelineClient {
     conf: &'static PageServerConf,
 
+    runtime: tokio::runtime::Handle,
+
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     generation: Generation,
@@ -329,6 +332,12 @@ impl RemoteTimelineClient {
     ) -> RemoteTimelineClient {
         RemoteTimelineClient {
             conf,
+            runtime: if cfg!(test) {
+                // remote_timeline_client.rs tests rely on current-thread runtime
+                tokio::runtime::Handle::current()
+            } else {
+                BACKGROUND_RUNTIME.handle().clone()
+            },
             tenant_shard_id,
             timeline_id,
             generation,
@@ -1264,6 +1273,7 @@ impl RemoteTimelineClient {
             let tenant_shard_id = self.tenant_shard_id;
             let timeline_id = self.timeline_id;
             task_mgr::spawn(
+                &self.runtime,
                 TaskKind::RemoteUploadTask,
                 Some(self.tenant_shard_id),
                 Some(self.timeline_id),
@@ -1857,6 +1867,7 @@ mod tests {
         fn build_client(&self, generation: Generation) -> Arc<RemoteTimelineClient> {
             Arc::new(RemoteTimelineClient {
                 conf: self.harness.conf,
+                runtime: tokio::runtime::Handle::current(),
                 tenant_shard_id: self.harness.tenant_shard_id,
                 timeline_id: TIMELINE_ID,
                 generation,

@@ -24,7 +24,7 @@ mod connection_manager;
 mod walreceiver_connection;
 
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::task_mgr::{self, TaskKind};
+use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::timeline::walreceiver::connection_manager::{
     connection_manager_loop_step, ConnectionManagerState,
@@ -80,6 +80,7 @@ impl WalReceiver {
         let loop_status = Arc::new(std::sync::RwLock::new(None));
         let manager_status = Arc::clone(&loop_status);
         task_mgr::spawn(
+            WALRECEIVER_RUNTIME.handle(),
             TaskKind::WalReceiverManager,
             Some(timeline.tenant_shard_id),
             Some(timeline_id),
@@ -174,7 +175,7 @@ impl<E: Clone> TaskHandle<E> {
         let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
 
         let cancellation_clone = cancellation.clone();
-        let join_handle = tokio::spawn(async move {
+        let join_handle = WALRECEIVER_RUNTIME.spawn(async move {
             events_sender.send(TaskStateUpdate::Started).ok();
             task(events_sender, cancellation_clone).await
             // events_sender is dropped at some point during the .await above.

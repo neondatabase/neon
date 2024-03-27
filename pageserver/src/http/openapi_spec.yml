@@ -1038,7 +1038,7 @@ paths:
                   format: hex
       responses:
         "201":
-          description: TimelineInfo
+          description: Timeline was created, or already existed with matching parameters
           content:
             application/json:
               schema:
@@ -1068,11 +1068,17 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: Timeline already exists, creation skipped
+          description: Timeline already exists, with different parameters.  Creation cannot proceed.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
+        "429":
+          description: A creation request was sent for the same Timeline Id while a creation was already in progress.  Back off and retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: Generic operation error
           content:
