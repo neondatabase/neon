@@ -3624,8 +3624,13 @@ impl Timeline {
     ///
     /// During the operation all timelines sharing the data with this timeline will be reparented
     /// from our ancestor to be branches from this timeline.
-    pub(crate) async fn detach_from_ancestor(&self) -> Result<(), DetachFromAncestorError> {
+    pub(crate) async fn detach_from_ancestor(
+        self: &Arc<Timeline>,
+    ) -> Result<(), DetachFromAncestorError> {
         use DetachFromAncestorError::*;
+
+        let ctx = RequestContext::todo_child(TaskKind::Eviction, DownloadBehavior::Download);
+        let ctx = &ctx;
 
         let Some(ancestor) = self.ancestor_timeline.clone() else {
             // FIXME: it would be great to check here if we've previously been detached, and now
@@ -3649,6 +3654,13 @@ impl Timeline {
         // failing our copys
         let _gate_entered = self.gate.enter().map_err(|_| ShuttingDown)?;
 
+        if ancestor_lsn >= ancestor.get_disk_consistent_lsn() {
+            ancestor
+                .freeze_and_flush()
+                .await
+                .map_err(DetachFromAncestorError::FlushAncestor)?;
+        }
+
         // these we will need to copy the prefix of, if we haven't already
         //
         // idea: if any of these are empty, we should temporarily upload an .empty to show we don't
@@ -3657,43 +3669,97 @@ impl Timeline {
         // these we will need to remote copy, if we haven't already
         let mut rest_of_historic = vec![];
 
-        if ancestor_lsn >= ancestor.get_disk_consistent_lsn() {
-            ancestor
-                .freeze_and_flush()
-                .await
-                .map_err(DetachFromAncestorError::FlushAncestor)?;
+        {
+            // we do not need to start from our layers, because they can only be layers that come
+            // *after* our
+            let layers = tokio::select! {
+                guard = ancestor.layers.read() => guard,
+                _ = self.cancel.cancelled() => {
+                    return Err(ShuttingDown);
+                }
+            };
+
+            let mut later_by_lsn = 0;
+
+            for desc in layers.layer_map().iter_historic_layers() {
+                // off by one chances here:
+                // - start is inclusive
+                // - end is exclusive
+                if desc.lsn_range.start > ancestor_lsn {
+                    later_by_lsn += 1;
+                    continue;
+                }
+
+                let target = if desc.lsn_range.start <= ancestor_lsn
+                    && desc.lsn_range.end > ancestor_lsn
+                    && desc.is_delta
+                {
+                    // TODO: image layer at Lsn optimization
+                    &mut straddling_branchpoint
+                } else {
+                    &mut rest_of_historic
+                };
+
+                target.push(layers.get_from_desc(&desc));
+            }
+
+            tracing::debug!(%later_by_lsn, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
         }
 
-        // we do not need to start from our layers, because they can only be layers that come
-        // *after* our
-        let layers = tokio::select! {
-            guard = ancestor.layers.read() => guard,
-            _ = self.cancel.cancelled() => {
-                return Err(ShuttingDown);
-            }
+        let Some(rtc) = self.remote_client.as_ref() else {
+            unimplemented!("no new code for running without remote storage");
         };
 
-        for desc in layers.layer_map().iter_historic_layers() {
-            // off by one chances here:
-            // - start is inclusive
-            // - end is exclusive
-            if desc.lsn_range.start >= ancestor_lsn {
-                continue;
-            }
+        let layers = tokio::select! {
+            guard = self.layers.read() => guard,
+            _ = self.cancel.cancelled() => return Err(ShuttingDown),
+        };
 
-            if desc.lsn_range.start <= ancestor_lsn && desc.lsn_range.end > ancestor_lsn {
-                straddling_branchpoint.push(layers.get_from_desc(&desc));
-            } else {
-                rest_of_historic.push(layers.get_from_desc(&desc));
-            }
-        }
+        // we can safely not copy the layers again which happen to be found in the index_part.json
+        rest_of_historic.retain(|layer| {
+            let desc = layer.layer_desc();
+
+            let key_range = desc.key_range.clone();
+            let lsn_range = desc.lsn_range.clone();
+
+            let key = crate::tenant::storage_layer::PersistentLayerKey {
+                key_range,
+                lsn_range,
+                is_delta: true,
+            };
+
+            layers.get(&key).is_none()
+        });
 
         if straddling_branchpoint.is_empty() {
             // as we flushed the inmem layer to disk, only reason: this branch has been created from a L1 layer LSN boundary, or
             // checkpoint.
+            drop(layers);
             todo!("is there anything to here?");
         } else {
-            // we should really have just one lsn, but be ready for
+            straddling_branchpoint.retain(|layer| {
+                let desc = layer.layer_desc();
+                assert!(desc.is_delta);
+
+                assert!(desc.lsn_range.start <= ancestor_lsn);
+                assert!(desc.lsn_range.end > ancestor_lsn);
+
+                let key_range = desc.key_range.clone();
+                let lsn_range = desc.lsn_range.start..(ancestor_lsn + 1);
+
+                let key = crate::tenant::storage_layer::PersistentLayerKey {
+                    key_range,
+                    lsn_range,
+                    is_delta: true,
+                };
+
+                // keep if we haven't already rewritten this
+                layers.get(&key).is_none()
+            });
+
+            drop(layers);
+
+            // we should really have just one lsn
             straddling_branchpoint.sort_by_key(|layer| {
                 (
                     layer.layer_desc().key_range.start,
@@ -3701,7 +3767,61 @@ impl Timeline {
                 )
             });
 
-            // how to assert this is looking like as expected?
+            tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
+
+            for layer in straddling_branchpoint {
+                let mut writer = DeltaLayerWriter::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_shard_id,
+                    layer.layer_desc().key_range.start,
+                    // off by one here?
+                    layer.layer_desc().lsn_range.start..ancestor_lsn,
+                )
+                .await
+                .map_err(CopyDeltaPrefix)?;
+
+                // likely shutdown
+                let resident = layer
+                    .download_and_keep_resident()
+                    .await
+                    .map_err(RewrittenDeltaDownloadFailed)?;
+
+                let records = resident
+                    .copy_delta_prefix(&mut writer, ancestor_lsn, ctx)
+                    .await
+                    .map_err(CopyDeltaPrefix)?;
+
+                drop(resident);
+
+                tracing::debug!(records, "copied records out of {layer}");
+
+                if records == 0 {
+                    drop(writer);
+                    // TODO: we might want to store an empty marker in remote storage for this
+                    // layer so that we will not needlessly walk `layer` on repeated attempts.
+                } else {
+                    // reuse the key instead of adding more holes between layers by using the real
+                    // highest key in the layer.
+                    let reused_highest_key = layer.layer_desc().key_range.end;
+                    let copied = writer
+                        .finish(reused_highest_key, self)
+                        .await
+                        .map_err(CopyDeltaPrefix)?;
+
+                    // FIXME: fsync + fsync directory here or amortize?
+                    // adding the layers one by one is probably fine
+
+                    let mut layers = self.layers.write().await;
+                    layers.track_adopted_delta_layers(std::array::from_ref(&copied), &self.metrics);
+                    rtc.schedule_layer_file_upload(copied)
+                        .map_err(|_| ShuttingDown)?;
+
+                    rtc.schedule_index_upload_for_file_changes()
+                        .map_err(|_| ShuttingDown)?;
+                    // without rtc there would be nothing to do
+                }
+            }
         }
 
         // process the remote layers in descending order by Lsn to leak less layers if we are
@@ -3713,8 +3833,66 @@ impl Timeline {
             ))
         });
 
+        // because we hold the layers, it will not be removed from remote storage.
+        //
         // before making the layermap changes, should the resident ones be hardlinked?
         // ResidentLayer being held here would help nicely.
+
+        let mut new_owned = Vec::with_capacity(rest_of_historic.len());
+
+        let mut chunks = rest_of_historic.chunks(20);
+
+        while let Some(layers) = chunks.next() {
+            for adopted in layers {
+                // this layer will not exist until the copy completes
+                let owned = crate::tenant::storage_layer::Layer::for_evicted(
+                    self.conf,
+                    &self,
+                    adopted.layer_desc().filename(),
+                    adopted.metadata().with_generation(self.generation),
+                );
+                rtc.schedule_layer_adoption(adopted.clone(), owned.clone())
+                    .map_err(|_| ShuttingDown)?;
+
+                new_owned.push(owned);
+            }
+            // after each batch schedule index_part update to be able to resume after a
+            // shutdown without re-copying all of the files.
+            //
+            // intentional: we are not publishing the new to LayerMap until the end, because
+            // they have better chance of being already downloaded at ancestor
+            //
+            // after a restart any accesses which require download will be unfortunate.
+            if chunks.len() > 0 {
+                rtc.schedule_index_upload_for_file_changes()
+                    .map_err(|_| ShuttingDown)?;
+                rtc.wait_completion().await.map_err(|_| ShuttingDown)?;
+            }
+        }
+
+        rtc.schedule_detaching_from_ancestor_and_wait((ancestor.timeline_id, ancestor_lsn))
+            .await
+            .map_err(|_| ShuttingDown)?;
+
+        // we must not let gc observe our layers here before reparenting is done... is that
+        // correct? gc could had already ran after restart before this operation was retried
+        //
+        // maybe we should instead mark the timeline as being detaching (also to remote storage) in
+        // the beginning, that way, gc is inhibited; we will just need to release it in the end.
+        // alternatively we don't want the parent to be gc'd either, nor do we want multiple
+        // concurrent timeline detaches racing each other, so perhaps the flag could be there, and
+        // then gc would be inhibited for the two timelines (our ancestor and self).
+        let _gc_guard = self.gc_lock.lock().await;
+
+        {
+            // TODO: optimization: hardlink any ancestor downloaded historic layer?
+            let mut layers = self.layers.write().await;
+            layers.track_adopted_historic_layers(&new_owned);
+        }
+
+        // now we only need to switch our ancestor timeline to be none
+        //
+        // and reparent all ancestor's timelines which had ancestor_lsn <= our(ancestor_lsn)
 
         todo!();
     }
@@ -3725,6 +3903,8 @@ pub(crate) enum DetachFromAncestorError {
     TooManyAncestors,
     ShuttingDown,
     FlushAncestor(anyhow::Error),
+    RewrittenDeltaDownloadFailed(anyhow::Error),
+    CopyDeltaPrefix(anyhow::Error),
 }
 
 /// Top-level failure to compact.

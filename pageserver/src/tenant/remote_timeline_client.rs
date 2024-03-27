@@ -613,6 +613,26 @@ impl RemoteTimelineClient {
         self.launch_queued_tasks(upload_queue);
     }
 
+    /// Schedule an index part update as the last step of timeline detach.
+    ///
+    /// Metadata of adoption is added to the next index part recording the path for WAL based
+    /// disaster recovery.
+    ///
+    /// The returned future waits for the upload to complete, which means that remote storage is
+    /// now in sync, and the timeline can be separated from its ancestor. The next time the
+    /// timeline is loaded from remote storage, it will have no ancestor.
+    ///
+    /// Cancellation-safety: cancelling or not waiting for the returned future will not cancel the
+    /// upload.
+    pub(crate) fn schedule_detaching_from_ancestor_and_wait(
+        self: &Arc<Self>,
+        _adopted: (TimelineId, Lsn),
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + 'static {
+        async move {
+            todo!();
+        }
+    }
+
     /// Schedules a remote copy of the given Layer file from another timeline of the same tenant.
     /// The file will be copied under the timeline in the remote storage, and added to the
     /// `index_part.json` files uploaded on the next metadata upload.
