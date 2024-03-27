@@ -1765,7 +1765,7 @@ impl ResidentLayer {
         writer: &mut super::delta_layer::DeltaLayerWriter,
         truncate_at: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         use LayerKind::*;
 
         let owner = &self.owner.0;

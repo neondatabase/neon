@@ -1087,7 +1087,7 @@ impl DeltaLayerInner {
         writer: &mut DeltaLayerWriter,
         truncate_at: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         use crate::tenant::vectored_blob_io::{
             BlobMeta, VectoredReadBuilder, VectoredReadExtended,
         };
@@ -1150,6 +1150,8 @@ impl DeltaLayerInner {
 
         // FIXME: buffering of DeltaLayerWriter
         let mut per_blob_copy = Vec::new();
+
+        let mut records = 0;
 
         while let Some(item) = stream.try_next().await? {
             tracing::debug!(?item, "popped");
@@ -1244,7 +1246,10 @@ impl DeltaLayerInner {
                         .put_value_bytes(key, lsn, std::mem::take(&mut per_blob_copy), will_init)
                         .await;
                     per_blob_copy = tmp;
+
                     res?;
+
+                    records += 1;
                 }
 
                 buffer = Some(res.buf);
@@ -1256,7 +1261,7 @@ impl DeltaLayerInner {
             "with the sentinel above loop should had handled all"
         );
 
-        Ok(())
+        Ok(records)
     }
 
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
