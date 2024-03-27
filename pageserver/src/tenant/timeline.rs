@@ -1312,7 +1312,7 @@ impl Timeline {
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
-            walreceiver.stop().await;
+            walreceiver.cancel().await;
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
@@ -1344,7 +1344,7 @@ impl Timeline {
             }
         }
 
-        // All tasks except walreceiver and remote_client are sensitve to Timeline::cancel.
+        // All tasks expect remote_client are sensitve to Timeline::cancel.
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 

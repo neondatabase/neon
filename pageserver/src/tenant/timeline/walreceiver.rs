@@ -58,12 +58,12 @@ pub struct WalReceiverConf {
 
 pub struct WalReceiver {
     manager_status: Arc<std::sync::RwLock<Option<ConnectionManagerStatus>>>,
-    loop_task: crate::task_mgr::JoinHandlePanicForwarding<()>,
-    loop_task_cancel: CancellationToken,
+    /// All task spawned by [`WalReceiver::start`] and its children are sensitive to this token.
+    /// It's a child token of [`Timeline`] so that timeline shutdown can cancel WalReceiver tasks early for `freeze_and_flush=true`.
+    cancel: CancellationToken,
 }
 
 impl WalReceiver {
-    const TASK_NAME: &'static str = "wal_connection_manager";
     pub fn start(
         timeline: Arc<Timeline>,
         conf: WalReceiverConf,
@@ -74,18 +74,23 @@ impl WalReceiver {
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-
         let loop_status = Arc::new(std::sync::RwLock::new(None));
         let manager_status = Arc::clone(&loop_status);
         let cancel = timeline.cancel.child_token();
-        let loop_task = crate::task_mgr::spawn_with_panic_forward(WALRECEIVER_RUNTIME.handle(), {
+        WALRECEIVER_RUNTIME.spawn({
             let cancel = cancel.clone();
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
+                // acquire timeline gate so we know the task doesn't outlive the Timeline
+                let Ok(_guard) = timeline.gate.enter() else {
+                    debug!("WAL receiver manager could not enter the gate timeline gate, it's closed already");
+                    return;
+                };
                 debug!("WAL receiver manager started, connecting to broker");
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
+                    cancel.clone(),
                 );
                 while !cancel.is_cancelled() {
                     let loop_step_result = connection_manager_loop_step(
@@ -107,25 +112,20 @@ impl WalReceiver {
                 *loop_status.write().unwrap() = None;
                 debug!("task exits");
             }
-            .instrument(info_span!(parent: None, WalReceiver::TASK_NAME, tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), timeline_id = %timeline_id))
+            .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), timeline_id = %timeline_id))
         });
 
         Self {
             manager_status,
-            loop_task,
-            loop_task_cancel: cancel,
+            cancel,
         }
     }
 
-    /// # Cancel-Safety
-    ///
-    /// Leaves the loop task dangling if cancelled.
-    #[instrument(skip_all)]
-    pub async fn stop(self) {
+    #[instrument(skip_all, level = tracing::Level::DEBUG)]
+    pub async fn cancel(&self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
-        debug!("signalling cancellation");
-        self.loop_task_cancel.cancel();
-        let _: () = self.loop_task.join(Self::TASK_NAME).await;
+        debug!("cancelling walreceiver tasks");
+        self.cancel.cancel();
     }
 
     pub(crate) fn status(&self) -> Option<ConnectionManagerStatus> {
@@ -159,14 +159,18 @@ enum TaskStateUpdate<E> {
 
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
+    ///
+    /// The second argument to `task` is a child token of `cancel_parent` ([`CancellationToken::child_token`]).
+    /// It being a child token enables us to provide a [`Self::shutdown`] method.
     fn spawn<Fut>(
+        cancel_parent: &CancellationToken,
         task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, CancellationToken) -> Fut + Send + 'static,
     ) -> Self
     where
         Fut: Future<Output = anyhow::Result<()>> + Send,
         E: Send + Sync + 'static,
     {
-        let cancellation = CancellationToken::new();
+        let cancellation = cancel_parent.child_token();
         let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
 
         let cancellation_clone = cancellation.clone();

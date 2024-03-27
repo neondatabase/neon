@@ -30,7 +30,6 @@
 //! only a single tenant or timeline.
 //!
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -41,6 +40,7 @@ use std::sync::{Arc, Mutex};
 use futures::FutureExt;
 use pageserver_api::shard::TenantShardId;
 use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
 
@@ -300,7 +300,7 @@ pub enum TaskKind {
 struct MutableTaskState {
     /// Handle for waiting for the task to exit. It can be None, if the
     /// the task has already exited.
-    join_handle: Option<tokio::task::JoinHandle<()>>,
+    join_handle: Option<JoinHandle<()>>,
 }
 
 struct PageServerTask {
@@ -354,7 +354,7 @@ where
 
     let task_name = name.to_string();
     let task_cloned = Arc::clone(&task);
-    let join_handle = runtime.spawn(task_wrapper_task_mgr(
+    let join_handle = runtime.spawn(task_wrapper(
         task_name,
         task_id,
         task_cloned,
@@ -371,7 +371,7 @@ where
 
 /// This wrapper function runs in a newly-spawned task. It initializes the
 /// task-local variables and calls the payload function.
-async fn task_wrapper_task_mgr<F>(
+async fn task_wrapper<F>(
     task_name: String,
     task_id: u64,
     task: Arc<PageServerTask>,
@@ -386,85 +386,22 @@ async fn task_wrapper_task_mgr<F>(
     let result = SHUTDOWN_TOKEN
         .scope(
             shutdown_token,
-            CURRENT_TASK.scope(task, task_wrapper_generic(future)),
+            CURRENT_TASK.scope(task, {
+                // We use AssertUnwindSafe here so that the payload function
+                // doesn't need to be UnwindSafe. We don't do anything after the
+                // unwinding that would expose us to unwind-unsafe behavior.
+                AssertUnwindSafe(future).catch_unwind()
+            }),
         )
         .await;
     task_finish(result, task_name, task_id, shutdown_process_on_error).await;
 }
 
-async fn task_wrapper_generic<F, R>(future: F) -> TaskWrapperOutput<R>
-where
-    F: Future<Output = R> + Send,
-    R: Send,
-{
-    // We use AssertUnwindSafe here so that the payload function
-    // doesn't need to be UnwindSafe. We don't do anything after the
-    // unwinding that would expose us to unwind-unsafe behavior.
-    match AssertUnwindSafe(future).catch_unwind().await {
-        Ok(output) => TaskWrapperOutput::TaskExited(output),
-        Err(panicked) => TaskWrapperOutput::TaskPanicked(panicked),
-    }
-}
-
-enum TaskWrapperOutput<R> {
-    TaskPanicked(Box<dyn Any + Send>),
-    TaskExited(R),
-}
-
-pub(crate) struct JoinHandlePanicForwarding<R> {
-    jh: tokio::task::JoinHandle<TaskWrapperOutput<R>>,
-}
-
-impl<R> JoinHandlePanicForwarding<R> {
-    /// # Cancel-Safety
-    ///
-    /// Since this method is consuming self, cancelling this future leaves the task dangling.
-    /// A warn! will be logged in that case.
-    pub(crate) async fn join(mut self, name: &str) -> R {
-        let guard = scopeguard::guard((), |()| {
-            warn!("dropping join() future for task {name}, leaving task dangling");
-        });
-        let join_res =
-            match tokio::time::timeout(std::time::Duration::from_secs(1), &mut self.jh).await {
-                Ok(r) => r,
-                Err(_elapsed) => {
-                    // allow some time to elapse before logging to cut down the number of log
-                    // lines.
-                    info!("waiting for task {} to shut down", name);
-                    // we never handled this return value, but:
-                    // - we don't deschedule which would lead to is_cancelled
-                    // - panics are already logged (is_panicked)
-                    // - task errors are already logged in the wrapper
-                    let r = self.jh.await;
-                    info!("task {} completed", name);
-                    r
-                }
-            };
-        // disarm the guard after the last await but before potential panic forwarding
-        scopeguard::ScopeGuard::into_inner(guard);
-        match join_res {
-            Err(e) => unreachable!("task_wrapper_generic intercepts all panics: {e:?}"),
-            Ok(TaskWrapperOutput::TaskPanicked(p)) => std::panic::panic_any(p),
-            Ok(TaskWrapperOutput::TaskExited(r)) => r,
-        }
-    }
-}
-
-pub(crate) fn spawn_with_panic_forward<F, R>(
-    rt: &tokio::runtime::Handle,
-    future: F,
-) -> JoinHandlePanicForwarding<R>
-where
-    F: Future<Output = R> + Send + 'static,
-    R: Send + 'static,
-{
-    JoinHandlePanicForwarding {
-        jh: rt.spawn(task_wrapper_generic(future)),
-    }
-}
-
 async fn task_finish(
-    result: TaskWrapperOutput<anyhow::Result<()>>,
+    result: std::result::Result<
+        anyhow::Result<()>,
+        std::boxed::Box<dyn std::any::Any + std::marker::Send>,
+    >,
     task_name: String,
     task_id: u64,
     shutdown_process_on_error: bool,
@@ -479,10 +416,10 @@ async fn task_finish(
     let mut shutdown_process = false;
     {
         match result {
-            TaskWrapperOutput::TaskExited(Ok(())) => {
+            Ok(Ok(())) => {
                 debug!("Task '{}' exited normally", task_name);
             }
-            TaskWrapperOutput::TaskExited(Err(err)) => {
+            Ok(Err(err)) => {
                 if shutdown_process_on_error {
                     error!(
                         "Shutting down: task '{}' tenant_shard_id: {:?}, timeline_id: {:?} exited with error: {:?}",
@@ -496,7 +433,7 @@ async fn task_finish(
                     );
                 }
             }
-            TaskWrapperOutput::TaskPanicked(err) => {
+            Err(err) => {
                 if shutdown_process_on_error {
                     error!(
                         "Shutting down: task '{}' tenant_shard_id: {:?}, timeline_id: {:?} panicked: {:?}",
