@@ -479,7 +479,6 @@ pub async fn shutdown_tasks(
     tenant_shard_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
 ) -> ShutdownTasksReport {
-
     let mut report = ShutdownTasksReport::default();
 
     let mut victim_tasks = Vec::new();
