@@ -383,6 +383,11 @@ jobs:
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
+      - name: Slim binaries
+        run: |
+          scripts/strip-useless-debug.py -j$(nproc) target
+        shell: bash -euxo pipefail {0}
+
       - name: Install rust binaries
         run: |
           # Install target binaries
