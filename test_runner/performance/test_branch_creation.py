@@ -78,7 +78,7 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
         p = random.randint(0, i)
 
         timer = timeit.default_timer()
-        env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(p), tenant_id=tenant)
+        env.neon_cli.create_branch(f"b{i + 1}", f"b{p}", tenant_id=tenant)
         dur = timeit.default_timer() - timer
 
         log.info(f"Creating branch b{i+1} took {dur}s")

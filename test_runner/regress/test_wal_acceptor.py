@@ -103,9 +103,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
 
     n_timelines = 3
 
-    branch_names = [
-        "test_safekeepers_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
-    ]
+    branch_names = [f"test_safekeepers_many_timelines_{tlin}" for tlin in range(n_timelines)]
     # pageserver, safekeeper operate timelines via their ids (can be represented in hex as 'ad50847381e248feaac9876cc71ae418')
     # that's not really human readable, so the branch names are introduced in Neon CLI.
     # Neon CLI stores its branch <-> timeline mapping in its internals,
@@ -1136,13 +1134,13 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
         for f in mismatch:
             f1 = os.path.join(sk0.timeline_dir(tenant_id, timeline_id), f)
             f2 = os.path.join(sk.timeline_dir(tenant_id, timeline_id), f)
-            stdout_filename = "{}.filediff".format(f2)
+            stdout_filename = f"{f2}.filediff"
 
             with open(stdout_filename, "w") as stdout_f:
-                subprocess.run("xxd {} > {}.hex ".format(f1, f1), shell=True)
-                subprocess.run("xxd {} > {}.hex ".format(f2, f2), shell=True)
+                subprocess.run(f"xxd {f1} > {f1}.hex ", shell=True)
+                subprocess.run(f"xxd {f2} > {f2}.hex ", shell=True)
 
-                cmd = "diff {}.hex {}.hex".format(f1, f2)
+                cmd = f"diff {f1}.hex {f2}.hex"
                 subprocess.run([cmd], stdout=stdout_f, shell=True)
 
             assert (mismatch, not_regular) == (

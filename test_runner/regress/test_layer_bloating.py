@@ -57,9 +57,7 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
     time.sleep(10)
 
     # Check layer file sizes
-    timeline_path = "{}/tenants/{}/timelines/{}/".format(
-        env.pageserver.workdir, env.initial_tenant, timeline
-    )
+    timeline_path = f"{env.pageserver.workdir}/tenants/{env.initial_tenant}/timelines/{timeline}/"
     log.info(f"Check {timeline_path}")
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):

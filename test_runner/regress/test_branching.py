@@ -84,11 +84,11 @@ def test_branching_with_pgbench(
             threads = []
 
         if ty == "cascade":
-            env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(i), tenant_id=tenant)
+            env.neon_cli.create_branch(f"b{i + 1}", f"b{i}", tenant_id=tenant)
         else:
-            env.neon_cli.create_branch("b{}".format(i + 1), "b0", tenant_id=tenant)
+            env.neon_cli.create_branch(f"b{i + 1}", "b0", tenant_id=tenant)
 
-        endpoints.append(env.endpoints.create_start("b{}".format(i + 1), tenant_id=tenant))
+        endpoints.append(env.endpoints.create_start(f"b{i + 1}", tenant_id=tenant))
 
         threads.append(
             threading.Thread(target=run_pgbench, args=(endpoints[-1].connstr(),), daemon=True)
