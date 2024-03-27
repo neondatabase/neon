@@ -147,15 +147,16 @@ jobs:
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "platform": "neon-captest-freetier",   "db_size": "3gb"  },
-                      { "platform": "neon-captest-new",        "db_size": "50gb" },
-                      { "platform": "neonvm-captest-freetier", "db_size": "3gb"  },
-                      { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
+          "include": [{ "platform": "neon-captest-freetier",         "db_size": "3gb"  },
+                      { "platform": "neon-captest-new",              "db_size": "50gb" },
+                      { "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
+                      { "platform": "neonvm-captest-new",            "db_size": "50gb" },
+                      { "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
-                                                   { "platform": "rds-aurora",   "db_size": "50gb"}]')
+                                                     { "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -171,7 +172,7 @@ jobs:
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
-                                                   { "platform": "rds-aurora"   }]')
+                                                     { "platform": "rds-aurora"   }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -190,7 +191,7 @@ jobs:
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
-                                                    { "platform": "rds-aurora",   "scale": "10" }]')
+                                                     { "platform": "rds-aurora",   "scale": "10" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -253,6 +254,9 @@ jobs:
           neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
+          neonvm-captest-sharding-reuse)
+            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_SHARDING_CONNSTR }}
+            ;;
           neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
@@ -270,11 +274,15 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERY="SELECT version();"
+        QUERIES=("SELECT version()")
         if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+          QUERIES+=("SHOW neon.tenant_id")
+          QUERIES+=("SHOW neon.timeline_id")
         fi
-        psql ${CONNSTR} -c "${QUERY}"
+
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -401,11 +409,15 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERY="SELECT version();"
+        QUERIES=("SELECT version()")
         if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+          QUERIES+=("SHOW neon.tenant_id")
+          QUERIES+=("SHOW neon.timeline_id")
         fi
-        psql ${CONNSTR} -c "${QUERY}"
+
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
 
     - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
@@ -507,11 +519,15 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERY="SELECT version();"
+        QUERIES=("SELECT version()")
         if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+          QUERIES+=("SHOW neon.tenant_id")
+          QUERIES+=("SHOW neon.timeline_id")
         fi
-        psql ${CONNSTR} -c "${QUERY}"
+
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
 
     - name: Run TPC-H benchmark
       uses: ./.github/actions/run-python-test-set
@@ -597,11 +613,15 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERY="SELECT version();"
+        QUERIES=("SELECT version()")
         if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+          QUERIES+=("SHOW neon.tenant_id")
+          QUERIES+=("SHOW neon.timeline_id")
         fi
-        psql ${CONNSTR} -c "${QUERY}"
+
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
 
     - name: Run user examples
       uses: ./.github/actions/run-python-test-set
