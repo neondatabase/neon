@@ -14,7 +14,6 @@ use crate::{
     deletion_queue::DeletionQueueClient,
     task_mgr::{self, TaskKind},
     tenant::{
-        debug_assert_current_span_has_tenant_and_timeline_id,
         metadata::TimelineMetadata,
         remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, Tenant,
@@ -22,42 +21,6 @@ use crate::{
 };
 
 use super::{Timeline, TimelineResources};
-
-/// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
-async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
-    debug_assert_current_span_has_tenant_and_timeline_id();
-    // Notify any timeline work to drop out of loops/requests
-    tracing::debug!("Cancelling CancellationToken");
-    timeline.cancel.cancel();
-
-    // Prevent new uploads from starting.
-    if let Some(remote_client) = timeline.remote_client.as_ref() {
-        remote_client.stop();
-    }
-
-    // Stop & wait for the remaining timeline tasks, including upload tasks.
-    // NB: This and other delete_timeline calls do not run as a task_mgr task,
-    //     so, they are not affected by this shutdown_tasks() call.
-    info!("waiting for timeline tasks to shutdown");
-    task_mgr::shutdown_tasks(
-        None,
-        Some(timeline.tenant_shard_id),
-        Some(timeline.timeline_id),
-    )
-    .await;
-
-    fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
-        Err(anyhow::anyhow!(
-            "failpoint: timeline-delete-before-index-deleted-at"
-        ))?
-    });
-
-    tracing::debug!("Waiting for gate...");
-    timeline.gate.close().await;
-    tracing::debug!("Shutdown complete");
-
-    Ok(())
-}
 
 /// Mark timeline as deleted in S3 so we won't pick it up next time
 /// during attach or pageserver restart.
@@ -252,7 +215,14 @@ impl DeleteTimelineFlow {
 
         guard.mark_in_progress()?;
 
-        stop_tasks(&timeline).await?;
+        // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
+        timeline.shutdown(super::ShutdownMode::Hard).await;
+
+        fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-before-index-deleted-at"
+            ))?
+        });
 
         set_deleted_in_remote_index(&timeline).await?;
 
