@@ -52,6 +52,10 @@ impl LayerFileMetadata {
     pub fn file_size(&self) -> u64 {
         self.file_size
     }
+
+    pub fn with_generation(self, generation: Generation) -> Self {
+        LayerFileMetadata { generation, ..self }
+    }
 }
 
 // TODO seems like another part of the remote storage file format
