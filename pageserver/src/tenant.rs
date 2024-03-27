@@ -1411,7 +1411,7 @@ impl Tenant {
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_timeline(
-        &self,
+        self: &Arc<Tenant>,
         new_timeline_id: TimelineId,
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
@@ -1559,7 +1559,7 @@ impl Tenant {
             })?;
         }
 
-        loaded_timeline.activate(broker_client, None, ctx);
+        loaded_timeline.activate(self.clone(), broker_client, None, ctx);
 
         Ok(loaded_timeline)
     }
@@ -1731,7 +1731,12 @@ impl Tenant {
             let mut activated_timelines = 0;
 
             for timeline in timelines_to_activate {
-                timeline.activate(broker_client.clone(), background_jobs_can_start, ctx);
+                timeline.activate(
+                    self.clone(),
+                    broker_client.clone(),
+                    background_jobs_can_start,
+                    ctx,
+                );
                 activated_timelines += 1;
             }
 
@@ -2063,7 +2068,12 @@ impl Tenant {
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
-                TenantState::Broken { .. } | TenantState::Stopping { .. } => {
+                TenantState::Broken { reason, .. } => {
+                    // This is fatal, and reported distinctly from the general case of "will never be active" because
+                    // it's logically a 500 to external API users (broken is always a bug).
+                    return Err(GetActiveTenantError::Broken(reason));
+                }
+                TenantState::Stopping { .. } => {
                     // There's no chance the tenant can transition back into ::Active
                     return Err(GetActiveTenantError::WillNotBecomeActive(current_state));
                 }

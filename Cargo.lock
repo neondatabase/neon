@@ -3581,6 +3581,7 @@ dependencies = [
  "strum_macros",
  "svg_fmt",
  "sync_wrapper",
+ "sysinfo",
  "tenant_size_model",
  "thiserror",
  "tokio",

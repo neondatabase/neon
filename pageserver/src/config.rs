@@ -95,6 +95,8 @@ pub mod defaults {
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
+    pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
+
     ///
     /// Default built-in configuration file.
     ///
@@ -155,6 +157,8 @@ pub mod defaults {
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
 #secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
+
+#ephemeral_bytes_per_memory_kb = {DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB}
 
 [remote_storage]
 
@@ -279,6 +283,13 @@ pub struct PageServerConf {
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
     pub validate_vectored_get: bool,
+
+    /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
+    /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
+    /// of ephemeral data.
+    ///
+    /// Setting this to zero disables limits on total ephemeral layer size.
+    pub ephemeral_bytes_per_memory_kb: usize,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -400,6 +411,8 @@ struct PageServerConfigBuilder {
     max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
 
     validate_vectored_get: BuilderValue<bool>,
+
+    ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
 }
 
 impl PageServerConfigBuilder {
@@ -486,6 +499,7 @@ impl PageServerConfigBuilder {
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
+            ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
         }
     }
 }
@@ -665,6 +679,10 @@ impl PageServerConfigBuilder {
         self.validate_vectored_get = BuilderValue::Set(value);
     }
 
+    pub fn get_ephemeral_bytes_per_memory_kb(&mut self, value: usize) {
+        self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
@@ -720,6 +738,7 @@ impl PageServerConfigBuilder {
                 get_vectored_impl,
                 max_vectored_read_bytes,
                 validate_vectored_get,
+                ephemeral_bytes_per_memory_kb,
             }
             CUSTOM LOGIC
             {
@@ -1010,6 +1029,9 @@ impl PageServerConf {
                 "validate_vectored_get" => {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
                 }
+                "ephemeral_bytes_per_memory_kb" => {
+                    builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -1091,6 +1113,7 @@ impl PageServerConf {
                     .expect("Invalid default constant"),
             ),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+            ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
         }
     }
 }
@@ -1328,6 +1351,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1399,6 +1423,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB
             },
             "Should be able to parse all basic config values correctly"
         );

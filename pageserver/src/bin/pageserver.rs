@@ -600,33 +600,37 @@ fn start_pageserver(
             None,
             "consumption metrics collection",
             true,
-            async move {
-                // first wait until background jobs are cleared to launch.
-                //
-                // this is because we only process active tenants and timelines, and the
-                // Timeline::get_current_logical_size will spawn the logical size calculation,
-                // which will not be rate-limited.
-                let cancel = task_mgr::shutdown_token();
+            {
+                let tenant_manager = tenant_manager.clone();
+                async move {
+                    // first wait until background jobs are cleared to launch.
+                    //
+                    // this is because we only process active tenants and timelines, and the
+                    // Timeline::get_current_logical_size will spawn the logical size calculation,
+                    // which will not be rate-limited.
+                    let cancel = task_mgr::shutdown_token();
 
-                tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); },
-                    _ = background_jobs_barrier.wait() => {}
-                };
+                    tokio::select! {
+                        _ = cancel.cancelled() => { return Ok(()); },
+                        _ = background_jobs_barrier.wait() => {}
+                    };
 
-                pageserver::consumption_metrics::collect_metrics(
-                    metric_collection_endpoint,
-                    &conf.metric_collection_bucket,
-                    conf.metric_collection_interval,
-                    conf.cached_metric_collection_interval,
-                    conf.synthetic_size_calculation_interval,
-                    conf.id,
-                    local_disk_storage,
-                    cancel,
-                    metrics_ctx,
-                )
-                .instrument(info_span!("metrics_collection"))
-                .await?;
-                Ok(())
+                    pageserver::consumption_metrics::collect_metrics(
+                        tenant_manager,
+                        metric_collection_endpoint,
+                        &conf.metric_collection_bucket,
+                        conf.metric_collection_interval,
+                        conf.cached_metric_collection_interval,
+                        conf.synthetic_size_calculation_interval,
+                        conf.id,
+                        local_disk_storage,
+                        cancel,
+                        metrics_ctx,
+                    )
+                    .instrument(info_span!("metrics_collection"))
+                    .await?;
+                    Ok(())
+                }
             },
         );
     }
