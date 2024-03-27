@@ -11,6 +11,7 @@ from fixtures.pageserver.utils import (
     assert_prefix_empty,
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
+    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
 from fixtures.types import TenantId, TimelineId
@@ -89,6 +90,8 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                 # this shutdown case is logged at WARN severity by the time it bubbles up to logical size calculation code
                 # WARN ...: initial size calculation failed: downloading failed, possibly for shutdown
                 ".*downloading failed, possibly for shutdown",
+                # {tenant_id=... timeline_id=...}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1664/0/1260 blkno=0 req_lsn=0/149F0D8}: error reading relation or page version: Not found: will not become active.  Current state: Stopping\n'
+                ".*page_service.*will not become active.*",
             ]
         )
 
@@ -472,6 +475,10 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     log.info("Synchronizing after initial write...")
     ps_attached.http_client().tenant_heatmap_upload(tenant_id)
 
+    # Ensure that everything which appears in the heatmap is also present in S3: heatmap writers
+    # are allowed to upload heatmaps that reference layers which are only enqueued for upload
+    wait_for_upload_queue_empty(ps_attached.http_client(), tenant_id, timeline_id)
+
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
     assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
@@ -484,6 +491,11 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     workload.churn_rows(128, ps_attached.id)
 
     ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+
+    # Ensure that everything which appears in the heatmap is also present in S3: heatmap writers
+    # are allowed to upload heatmaps that reference layers which are only enqueued for upload
+    wait_for_upload_queue_empty(ps_attached.http_client(), tenant_id, timeline_id)
+
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
     assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(

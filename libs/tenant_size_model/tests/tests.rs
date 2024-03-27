@@ -247,7 +247,7 @@ fn scenario_4() {
     //
     // This is in total 5000 + 1000 + 5000 + 1000 = 12000
     //
-    // (If we used the the method from the previous scenario, and
+    // (If we used the method from the previous scenario, and
     // kept only snapshot at the branch point, we'd need to keep
     // all the WAL between 10000-18000 on the main branch, so
     // the total size would be 5000 + 1000 + 8000 = 14000. The

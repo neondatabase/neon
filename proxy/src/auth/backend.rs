@@ -12,6 +12,8 @@ use crate::console::errors::GetAuthInfoError;
 use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::{AuthSecret, NodeInfo};
 use crate::context::RequestMonitoring;
+use crate::intern::EndpointIdInt;
+use crate::metrics::{AUTH_RATE_LIMIT_HITS, ENDPOINTS_AUTH_RATE_LIMITED};
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::stream::Stream;
@@ -28,7 +30,7 @@ use crate::{
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -174,6 +176,52 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
     }
 }
 
+impl AuthenticationConfig {
+    pub fn check_rate_limit(
+        &self,
+
+        ctx: &mut RequestMonitoring,
+        secret: AuthSecret,
+        endpoint: &EndpointId,
+        is_cleartext: bool,
+    ) -> auth::Result<AuthSecret> {
+        // we have validated the endpoint exists, so let's intern it.
+        let endpoint_int = EndpointIdInt::from(endpoint);
+
+        // only count the full hash count if password hack or websocket flow.
+        // in other words, if proxy needs to run the hashing
+        let password_weight = if is_cleartext {
+            match &secret {
+                #[cfg(any(test, feature = "testing"))]
+                AuthSecret::Md5(_) => 1,
+                AuthSecret::Scram(s) => s.iterations + 1,
+            }
+        } else {
+            // validating scram takes just 1 hmac_sha_256 operation.
+            1
+        };
+
+        let limit_not_exceeded = self
+            .rate_limiter
+            .check((endpoint_int, ctx.peer_addr), password_weight);
+
+        if !limit_not_exceeded {
+            warn!(
+                enabled = self.rate_limiter_enabled,
+                "rate limiting authentication"
+            );
+            AUTH_RATE_LIMIT_HITS.inc();
+            ENDPOINTS_AUTH_RATE_LIMITED.measure(endpoint);
+
+            if self.rate_limiter_enabled {
+                return Err(auth::AuthError::too_many_connections());
+            }
+        }
+
+        Ok(secret)
+    }
+}
+
 /// True to its name, this function encapsulates our current auth trade-offs.
 /// Here, we choose the appropriate auth flow based on circumstances.
 ///
@@ -214,14 +262,24 @@ async fn auth_quirks(
         Some(secret) => secret,
         None => api.get_role_secret(ctx, &info).await?,
     };
+    let (cached_entry, secret) = cached_secret.take_value();
 
-    let secret = cached_secret.value.clone().unwrap_or_else(|| {
-        // If we don't have an authentication secret, we mock one to
-        // prevent malicious probing (possible due to missing protocol steps).
-        // This mocked secret will never lead to successful authentication.
-        info!("authentication info not found, mocking it");
-        AuthSecret::Scram(scram::ServerSecret::mock(&info.user, rand::random()))
-    });
+    let secret = match secret {
+        Some(secret) => config.check_rate_limit(
+            ctx,
+            secret,
+            &info.endpoint,
+            unauthenticated_password.is_some() || allow_cleartext,
+        )?,
+        None => {
+            // If we don't have an authentication secret, we mock one to
+            // prevent malicious probing (possible due to missing protocol steps).
+            // This mocked secret will never lead to successful authentication.
+            info!("authentication info not found, mocking it");
+            AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
+        }
+    };
+
     match authenticate_with_secret(
         ctx,
         secret,
@@ -237,7 +295,7 @@ async fn auth_quirks(
         Err(e) => {
             if e.is_auth_failed() {
                 // The password could have been changed, so we invalidate the cache.
-                cached_secret.invalidate();
+                cached_entry.invalidate();
             }
             Err(e)
         }
@@ -415,6 +473,7 @@ mod tests {
 
     use bytes::BytesMut;
     use fallible_iterator::FallibleIterator;
+    use once_cell::sync::Lazy;
     use postgres_protocol::{
         authentication::sasl::{ChannelBinding, ScramSha256},
         message::{backend::Message as PgMessage, frontend},
@@ -432,6 +491,7 @@ mod tests {
         },
         context::RequestMonitoring,
         proxy::NeonOptions,
+        rate_limiter::{AuthRateLimiter, RateBucketInfo},
         scram::ServerSecret,
         stream::{PqStream, Stream},
     };
@@ -473,9 +533,11 @@ mod tests {
         }
     }
 
-    static CONFIG: &AuthenticationConfig = &AuthenticationConfig {
+    static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
         scram_protocol_timeout: std::time::Duration::from_secs(5),
-    };
+        rate_limiter_enabled: true,
+        rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
+    });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
         loop {
@@ -544,7 +606,7 @@ mod tests {
             }
         });
 
-        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, false, CONFIG)
+        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, false, &CONFIG)
             .await
             .unwrap();
 
@@ -584,7 +646,7 @@ mod tests {
             client.write_all(&write).await.unwrap();
         });
 
-        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
+        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, &CONFIG)
             .await
             .unwrap();
 
@@ -624,7 +686,7 @@ mod tests {
             client.write_all(&write).await.unwrap();
         });
 
-        let creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, CONFIG)
+        let creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, &CONFIG)
             .await
             .unwrap();
 

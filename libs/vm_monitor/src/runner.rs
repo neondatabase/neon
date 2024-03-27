@@ -69,7 +69,7 @@ pub struct Config {
     /// should be removed once we have a better solution there.
     sys_buffer_bytes: u64,
 
-    /// Minimum fraction of total system memory reserved *before* the the cgroup threshold; in
+    /// Minimum fraction of total system memory reserved *before* the cgroup threshold; in
     /// other words, providing a ceiling for the highest value of the threshold by enforcing that
     /// there's at least `cgroup_min_overhead_fraction` of the total memory remaining beyond the
     /// threshold.

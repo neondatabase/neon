@@ -782,7 +782,7 @@ where
         }
     }
     // NB: don't use `buf.is_empty()` here; it is from the
-    // `impl Deref for Slice { Target = [u8] }`; the the &[u8]
+    // `impl Deref for Slice { Target = [u8] }`; the &[u8]
     // returned by it only covers the initialized portion of `buf`.
     // Whereas we're interested in ensuring that we filled the entire
     // buffer that the user passed in.

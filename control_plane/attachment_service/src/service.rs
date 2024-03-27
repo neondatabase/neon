@@ -1523,6 +1523,8 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<TenantCreateResponse, ApiError> {
+        let tenant_id = create_req.new_tenant_id.tenant_id;
+
         // Exclude any concurrent attempts to create/access the same tenant ID
         let _tenant_lock = self
             .tenant_op_locks
@@ -1531,7 +1533,12 @@ impl Service {
 
         let (response, waiters) = self.do_tenant_create(create_req).await?;
 
-        self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await?;
+        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+            // Avoid deadlock: reconcile may fail while notifying compute, if the cloud control plane refuses to
+            // accept compute notifications while it is in the process of creating.  Reconciliation will
+            // be retried in the background.
+            tracing::warn!(%tenant_id, "Reconcile not done yet while creating tenant ({e})");
+        }
         Ok(response)
     }
 
@@ -1610,13 +1617,25 @@ impl Service {
                 splitting: SplitState::default(),
             })
             .collect();
-        self.persistence
+
+        match self
+            .persistence
             .insert_tenant_shards(persist_tenant_shards)
             .await
-            .map_err(|e| {
-                // TODO: distinguish primary key constraint (idempotent, OK), from other errors
-                ApiError::InternalServerError(anyhow::anyhow!(e))
-            })?;
+        {
+            Ok(_) => {}
+            Err(DatabaseError::Query(diesel::result::Error::DatabaseError(
+                DatabaseErrorKind::UniqueViolation,
+                _,
+            ))) => {
+                // Unique key violation: this is probably a retry.  Because the shard count is part of the unique key,
+                // if we see a unique key violation it means that the creation request's shard count matches the previous
+                // creation's shard count.
+                tracing::info!("Tenant shards already present in database, proceeding with idempotent creation...");
+            }
+            // Any other database error is unexpected and a bug.
+            Err(e) => return Err(ApiError::InternalServerError(anyhow::anyhow!(e))),
+        };
 
         let (waiters, response_shards) = {
             let mut locked = self.inner.write().unwrap();

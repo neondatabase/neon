@@ -18,6 +18,7 @@ use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
 use proxy::metrics::NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT;
+use proxy::rate_limiter::AuthRateLimiter;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
@@ -141,10 +142,16 @@ struct ProxyCliArgs {
     ///
     /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
     /// Can be given multiple times for different bucket sizes.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
+    /// Whether the auth rate limiter actually takes effect (for testing)
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    auth_rate_limit_enabled: bool,
+    /// Authentication rate limiter max number of hashes per second.
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
+    auth_rate_limit: Vec<RateBucketInfo>,
     /// Redis rate limiter max number of requests per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
     #[clap(long, default_value_t = 100)]
@@ -510,6 +517,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
+        rate_limiter_enabled: args.auth_rate_limit_enabled,
+        rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
     };
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();

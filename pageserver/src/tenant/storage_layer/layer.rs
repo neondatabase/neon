@@ -1447,7 +1447,7 @@ impl LayerInner {
         #[cfg(test)]
         tokio::task::spawn(fut);
         #[cfg(not(test))]
-        crate::task_mgr::THE_RUNTIME.spawn(fut);
+        crate::task_mgr::BACKGROUND_RUNTIME.spawn(fut);
     }
 
     /// Needed to use entered runtime in tests, but otherwise use BACKGROUND_RUNTIME.
@@ -1458,7 +1458,7 @@ impl LayerInner {
         #[cfg(test)]
         tokio::task::spawn_blocking(f);
         #[cfg(not(test))]
-        crate::task_mgr::THE_RUNTIME.spawn_blocking(f);
+        crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(f);
     }
 }
 

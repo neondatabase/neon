@@ -838,7 +838,7 @@ def test_compaction_waits_for_upload(
     # upload_stuck_layers and the original initdb L0
     client.timeline_checkpoint(tenant_id, timeline_id)
 
-    # as uploads are paused, the the upload_stuck_layers should still be with us
+    # as uploads are paused, the upload_stuck_layers should still be with us
     for name in upload_stuck_layers:
         path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
         assert path.exists(), "uploads are stuck still over compaction"

@@ -1155,13 +1155,17 @@ class NeonEnv:
         After this method returns, there should be no child processes running.
         """
         self.endpoints.stop_all()
+
+        # Stop storage controller before pageservers: we don't want it to spuriously
+        # detect a pageserver "failure" during test teardown
+        self.storage_controller.stop(immediate=immediate)
+
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
         for pageserver in self.pageservers:
             if ps_assert_metric_no_errors:
                 pageserver.assert_no_metric_errors()
             pageserver.stop(immediate=immediate)
-        self.storage_controller.stop(immediate=immediate)
         self.broker.stop(immediate=immediate)
 
     @property
@@ -2122,6 +2126,8 @@ class NeonStorageController(MetricsGetter):
             shard_params = {"count": shard_count}
             if shard_stripe_size is not None:
                 shard_params["stripe_size"] = shard_stripe_size
+            else:
+                shard_params["stripe_size"] = 32768
 
             body["shard_parameters"] = shard_params
 
@@ -2135,6 +2141,7 @@ class NeonStorageController(MetricsGetter):
             json=body,
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
+        response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:

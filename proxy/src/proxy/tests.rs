@@ -142,8 +142,8 @@ impl Scram {
         Ok(Scram(secret))
     }
 
-    fn mock(user: &str) -> Self {
-        Scram(scram::ServerSecret::mock(user, rand::random()))
+    fn mock() -> Self {
+        Scram(scram::ServerSecret::mock(rand::random()))
     }
 }
 
@@ -330,11 +330,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
 
     let (client_config, server_config) =
         generate_tls_config("generic-project-name.localhost", "localhost")?;
-    let proxy = tokio::spawn(dummy_proxy(
-        client,
-        Some(server_config),
-        Scram::mock("user"),
-    ));
+    let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
 
     use rand::{distributions::Alphanumeric, Rng};
     let password: String = rand::thread_rng()

@@ -89,6 +89,11 @@ def test_sharding_service_smoke(
     for tid in tenant_ids:
         env.neon_cli.create_tenant(tid, shard_count=shards_per_tenant)
 
+    # Repeating a creation should be idempotent (we are just testing it doesn't return an error)
+    env.storage_controller.tenant_create(
+        tenant_id=next(iter(tenant_ids)), shard_count=shards_per_tenant
+    )
+
     for node_id, count in get_node_shard_counts(env, tenant_ids).items():
         # we used a multiple of pagservers for the total shard count,
         # so expect equal number on all pageservers

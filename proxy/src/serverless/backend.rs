@@ -42,7 +42,12 @@ impl PoolingBackend {
         };
 
         let secret = match cached_secret.value.clone() {
-            Some(secret) => secret,
+            Some(secret) => self.config.authentication_config.check_rate_limit(
+                ctx,
+                secret,
+                &user_info.endpoint,
+                true,
+            )?,
             None => {
                 // If we don't have an authentication secret, for the http flow we can just return an error.
                 info!("authentication info not found");

@@ -389,6 +389,9 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
             if e.status_code == 409:
                 log.info(f"delay_ms={delay_ms} 409")
                 pass
+            elif e.status_code == 429:
+                log.info(f"delay_ms={delay_ms} 429")
+                pass
             elif e.status_code == 400:
                 if "is less than existing" in e.message:
                     # We send creation requests very close together in time: it is expected that these

@@ -1,5 +1,6 @@
 use anyhow::*;
 use clap::{value_parser, Arg, ArgMatches, Command};
+use postgres::Client;
 use std::{path::PathBuf, str::FromStr};
 use wal_craft::*;
 
@@ -8,8 +9,8 @@ fn main() -> Result<()> {
         .init();
     let arg_matches = cli().get_matches();
 
-    let wal_craft = |arg_matches: &ArgMatches, client| {
-        let (intermediate_lsns, end_of_wal_lsn) = match arg_matches
+    let wal_craft = |arg_matches: &ArgMatches, client: &mut Client| {
+        let intermediate_lsns = match arg_matches
             .get_one::<String>("type")
             .map(|s| s.as_str())
             .context("'type' is required")?
@@ -25,6 +26,7 @@ fn main() -> Result<()> {
             LastWalRecordCrossingSegment::NAME => LastWalRecordCrossingSegment::craft(client)?,
             a => panic!("Unknown --type argument: {a}"),
         };
+        let end_of_wal_lsn = client.pg_current_wal_insert_lsn()?;
         for lsn in intermediate_lsns {
             println!("intermediate_lsn = {lsn}");
         }

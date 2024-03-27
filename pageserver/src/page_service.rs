@@ -180,6 +180,7 @@ pub async fn libpq_listener_main(
                 // only deal with a particular timeline, but we don't know which one
                 // yet.
                 task_mgr::spawn(
+                    &tokio::runtime::Handle::current(),
                     TaskKind::PageRequestHandler,
                     None,
                     None,
@@ -759,6 +760,7 @@ impl PageServerHandler {
         let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &tenant.cancel)));
         timeline
             .import_basebackup_from_tar(
+                tenant.clone(),
                 &mut copyin_reader,
                 base_lsn,
                 self.broker_client.clone(),
