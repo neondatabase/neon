@@ -1058,7 +1058,7 @@ impl Timeline {
     pub(crate) async fn wait_lsn(
         &self,
         lsn: Lsn,
-        _ctx: &RequestContext, /* Prepare for use by cancellation */
+        ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
         if self.cancel.is_cancelled() {
             return Err(WaitLsnError::Shutdown);
@@ -1069,15 +1069,15 @@ impl Timeline {
         // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
         debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverManager),
+            ctx.task_kind() != TaskKind::WalReceiverManager,
             "wait_lsn cannot be called in WAL receiver"
         );
         debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionHandler),
+            ctx.task_kind() != TaskKind::WalReceiverConnectionHandler,
             "wait_lsn cannot be called in WAL receiver"
         );
         debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionPoller),
+            ctx.task_kind() != TaskKind::WalReceiverConnectionPoller,
             "wait_lsn cannot be called in WAL receiver"
         );
 
