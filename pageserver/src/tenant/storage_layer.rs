@@ -220,9 +220,12 @@ pub(crate) enum ReadableLayer {
     InMemoryLayer(Arc<InMemoryLayer>),
 }
 
+/// A partial description of a read to be done.
 #[derive(Debug, Clone)]
 struct ReadDesc {
+    /// A key used to resolve the readable layer within the fringe
     layer_key: LayerId,
+    /// Lsn range for the read, used for selecting the next read
     lsn_range: Range<Lsn>,
 }
 
@@ -236,7 +239,13 @@ struct ReadDesc {
 #[derive(Debug)]
 pub(crate) struct LayerFringe {
     planned_reads_by_lsn: BinaryHeap<ReadDesc>,
-    layers: HashMap<LayerId, (ReadableLayer, KeySpace)>,
+    layers: HashMap<LayerId, LayerKeyspace>,
+}
+
+#[derive(Debug)]
+struct LayerKeyspace {
+    layer: ReadableLayer,
+    target_keyspace: KeySpace,
 }
 
 impl LayerFringe {
@@ -255,7 +264,13 @@ impl LayerFringe {
 
         let removed = self.layers.remove_entry(&read_desc.layer_key);
         match removed {
-            Some((_, (layer, keyspace))) => Some((layer, keyspace, read_desc.lsn_range)),
+            Some((
+                _,
+                LayerKeyspace {
+                    layer,
+                    target_keyspace,
+                },
+            )) => Some((layer, target_keyspace, read_desc.lsn_range)),
             None => unreachable!("fringe internals are always consistent"),
         }
     }
@@ -270,14 +285,17 @@ impl LayerFringe {
         let entry = self.layers.entry(key.clone());
         match entry {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().1.merge(&keyspace);
+                entry.get_mut().target_keyspace.merge(&keyspace);
             }
             Entry::Vacant(entry) => {
                 self.planned_reads_by_lsn.push(ReadDesc {
                     lsn_range,
                     layer_key: key.clone(),
                 });
-                entry.insert((layer, keyspace));
+                entry.insert(LayerKeyspace {
+                    layer,
+                    target_keyspace: keyspace,
+                });
             }
         }
     }
