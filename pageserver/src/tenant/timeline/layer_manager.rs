@@ -31,6 +31,10 @@ impl LayerManager {
         self.layer_fmgr.get_from_desc(desc)
     }
 
+    pub(crate) fn get(&self, key: &PersistentLayerKey) -> Option<&Layer> {
+        self.layer_fmgr.get_from_key(key)
+    }
+
     /// Get an immutable reference to the layer map.
     ///
     /// We expect users only to be able to get an immutable layer map. If users want to make modifications,
