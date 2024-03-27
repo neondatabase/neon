@@ -34,7 +34,8 @@ use utils::{
 };
 
 use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantShardMigrateRequest,
+    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantPolicyRequest,
+    TenantShardMigrateRequest,
 };
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
 
@@ -478,6 +479,22 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
+async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let update_req = json_request::<TenantPolicyRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state
+            .service
+            .tenant_update_policy(tenant_id, update_req)
+            .await?,
+    )
+}
+
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
@@ -763,6 +780,13 @@ pub fn make_router(
                 r,
                 handle_tenant_describe,
                 RequestName("control_v1_tenant_describe"),
+            )
+        })
+        .put("/control/v1/tenant/:tenant_id/policy", |r| {
+            named_request_span(
+                r,
+                handle_tenant_update_policy,
+                RequestName("control_v1_tenant_config"),
             )
         })
         // Tenant operations

@@ -8,7 +8,7 @@ use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
 };
-use pageserver_api::controller_api::PlacementPolicy;
+use pageserver_api::controller_api::{PlacementPolicy, ShardSchedulingPolicy};
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
@@ -116,6 +116,10 @@ pub(crate) struct TenantState {
     /// sending it.  This is the mechanism by which compute notifications are included in the scope
     /// of state that we publish externally in an eventually consistent way.
     pub(crate) pending_compute_notification: bool,
+
+    // Support/debug tool: if something is going wrong or flapping with scheduling, this may
+    // be set to a non-active state to avoid making changes while the issue is fixed.
+    scheduling_policy: ShardSchedulingPolicy,
 }
 
 #[derive(Default, Clone, Debug, Serialize)]
@@ -370,6 +374,7 @@ impl TenantState {
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),
             last_error: Arc::default(),
             pending_compute_notification: false,
+            scheduling_policy: ShardSchedulingPolicy::default(),
         }
     }
 
@@ -452,6 +457,16 @@ impl TenantState {
 
         // TODO: respect the splitting bit on tenants: if they are currently splitting then we may not
         // change their attach location.
+
+        match self.scheduling_policy {
+            ShardSchedulingPolicy::Active | ShardSchedulingPolicy::Essential => {}
+            ShardSchedulingPolicy::Pause | ShardSchedulingPolicy::Stop => {
+                // Warn to make it obvious why other things aren't happening/working, if we skip scheduling
+                tracing::warn!(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(),
+                    "Scheduling is disabled by policy {:?}", self.scheduling_policy);
+                return Ok(());
+            }
+        }
 
         // Build the set of pageservers already in use by this tenant, to avoid scheduling
         // more work on the same pageservers we're already using.
@@ -668,6 +683,19 @@ impl TenantState {
             }
         }
 
+        // Pre-checks done: finally check whether we may actually do the work
+        match self.scheduling_policy {
+            ShardSchedulingPolicy::Active
+            | ShardSchedulingPolicy::Essential
+            | ShardSchedulingPolicy::Pause => {}
+            ShardSchedulingPolicy::Stop => {
+                // We only reach this point if there is work to do and we're going to skip
+                // doing it: warn it obvious why this tenant isn't doing what it ought to.
+                tracing::warn!("Skipping reconcile for policy {:?}", self.scheduling_policy);
+                return None;
+            }
+        }
+
         // Build list of nodes from which the reconciler should detach
         let mut detach = Vec::new();
         for node_id in self.observed.locations.keys() {
@@ -829,6 +857,36 @@ impl TenantState {
         debug_assert!(!self.intent.all_pageservers().contains(&node_id));
     }
 
+    pub(crate) fn set_scheduling_policy(&mut self, p: ShardSchedulingPolicy) {
+        self.scheduling_policy = p;
+    }
+
+    pub(crate) fn from_persistent(
+        tsp: TenantShardPersistence,
+        intent: IntentState,
+    ) -> anyhow::Result<Self> {
+        let tenant_shard_id = tsp.get_tenant_shard_id()?;
+        let shard_identity = tsp.get_shard_identity()?;
+
+        Ok(Self {
+            tenant_shard_id,
+            shard: shard_identity,
+            sequence: Sequence::initial(),
+            generation: tsp.generation.map(|g| Generation::new(g as u32)),
+            policy: serde_json::from_str(&tsp.placement_policy).unwrap(),
+            intent,
+            observed: ObservedState::new(),
+            config: serde_json::from_str(&tsp.config).unwrap(),
+            reconciler: None,
+            splitting: tsp.splitting,
+            waiter: Arc::new(SeqWait::new(Sequence::initial())),
+            error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
+            last_error: Arc::default(),
+            pending_compute_notification: false,
+            scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
+        })
+    }
+
     pub(crate) fn to_persistent(&self) -> TenantShardPersistence {
         TenantShardPersistence {
             tenant_id: self.tenant_shard_id.tenant_id.to_string(),
@@ -840,6 +898,7 @@ impl TenantState {
             placement_policy: serde_json::to_string(&self.policy).unwrap(),
             config: serde_json::to_string(&self.config).unwrap(),
             splitting: SplitState::default(),
+            scheduling_policy: serde_json::to_string(&self.scheduling_policy).unwrap(),
         }
     }
 }
@@ -976,6 +1035,27 @@ pub(crate) mod tests {
         assert_eq!(tenant_state.intent.secondary, vec![NodeId(2)]);
 
         scheduler.consistency_check(nodes.values(), [&tenant_state].into_iter())?;
+
+        tenant_state.intent.clear(&mut scheduler);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduling_mode() -> anyhow::Result<()> {
+        let nodes = make_test_nodes(3);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
+
+        // In pause mode, schedule() shouldn't do anything
+        tenant_state.scheduling_policy = ShardSchedulingPolicy::Pause;
+        assert!(tenant_state.schedule(&mut scheduler).is_ok());
+        assert!(tenant_state.intent.all_pageservers().is_empty());
+
+        // In active mode, schedule() works
+        tenant_state.scheduling_policy = ShardSchedulingPolicy::Active;
+        assert!(tenant_state.schedule(&mut scheduler).is_ok());
+        assert!(!tenant_state.intent.all_pageservers().is_empty());
 
         tenant_state.intent.clear(&mut scheduler);
         Ok(())
