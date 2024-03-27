@@ -526,6 +526,14 @@ async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, 
     json_response(StatusCode::OK, state.service.consistency_check().await?)
 }
 
+async fn handle_reconcile_all(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+
+    json_response(StatusCode::OK, state.service.reconcile_all_now().await?)
+}
+
 /// Status endpoint is just used for checking that our HTTP listener is up
 async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, ())
@@ -742,6 +750,9 @@ pub fn make_router(
                 handle_consistency_check,
                 RequestName("debug_v1_consistency_check"),
             )
+        })
+        .post("/debug/v1/reconcile_all", |r| {
+            request_span(r, handle_reconcile_all)
         })
         .put("/debug/v1/failpoints", |r| {
             request_span(r, |r| failpoints_handler(r, CancellationToken::new()))

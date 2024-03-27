@@ -4016,6 +4016,28 @@ impl Service {
         reconciles_spawned
     }
 
+    /// Useful for tests: run whatever work a background [`Self::reconcile_all`] would have done, but
+    /// also wait for any generated Reconcilers to complete.  Calling this until it returns zero should
+    /// put the system into a quiescent state where future background reconciliations won't do anything.
+    pub(crate) async fn reconcile_all_now(&self) -> Result<usize, ReconcileWaitError> {
+        self.reconcile_all();
+
+        let waiters = {
+            let mut waiters = Vec::new();
+            let locked = self.inner.read().unwrap();
+            for (_tenant_shard_id, shard) in locked.tenants.iter() {
+                if let Some(waiter) = shard.get_waiter() {
+                    waiters.push(waiter);
+                }
+            }
+            waiters
+        };
+
+        let waiter_count = waiters.len();
+        self.await_waiters(waiters, RECONCILE_TIMEOUT).await?;
+        Ok(waiter_count)
+    }
+
     pub async fn shutdown(&self) {
         // Note that this already stops processing any results from reconciles: so
         // we do not expect that our [`TenantState`] objects will reach a neat

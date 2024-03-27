@@ -832,6 +832,22 @@ impl TenantState {
         })
     }
 
+    /// Get a waiter for any reconciliation in flight, but do not start reconciliation
+    /// if it is not already running
+    pub(crate) fn get_waiter(&self) -> Option<ReconcilerWaiter> {
+        if self.reconciler.is_some() {
+            Some(ReconcilerWaiter {
+                tenant_shard_id: self.tenant_shard_id,
+                seq_wait: self.waiter.clone(),
+                error_seq_wait: self.error_waiter.clone(),
+                error: self.last_error.clone(),
+                seq: self.sequence,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Called when a ReconcileResult has been emitted and the service is updating
     /// our state: if the result is from a sequence >= my ReconcileHandle, then drop
     /// the handle to indicate there is no longer a reconciliation in progress.
