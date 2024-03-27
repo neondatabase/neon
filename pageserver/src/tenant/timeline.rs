@@ -1066,20 +1066,20 @@ impl Timeline {
             return Err(WaitLsnError::BadState);
         }
 
-        // This should never be called from the WAL receiver, because that could lead
-        // to a deadlock.
-        debug_assert!(
-            ctx.task_kind() != TaskKind::WalReceiverManager,
-            "wait_lsn cannot be called in WAL receiver"
-        );
-        debug_assert!(
-            ctx.task_kind() != TaskKind::WalReceiverConnectionHandler,
-            "wait_lsn cannot be called in WAL receiver"
-        );
-        debug_assert!(
-            ctx.task_kind() != TaskKind::WalReceiverConnectionPoller,
-            "wait_lsn cannot be called in WAL receiver"
-        );
+        if cfg!(debug_assertions) {
+            match ctx.task_kind() {
+                TaskKind::WalReceiverManager
+                | TaskKind::WalReceiverConnectionHandler
+                | TaskKind::WalReceiverConnectionPoller => {
+                    // This should never be called from the WAL receiver, because that could lead
+                    // to a deadlock.
+                    if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
+                        panic!("walingest task is calling wait_lsn {lsn} but current is only {current}, would deadlock");
+                    }
+                }
+                _ => {}
+            }
+        }
 
         let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
