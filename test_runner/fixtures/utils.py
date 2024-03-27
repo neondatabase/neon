@@ -331,7 +331,7 @@ def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, 
 
     for name, link in links.items():
         allure.dynamic.link(link, name=name)
-        log.info("%s", "{name}: {link}")
+        log.info(f"{name}: {link}")
 
 
 def start_in_background(
@@ -480,7 +480,7 @@ def assert_no_errors(log_file, service, allowed_errors):
     with log_file.open("r") as f:
         errors = scan_log_for_errors(f, allowed_errors)
 
-    for _lineno, _error in errors:
-        log.info("%s", "not allowed {service} error: {error.strip()}")
+    for _lineno, error in errors:
+        log.info(f"not allowed {service} error: {error.strip()}")
 
     assert not errors, f"Log errors on {service}: {errors[0]}"

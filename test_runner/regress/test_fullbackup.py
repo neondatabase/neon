@@ -39,7 +39,7 @@ def test_fullbackup(
         cur.execute("CHECKPOINT")
 
         lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_insert_lsn()"))
-        log.info("%s", "start_backup_lsn = {lsn}")
+        log.info(f"start_backup_lsn = {lsn}")
 
     # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
     # PgBin sets it automatically, but here we need to pipe psql output to the tar command.

@@ -103,8 +103,8 @@ def test_pageserver_small_inmemory_layers(
 
     total_wal_ingested_after_restart = wait_for_wal_ingest_metric(ps_http_client)
 
-    log.info("%s", "WAL ingested before restart: {total_wal_ingested_before_restart}")
-    log.info("%s", "WAL ingested after restart: {total_wal_ingested_after_restart}")
+    log.info(f"WAL ingested before restart: {total_wal_ingested_before_restart}")
+    log.info(f"WAL ingested after restart: {total_wal_ingested_after_restart}")
 
     leeway = total_wal_ingested_before_restart * 5 / 100
     assert total_wal_ingested_after_restart <= leeway

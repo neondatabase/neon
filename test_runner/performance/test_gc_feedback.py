@@ -61,7 +61,7 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             # cur.execute("select pg_table_size('t')")
             # logical_size = cur.fetchone()[0]
             logical_size = client.timeline_detail(tenant_id, timeline_id)["current_logical_size"]
-            log.info("%s", "Logical storage size  {logical_size}")
+            log.info(f"Logical storage size  {logical_size}")
 
             client.timeline_checkpoint(tenant_id, timeline_id)
 
@@ -73,7 +73,7 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             client.timeline_compact(tenant_id, timeline_id)
 
             physical_size = client.timeline_detail(tenant_id, timeline_id)["current_physical_size"]
-            log.info("%s", "Physical storage size {physical_size}")
+            log.info(f"Physical storage size {physical_size}")
 
     MB = 1024 * 1024
     zenbenchmark.record("logical_size", logical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
@@ -83,6 +83,6 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     )
 
     layer_map_path = env.repo_dir / "layer-map.json"
-    log.info("%s", "Writing layer map to {layer_map_path}")
+    log.info(f"Writing layer map to {layer_map_path}")
     with layer_map_path.open("w") as f:
         f.write(json.dumps(client.timeline_layer_map_info(tenant_id, timeline_id)))

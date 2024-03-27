@@ -59,7 +59,7 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     )
     row = curs[0].fetchone()
     assert row is not None
-    log.info("%s", "shared_buffers is {row[0]}, table size {row[1]}")
+    log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
     assert int(row[0]) < int(row[1])
 
     execute("SELECT count(*) FROM foo")

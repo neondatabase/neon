@@ -54,7 +54,7 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
     )
 
     def run_pgbench(branch: str):
-        log.info("%s", "Start a pgbench workload on branch {branch}")
+        log.info(f"Start a pgbench workload on branch {branch}")
 
         endpoint = env.endpoints.create_start(branch, tenant_id=tenant)
         connstr = endpoint.connstr()
@@ -78,10 +78,10 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
         p = random.randint(0, i)
 
         timer = timeit.default_timer()
-        env.neon_cli.create_branch(f"b{i + 1}", f"b{p}", tenant_id=tenant)
+        env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(p), tenant_id=tenant)
         dur = timeit.default_timer() - timer
 
-        log.info("%s", "Creating branch b{i+1} took {dur}s")
+        log.info(f"Creating branch b{i+1} took {dur}s")
         branch_creation_durations.append(dur)
 
         threads.append(threading.Thread(target=run_pgbench, args=(f"b{i+1}",), daemon=True))

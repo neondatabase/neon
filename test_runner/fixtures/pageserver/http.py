@@ -188,13 +188,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         else:
             pairs = config_strings
 
-        log.info("%s", "Requesting config failpoints: {repr(pairs)}")
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
 
         res = self.put(
             f"http://localhost:{self.port}/v1/failpoints",
             json=[{"name": name, "actions": actions} for name, actions in pairs],
         )
-        log.info("%s", "Got failpoints request response code {res.status_code}")
+        log.info(f"Got failpoints request response code {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
@@ -557,7 +557,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc",
             json={"gc_horizon": gc_horizon},
         )
-        log.info("%s", "Got GC request response code: {res.status_code}")
+        log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is not None
@@ -578,12 +578,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
 
-        log.info("%s", "Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
+        log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact",
             params=query,
         )
-        log.info("%s", "Got compact request response code: {res.status_code}")
+        log.info(f"Got compact request response code: {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
@@ -618,9 +618,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def timeline_get_timestamp_of_lsn(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
     ):
-        log.info(
-            "%s", "Requesting time range of lsn {lsn}, tenant {tenant_id}, timeline {timeline_id}"
-        )
+        log.info(f"Requesting time range of lsn {lsn}, tenant {tenant_id}, timeline {timeline_id}")
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn?lsn={lsn}",
         )
@@ -631,7 +629,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def timeline_layer_map_info(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
     ):
-        log.info("%s", "Requesting layer map info of tenant {tenant_id}, timeline {timeline_id}")
+        log.info(f"Requesting layer map info of tenant {tenant_id}, timeline {timeline_id}")
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer",
         )
@@ -653,12 +651,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
 
-        log.info("%s", "Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
+        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
             params=query,
         )
-        log.info("%s", "Got checkpoint request response code: {res.status_code}")
+        log.info(f"Got checkpoint request response code: {res.status_code}")
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None

@@ -47,7 +47,7 @@ def single_timeline(
         ".*Dropped remote consistent LSN updates.*",
     )
 
-    log.info("%s", "duplicating template tenant {ncopies} times in S3")
+    log.info(f"duplicating template tenant {ncopies} times in S3")
     tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, ncopies)
 
     log.info("attach duplicated tenants to pageserver")

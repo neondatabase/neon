@@ -94,7 +94,7 @@ class LocalFsStorage:
         index_parts = [f for f in timeline_files if f.startswith("index_part")]
 
         def parse_gen(filename):
-            log.info("%s", "parsing index_part '{filename}'")
+            log.info(f"parsing index_part '{filename}'")
             parts = filename.split("-")
             if len(parts) == 2:
                 return int(parts[1], 16)
@@ -250,7 +250,7 @@ class S3Storage:
                 Delete=objects_to_delete,
             )
 
-        log.info("%s", "deleted {cnt} objects from remote storage")
+        log.info(f"deleted {cnt} objects from remote storage")
 
     def tenant_path(self, tenant_id: TenantId) -> str:
         return f"{self.prefix_in_bucket}/tenants/{tenant_id}"

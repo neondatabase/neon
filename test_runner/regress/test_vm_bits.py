@@ -207,7 +207,7 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
     for _ in range(1000):
         cur.execute("select min(datfrozenxid::text::int) from pg_database")
         datfrozenxid = int(cur.fetchall()[0][0])
-        log.info("%s", "datfrozenxid {datfrozenxid} locking_xid: {locking_xid}")
+        log.info(f"datfrozenxid {datfrozenxid} locking_xid: {locking_xid}")
         if datfrozenxid > locking_xid + 3000000:
             break
         time.sleep(0.5)
@@ -229,6 +229,6 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
     #
     # ERROR: could not access status of transaction 1027
     cur.execute("select xmin, xmax, * from vmtest_lock where id = 40000 for update")
-    cur.fetchall()
-    log.info("%s", "tuple = {tup}")
+    tup = cur.fetchall()
+    log.info(f"tuple = {tup}")
     cur.execute("commit transaction")

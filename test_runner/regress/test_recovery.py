@@ -42,8 +42,8 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
                 try:
                     while True:
                         cur.execute("update foo set x=x+1")
-                except Exception:
-                    log.info("%s", "Expected server crash {err}")
+                except Exception as err:
+                    log.info(f"Expected server crash {err}")
 
     log.info("Wait before server restart")
     env.pageserver.stop()

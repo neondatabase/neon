@@ -76,22 +76,21 @@ class WorkerStats(object):
         self.counters[worker_id] += 1
 
     def check_progress(self):
-        log.debug(f"Workers progress: {self.counters}")
+        log.debug("Workers progress: {}".format(self.counters))
 
         # every worker should finish at least one tx
-        assert all(
-            cnt > 0 for cnt in self.counters
-        ), "Every worker should finish at least one transaction"
+        assert all(cnt > 0 for cnt in self.counters)
 
         progress = sum(self.counters)
-        log.info(f"All workers made {progress} transactions")
+        log.info("All workers made {} transactions".format(progress))
+
 
 
 async def run_random_worker(
     stats: WorkerStats, endpoint: Endpoint, worker_id, n_accounts, max_transfer
 ):
     pg_conn = await endpoint.connect_async()
-    log.debug(f"Started worker {worker_id}")
+    log.debug("Started worker {}".format(worker_id))
 
     while stats.running:
         from_uid = random.randint(0, n_accounts - 1)
@@ -101,9 +100,9 @@ async def run_random_worker(
         await bank_transfer(pg_conn, from_uid, to_uid, amount)
         stats.inc_progress(worker_id)
 
-        log.debug(f"Executed transfer({amount}) {from_uid} => {to_uid}")
+        log.debug("Executed transfer({}) {} => {}".format(amount, from_uid, to_uid))
 
-    log.debug(f"Finished worker {worker_id}")
+    log.debug("Finished worker {}".format(worker_id))
 
     await pg_conn.close()
 
@@ -183,13 +182,13 @@ async def run_restarts_under_load(
         victim.stop()
 
         flush_lsn = Lsn(await pg_conn.fetchval("SELECT pg_current_wal_flush_lsn()"))
-        log.info("%s", "Postgres flush_lsn {flush_lsn}")
+        log.info(f"Postgres flush_lsn {flush_lsn}")
 
         pageserver_lsn = Lsn(
             env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["last_record_lsn"]
         )
-        flush_lsn - pageserver_lsn
-        log.info("%s", "Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb")
+        sk_ps_lag = flush_lsn - pageserver_lsn
+        log.info(f"Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb")
 
         # Wait until alive safekeepers catch up with postgres
         for idx, safekeeper in enumerate(acceptors):
@@ -278,8 +277,8 @@ async def exec_compute_query(
         conn = await endpoint.connect_async()
         res = await conn.fetch(query)
         await conn.close()
-        time.time()
-        log.info("%s", "{query} took {after_conn - before_conn}s")
+        after_conn = time.time()
+        log.info(f"{query} took {after_conn - before_conn}s")
         return res
 
 
@@ -346,14 +345,14 @@ class BackgroundCompute(object):
                     f"INSERT INTO query_log(index, verify_key) VALUES ({self.index}, {verify_key}) RETURNING verify_key",
                     pgdir_name=f"bgcompute{self.index}_key{verify_key}",
                 )
-                log.info("%s", "result: {res}")
+                log.info(f"result: {res}")
                 if len(res) != 1:
                     raise Exception("No result returned")
                 if res[0][0] != verify_key:
                     raise Exception("Wrong result returned")
                 self.successful_queries.append(verify_key)
-            except Exception:
-                log.info("%s", "BackgroundCompute {self.index} query failed: {e}")
+            except Exception as e:
+                log.info(f"BackgroundCompute {self.index} query failed: {e}")
 
             # With less sleep, there is a very big chance of not committing
             # anything or only 1 xact during test run.
@@ -406,8 +405,8 @@ async def run_concurrent_computes(
         f"Executed {len(result)} queries, {current_queries_by_0} of them "
         f"by computes[0] after we started stopping the others"
     )
-    for _row in result:
-        log.info("%s", "{row[0]} {row[1]} {row[2]}")
+    for row in result:
+        log.info(f"{row[0]} {row[1]} {row[2]}")
 
     # ensure everything reported as committed wasn't lost
     for compute in computes:
@@ -575,7 +574,7 @@ async def xmas_garland(safekeepers: List[Safekeeper], data: RaceConditionTest):
         await asyncio.sleep(1)
         for v in victims:
             v.start()
-        log.info("%s", "Iteration {data.iteration} finished")
+        log.info(f"Iteration {data.iteration} finished")
         await asyncio.sleep(1)
 
 
@@ -596,7 +595,7 @@ async def run_race_conditions(env: NeonEnv, endpoint: Endpoint):
         expected_sum += i
         i += 1
 
-    log.info("%s", "Executed {i-1} queries")
+    log.info(f"Executed {i-1} queries")
 
     res = await conn.fetchval("SELECT sum(key) FROM t")
     assert res == expected_sum
@@ -653,7 +652,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
             continue
 
         adjust_safekeepers(env, active_sk)
-        log.info("%s", "Iteration {it}: {active_sk}")
+        log.info(f"Iteration {it}: {active_sk}")
 
         endpoint.start()
         conn = await endpoint.connect_async()
@@ -670,7 +669,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
     endpoint.start()
     conn = await endpoint.connect_async()
 
-    log.info("%s", "Executed {i-1} queries")
+    log.info(f"Executed {i-1} queries")
 
     res = await conn.fetchval("SELECT sum(key) FROM t")
     assert res == expected_sum

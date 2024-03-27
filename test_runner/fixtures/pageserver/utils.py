@@ -22,7 +22,7 @@ def assert_tenant_state(
     message: Optional[str] = None,
 ) -> None:
     tenant_status = pageserver_http.tenant_status(tenant)
-    log.info("%s", "tenant_status: {tenant_status}")
+    log.info(f"tenant_status: {tenant_status}")
     assert tenant_status["state"]["slug"] == expected_state, message or tenant_status
 
 
@@ -58,15 +58,13 @@ def wait_for_upload(
             return
         lr_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         log.info(
-            "waiting for remote_consistent_lsn to reach %s, now %s, last_record_lsn=%s, iteration %s",
-            lsn,
-            current_lsn,
-            lr_lsn,
-            i + 1,
+            f"waiting for remote_consistent_lsn to reach {lsn}, now {current_lsn}, last_record_lsn={lr_lsn}, iteration {i + 1}"
         )
         time.sleep(1)
     raise Exception(
-        f"timed out while waiting for remote_consistent_lsn to reach {lsn}, was {current_lsn}"
+        "timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
+            lsn, current_lsn
+        )
     )
 
 
@@ -208,11 +206,13 @@ def wait_for_last_record_lsn(
             return current_lsn
         if i % 10 == 0:
             log.info(
-                f"{tenant}/{timeline} waiting for last_record_lsn to reach {lsn}, now {current_lsn}, iteration {i + 1}"
+                "{}/{} waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
+                    tenant, timeline, lsn, current_lsn, i + 1
+                )
             )
         time.sleep(0.1)
     raise Exception(
-        f"timed out while waiting for last_record_lsn to reach {lsn}, was {current_lsn}"
+        "timed out while waiting for last_record_lsn to reach {}, was {}".format(lsn, current_lsn)
     )
 
 
@@ -252,9 +252,9 @@ def wait_for_upload_queue_empty(
             if not found:
                 tl.append((s.labels, int(s.value)))
         assert len(tl) == len(started), "something broken with join logic"
-        log.info("%s", "upload queue for {tenant_id}/{timeline_id}:")
-        for _labels, _queue_count in tl:
-            log.info("%s", "  {labels}: {queue_count}")
+        log.info(f"upload queue for {tenant_id}/{timeline_id}:")
+        for labels, queue_count in tl:
+            log.info(f"  {labels}: {queue_count}")
         if all(queue_count == 0 for (_, queue_count) in tl):
             return
         time.sleep(wait_period_secs)
@@ -274,7 +274,7 @@ def wait_timeline_detail_404(
         data = {}
         try:
             data = pageserver_http.timeline_detail(tenant_id, timeline_id)
-            log.info("%s", "timeline detail {data}")
+            log.info(f"timeline detail {data}")
         except PageserverApiException as e:
             log.debug(e)
             if e.status_code == 404:
@@ -444,7 +444,7 @@ def wait_tenant_status_404(
         data = {}
         try:
             data = pageserver_http.tenant_status(tenant_id)
-            log.info("%s", "tenant status {data}")
+            log.info(f"tenant status {data}")
         except PageserverApiException as e:
             log.debug(e)
             if e.status_code == 404:

@@ -58,7 +58,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
     # it should match global configuration
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            log.info("%s", "show {env.initial_tenant}")
+            log.info(f"show {env.initial_tenant}")
             pscur.execute(f"show {env.initial_tenant}")
             res = pscur.fetchone()
             assert res is not None
@@ -100,7 +100,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
-            log.info("%s", "res: {res}")
+            log.info(f"res: {res}")
             assert res is not None
             assert all(
                 i in res.items()
@@ -163,7 +163,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
-            log.info("%s", "after config res: {res}")
+            log.info(f"after config res: {res}")
             assert res is not None
             assert all(
                 i in res.items()
@@ -219,7 +219,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
-            log.info("%s", "after restart res: {res}")
+            log.info(f"after restart res: {res}")
             assert res is not None
             assert all(
                 i in res.items()
@@ -280,7 +280,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
-            log.info("%s", "after restart res: {res}")
+            log.info(f"after restart res: {res}")
             assert res is not None
             assert all(
                 i in res.items()

@@ -65,13 +65,13 @@ class SafekeeperHttpClient(requests.Session):
         else:
             pairs = config_strings
 
-        log.info("%s", "Requesting config failpoints: {repr(pairs)}")
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
 
         res = self.put(
             f"http://localhost:{self.port}/v1/failpoints",
             json=[{"name": name, "actions": actions} for name, actions in pairs],
         )
-        log.info("%s", "Got failpoints request response code {res.status_code}")
+        log.info(f"Got failpoints request response code {res.status_code}")
         res.raise_for_status()
         res_json = res.json()
         assert res_json is None

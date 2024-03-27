@@ -80,11 +80,11 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
     )
     main_cur.execute("INSERT INTO foo SELECT FROM generate_series(1, 100000)")
     lsn1 = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
-    log.info("%s", "LSN1: {lsn1}")
+    log.info(f"LSN1: {lsn1}")
 
     main_cur.execute("INSERT INTO foo SELECT FROM generate_series(1, 100000)")
     lsn2 = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
-    log.info("%s", "LSN2: {lsn2}")
+    log.info(f"LSN2: {lsn2}")
 
     # Set the GC horizon so that lsn1 is inside the horizon, which means
     # we can create a new branch starting from lsn1.

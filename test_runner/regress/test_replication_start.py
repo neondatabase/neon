@@ -14,8 +14,8 @@ def test_replication_start(neon_simple_env: NeonEnv):
                 p_cur.execute("create table t(pk integer primary key, payload integer)")
                 p_cur.execute("insert into t values (generate_series(1,100000), 0)")
                 p_cur.execute("select txid_current()")
-                p_cur.fetchall()[0][0]
-                log.info("%s", "Master transaction {xid}")
+                xid = p_cur.fetchall()[0][0]
+                log.info(f"Master transaction {xid}")
                 with env.endpoints.new_replica_start(
                     origin=primary, endpoint_id="secondary"
                 ) as secondary:

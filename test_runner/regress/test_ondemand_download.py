@@ -109,7 +109,7 @@ def test_ondemand_download_large_rel(neon_env_builder: NeonEnvBuilder):
 
     # remove all the layer files
     for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
-        log.info("%s", "unlinking layer {layer}")
+        log.info(f"unlinking layer {layer}")
         layer.unlink()
 
     ##### Second start, restore the data and ensure it's the same
@@ -132,7 +132,7 @@ def test_ondemand_download_large_rel(neon_env_builder: NeonEnvBuilder):
         assert query_scalar(cur, "select count(*) from tbl where id = 500000") == 1
 
     after_downloads = get_num_downloaded_layers(client)
-    log.info("%s", "layers downloaded before {before_downloads} and after {after_downloads}")
+    log.info(f"layers downloaded before {before_downloads} and after {after_downloads}")
     assert after_downloads > before_downloads
 
 
@@ -243,7 +243,7 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
 
     # remove all the layer files
     for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
-        log.info("%s", "unlinking layer {layer}")
+        log.info(f"unlinking layer {layer}")
         layer.unlink()
 
     ##### Second start, restore the data and ensure it's the same
@@ -283,7 +283,7 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
 
         after_downloads = get_num_downloaded_layers(client)
         num_layers_downloaded.append(after_downloads)
-        log.info("%s", "num_layers_downloaded[-1]={num_layers_downloaded[-1]}")
+        log.info(f"num_layers_downloaded[-1]={num_layers_downloaded[-1]}")
 
         # Check that on each query, we need to download at least one more layer file. However in
         # practice, thanks to compaction and the fact that some requests need to download
@@ -292,13 +292,13 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
         #
         # Do a fuzzy check on that, by checking that after each point-in-time, we have downloaded
         # more files than we had three iterations ago.
-        log.info("%s", "layers downloaded after checkpoint {checkpoint_number}: {after_downloads}")
+        log.info(f"layers downloaded after checkpoint {checkpoint_number}: {after_downloads}")
         if len(num_layers_downloaded) > 4:
             assert after_downloads > num_layers_downloaded[len(num_layers_downloaded) - 4]
 
         # Likewise, assert that the resident_physical_size metric grows as layers are downloaded
         resident_size.append(get_resident_physical_size())
-        log.info("%s", "resident_size[-1]={resident_size[-1]}")
+        log.info(f"resident_size[-1]={resident_size[-1]}")
         if len(resident_size) > 4:
             assert resident_size[-1] > resident_size[len(resident_size) - 4]
 
@@ -374,16 +374,16 @@ def test_download_remote_layers_api(
     wait_for_upload_queue_empty(client, tenant_id, timeline_id)
 
     filled_current_physical = get_api_current_physical_size()
-    log.info("%s", "filled_current_physical: {filled_current_physical}")
+    log.info(f"filled_current_physical: {filled_current_physical}")
     filled_size = get_resident_physical_size()
-    log.info("%s", "filled_size: {filled_size}")
+    log.info(f"filled_size: {filled_size}")
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
     env.pageserver.stop()
 
     # remove all the layer files
     for layer in env.pageserver.tenant_dir().glob("*/timelines/*/*-*_*"):
-        log.info("%s", "unlinking layer {layer.name}")
+        log.info(f"unlinking layer {layer.name}")
         layer.unlink()
 
     ##### Second start, restore the data and ensure it's the same
@@ -405,7 +405,7 @@ def test_download_remote_layers_api(
     ), "current_physical_size is sum of loaded layer sizes, independent of whether local or remote"
 
     post_unlink_size = get_resident_physical_size()
-    log.info("%s", "post_unlink_size: {post_unlink_size}")
+    log.info(f"post_unlink_size: {post_unlink_size}")
     assert (
         post_unlink_size < filled_size
     ), "we just deleted layers and didn't cause anything to re-download them yet"
@@ -418,7 +418,7 @@ def test_download_remote_layers_api(
         errors_ok=True,
         at_least_one_download=False,
     )
-    log.info("%s", "info={info}")
+    log.info(f"info={info}")
     assert info["state"] == "Completed"
     assert info["total_layer_count"] > 0
     assert info["successful_download_count"] == 0
@@ -443,7 +443,7 @@ def test_download_remote_layers_api(
         max_concurrent_downloads=10,
         errors_ok=False,
     )
-    log.info("%s", "info={info}")
+    log.info(f"info={info}")
 
     assert info["state"] == "Completed"
     assert info["total_layer_count"] > 0
@@ -528,7 +528,7 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
     layer_sizes = 0
 
     for layer in layers.historic_layers:
-        log.info("%s", "pre-compact:  {layer}")
+        log.info(f"pre-compact:  {layer}")
         assert layer.layer_file_size is not None, "we must know layer file sizes"
         layer_sizes += layer.layer_file_size
         pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
@@ -538,7 +538,7 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     for layer in layers.historic_layers:
-        log.info("post compact: %s", layer)
+        log.info(f"post compact: {layer}")
     assert len(layers.historic_layers) == 1, "should have compacted to single layer"
 
     post_compact = downloaded_bytes_and_count(pageserver_http)
