@@ -226,31 +226,6 @@ struct ReadDesc {
     lsn_range: Range<Lsn>,
 }
 
-impl Ord for ReadDesc {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let ord = self.lsn_range.end.cmp(&other.lsn_range.end);
-        if ord == std::cmp::Ordering::Equal {
-            self.lsn_range.start.cmp(&other.lsn_range.start).reverse()
-        } else {
-            ord
-        }
-    }
-}
-
-impl PartialOrd for ReadDesc {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for ReadDesc {
-    fn eq(&self, other: &Self) -> bool {
-        self.lsn_range == other.lsn_range
-    }
-}
-
-impl Eq for ReadDesc {}
-
 /// Data structure which maintains a fringe of layers for the
 /// read path. The fringe is the set of layers which intersects
 /// the current keyspace that the search is descending on.
@@ -313,6 +288,31 @@ impl Default for LayerFringe {
         Self::new()
     }
 }
+
+impl Ord for ReadDesc {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let ord = self.lsn_range.end.cmp(&other.lsn_range.end);
+        if ord == std::cmp::Ordering::Equal {
+            self.lsn_range.start.cmp(&other.lsn_range.start).reverse()
+        } else {
+            ord
+        }
+    }
+}
+
+impl PartialOrd for ReadDesc {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for ReadDesc {
+    fn eq(&self, other: &Self) -> bool {
+        self.lsn_range == other.lsn_range
+    }
+}
+
+impl Eq for ReadDesc {}
 
 impl ReadableLayer {
     pub(crate) fn key(&self) -> LayerKey {
