@@ -216,7 +216,7 @@ impl DeleteTimelineFlow {
         guard.mark_in_progress()?;
 
         // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
-        timeline.shutdown().await;
+        timeline.shutdown(super::ShutdownMode::Hard).await;
 
         fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
             Err(anyhow::anyhow!(

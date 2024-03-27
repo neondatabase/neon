@@ -610,6 +610,19 @@ pub enum GetVectoredImpl {
     Vectored,
 }
 
+/// Argument to [`Timeline::shutdown`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ShutdownMode {
+    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
+    /// also to remote storage.  This method can easily take multiple seconds for a busy timeline.
+    ///
+    /// While we are flushing, we continue to accept read I/O for LSNs ingested before
+    /// the call to [`Timeline::shutdown`].
+    FreezeAndFlush,
+    /// Shut down immediately, without waiting for any open layers to flush.
+    Hard,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -1288,21 +1301,13 @@ impl Timeline {
         self.launch_eviction_task(parent, background_jobs_can_start);
     }
 
-    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
-    /// also to remote storage.  This method can easily take multiple seconds for a busy timeline.
-    ///
-    /// While we are flushing, we continue to accept read I/O.
-    pub(crate) async fn flush_and_shutdown(&self) {
-        self.shutdown_impl(true).await
-    }
-
-    /// Shut down immediately, without waiting for any open layers to flush.
-    pub(crate) async fn shutdown(&self) {
-        self.shutdown_impl(false).await
-    }
-
-    async fn shutdown_impl(&self, try_freeze_and_flush: bool) {
+    pub(crate) async fn shutdown(&self, mode: ShutdownMode) {
         debug_assert_current_span_has_tenant_and_timeline_id();
+
+        let try_freeze_and_flush = match mode {
+            ShutdownMode::FreezeAndFlush => true,
+            ShutdownMode::Hard => false,
+        };
 
         // Regardless of whether we're going to try_freeze_and_flush
         // or not, stop ingesting any more data. Walreceiver only provides
@@ -1319,7 +1324,7 @@ impl Timeline {
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
-            walreceiver.cancel().await;
+            walreceiver.cancel();
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
@@ -1351,7 +1356,7 @@ impl Timeline {
             }
         }
 
-        // All tasks expect remote_client are sensitve to Timeline::cancel.
+        // All tasks except remote_client are sensitve to Timeline::cancel.
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
@@ -1373,6 +1378,7 @@ impl Timeline {
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
 
+        // TODO: re-try this
         // NB: we cannot assert that this is a no-op because actually, tasks outlive
         // `Self::gate`-guards if they acquire the guard within the task.
         // Then again, all tasks should really be sensitive to Self::cancel, not the

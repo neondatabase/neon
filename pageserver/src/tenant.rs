@@ -1782,7 +1782,7 @@ impl Tenant {
     async fn shutdown(
         &self,
         shutdown_progress: completion::Barrier,
-        freeze_and_flush: bool,
+        shutdown_mode: timeline::ShutdownMode,
     ) -> Result<(), completion::Barrier> {
         span::debug_assert_current_span_has_tenant_id();
 
@@ -1829,17 +1829,8 @@ impl Tenant {
             timelines.values().for_each(|timeline| {
                 let timeline = Arc::clone(timeline);
                 let timeline_id = timeline.timeline_id;
-
-                let span =
-                    tracing::info_span!("timeline_shutdown", %timeline_id, ?freeze_and_flush);
-                js.spawn(async move {
-                    // TODO: directly use shutdown_impl / make pub with right argument?
-                    if freeze_and_flush {
-                        timeline.flush_and_shutdown().instrument(span).await
-                    } else {
-                        timeline.shutdown().instrument(span).await
-                    }
-                });
+                let span = tracing::info_span!("timeline_shutdown", %timeline_id, ?shutdown_mode);
+                js.spawn(async move { timeline.shutdown(shutdown_mode).instrument(span).await });
             })
         };
         // test_long_timeline_create_then_tenant_delete is leaning on this message
@@ -3852,6 +3843,7 @@ mod tests {
     use hex_literal::hex;
     use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
+    use tests::timeline::ShutdownMode;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -4297,7 +4289,7 @@ mod tests {
             make_some_layers(tline.as_ref(), Lsn(0x8000), &ctx).await?;
             // so that all uploads finish & we can call harness.load() below again
             tenant
-                .shutdown(Default::default(), true)
+                .shutdown(Default::default(), ShutdownMode::FreezeAndFlush)
                 .instrument(harness.span())
                 .await
                 .ok()
@@ -4338,7 +4330,7 @@ mod tests {
 
             // so that all uploads finish & we can call harness.load() below again
             tenant
-                .shutdown(Default::default(), true)
+                .shutdown(Default::default(), ShutdownMode::FreezeAndFlush)
                 .instrument(harness.span())
                 .await
                 .ok()
@@ -5119,7 +5111,7 @@ mod tests {
             // Leave the timeline ID in [`Tenant::timelines_creating`] to exclude attempting to create it again
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
-                .shutdown()
+                .shutdown(super::timeline::ShutdownMode::Hard)
                 .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_shard_id, shard_id=%raw_tline.tenant_shard_id.shard_slug(), timeline_id=%TIMELINE_ID))
                 .await;
             std::mem::forget(tline);
