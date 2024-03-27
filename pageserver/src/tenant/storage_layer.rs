@@ -41,7 +41,7 @@ pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 
 pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 
-use self::inmemory_layer::InMemoryLayerKey;
+use self::inmemory_layer::InMemoryLayerFileId;
 
 use super::timeline::GetVectoredError;
 use super::PageReconstructError;
@@ -206,9 +206,9 @@ impl Default for ValuesReconstructState {
 
 /// A key that uniquely identifies a layer in a timeline
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
-pub(crate) enum LayerKey {
-    PersitentLayerKey(PersistentLayerKey),
-    InMemoryLayerKey(InMemoryLayerKey),
+pub(crate) enum LayerId {
+    PersitentLayerId(PersistentLayerKey),
+    InMemoryLayerId(InMemoryLayerFileId),
 }
 
 /// Layer wrapper for the read path. Note that it is valid
@@ -222,7 +222,7 @@ pub(crate) enum ReadableLayer {
 
 #[derive(Debug, Clone)]
 struct ReadDesc {
-    layer_key: LayerKey,
+    layer_key: LayerId,
     lsn_range: Range<Lsn>,
 }
 
@@ -236,7 +236,7 @@ struct ReadDesc {
 #[derive(Debug)]
 pub(crate) struct LayerFringe {
     planned_reads_by_lsn: BinaryHeap<ReadDesc>,
-    layers: HashMap<LayerKey, (ReadableLayer, KeySpace)>,
+    layers: HashMap<LayerId, (ReadableLayer, KeySpace)>,
 }
 
 impl LayerFringe {
@@ -315,10 +315,10 @@ impl PartialEq for ReadDesc {
 impl Eq for ReadDesc {}
 
 impl ReadableLayer {
-    pub(crate) fn key(&self) -> LayerKey {
+    pub(crate) fn key(&self) -> LayerId {
         match self {
-            Self::PersistentLayer(layer) => LayerKey::PersitentLayerKey(layer.layer_desc().key()),
-            Self::InMemoryLayer(layer) => LayerKey::InMemoryLayerKey(layer.key()),
+            Self::PersistentLayer(layer) => LayerId::PersitentLayerId(layer.layer_desc().key()),
+            Self::InMemoryLayer(layer) => LayerId::InMemoryLayerId(layer.key()),
         }
     }
 
