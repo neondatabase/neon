@@ -47,6 +47,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
+use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
@@ -946,6 +947,37 @@ impl DeltaLayerInner {
         Ok(planner.finish())
     }
 
+    fn get_min_read_buffer_size(
+        planned_reads: &[VectoredRead],
+        read_size_soft_max: usize,
+    ) -> usize {
+        let largest_read = match planned_reads.iter().max_by_key(|read| read.size()) {
+            Some(largest_read) => largest_read,
+            None => {
+                return read_size_soft_max;
+            }
+        };
+
+        let largest_read_size = largest_read.size();
+        if largest_read_size > read_size_soft_max {
+            // If the read is oversized, it should only contain one key.
+            let offenders = largest_read
+                .blobs_at
+                .as_slice()
+                .iter()
+                .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                .join(", ");
+            tracing::warn!(
+                "Oversized vectored read ({} > {}) for keys {}",
+                largest_read_size,
+                read_size_soft_max,
+                offenders
+            );
+        }
+
+        largest_read_size
+    }
+
     async fn do_reads_and_update_state(
         &self,
         reads: Vec<VectoredRead>,
@@ -959,7 +991,8 @@ impl DeltaLayerInner {
             .expect("Layer is loaded with max vectored bytes config")
             .0
             .into();
-        let mut buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
+        let buf_size = Self::get_min_read_buffer_size(&reads, max_vectored_read_bytes);
+        let mut buf = Some(BytesMut::with_capacity(buf_size));
 
         // Note that reads are processed in reverse order (from highest key+lsn).
         // This is the order that `ReconstructState` requires such that it can
@@ -986,7 +1019,7 @@ impl DeltaLayerInner {
 
                     // We have "lost" the buffer since the lower level IO api
                     // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(BytesMut::with_capacity(max_vectored_read_bytes));
+                    buf = Some(BytesMut::with_capacity(buf_size));
 
                     continue;
                 }
