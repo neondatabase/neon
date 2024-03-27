@@ -86,7 +86,22 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # This is especially pronounced in tests that set small checkpoint
     # distances.
     ".*Flushed oversized open layer with size.*",
+    # During teardown, we stop the storage controller before the pageservers, so pageservers
+    # can experience connection errors doing background deletion queue work.
+    ".*WARN deletion backend: calling control plane generation validation API failed.*Connection refused.*",
 )
+
+
+DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
+    # Many tests will take pageservers offline, resulting in log warnings on the controller
+    # failing to connect to them.
+    ".*Call to node.*management API.*failed.*receive body.*",
+    ".*Call to node.*management API.*failed.*ReceiveBody.*",
+    # Many tests will start up with a node offline
+    ".*startup_reconcile: Could not scan node.*",
+    # Tests run in dev mode
+    ".*Starting in dev mode.*",
+]
 
 
 def _check_allowed_errors(input):

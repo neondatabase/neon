@@ -7,7 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{id_lock_map::IdLockMap, persistence::AbortShardSplitStatus};
+use crate::{
+    id_lock_map::IdLockMap, persistence::AbortShardSplitStatus, reconciler::ReconcileError,
+};
 use anyhow::Context;
 use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
@@ -18,12 +20,14 @@ use hyper::StatusCode;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
-        TenantShardMigrateRequest, TenantShardMigrateResponse, UtilizationScore,
+        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
+        TenantDescribeResponseShard, TenantLocateResponse, TenantShardMigrateRequest,
+        TenantShardMigrateResponse, UtilizationScore,
     },
     models::{SecondaryProgress, TenantConfigRequest},
 };
 
+use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
@@ -198,6 +202,30 @@ impl From<ReconcileWaitError> for ApiError {
 enum TenantCreateOrUpdate {
     Create(TenantCreateRequest),
     Update(Vec<ShardUpdate>),
+}
+
+struct ShardSplitParams {
+    old_shard_count: ShardCount,
+    new_shard_count: ShardCount,
+    new_stripe_size: Option<ShardStripeSize>,
+    targets: Vec<ShardSplitTarget>,
+    policy: PlacementPolicy,
+    config: TenantConfig,
+    shard_ident: ShardIdentity,
+}
+
+// When preparing for a shard split, we may either choose to proceed with the split,
+// or find that the work is already done and return NoOp.
+enum ShardSplitAction {
+    Split(ShardSplitParams),
+    NoOp(TenantShardSplitResponse),
+}
+
+// A parent shard which will be split
+struct ShardSplitTarget {
+    parent_id: TenantShardId,
+    node: Node,
+    child_ids: Vec<TenantShardId>,
 }
 
 /// When we tenant shard split operation fails, we may not be able to clean up immediately, because nodes
@@ -525,7 +553,11 @@ impl Service {
                 break;
             }
 
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            let client = PageserverClient::new(
+                node.get_id(),
+                node.base_url(),
+                self.config.jwt_token.as_deref(),
+            );
             match client
                 .location_config(
                     tenant_shard_id,
@@ -733,7 +765,19 @@ impl Service {
                 tenant.waiter.advance(result.sequence);
             }
             Err(e) => {
-                tracing::warn!("Reconcile error: {}", e);
+                match e {
+                    ReconcileError::Cancel => {
+                        tracing::info!("Reconciler was cancelled");
+                    }
+                    ReconcileError::Remote(mgmt_api::Error::Cancelled) => {
+                        // This might be due to the reconciler getting cancelled, or it might
+                        // be due to the `Node` being marked offline.
+                        tracing::info!("Reconciler cancelled during pageserver API call");
+                    }
+                    _ => {
+                        tracing::warn!("Reconcile error: {}", e);
+                    }
+                }
 
                 // Ordering: populate last_error before advancing error_seq,
                 // so that waiters will see the correct error after waiting.
@@ -1057,7 +1101,7 @@ impl Service {
                 shard_stripe_size: 0,
                 generation: Some(0),
                 generation_pageserver: None,
-                placement_policy: serde_json::to_string(&PlacementPolicy::Single).unwrap(),
+                placement_policy: serde_json::to_string(&PlacementPolicy::Attached(0)).unwrap(),
                 config: serde_json::to_string(&TenantConfig::default()).unwrap(),
                 splitting: SplitState::default(),
             };
@@ -1084,7 +1128,7 @@ impl Service {
                         TenantState::new(
                             attach_req.tenant_shard_id,
                             ShardIdentity::unsharded(),
-                            PlacementPolicy::Single,
+                            PlacementPolicy::Attached(0),
                         ),
                     );
                     tracing::info!("Inserted shard {} in memory", attach_req.tenant_shard_id);
@@ -1113,7 +1157,7 @@ impl Service {
                     self.persistence
                         .update_tenant_shard(
                             attach_req.tenant_shard_id,
-                            PlacementPolicy::Single,
+                            PlacementPolicy::Attached(0),
                             conf,
                             None,
                         )
@@ -1138,7 +1182,7 @@ impl Service {
 
         if let Some(new_generation) = new_generation {
             tenant_state.generation = Some(new_generation);
-            tenant_state.policy = PlacementPolicy::Single;
+            tenant_state.policy = PlacementPolicy::Attached(0);
         } else {
             // This is a detach notification.  We must update placement policy to avoid re-attaching
             // during background scheduling/reconciliation, or during storage controller restart.
@@ -1350,7 +1394,8 @@ impl Service {
             incremented_generations.len()
         );
 
-        // Apply the updated generation to our in-memory state
+        // Apply the updated generation to our in-memory state, and
+        // gather discover secondary locations.
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, scheduler) = locked.parts_mut();
 
@@ -1358,62 +1403,65 @@ impl Service {
             tenants: Vec::new(),
         };
 
-        for (tenant_shard_id, new_gen) in incremented_generations {
-            response.tenants.push(ReAttachResponseTenant {
-                id: tenant_shard_id,
-                gen: new_gen.into().unwrap(),
-            });
-            // Apply the new generation number to our in-memory state
-            let shard_state = tenants.get_mut(&tenant_shard_id);
-            let Some(shard_state) = shard_state else {
-                // Not fatal.  This edge case requires a re-attach to happen
-                // between inserting a new tenant shard in to the database, and updating our in-memory
-                // state to know about the shard, _and_ that the state inserted to the database referenced
-                // a pageserver.  Should never happen, but handle it rather than panicking, since it should
-                // be harmless.
-                tracing::error!(
-                    "Shard {} is in database for node {} but not in-memory state",
-                    tenant_shard_id,
-                    reattach_req.node_id
-                );
-                continue;
-            };
+        // TODO: cancel/restart any running reconciliation for this tenant, it might be trying
+        // to call location_conf API with an old generation.  Wait for cancellation to complete
+        // before responding to this request.  Requires well implemented CancellationToken logic
+        // all the way to where we call location_conf.  Even then, there can still be a location_conf
+        // request in flight over the network: TODO handle that by making location_conf API refuse
+        // to go backward in generations.
 
-            // If [`Persistence::re_attach`] selected this shard, it must have alread
-            // had a generation set.
-            debug_assert!(shard_state.generation.is_some());
-            let Some(old_gen) = shard_state.generation else {
-                // Should never happen:  would only return incremented generation
-                // for a tenant that already had a non-null generation.
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "Generation must be set while re-attaching"
-                )));
-            };
-            shard_state.generation = Some(std::cmp::max(old_gen, new_gen));
-            if let Some(observed) = shard_state
-                .observed
-                .locations
-                .get_mut(&reattach_req.node_id)
-            {
-                if let Some(conf) = observed.conf.as_mut() {
-                    conf.generation = new_gen.into();
+        // Scan through all shards, applying updates for ones where we updated generation
+        // and identifying shards that intend to have a secondary location on this node.
+        for (tenant_shard_id, shard) in tenants {
+            if let Some(new_gen) = incremented_generations.get(tenant_shard_id) {
+                let new_gen = *new_gen;
+                response.tenants.push(ReAttachResponseTenant {
+                    id: *tenant_shard_id,
+                    gen: Some(new_gen.into().unwrap()),
+                    // A tenant is only put into multi or stale modes in the middle of a [`Reconciler::live_migrate`]
+                    // execution.  If a pageserver is restarted during that process, then the reconcile pass will
+                    // fail, and start from scratch, so it doesn't make sense for us to try and preserve
+                    // the stale/multi states at this point.
+                    mode: LocationConfigMode::AttachedSingle,
+                });
+
+                shard.generation = std::cmp::max(shard.generation, Some(new_gen));
+                if let Some(observed) = shard.observed.locations.get_mut(&reattach_req.node_id) {
+                    // Why can we update `observed` even though we're not sure our response will be received
+                    // by the pageserver?  Because the pageserver will not proceed with startup until
+                    // it has processed response: if it loses it, we'll see another request and increment
+                    // generation again, avoiding any uncertainty about dirtiness of tenant's state.
+                    if let Some(conf) = observed.conf.as_mut() {
+                        conf.generation = new_gen.into();
+                    }
+                } else {
+                    // This node has no observed state for the shard: perhaps it was offline
+                    // when the pageserver restarted.  Insert a None, so that the Reconciler
+                    // will be prompted to learn the location's state before it makes changes.
+                    shard
+                        .observed
+                        .locations
+                        .insert(reattach_req.node_id, ObservedStateLocation { conf: None });
                 }
-            } else {
-                // This node has no observed state for the shard: perhaps it was offline
-                // when the pageserver restarted.  Insert a None, so that the Reconciler
-                // will be prompted to learn the location's state before it makes changes.
-                shard_state
-                    .observed
-                    .locations
-                    .insert(reattach_req.node_id, ObservedStateLocation { conf: None });
-            }
+            } else if shard.intent.get_secondary().contains(&reattach_req.node_id) {
+                // Ordering: pageserver will not accept /location_config requests until it has
+                // finished processing the response from re-attach.  So we can update our in-memory state
+                // now, and be confident that we are not stamping on the result of some later location config.
+                // TODO: however, we are not strictly ordered wrt ReconcileResults queue,
+                // so we might update observed state here, and then get over-written by some racing
+                // ReconcileResult.  The impact is low however, since we have set state on pageserver something
+                // that matches intent, so worst case if we race then we end up doing a spurious reconcile.
 
-            // TODO: cancel/restart any running reconciliation for this tenant, it might be trying
-            // to call location_conf API with an old generation.  Wait for cancellation to complete
-            // before responding to this request.  Requires well implemented CancellationToken logic
-            // all the way to where we call location_conf.  Even then, there can still be a location_conf
-            // request in flight over the network: TODO handle that by making location_conf API refuse
-            // to go backward in generations.
+                response.tenants.push(ReAttachResponseTenant {
+                    id: *tenant_shard_id,
+                    gen: None,
+                    mode: LocationConfigMode::Secondary,
+                });
+
+                // We must not update observed, because we have no guarantee that our
+                // response will be received by the pageserver. This could leave it
+                // falsely dirty, but the resulting reconcile should be idempotent.
+            }
         }
 
         // We consider a node Active once we have composed a re-attach response, but we
@@ -1475,6 +1523,8 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<TenantCreateResponse, ApiError> {
+        let tenant_id = create_req.new_tenant_id.tenant_id;
+
         // Exclude any concurrent attempts to create/access the same tenant ID
         let _tenant_lock = self
             .tenant_op_locks
@@ -1483,7 +1533,12 @@ impl Service {
 
         let (response, waiters) = self.do_tenant_create(create_req).await?;
 
-        self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await?;
+        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+            // Avoid deadlock: reconcile may fail while notifying compute, if the cloud control plane refuses to
+            // accept compute notifications while it is in the process of creating.  Reconciliation will
+            // be retried in the background.
+            tracing::warn!(%tenant_id, "Reconcile not done yet while creating tenant ({e})");
+        }
         Ok(response)
     }
 
@@ -1491,11 +1546,11 @@ impl Service {
         &self,
         create_req: TenantCreateRequest,
     ) -> Result<(TenantCreateResponse, Vec<ReconcilerWaiter>), ApiError> {
-        // As a default, single is convenient for tests that don't choose a policy.
         let placement_policy = create_req
             .placement_policy
             .clone()
-            .unwrap_or(PlacementPolicy::Single);
+            // As a default, zero secondaries is convenient for tests that don't choose a policy.
+            .unwrap_or(PlacementPolicy::Attached(0));
 
         // This service expects to handle sharding itself: it is an error to try and directly create
         // a particular shard here.
@@ -1562,13 +1617,25 @@ impl Service {
                 splitting: SplitState::default(),
             })
             .collect();
-        self.persistence
+
+        match self
+            .persistence
             .insert_tenant_shards(persist_tenant_shards)
             .await
-            .map_err(|e| {
-                // TODO: distinguish primary key constraint (idempotent, OK), from other errors
-                ApiError::InternalServerError(anyhow::anyhow!(e))
-            })?;
+        {
+            Ok(_) => {}
+            Err(DatabaseError::Query(diesel::result::Error::DatabaseError(
+                DatabaseErrorKind::UniqueViolation,
+                _,
+            ))) => {
+                // Unique key violation: this is probably a retry.  Because the shard count is part of the unique key,
+                // if we see a unique key violation it means that the creation request's shard count matches the previous
+                // creation's shard count.
+                tracing::info!("Tenant shards already present in database, proceeding with idempotent creation...");
+            }
+            // Any other database error is unexpected and a bug.
+            Err(e) => return Err(ApiError::InternalServerError(anyhow::anyhow!(e))),
+        };
 
         let (waiters, response_shards) = {
             let mut locked = self.inner.write().unwrap();
@@ -1705,11 +1772,11 @@ impl Service {
             | LocationConfigMode::AttachedSingle
             | LocationConfigMode::AttachedStale => {
                 if nodes.len() > 1 {
-                    PlacementPolicy::Double(1)
+                    PlacementPolicy::Attached(1)
                 } else {
                     // Convenience for dev/test: if we just have one pageserver, import
-                    // tenants into Single mode so that scheduling will succeed.
-                    PlacementPolicy::Single
+                    // tenants into non-HA mode so that scheduling will succeed.
+                    PlacementPolicy::Attached(0)
                 }
             }
         };
@@ -2058,8 +2125,11 @@ impl Service {
                 })
                 .collect::<Vec<_>>();
             for tenant_shard_id in shard_ids {
-                let client =
-                    mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+                let client = PageserverClient::new(
+                    node.get_id(),
+                    node.base_url(),
+                    self.config.jwt_token.as_deref(),
+                );
 
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
 
@@ -2111,7 +2181,11 @@ impl Service {
         // Issue concurrent requests to all shards' locations
         let mut futs = FuturesUnordered::new();
         for (tenant_shard_id, node) in targets {
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            let client = PageserverClient::new(
+                node.get_id(),
+                node.base_url(),
+                self.config.jwt_token.as_deref(),
+            );
             futs.push(async move {
                 let result = client
                     .tenant_secondary_download(tenant_shard_id, wait)
@@ -2204,7 +2278,11 @@ impl Service {
         // Phase 1: delete on the pageservers
         let mut any_pending = false;
         for (tenant_shard_id, node) in targets {
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            let client = PageserverClient::new(
+                node.get_id(),
+                node.base_url(),
+                self.config.jwt_token.as_deref(),
+            );
             // TODO: this, like many other places, requires proper retry handling for 503, timeout: those should not
             // surface immediately as an error to our caller.
             let status = client.tenant_delete(tenant_shard_id).await.map_err(|e| {
@@ -2316,7 +2394,7 @@ impl Service {
                 tenant_shard_id,
                 create_req.new_timeline_id,
             );
-            let client = mgmt_api::Client::new(node.base_url(), jwt.as_deref());
+            let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
 
             client
                 .timeline_create(tenant_shard_id, &create_req)
@@ -2440,7 +2518,7 @@ impl Service {
                 "Deleting timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
             );
 
-            let client = mgmt_api::Client::new(node.base_url(), jwt.as_deref());
+            let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
             client
                 .timeline_delete(tenant_shard_id, timeline_id)
                 .await
@@ -2481,11 +2559,11 @@ impl Service {
     }
 
     /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
-    /// function looks it up and returns the url.  If the tenant isn't found, returns Err(ApiError::NotFound)
-    pub(crate) fn tenant_shard0_baseurl(
+    /// function looks up and returns node. If the tenant isn't found, returns Err(ApiError::NotFound)
+    pub(crate) fn tenant_shard0_node(
         &self,
         tenant_id: TenantId,
-    ) -> Result<(String, TenantShardId), ApiError> {
+    ) -> Result<(Node, TenantShardId), ApiError> {
         let locked = self.inner.read().unwrap();
         let Some((tenant_shard_id, shard)) = locked
             .tenants
@@ -2517,7 +2595,7 @@ impl Service {
             )));
         };
 
-        Ok((node.base_url(), *tenant_shard_id))
+        Ok((node.clone(), *tenant_shard_id))
     }
 
     pub(crate) fn tenant_locate(
@@ -2526,9 +2604,6 @@ impl Service {
     ) -> Result<TenantLocateResponse, ApiError> {
         let locked = self.inner.read().unwrap();
         tracing::info!("Locating shards for tenant {tenant_id}");
-
-        // Take a snapshot of pageservers
-        let pageservers = locked.nodes.clone();
 
         let mut result = Vec::new();
         let mut shard_params: Option<ShardParameters> = None;
@@ -2543,7 +2618,8 @@ impl Service {
                         "Cannot locate a tenant that is not attached"
                     )))?;
 
-            let node = pageservers
+            let node = locked
+                .nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while referenced");
 
@@ -2588,6 +2664,47 @@ impl Service {
         Ok(TenantLocateResponse {
             shards: result,
             shard_params,
+        })
+    }
+
+    pub(crate) fn tenant_describe(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantDescribeResponse, ApiError> {
+        let locked = self.inner.read().unwrap();
+
+        let mut shard_zero = None;
+        let mut shards = Vec::new();
+
+        for (tenant_shard_id, shard) in locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+        {
+            if tenant_shard_id.is_zero() {
+                shard_zero = Some(shard);
+            }
+
+            let response_shard = TenantDescribeResponseShard {
+                tenant_shard_id: *tenant_shard_id,
+                node_attached: *shard.intent.get_attached(),
+                node_secondary: shard.intent.get_secondary().to_vec(),
+                last_error: shard.last_error.lock().unwrap().clone(),
+                is_reconciling: shard.reconciler.is_some(),
+                is_pending_compute_notification: shard.pending_compute_notification,
+                is_splitting: matches!(shard.splitting, SplitState::Splitting),
+            };
+            shards.push(response_shard);
+        }
+
+        let Some(shard_zero) = shard_zero else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+            ));
+        };
+
+        Ok(TenantDescribeResponse {
+            shards,
+            stripe_size: shard_zero.shard.stripe_size,
+            policy: shard_zero.policy.clone(),
+            config: shard_zero.config.clone(),
         })
     }
 
@@ -2648,7 +2765,7 @@ impl Service {
         let detach_locations: Vec<(Node, TenantShardId)> = {
             let mut detach_locations = Vec::new();
             let mut locked = self.inner.write().unwrap();
-            let (nodes, tenants, _scheduler) = locked.parts_mut();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
 
             for (tenant_shard_id, shard) in
                 tenants.range_mut(TenantShardId::tenant_range(op.tenant_id))
@@ -2681,6 +2798,13 @@ impl Service {
 
                 tracing::info!("Restoring parent shard {tenant_shard_id}");
                 shard.splitting = SplitState::Idle;
+                if let Err(e) = shard.schedule(scheduler) {
+                    // If this shard can't be scheduled now (perhaps due to offline nodes or
+                    // capacity issues), that must not prevent us rolling back a split.  In this
+                    // case it should be eventually scheduled in the background.
+                    tracing::warn!("Failed to schedule {tenant_shard_id} during shard abort: {e}")
+                }
+
                 self.maybe_reconcile_shard(shard, nodes);
             }
 
@@ -2772,7 +2896,7 @@ impl Service {
                 .map(|(shard_id, _)| *shard_id)
                 .collect::<Vec<_>>();
 
-            let (_nodes, tenants, scheduler) = locked.parts_mut();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
             for parent_id in parent_ids {
                 let child_ids = parent_id.split(new_shard_count);
 
@@ -2814,7 +2938,7 @@ impl Service {
                                 generation,
                                 &child_shard,
                                 &config,
-                                matches!(policy, PlacementPolicy::Double(n) if n > 0),
+                                matches!(policy, PlacementPolicy::Attached(n) if n > 0),
                             )),
                         },
                     );
@@ -2839,6 +2963,8 @@ impl Service {
                         // find a secondary (e.g. because cluster is overloaded).
                         tracing::warn!("Failed to schedule child shard {child}: {e}");
                     }
+                    // In the background, attach secondary locations for the new shards
+                    self.maybe_reconcile_shard(&mut child_state, nodes);
 
                     tenants.insert(child, child_state);
                     response.new_shards.push(child);
@@ -2861,17 +2987,23 @@ impl Service {
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
 
-        let r = self.do_tenant_shard_split(tenant_id, split_req).await;
+        // Validate the request and construct parameters.  This phase is fallible, but does not require
+        // rollback on errors, as it does no I/O and mutates no state.
+        let shard_split_params = match self.prepare_tenant_shard_split(tenant_id, split_req)? {
+            ShardSplitAction::NoOp(resp) => return Ok(resp),
+            ShardSplitAction::Split(params) => params,
+        };
+
+        // Execute this split: this phase mutates state and does remote I/O on pageservers.  If it fails,
+        // we must roll back.
+        let r = self
+            .do_tenant_shard_split(tenant_id, shard_split_params)
+            .await;
 
         match r {
             Ok(r) => Ok(r),
-            Err(ApiError::BadRequest(_)) => {
-                // A request validation error does not require rollback: we rejected it before we started making any changes: just
-                // return the error
-                r
-            }
             Err(e) => {
-                // General case error handling: split might be part-done, we must do work to abort it.
+                // Split might be part-done, we must do work to abort it.
                 tracing::warn!("Enqueuing background abort of split on {tenant_id}");
                 self.abort_tx
                     .send(TenantShardSplitAbort {
@@ -2887,25 +3019,18 @@ impl Service {
         }
     }
 
-    pub(crate) async fn do_tenant_shard_split(
+    fn prepare_tenant_shard_split(
         &self,
         tenant_id: TenantId,
         split_req: TenantShardSplitRequest,
-    ) -> Result<TenantShardSplitResponse, ApiError> {
-        let mut policy = None;
-        let mut shard_ident = None;
-
-        // A parent shard which will be split
-        struct SplitTarget {
-            parent_id: TenantShardId,
-            node: Node,
-            child_ids: Vec<TenantShardId>,
-        }
-
+    ) -> Result<ShardSplitAction, ApiError> {
         fail::fail_point!("shard-split-validation", |_| Err(ApiError::BadRequest(
             anyhow::anyhow!("failpoint")
         )));
 
+        let mut policy = None;
+        let mut config = None;
+        let mut shard_ident = None;
         // Validate input, and calculate which shards we will create
         let (old_shard_count, targets) =
             {
@@ -2961,6 +3086,9 @@ impl Service {
                     if shard_ident.is_none() {
                         shard_ident = Some(shard.shard);
                     }
+                    if config.is_none() {
+                        config = Some(shard.config.clone());
+                    }
 
                     if tenant_shard_id.shard_count.count() == split_req.new_shard_count {
                         tracing::info!(
@@ -2979,9 +3107,7 @@ impl Service {
                         .get(&node_id)
                         .expect("Pageservers may not be deleted while referenced");
 
-                    // TODO: if any reconciliation is currently in progress for this shard, wait for it.
-
-                    targets.push(SplitTarget {
+                    targets.push(ShardSplitTarget {
                         parent_id: *tenant_shard_id,
                         node: node.clone(),
                         child_ids: tenant_shard_id
@@ -2991,9 +3117,9 @@ impl Service {
 
                 if targets.is_empty() {
                     if children_found.len() == split_req.new_shard_count as usize {
-                        return Ok(TenantShardSplitResponse {
+                        return Ok(ShardSplitAction::NoOp(TenantShardSplitResponse {
                             new_shards: children_found,
-                        });
+                        }));
                     } else {
                         // No shards found to split, and no existing children found: the
                         // tenant doesn't exist at all.
@@ -3023,12 +3149,76 @@ impl Service {
             shard_ident.unwrap()
         };
         let policy = policy.unwrap();
+        let config = config.unwrap();
 
+        Ok(ShardSplitAction::Split(ShardSplitParams {
+            old_shard_count,
+            new_shard_count: ShardCount::new(split_req.new_shard_count),
+            new_stripe_size: split_req.new_stripe_size,
+            targets,
+            policy,
+            config,
+            shard_ident,
+        }))
+    }
+
+    async fn do_tenant_shard_split(
+        &self,
+        tenant_id: TenantId,
+        params: ShardSplitParams,
+    ) -> Result<TenantShardSplitResponse, ApiError> {
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
         // request could occur here, deleting or mutating the tenant.  begin_shard_split checks that the
         // parent shards exist as expected, but it would be neater to do the above pre-checks within the
         // same database transaction rather than pre-check in-memory and then maybe-fail the database write.
         // (https://github.com/neondatabase/neon/issues/6676)
+
+        let ShardSplitParams {
+            old_shard_count,
+            new_shard_count,
+            new_stripe_size,
+            mut targets,
+            policy,
+            config,
+            shard_ident,
+        } = params;
+
+        // Drop any secondary locations: pageservers do not support splitting these, and in any case the
+        // end-state for a split tenant will usually be to have secondary locations on different nodes.
+        // The reconciliation calls in this block also implicitly cancel+barrier wrt any ongoing reconciliation
+        // at the time of split.
+        let waiters = {
+            let mut locked = self.inner.write().unwrap();
+            let mut waiters = Vec::new();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
+            for target in &mut targets {
+                let Some(shard) = tenants.get_mut(&target.parent_id) else {
+                    // Paranoia check: this shouldn't happen: we have the oplock for this tenant ID.
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Shard {} not found",
+                        target.parent_id
+                    )));
+                };
+
+                if shard.intent.get_attached() != &Some(target.node.get_id()) {
+                    // Paranoia check: this shouldn't happen: we have the oplock for this tenant ID.
+                    return Err(ApiError::Conflict(format!(
+                        "Shard {} unexpectedly rescheduled during split",
+                        target.parent_id
+                    )));
+                }
+
+                // Irrespective of PlacementPolicy, clear secondary locations from intent
+                shard.intent.clear_secondary(scheduler);
+
+                // Run Reconciler to execute detach fo secondary locations.
+                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                    waiters.push(waiter);
+                }
+            }
+            waiters
+        };
+        self.await_waiters(waiters, RECONCILE_TIMEOUT).await?;
 
         // Before creating any new child shards in memory or on the pageservers, persist them: this
         // enables us to ensure that we will always be able to clean up if something goes wrong.  This also
@@ -3058,8 +3248,7 @@ impl Service {
                     generation: None,
                     generation_pageserver: Some(target.node.get_id().0 as i64),
                     placement_policy: serde_json::to_string(&policy).unwrap(),
-                    // TODO: get the config out of the map
-                    config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+                    config: serde_json::to_string(&config).unwrap(),
                     splitting: SplitState::Splitting,
                 });
             }
@@ -3111,18 +3300,22 @@ impl Service {
         // N>1 shards into M shards -- initially we're usually splitting 1 shard into N).
 
         for target in &targets {
-            let SplitTarget {
+            let ShardSplitTarget {
                 parent_id,
                 node,
                 child_ids,
             } = target;
-            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            let client = PageserverClient::new(
+                node.get_id(),
+                node.base_url(),
+                self.config.jwt_token.as_deref(),
+            );
             let response = client
                 .tenant_shard_split(
                     *parent_id,
                     TenantShardSplitRequest {
-                        new_shard_count: split_req.new_shard_count,
-                        new_stripe_size: split_req.new_stripe_size,
+                        new_shard_count: new_shard_count.literal(),
+                        new_stripe_size,
                     },
                 )
                 .await
@@ -3171,11 +3364,8 @@ impl Service {
         ));
 
         // Replace all the shards we just split with their children: this phase is infallible.
-        let (response, child_locations) = self.tenant_shard_split_commit_inmem(
-            tenant_id,
-            ShardCount::new(split_req.new_shard_count),
-            split_req.new_stripe_size,
-        );
+        let (response, child_locations) =
+            self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
@@ -3240,17 +3430,20 @@ impl Service {
                 let old_attached = *shard.intent.get_attached();
 
                 match shard.policy {
-                    PlacementPolicy::Single => {
-                        shard.intent.clear_secondary(scheduler);
-                        shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
-                    }
-                    PlacementPolicy::Double(_n) => {
+                    PlacementPolicy::Attached(n) => {
                         // If our new attached node was a secondary, it no longer should be.
                         shard.intent.remove_secondary(scheduler, migrate_req.node_id);
 
                         // If we were already attached to something, demote that to a secondary
                         if let Some(old_attached) = old_attached {
-                            shard.intent.push_secondary(scheduler, old_attached);
+                            if n > 0 {
+                                // Remove other secondaries to make room for the location we'll demote
+                                while shard.intent.get_secondary().len() >= n {
+                                    shard.intent.pop_secondary(scheduler);
+                                }
+
+                                shard.intent.push_secondary(scheduler, old_attached);
+                            }
                         }
 
                         shard.intent.set_attached(scheduler, Some(migrate_req.node_id));
@@ -3276,7 +3469,7 @@ impl Service {
         if let Some(waiter) = waiter {
             waiter.wait_timeout(RECONCILE_TIMEOUT).await?;
         } else {
-            tracing::warn!("Migration is a no-op");
+            tracing::info!("Migration is a no-op");
         }
 
         Ok(TenantShardMigrateResponse {})
@@ -3629,6 +3822,13 @@ impl Service {
                         // When a node goes offline, we set its observed configuration to None, indicating unknown: we will
                         // not assume our knowledge of the node's configuration is accurate until it comes back online
                         observed_loc.conf = None;
+                    }
+
+                    if new_nodes.len() == 1 {
+                        // Special case for single-node cluster: there is no point trying to reschedule
+                        // any tenant shards: avoid doing so, in order to avoid spewing warnings about
+                        // failures to schedule them.
+                        continue;
                     }
 
                     if tenant_state.intent.demote_attached(node_id) {

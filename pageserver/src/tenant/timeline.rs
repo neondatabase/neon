@@ -13,14 +13,13 @@ use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
 use fail::fail_point;
-use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::AUX_FILES_KEY,
     keyspace::KeySpaceAccum,
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-        EvictionPolicy, LayerMapInfo, TimelineState,
+        EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, TenantShardId},
@@ -37,6 +36,7 @@ use tracing::*;
 use utils::{
     bin_ser::BeSer,
     sync::gate::{Gate, GateGuard},
+    vec_map::VecMap,
 };
 
 use std::ops::{Deref, Range};
@@ -54,6 +54,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -64,7 +65,6 @@ use crate::{
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
-use crate::{deletion_queue::DeletionQueueClient, tenant::remote_timeline_client::StopError};
 use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
@@ -1142,6 +1142,79 @@ impl Timeline {
         self.flush_frozen_layers_and_wait().await
     }
 
+    /// If there is no writer, and conditions for rolling the latest layer are met, then freeze it.
+    ///
+    /// This is for use in background housekeeping, to provide guarantees of layers closing eventually
+    /// even if there are no ongoing writes to drive that.
+    async fn maybe_freeze_ephemeral_layer(&self) {
+        let Ok(_write_guard) = self.write_lock.try_lock() else {
+            // If the write lock is held, there is an active wal receiver: rolling open layers
+            // is their responsibility while they hold this lock.
+            return;
+        };
+
+        let Ok(layers_guard) = self.layers.try_read() else {
+            // Don't block if the layer lock is busy
+            return;
+        };
+
+        let Some(open_layer) = &layers_guard.layer_map().open_layer else {
+            // No open layer, no work to do.
+            return;
+        };
+
+        let Some(current_size) = open_layer.try_len() else {
+            // Unexpected: since we hold the write guard, nobody else should be writing to this layer, so
+            // read lock to get size should always succeed.
+            tracing::warn!("Lock conflict while reading size of open layer");
+            return;
+        };
+
+        let current_lsn = self.get_last_record_lsn();
+
+        let checkpoint_distance_override = open_layer.tick().await;
+
+        if let Some(size_override) = checkpoint_distance_override {
+            if current_size > size_override {
+                // This is not harmful, but it only happens in relatively rare cases where
+                // time-based checkpoints are not happening fast enough to keep the amount of
+                // ephemeral data within configured limits.  It's a sign of stress on the system.
+                tracing::info!("Early-rolling open layer at size {current_size} (limit {size_override}) due to dirty data pressure");
+            }
+        }
+
+        let checkpoint_distance =
+            checkpoint_distance_override.unwrap_or(self.get_checkpoint_distance());
+
+        if self.should_roll(
+            current_size,
+            current_size,
+            checkpoint_distance,
+            self.get_last_record_lsn(),
+            self.last_freeze_at.load(),
+            *self.last_freeze_ts.read().unwrap(),
+        ) {
+            match open_layer.info() {
+                InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
+                    // We may reach this point if the layer was already frozen by not yet flushed: flushing
+                    // happens asynchronously in the background.
+                    tracing::debug!(
+                        "Not freezing open layer, it's already frozen ({lsn_start}..{lsn_end})"
+                    );
+                }
+                InMemoryLayerInfo::Open { .. } => {
+                    // Upgrade to a write lock and freeze the layer
+                    drop(layers_guard);
+                    let mut layers_guard = self.layers.write().await;
+                    layers_guard
+                        .try_freeze_in_memory_layer(current_lsn, &self.last_freeze_at)
+                        .await;
+                }
+            }
+            self.flush_frozen_layers();
+        }
+    }
+
     /// Outermost timeline compaction operation; downloads needed layers.
     pub(crate) async fn compact(
         self: &Arc<Self>,
@@ -1163,6 +1236,11 @@ impl Timeline {
 
             (guard, permit)
         };
+
+        // Prior to compaction, check if an open ephemeral layer should be closed: this provides
+        // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
+        // an ephemeral layer open forever when idle.
+        self.maybe_freeze_ephemeral_layer().await;
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
@@ -1196,6 +1274,7 @@ impl Timeline {
 
     pub(crate) fn activate(
         self: &Arc<Self>,
+        parent: Arc<crate::tenant::Tenant>,
         broker_client: BrokerClientChannel,
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
@@ -1206,7 +1285,7 @@ impl Timeline {
         }
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
-        self.launch_eviction_task(background_jobs_can_start);
+        self.launch_eviction_task(parent, background_jobs_can_start);
     }
 
     /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
@@ -1241,11 +1320,7 @@ impl Timeline {
                     // what is problematic is the shutting down of RemoteTimelineClient, because
                     // obviously it does not make sense to stop while we wait for it, but what
                     // about corner cases like s3 suddenly hanging up?
-                    if let Err(e) = client.shutdown().await {
-                        // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
-                        // we have some extra WAL replay to do next time the timeline starts.
-                        warn!("failed to flush to remote storage: {e:#}");
-                    }
+                    client.shutdown().await;
                 }
             }
             Err(e) => {
@@ -1282,12 +1357,7 @@ impl Timeline {
         // Shut down remote timeline client: this gracefully moves its metadata into its Stopping state in
         // case our caller wants to use that for a deletion
         if let Some(remote_client) = self.remote_client.as_ref() {
-            match remote_client.stop() {
-                Ok(()) => {}
-                Err(StopError::QueueUninitialized) => {
-                    // Shutting down during initialization is legal
-                }
-            }
+            remote_client.stop();
         }
 
         tracing::debug!("Waiting for tasks...");
@@ -1441,6 +1511,53 @@ impl Timeline {
             Err(EvictionError::NotFound) => Ok(Some(false)),
             Err(EvictionError::Downloaded) => Ok(Some(false)),
             Err(EvictionError::Timeout) => Ok(Some(false)),
+        }
+    }
+
+    fn should_roll(
+        &self,
+        layer_size: u64,
+        projected_layer_size: u64,
+        checkpoint_distance: u64,
+        projected_lsn: Lsn,
+        last_freeze_at: Lsn,
+        last_freeze_ts: Instant,
+    ) -> bool {
+        let distance = projected_lsn.widening_sub(last_freeze_at);
+
+        // Rolling the open layer can be triggered by:
+        // 1. The distance from the last LSN we rolled at. This bounds the amount of WAL that
+        //    the safekeepers need to store.  For sharded tenants, we multiply by shard count to
+        //    account for how writes are distributed across shards: we expect each node to consume
+        //    1/count of the LSN on average.
+        // 2. The size of the currently open layer.
+        // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
+        //    up and suspend activity.
+        if distance >= checkpoint_distance as i128 * self.shard_identity.count.count() as i128 {
+            info!(
+                "Will roll layer at {} with layer size {} due to LSN distance ({})",
+                projected_lsn, layer_size, distance
+            );
+
+            true
+        } else if projected_layer_size >= checkpoint_distance {
+            info!(
+                "Will roll layer at {} with layer size {} due to layer size ({})",
+                projected_lsn, layer_size, projected_layer_size
+            );
+
+            true
+        } else if distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
+            info!(
+                "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
+                projected_lsn,
+                layer_size,
+                last_freeze_ts.elapsed()
+            );
+
+            true
+        } else {
+            false
         }
     }
 }
@@ -2442,7 +2559,7 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
-        let resident = guard.resident_layers().map(|layer| {
+        let resident = guard.likely_resident_layers().map(|layer| {
             let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
             HeatMapLayer::new(
@@ -2452,7 +2569,7 @@ impl Timeline {
             )
         });
 
-        let layers = resident.collect().await;
+        let layers = resident.collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
@@ -2596,6 +2713,10 @@ impl Timeline {
                     // Get all the data needed to reconstruct the page version from this layer.
                     // But if we have an older cached page image, no need to go past that.
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
+
+                    let open_layer = open_layer.clone();
+                    drop(guard);
+
                     result = match open_layer
                         .get_value_reconstruct_data(
                             key,
@@ -2613,10 +2734,7 @@ impl Timeline {
                     traversal_path.push((
                         result,
                         cont_lsn,
-                        Box::new({
-                            let open_layer = Arc::clone(open_layer);
-                            move || open_layer.traversal_id()
-                        }),
+                        Box::new(move || open_layer.traversal_id()),
                     ));
                     continue 'outer;
                 }
@@ -2626,6 +2744,10 @@ impl Timeline {
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
+
+                    let frozen_layer = frozen_layer.clone();
+                    drop(guard);
+
                     result = match frozen_layer
                         .get_value_reconstruct_data(
                             key,
@@ -2643,10 +2765,7 @@ impl Timeline {
                     traversal_path.push((
                         result,
                         cont_lsn,
-                        Box::new({
-                            let frozen_layer = Arc::clone(frozen_layer);
-                            move || frozen_layer.traversal_id()
-                        }),
+                        Box::new(move || frozen_layer.traversal_id()),
                     ));
                     continue 'outer;
                 }
@@ -2654,6 +2773,8 @@ impl Timeline {
 
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                 let layer = guard.get_from_desc(&layer);
+                drop(guard);
+
                 // Get all the data needed to reconstruct the page version from this layer.
                 // But if we have an older cached page image, no need to go past that.
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
@@ -4302,7 +4423,7 @@ impl Timeline {
         let mut max_layer_size: Option<u64> = None;
 
         let resident_layers = guard
-            .resident_layers()
+            .likely_resident_layers()
             .map(|layer| {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
@@ -4315,8 +4436,7 @@ impl Timeline {
                     relative_last_activity: finite_f32::FiniteF32::ZERO,
                 }
             })
-            .collect()
-            .await;
+            .collect();
 
         DiskUsageEvictionInfo {
             max_layer_size,
@@ -4461,49 +4581,6 @@ impl<'a> TimelineWriter<'a> {
         res
     }
 
-    /// "Tick" the timeline writer: it will roll the open layer if required
-    /// and do nothing else.
-    pub(crate) async fn tick(&mut self) -> anyhow::Result<()> {
-        self.open_layer_if_present().await?;
-
-        let last_record_lsn = self.get_last_record_lsn();
-        let action = self.get_open_layer_action(last_record_lsn, 0);
-        if action == OpenLayerAction::Roll {
-            self.roll_layer(last_record_lsn).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Populate the timeline writer state only if an in-memory layer
-    /// is already open.
-    async fn open_layer_if_present(&mut self) -> anyhow::Result<()> {
-        assert!(self.write_guard.is_none());
-
-        let open_layer = {
-            let guard = self.layers.read().await;
-            let layers = guard.layer_map();
-            match layers.open_layer {
-                Some(ref open_layer) => open_layer.clone(),
-                None => {
-                    return Ok(());
-                }
-            }
-        };
-
-        let initial_size = open_layer.size().await?;
-        let last_freeze_at = self.last_freeze_at.load();
-        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
-        self.write_guard.replace(TimelineWriterState::new(
-            open_layer,
-            initial_size,
-            last_freeze_at,
-            last_freeze_ts,
-        ));
-
-        Ok(())
-    }
-
     async fn handle_open_layer_action(
         &mut self,
         at: Lsn,
@@ -4575,59 +4652,29 @@ impl<'a> TimelineWriter<'a> {
             return OpenLayerAction::None;
         }
 
-        let distance = lsn.widening_sub(state.cached_last_freeze_at);
-        let proposed_open_layer_size = state.current_size + new_value_size;
-
-        // Rolling the open layer can be triggered by:
-        // 1. The distance from the last LSN we rolled at. This bounds the amount of WAL that
-        //    the safekeepers need to store.  For sharded tenants, we multiply by shard count to
-        //    account for how writes are distributed across shards: we expect each node to consume
-        //    1/count of the LSN on average.
-        // 2. The size of the currently open layer.
-        // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
-        //    up and suspend activity.
-        if distance
-            >= self.get_checkpoint_distance() as i128 * self.shard_identity.count.count() as i128
-        {
-            info!(
-                "Will roll layer at {} with layer size {} due to LSN distance ({})",
-                lsn, state.current_size, distance
-            );
-
-            OpenLayerAction::Roll
-        } else if proposed_open_layer_size >= self.get_checkpoint_distance() {
-            info!(
-                "Will roll layer at {} with layer size {} due to layer size ({})",
-                lsn, state.current_size, proposed_open_layer_size
-            );
-
-            OpenLayerAction::Roll
-        } else if distance > 0
-            && state.cached_last_freeze_ts.elapsed() >= self.get_checkpoint_timeout()
-        {
-            info!(
-                "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
-                lsn,
-                state.current_size,
-                state.cached_last_freeze_ts.elapsed()
-            );
-
+        if self.tl.should_roll(
+            state.current_size,
+            state.current_size + new_value_size,
+            self.get_checkpoint_distance(),
+            lsn,
+            state.cached_last_freeze_at,
+            state.cached_last_freeze_ts,
+        ) {
             OpenLayerAction::Roll
         } else {
             OpenLayerAction::None
         }
     }
 
-    /// Put a batch keys at the specified Lsns.
+    /// Put a batch of keys at the specified Lsns.
     ///
-    /// The batch should be sorted by Lsn such that it's safe
-    /// to roll the open layer mid batch.
+    /// The batch is sorted by Lsn (enforced by usage of [`utils::vec_map::VecMap`].
     pub(crate) async fn put_batch(
         &mut self,
-        batch: Vec<(Key, Lsn, Value)>,
+        batch: VecMap<Lsn, (Key, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for (key, lsn, val) in batch {
+        for (lsn, (key, val)) in batch {
             self.put(key, lsn, &val, ctx).await?
         }
 
@@ -4713,7 +4760,6 @@ mod tests {
             .keep_resident()
             .await
             .expect("no download => no downloading errors")
-            .expect("should had been resident")
             .drop_eviction_guard();
 
         let forever = std::time::Duration::from_secs(120);
@@ -4724,7 +4770,7 @@ mod tests {
         let (first, second) = tokio::join!(first, second);
 
         let res = layer.keep_resident().await;
-        assert!(matches!(res, Ok(None)), "{res:?}");
+        assert!(res.is_none(), "{res:?}");
 
         match (first, second) {
             (Ok(()), Ok(())) => {

@@ -4,7 +4,10 @@ use ::metrics::{
     register_int_gauge_vec, Histogram, HistogramVec, HyperLogLogVec, IntCounterPairVec,
     IntCounterVec, IntGauge, IntGaugeVec,
 };
-use metrics::{register_int_counter, register_int_counter_pair, IntCounter, IntCounterPair};
+use metrics::{
+    register_hll, register_int_counter, register_int_counter_pair, HyperLogLog, IntCounter,
+    IntCounterPair,
+};
 
 use once_cell::sync::Lazy;
 use tokio::time::{self, Instant};
@@ -160,6 +163,9 @@ pub static NUM_CANCELLATION_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub const NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT: &str = "from_client";
+pub const NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS: &str = "from_redis";
 
 pub enum Waiting {
     Cplane,
@@ -352,6 +358,23 @@ pub static TLS_HANDSHAKE_FAILURES: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "proxy_tls_handshake_failures",
         "Number of TLS handshake failures",
+    )
+    .unwrap()
+});
+
+pub static ENDPOINTS_AUTH_RATE_LIMITED: Lazy<HyperLogLog<32>> = Lazy::new(|| {
+    register_hll!(
+        32,
+        "proxy_endpoints_auth_rate_limits",
+        "Number of endpoints affected by authentication rate limits",
+    )
+    .unwrap()
+});
+
+pub static AUTH_RATE_LIMIT_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "proxy_requests_auth_rate_limits_total",
+        "Number of connection requests affected by authentication rate limits",
     )
     .unwrap()
 });

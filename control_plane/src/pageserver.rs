@@ -101,8 +101,16 @@ impl PageServerNode {
 
         let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
         let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
-        let virtual_file_io_engine = format!("virtual_file_io_engine='{virtual_file_io_engine}'");
-        let get_vectored_impl = format!("get_vectored_impl='{get_vectored_impl}'");
+        let virtual_file_io_engine = if let Some(virtual_file_io_engine) = virtual_file_io_engine {
+            format!("virtual_file_io_engine='{virtual_file_io_engine}'")
+        } else {
+            String::new()
+        };
+        let get_vectored_impl = if let Some(get_vectored_impl) = get_vectored_impl {
+            format!("get_vectored_impl='{get_vectored_impl}'")
+        } else {
+            String::new()
+        };
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 

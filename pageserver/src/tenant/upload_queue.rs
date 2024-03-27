@@ -121,9 +121,14 @@ pub(super) enum SetDeletedFlagProgress {
     Successful(NaiveDateTime),
 }
 
-pub(super) struct UploadQueueStopped {
+pub(super) struct UploadQueueStoppedDeletable {
     pub(super) upload_queue_for_deletion: UploadQueueInitialized,
     pub(super) deleted_at: SetDeletedFlagProgress,
+}
+
+pub(super) enum UploadQueueStopped {
+    Deletable(UploadQueueStoppedDeletable),
+    Uninitialized,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -249,12 +254,15 @@ impl UploadQueue {
         }
     }
 
-    pub(crate) fn stopped_mut(&mut self) -> anyhow::Result<&mut UploadQueueStopped> {
+    pub(crate) fn stopped_mut(&mut self) -> anyhow::Result<&mut UploadQueueStoppedDeletable> {
         match self {
             UploadQueue::Initialized(_) | UploadQueue::Uninitialized => {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
-            UploadQueue::Stopped(stopped) => Ok(stopped),
+            UploadQueue::Stopped(UploadQueueStopped::Uninitialized) => {
+                anyhow::bail!("queue is in state Stopped(Uninitialized)")
+            }
+            UploadQueue::Stopped(UploadQueueStopped::Deletable(deletable)) => Ok(deletable),
         }
     }
 }

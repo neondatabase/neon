@@ -294,7 +294,7 @@ where
     //      is in state 'taken' but the thread that would unlock it is
     //      not there.
     //   2. A rust object that represented some external resource in the
-    //      parent now got implicitly copied by the the fork, even though
+    //      parent now got implicitly copied by the fork, even though
     //      the object's type is not `Copy`. The parent program may use
     //      non-copyability as way to enforce unique ownership of an
     //      external resource in the typesystem. The fork breaks that

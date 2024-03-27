@@ -1,5 +1,6 @@
 import os
 import time
+from collections import defaultdict
 from typing import Dict, List, Optional, Union
 
 import pytest
@@ -13,7 +14,7 @@ from fixtures.neon_fixtures import (
     tenant_get_shards,
 )
 from fixtures.remote_storage import s3_storage
-from fixtures.types import Lsn, TenantShardId, TimelineId
+from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 from pytest_httpserver import HTTPServer
@@ -159,11 +160,20 @@ def test_sharding_split_smoke(
 
     neon_env_builder.preserve_database_files = True
 
-    env = neon_env_builder.init_start(
-        initial_tenant_shard_count=shard_count, initial_tenant_shard_stripe_size=stripe_size
+    non_default_tenant_config = {"gc_horizon": 77 * 1024 * 1024}
+
+    env = neon_env_builder.init_configs(True)
+    neon_env_builder.start()
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(
+        tenant_id,
+        timeline_id,
+        shard_count=shard_count,
+        shard_stripe_size=stripe_size,
+        placement_policy='{"Attached": 1}',
+        conf=non_default_tenant_config,
     )
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
 
@@ -223,6 +233,14 @@ def test_sharding_split_smoke(
     # Before split, old shards exist
     assert shards_on_disk(old_shard_ids)
 
+    # Before split, we have done one reconcile for each shard
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+        )
+        == shard_count
+    )
+
     env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
     post_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
@@ -264,43 +282,66 @@ def test_sharding_split_smoke(
         destination = migrate_to_pageserver_ids.pop()
 
         log.info(f"Migrating shard {migrate_shard} from {ps_id} to {destination}")
-        env.neon_cli.tenant_migrate(migrate_shard, destination, timeout_secs=10)
+        env.storage_controller.tenant_shard_migrate(migrate_shard, destination)
 
     workload.validate()
 
-    # Check that we didn't do any spurious reconciliations.
-    # Total number of reconciles should have been one per original shard, plus
-    # one for each shard that was migrated.
+    # Assert on how many reconciles happened during the process.  This is something of an
+    # implementation detail, but it is useful to detect any bugs that might generate spurious
+    # extra reconcile iterations.
+    #
+    # We'll have:
+    # - shard_count reconciles for the original setup of the tenant
+    # - shard_count reconciles for detaching the original secondary locations during split
+    # - split_shard_count reconciles during shard splitting, for setting up secondaries.
+    # - shard_count reconciles for the migrations we did to move child shards away from their split location
+    expect_reconciles = shard_count * 2 + split_shard_count + shard_count
     reconcile_ok = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
-    assert reconcile_ok == shard_count + split_shard_count // 2
+    assert reconcile_ok == expect_reconciles
 
     # Check that no cancelled or errored reconciliations occurred: this test does no
     # failure injection and should run clean.
-    assert (
-        env.storage_controller.get_metric_value(
-            "storage_controller_reconcile_complete_total", filter={"status": "cancel"}
-        )
-        is None
+    cancelled_reconciles = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "cancel"}
     )
-    assert (
-        env.storage_controller.get_metric_value(
-            "storage_controller_reconcile_complete_total", filter={"status": "error"}
-        )
-        is None
+    errored_reconciles = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "error"}
     )
+    assert cancelled_reconciles is not None and int(cancelled_reconciles) == 0
+    assert errored_reconciles is not None and int(errored_reconciles) == 0
 
     env.storage_controller.consistency_check()
 
-    # Validate pageserver state
-    shards_exist: list[TenantShardId] = []
-    for pageserver in env.pageservers:
-        locations = pageserver.http_client().tenant_list_locations()
-        shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
+    def get_node_shard_counts(env: NeonEnv, tenant_ids):
+        total: defaultdict[int, int] = defaultdict(int)
+        attached: defaultdict[int, int] = defaultdict(int)
+        for tid in tenant_ids:
+            for shard in env.storage_controller.tenant_describe(tid)["shards"]:
+                log.info(
+                    f"{shard['tenant_shard_id']}: attached={shard['node_attached']}, secondary={shard['node_secondary']} "
+                )
+                for node in shard["node_secondary"]:
+                    total[int(node)] += 1
+                attached[int(shard["node_attached"])] += 1
+                total[int(shard["node_attached"])] += 1
 
-    log.info("Shards after split: {shards_exist}")
-    assert len(shards_exist) == split_shard_count
+        return total, attached
+
+    def check_effective_tenant_config():
+        # Expect our custom tenant configs to have survived the split
+        for shard in env.storage_controller.tenant_describe(tenant_id)["shards"]:
+            node = env.get_pageserver(int(shard["node_attached"]))
+            config = node.http_client().tenant_config(TenantShardId.parse(shard["tenant_shard_id"]))
+            for k, v in non_default_tenant_config.items():
+                assert config.effective_config[k] == v
+
+    # Validate pageserver state: expect every child shard to have an attached and secondary location
+    (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
+    assert sum(attached.values()) == split_shard_count
+    assert sum(total.values()) == split_shard_count * 2
+    check_effective_tenant_config()
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
@@ -309,13 +350,11 @@ def test_sharding_split_smoke(
         pageserver.stop()
         pageserver.start()
 
-    shards_exist = []
-    for pageserver in env.pageservers:
-        locations = pageserver.http_client().tenant_list_locations()
-        shards_exist.extend(TenantShardId.parse(s[0]) for s in locations["tenant_shards"])
-
-    log.info("Shards after restart: {shards_exist}")
-    assert len(shards_exist) == split_shard_count
+    # Validate pageserver state: expect every child shard to have an attached and secondary location
+    (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
+    assert sum(attached.values()) == split_shard_count
+    assert sum(total.values()) == split_shard_count * 2
+    check_effective_tenant_config()
 
     workload.validate()
 
@@ -721,9 +760,32 @@ def test_sharding_split_failures(
     initial_shard_count = 2
     split_shard_count = 4
 
-    env = neon_env_builder.init_start(initial_tenant_shard_count=initial_shard_count)
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+
+    # Create a tenant with secondary locations enabled
+    env.neon_cli.create_tenant(
+        tenant_id, timeline_id, shard_count=initial_shard_count, placement_policy='{"Attached":1}'
+    )
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            # All split failures log a warning when then enqueue the abort operation
+            ".*Enqueuing background abort.*",
+            # We exercise failure cases where abort itself will also fail (node offline)
+            ".*abort_tenant_shard_split.*",
+            ".*Failed to abort.*",
+            # Tolerate any error lots that mention a failpoint
+            ".*failpoint.*",
+            # Node offline cases will fail to send requests
+            ".*Reconcile error: receive body: error sending request for url.*",
+            # Node offline cases will fail inside reconciler when detaching secondaries
+            ".*Reconcile error on shard.*: receive body: error sending request for url.*",
+        ]
+    )
 
     for ps in env.pageservers:
         # When we do node failures and abandon a shard, it will de-facto have old generation and
@@ -759,7 +821,8 @@ def test_sharding_split_failures(
     # will have succeeded: the net result should be to return to a clean state, including
     # detaching any child shards.
     def assert_rolled_back(exclude_ps_id=None) -> None:
-        count = 0
+        secondary_count = 0
+        attached_count = 0
         for ps in env.pageservers:
             if exclude_ps_id is not None and ps.id == exclude_ps_id:
                 continue
@@ -767,13 +830,25 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id}")
+                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
                 assert tenant_shard_id.shard_count == initial_shard_count
-                count += 1
-        assert count == initial_shard_count
+                if loc[1]["mode"] == "Secondary":
+                    secondary_count += 1
+                else:
+                    attached_count += 1
+
+        if exclude_ps_id is not None:
+            # For a node failure case, we expect there to be a secondary location
+            # scheduled on the offline node, so expect one fewer secondary in total
+            assert secondary_count == initial_shard_count - 1
+        else:
+            assert secondary_count == initial_shard_count
+
+        assert attached_count == initial_shard_count
 
     def assert_split_done(exclude_ps_id=None) -> None:
-        count = 0
+        secondary_count = 0
+        attached_count = 0
         for ps in env.pageservers:
             if exclude_ps_id is not None and ps.id == exclude_ps_id:
                 continue
@@ -781,10 +856,14 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id}")
+                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
                 assert tenant_shard_id.shard_count == split_shard_count
-                count += 1
-        assert count == split_shard_count
+                if loc[1]["mode"] == "Secondary":
+                    secondary_count += 1
+                else:
+                    attached_count += 1
+        assert attached_count == split_shard_count
+        assert secondary_count == split_shard_count
 
     def finish_split():
         # Having failed+rolled back, we should be able to split again
@@ -795,11 +874,17 @@ def test_sharding_split_failures(
         workload.validate()
 
     if failure.expect_available():
-        # Even though the split failed partway through, this should not have interrupted
-        # clients.  Disable waiting for pageservers in the workload helper, because our
-        # failpoints may prevent API access.
-        # This only applies for failure modes that leave pageserver page_service API available.
-        workload.churn_rows(10, upload=False, ingest=False)
+        # Even though the split failed partway through, this should not leave the tenant in
+        # an unavailable state.
+        # - Disable waiting for pageservers in the workload helper, because our
+        #   failpoints may prevent API access. This only applies for failure modes that
+        #   leave pageserver page_service API available.
+        # - This is a wait_until because clients may see transient errors in some split error cases,
+        #   e.g. while waiting for a storage controller to re-attach a parent shard if we failed
+        #   inside the pageserver and the storage controller responds by detaching children and attaching
+        #   parents concurrently (https://github.com/neondatabase/neon/issues/7148)
+        wait_until(10, 1, lambda: workload.churn_rows(10, upload=False, ingest=False))  # type: ignore
+
         workload.validate()
 
     if failure.fails_forward(env):

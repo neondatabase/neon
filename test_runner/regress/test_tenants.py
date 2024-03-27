@@ -36,7 +36,9 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     )
     [d for d in tenants_dir.iterdir()]
 
-    neon_simple_env.pageserver.allowed_errors.append(".*tenant-config-before-write.*")
+    error_regexes = [".*tenant-config-before-write.*"]
+    neon_simple_env.pageserver.allowed_errors.extend(error_regexes)
+    neon_simple_env.storage_controller.allowed_errors.extend(error_regexes)
 
     pageserver_http = neon_simple_env.pageserver.http_client()
     pageserver_http.configure_failpoints(("tenant-config-before-write", "return"))
@@ -386,6 +388,9 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
         except PageserverApiException as e:
             if e.status_code == 409:
                 log.info(f"delay_ms={delay_ms} 409")
+                pass
+            elif e.status_code == 429:
+                log.info(f"delay_ms={delay_ms} 429")
                 pass
             elif e.status_code == 400:
                 if "is less than existing" in e.message:

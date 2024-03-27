@@ -279,6 +279,7 @@ impl StorageController {
             &self.listen,
             "-p",
             self.path.as_ref(),
+            "--dev",
             "--database-url",
             &database_url,
             "--max-unavailable-interval",
@@ -475,7 +476,7 @@ impl StorageController {
     pub async fn tenant_locate(&self, tenant_id: TenantId) -> anyhow::Result<TenantLocateResponse> {
         self.dispatch::<(), _>(
             Method::GET,
-            format!("control/v1/tenant/{tenant_id}/locate"),
+            format!("debug/v1/tenant/{tenant_id}/locate"),
             None,
         )
         .await

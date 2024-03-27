@@ -105,7 +105,7 @@ def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
     # The neon_local tool generates one key pair at a hardcoded path by default.
     # As a preparation for our test, move the public key of the key pair into a
     # directory at the same location as the hardcoded path by:
-    # 1. moving the the file at `configured_pub_key_path` to a temporary location
+    # 1. moving the file at `configured_pub_key_path` to a temporary location
     # 2. creating a new directory at `configured_pub_key_path`
     # 3. moving the file from the temporary location into the newly created directory
     configured_pub_key_path = Path(env.repo_dir) / "auth_public_key.pem"
