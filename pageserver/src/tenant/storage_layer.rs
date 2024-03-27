@@ -223,8 +223,8 @@ pub(crate) enum ReadableLayer {
 /// A partial description of a read to be done.
 #[derive(Debug, Clone)]
 struct ReadDesc {
-    /// A key used to resolve the readable layer within the fringe
-    layer_key: LayerId,
+    /// An id used to resolve the readable layer within the fringe
+    layer_id: LayerId,
     /// Lsn range for the read, used for selecting the next read
     lsn_range: Range<Lsn>,
 }
@@ -262,7 +262,7 @@ impl LayerFringe {
             None => return None,
         };
 
-        let removed = self.layers.remove_entry(&read_desc.layer_key);
+        let removed = self.layers.remove_entry(&read_desc.layer_id);
         match removed {
             Some((
                 _,
@@ -281,8 +281,8 @@ impl LayerFringe {
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
     ) {
-        let key = layer.key();
-        let entry = self.layers.entry(key.clone());
+        let layer_id = layer.id();
+        let entry = self.layers.entry(layer_id.clone());
         match entry {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().target_keyspace.merge(&keyspace);
@@ -290,7 +290,7 @@ impl LayerFringe {
             Entry::Vacant(entry) => {
                 self.planned_reads_by_lsn.push(ReadDesc {
                     lsn_range,
-                    layer_key: key.clone(),
+                    layer_id: layer_id.clone(),
                 });
                 entry.insert(LayerKeyspace {
                     layer,
@@ -333,10 +333,10 @@ impl PartialEq for ReadDesc {
 impl Eq for ReadDesc {}
 
 impl ReadableLayer {
-    pub(crate) fn key(&self) -> LayerId {
+    pub(crate) fn id(&self) -> LayerId {
         match self {
             Self::PersistentLayer(layer) => LayerId::PersitentLayerId(layer.layer_desc().key()),
-            Self::InMemoryLayer(layer) => LayerId::InMemoryLayerId(layer.key()),
+            Self::InMemoryLayer(layer) => LayerId::InMemoryLayerId(layer.file_id()),
         }
     }
 

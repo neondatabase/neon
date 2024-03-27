@@ -39,7 +39,7 @@ pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
-    key: InMemoryLayerFileId,
+    file_id: InMemoryLayerFileId,
 
     /// This layer contains all the changes from 'start_lsn'. The
     /// start is inclusive.
@@ -83,8 +83,8 @@ impl std::fmt::Debug for InMemoryLayerInner {
 }
 
 impl InMemoryLayer {
-    pub(crate) fn key(&self) -> InMemoryLayerFileId {
-        self.key
+    pub(crate) fn file_id(&self) -> InMemoryLayerFileId {
+        self.file_id
     }
 
     pub(crate) fn get_timeline_id(&self) -> TimelineId {
@@ -329,7 +329,7 @@ impl InMemoryLayer {
         let key = InMemoryLayerFileId(file.id());
 
         Ok(InMemoryLayer {
-            key,
+            file_id: key,
             conf,
             timeline_id,
             tenant_shard_id,
