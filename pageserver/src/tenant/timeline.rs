@@ -1305,7 +1305,14 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Regardless of whether we're going to try_freeze_and_flush
-        // or not, stop ingesting any more data ...
+        // or not, stop ingesting any more data. Walreceiver only provides
+        // cancellation but no "wait until gone", because it uses the Timeline::gate.
+        // So, only after the self.gate.close() below will we know for sure that
+        // no walreceiver tasks are left.
+        // For `freeze_and_flush=true`, this means that we might still be ingesting
+        // data during the call to `self.freeze_and_flush()` below.
+        // That's not ideal, but, we don't have the concept of a ChildGuard, which
+        // is what we'd need to properly model early shutdown of walreceiver.
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
