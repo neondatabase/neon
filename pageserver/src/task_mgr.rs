@@ -30,6 +30,7 @@
 //! only a single tenant or timeline.
 //!
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -40,7 +41,6 @@ use std::sync::{Arc, Mutex};
 use futures::FutureExt;
 use pageserver_api::shard::TenantShardId;
 use tokio::runtime::Runtime;
-use tokio::task::JoinHandle;
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
 
@@ -300,7 +300,7 @@ pub enum TaskKind {
 struct MutableTaskState {
     /// Handle for waiting for the task to exit. It can be None, if the
     /// the task has already exited.
-    join_handle: Option<JoinHandle<()>>,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct PageServerTask {
@@ -386,15 +386,16 @@ async fn task_wrapper_task_mgr<F>(
     let result = SHUTDOWN_TOKEN
         .scope(
             shutdown_token,
-            CURRENT_TASK.scope(task, { task_wrapper_generic(future) }),
+            CURRENT_TASK.scope(task, task_wrapper_generic(future)),
         )
         .await;
     task_finish(result, task_name, task_id, shutdown_process_on_error).await;
 }
 
-pub(crate) async fn task_wrapper_generic<F, R>(future: F) -> TaskWrapperOutput
+async fn task_wrapper_generic<F, R>(future: F) -> TaskWrapperOutput<R>
 where
-    F: Future<Output = R>,
+    F: Future<Output = R> + Send,
+    R: Send,
 {
     // We use AssertUnwindSafe here so that the payload function
     // doesn't need to be UnwindSafe. We don't do anything after the
@@ -405,19 +406,60 @@ where
     }
 }
 
-pub(crate) enum TaskWrapperOutput<R> {
+enum TaskWrapperOutput<R> {
     TaskPanicked(Box<dyn Any + Send>),
     TaskExited(R),
 }
 
-impl<R> TaskWrapperOutput<R> {
-    pub fn forward_panic(self) -> R {
-        match self {
-            TaskWrapperOutput::TaskPanicked(p) => {
-                panic!("forwarding panic: {p:?}")
-            }
-            TaskWrapperOutput::TaskExited(r) => r,
+pub(crate) struct JoinHandlePanicForwarding<R> {
+    jh: tokio::task::JoinHandle<TaskWrapperOutput<R>>,
+}
+
+impl<R> JoinHandlePanicForwarding<R> {
+    /// # Cancel-Safety
+    ///
+    /// Since this method is consuming self, cancelling this future leaves the task dangling.
+    /// A warn! will be logged in that case.
+    pub(crate) async fn join(mut self, name: &str) -> R {
+        let guard = scopeguard::guard((), |()| {
+            warn!("dropping join() future for task {name}, leaving task dangling");
+        });
+        let join_res =
+            match tokio::time::timeout(std::time::Duration::from_secs(1), &mut self.jh).await {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    // allow some time to elapse before logging to cut down the number of log
+                    // lines.
+                    info!("waiting for task {} to shut down", name);
+                    // we never handled this return value, but:
+                    // - we don't deschedule which would lead to is_cancelled
+                    // - panics are already logged (is_panicked)
+                    // - task errors are already logged in the wrapper
+                    let r = self.jh.await;
+                    info!("task {} completed", name);
+                    r
+                }
+            };
+        // disarm the guard after the last await but before potential panic forwarding
+        scopeguard::ScopeGuard::into_inner(guard);
+        match join_res {
+            Err(e) => unreachable!("task_wrapper_generic intercepts all panics: {e:?}"),
+            Ok(TaskWrapperOutput::TaskPanicked(p)) => std::panic::panic_any(p),
+            Ok(TaskWrapperOutput::TaskExited(r)) => r,
         }
+    }
+}
+
+pub(crate) fn spawn_with_panic_forward<F, R>(
+    rt: &tokio::runtime::Handle,
+    future: F,
+) -> JoinHandlePanicForwarding<R>
+where
+    F: Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    JoinHandlePanicForwarding {
+        jh: rt.spawn(task_wrapper_generic(future)),
     }
 }
 
@@ -530,33 +572,24 @@ pub async fn shutdown_tasks(
                     warn!(name = task.name, tenant_shard_id = ?tenant_shard_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
                 }
             }
-            // ignore the join result, task_wrapper does the logging of panics
-            let _ = join_task_and_log_if_slow(&task.name, &mut join_handle).await;
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut join_handle)
+                .await
+                .is_err()
+            {
+                // allow some time to elapse before logging to cut down the number of log
+                // lines.
+                info!("waiting for task {} to shut down", task.name);
+                // we never handled this return value, but:
+                // - we don't deschedule which would lead to is_cancelled
+                // - panics are already logged (is_panicked)
+                // - task errors are already logged in the wrapper
+                let _ = join_handle.await;
+                info!("task {} completed", task.name);
+            }
         } else {
             // Possibly one of:
             //  * The task had not even fully started yet.
             //  * It was shut down concurrently and already exited
-        }
-    }
-}
-
-pub(crate) async fn join_task_and_log_if_slow<T>(
-    name: &str,
-    join_handle: &mut JoinHandle<T>,
-) -> Result<T, tokio::task::JoinError> {
-    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut *join_handle).await {
-        Ok(r) => r,
-        Err(_elapsed) => {
-            // allow some time to elapse before logging to cut down the number of log
-            // lines.
-            info!("waiting for task {} to shut down", name);
-            // we never handled this return value, but:
-            // - we don't deschedule which would lead to is_cancelled
-            // - panics are already logged (is_panicked)
-            // - task errors are already logged in the wrapper
-            let r = join_handle.await;
-            info!("task {} completed", name);
-            r
         }
     }
 }
