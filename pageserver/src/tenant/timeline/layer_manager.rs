@@ -281,6 +281,10 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
             .clone()
     }
 
+    fn get_from_key(&self, key: &PersistentLayerKey) -> Option<&T> {
+        self.0.get(key)
+    }
+
     pub(crate) fn insert(&mut self, layer: T) {
         let present = self.0.insert(layer.layer_desc().key(), layer.clone());
         if present.is_some() && cfg!(debug_assertions) {
