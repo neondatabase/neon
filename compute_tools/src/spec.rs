@@ -806,6 +806,7 @@ $$;"#,
         "",
         "",
         "",
+        "",
         // Add new migrations below.
     ];
 
