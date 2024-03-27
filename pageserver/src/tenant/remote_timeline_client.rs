@@ -698,9 +698,11 @@ impl RemoteTimelineClient {
         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
 
         info!(
-            "scheduled layer file upload {layer} gen={:?} shard={:?}",
-            metadata.generation, metadata.shard
+            gen=?metadata.generation,
+            shard=?metadata.shard,
+            "scheduled layer file upload {layer}",
         );
+
         let op = UploadOp::UploadLayer(layer, metadata);
         self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
