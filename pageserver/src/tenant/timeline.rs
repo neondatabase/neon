@@ -2825,6 +2825,13 @@ impl Timeline {
             // It's safe to drop the layer map lock after planning the next round of reads.
             // The fringe keeps readable handles for the layers which are safe to read even
             // if layers were compacted or flushed.
+            //
+            // The more interesting consideration is: "Why is the read algorithm still correct
+            // if the layer map changes while it is operating?". Doing a vectored read on a
+            // timeline boils down to pushing an imaginary lsn boundary downwards for each range
+            // covered by the read. The layer map tells us how to move the lsn downwards for a
+            // range at *a particular point in time*. It is fine for the answer to be different
+            // at two different time points.
             drop(guard);
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
