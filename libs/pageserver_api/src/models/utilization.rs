@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use utils::serde_system_time::SystemTime;
 
 /// Pageserver current utilization and scoring for how good candidate the pageserver would be for
 /// the next tenant.
@@ -21,26 +21,7 @@ pub struct PageserverUtilization {
     /// When was this snapshot captured, pageserver local time.
     ///
     /// Use millis to give confidence that the value is regenerated often enough.
-    #[serde(
-        serialize_with = "ser_rfc3339_millis",
-        deserialize_with = "deser_rfc3339_millis"
-    )]
     pub captured_at: SystemTime,
-}
-
-fn ser_rfc3339_millis<S: serde::Serializer>(
-    ts: &SystemTime,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.collect_str(&humantime::format_rfc3339_millis(*ts))
-}
-
-fn deser_rfc3339_millis<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let s: String = serde::de::Deserialize::deserialize(deserializer)?;
-    humantime::parse_rfc3339(&s).map_err(serde::de::Error::custom)
 }
 
 /// openapi knows only `format: int64`, so avoid outputting a non-parseable value by generated clients.
@@ -69,7 +50,9 @@ mod tests {
             disk_usage_bytes: u64::MAX,
             free_space_bytes: 0,
             utilization_score: u64::MAX,
-            captured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1708509779),
+            captured_at: SystemTime(
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1708509779),
+            ),
         };
 
         let s = serde_json::to_string(&doc).unwrap();

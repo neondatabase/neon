@@ -20,7 +20,7 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
     #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_cast))]
     let free = statvfs.blocks_available() as u64 * blocksz;
     let used = crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.get();
-    let captured_at = std::time::SystemTime::now();
+    let now = std::time::SystemTime::now();
 
     let doc = PageserverUtilization {
         disk_usage_bytes: used,
@@ -29,7 +29,7 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
         //
         // note that u64::MAX will be output as i64::MAX as u64, but that should not matter
         utilization_score: u64::MAX,
-        captured_at,
+        captured_at: utils::serde_system_time::SystemTime(now),
     };
 
     // TODO: make utilization_score into a metric
