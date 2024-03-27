@@ -120,6 +120,31 @@ pub(super) async fn upload_timeline_layer<'a>(
         .with_context(|| format!("upload layer from local path '{source_path}'"))
 }
 
+pub(super) async fn copy_timeline_layer(
+    conf: &'static PageServerConf,
+    storage: &GenericRemoteStorage,
+    source_path: &Utf8Path,
+    source_metadata: &LayerFileMetadata,
+    target_path: &Utf8Path,
+    target_metadata: &LayerFileMetadata,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    fail_point!("before-copy-layer", |_| {
+        bail!("failpoint before-copy-layer")
+    });
+
+    pausable_failpoint!("before-copy-layer-pausable");
+
+    let source_path = remote_path(conf, source_path, source_metadata.generation)?;
+    let target_path = remote_path(conf, target_path, target_metadata.generation)?;
+
+    // TODO: this should have a retry loop ... or not? we are looped externally.
+    storage
+        .copy_object(&source_path, &target_path, cancel)
+        .await
+        .with_context(|| format!("adopt layer {source_path} to {target_path}"))
+}
+
 /// Uploads the given `initdb` data to the remote storage.
 pub(crate) async fn upload_initdb_dir(
     storage: &GenericRemoteStorage,
