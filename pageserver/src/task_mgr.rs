@@ -354,7 +354,7 @@ where
 
     let task_name = name.to_string();
     let task_cloned = Arc::clone(&task);
-    let join_handle = runtime.spawn(task_wrapper(
+    let join_handle = runtime.spawn(task_wrapper_task_mgr(
         task_name,
         task_id,
         task_cloned,
@@ -371,7 +371,7 @@ where
 
 /// This wrapper function runs in a newly-spawned task. It initializes the
 /// task-local variables and calls the payload function.
-async fn task_wrapper<F>(
+async fn task_wrapper_task_mgr<F>(
     task_name: String,
     task_id: u64,
     task: Arc<PageServerTask>,
@@ -386,22 +386,43 @@ async fn task_wrapper<F>(
     let result = SHUTDOWN_TOKEN
         .scope(
             shutdown_token,
-            CURRENT_TASK.scope(task, {
-                // We use AssertUnwindSafe here so that the payload function
-                // doesn't need to be UnwindSafe. We don't do anything after the
-                // unwinding that would expose us to unwind-unsafe behavior.
-                AssertUnwindSafe(future).catch_unwind()
-            }),
+            CURRENT_TASK.scope(task, { task_wrapper_generic(future) }),
         )
         .await;
     task_finish(result, task_name, task_id, shutdown_process_on_error).await;
 }
 
+pub(crate) async fn task_wrapper_generic<F, R>(future: F) -> TaskWrapperOutput
+where
+    F: Future<Output = R>,
+{
+    // We use AssertUnwindSafe here so that the payload function
+    // doesn't need to be UnwindSafe. We don't do anything after the
+    // unwinding that would expose us to unwind-unsafe behavior.
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(output) => TaskWrapperOutput::TaskExited(output),
+        Err(panicked) => TaskWrapperOutput::TaskPanicked(panicked),
+    }
+}
+
+pub(crate) enum TaskWrapperOutput<R> {
+    TaskPanicked(Box<dyn Any + Send>),
+    TaskExited(R),
+}
+
+impl<R> TaskWrapperOutput<R> {
+    pub fn forward_panic(self) -> R {
+        match self {
+            TaskWrapperOutput::TaskPanicked(p) => {
+                panic!("forwarding panic: {p:?}")
+            }
+            TaskWrapperOutput::TaskExited(r) => r,
+        }
+    }
+}
+
 async fn task_finish(
-    result: std::result::Result<
-        anyhow::Result<()>,
-        std::boxed::Box<dyn std::any::Any + std::marker::Send>,
-    >,
+    result: TaskWrapperOutput<anyhow::Result<()>>,
     task_name: String,
     task_id: u64,
     shutdown_process_on_error: bool,
@@ -416,10 +437,10 @@ async fn task_finish(
     let mut shutdown_process = false;
     {
         match result {
-            Ok(Ok(())) => {
+            TaskWrapperOutput::TaskExited(Ok(())) => {
                 debug!("Task '{}' exited normally", task_name);
             }
-            Ok(Err(err)) => {
+            TaskWrapperOutput::TaskExited(Err(err)) => {
                 if shutdown_process_on_error {
                     error!(
                         "Shutting down: task '{}' tenant_shard_id: {:?}, timeline_id: {:?} exited with error: {:?}",
@@ -433,7 +454,7 @@ async fn task_finish(
                     );
                 }
             }
-            Err(err) => {
+            TaskWrapperOutput::TaskPanicked(err) => {
                 if shutdown_process_on_error {
                     error!(
                         "Shutting down: task '{}' tenant_shard_id: {:?}, timeline_id: {:?} panicked: {:?}",
@@ -509,24 +530,33 @@ pub async fn shutdown_tasks(
                     warn!(name = task.name, tenant_shard_id = ?tenant_shard_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
                 }
             }
-            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut join_handle)
-                .await
-                .is_err()
-            {
-                // allow some time to elapse before logging to cut down the number of log
-                // lines.
-                info!("waiting for task {} to shut down", task.name);
-                // we never handled this return value, but:
-                // - we don't deschedule which would lead to is_cancelled
-                // - panics are already logged (is_panicked)
-                // - task errors are already logged in the wrapper
-                let _ = join_handle.await;
-                info!("task {} completed", task.name);
-            }
+            // ignore the join result, task_wrapper does the logging of panics
+            let _ = join_task_and_log_if_slow(&task.name, &mut join_handle).await;
         } else {
             // Possibly one of:
             //  * The task had not even fully started yet.
             //  * It was shut down concurrently and already exited
+        }
+    }
+}
+
+pub(crate) async fn join_task_and_log_if_slow<T>(
+    name: &str,
+    join_handle: &mut JoinHandle<T>,
+) -> Result<T, tokio::task::JoinError> {
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut *join_handle).await {
+        Ok(r) => r,
+        Err(_elapsed) => {
+            // allow some time to elapse before logging to cut down the number of log
+            // lines.
+            info!("waiting for task {} to shut down", name);
+            // we never handled this return value, but:
+            // - we don't deschedule which would lead to is_cancelled
+            // - panics are already logged (is_panicked)
+            // - task errors are already logged in the wrapper
+            let r = join_handle.await;
+            info!("task {} completed", name);
+            r
         }
     }
 }

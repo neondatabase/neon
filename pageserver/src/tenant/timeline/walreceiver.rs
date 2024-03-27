@@ -24,7 +24,7 @@ mod connection_manager;
 mod walreceiver_connection;
 
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
+use crate::task_mgr::{self, join_task_and_log_if_slow, TaskKind, WALRECEIVER_RUNTIME};
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::timeline::walreceiver::connection_manager::{
     connection_manager_loop_step, ConnectionManagerState,
@@ -63,9 +63,12 @@ pub struct WalReceiver {
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     manager_status: Arc<std::sync::RwLock<Option<ConnectionManagerStatus>>>,
+    loop_task: tokio::task::JoinHandle<crate::task_mgr::TaskWrapperOutput<()>>,
+    loop_task_cancel: CancellationToken,
 }
 
 impl WalReceiver {
+    const TASK_NAME: &'static str = "wal_connection_manager";
     pub fn start(
         timeline: Arc<Timeline>,
         conf: WalReceiverConf,
@@ -79,17 +82,12 @@ impl WalReceiver {
 
         let loop_status = Arc::new(std::sync::RwLock::new(None));
         let manager_status = Arc::clone(&loop_status);
-        task_mgr::spawn(
-            WALRECEIVER_RUNTIME.handle(),
-            TaskKind::WalReceiverManager,
-            Some(timeline.tenant_shard_id),
-            Some(timeline_id),
-            &format!("walreceiver for timeline {tenant_shard_id}/{timeline_id}"),
-            false,
+        let cancel = timeline.cancel.child_token();
+        let loop_task = WALRECEIVER_RUNTIME.spawn(crate::task_mgr::task_wrapper_generic({
+            let cancel = cancel.clone();
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
                 debug!("WAL receiver manager started, connecting to broker");
-                let cancel = timeline.cancel.clone();
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
@@ -112,25 +110,26 @@ impl WalReceiver {
                 }
                 connection_manager_state.shutdown().await;
                 *loop_status.write().unwrap() = None;
-                Ok(())
+                debug!("task exits");
             }
-            .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), timeline_id = %timeline_id))
-        );
+            .instrument(info_span!(parent: None, WalReceiver::TASK_NAME, tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), timeline_id = %timeline_id))
+        }));
 
         Self {
             tenant_shard_id,
             timeline_id,
             manager_status,
+            loop_task,
+            loop_task_cancel: cancel,
         }
     }
 
-    pub async fn stop(self) {
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_shard_id),
-            Some(self.timeline_id),
-        )
-        .await;
+    #[instrument(skip_all)]
+    pub async fn stop(mut self) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        debug!("signalling cancellation");
+        self.loop_task_cancel.cancel();
+        join_task_and_log_if_slow(Self::TASK_NAME, &mut self.loop_task).await(|e| try_into_panic);
     }
 
     pub(crate) fn status(&self) -> Option<ConnectionManagerStatus> {
