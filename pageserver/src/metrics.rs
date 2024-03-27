@@ -1632,6 +1632,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
+    Copy,
     Download,
     Delete,
 }
@@ -1639,6 +1640,7 @@ impl RemoteOpKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Upload => "upload",
+            Self::Copy => "copy",
             Self::Download => "download",
             Self::Delete => "delete",
         }

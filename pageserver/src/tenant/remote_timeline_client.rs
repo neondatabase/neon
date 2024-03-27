@@ -645,6 +645,63 @@ impl RemoteTimelineClient {
         self.launch_queued_tasks(upload_queue);
     }
 
+    /// Schedules a remote copy of the given Layer file from another timeline of the same tenant.
+    /// The file will be copied under the timeline in the remote storage, and added to the
+    /// `index_part.json` files uploaded on the next metadata upload.
+    ///
+    /// There will be no checking if the copys have already happened. If such is needed, the
+    /// existence of a copy needs to be done before calling this method.
+    ///
+    /// A `index_part.json` upload will not be scheduled, it can be scheduled by
+    /// [`Self::schedule_index_upload_for_file_changes`].
+    pub(crate) fn schedule_layer_adoption(
+        self: &Arc<Self>,
+        adopted: Layer,
+        target: Layer,
+    ) -> anyhow::Result<()> {
+        // non-technical rule, we don't have any such support planned
+        anyhow::ensure!(
+            adopted.layer_desc().tenant_shard_id == target.layer_desc().tenant_shard_id,
+            "cross-tenant copying is not supported"
+        );
+        // currently there is no known reason to do copy within
+        anyhow::ensure!(
+            adopted.layer_desc().timeline_id != target.layer_desc().timeline_id,
+            "copying within a timeline is not supported"
+        );
+
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        self.schedule_layer_adoption0(upload_queue, adopted, target);
+        self.launch_queued_tasks(upload_queue);
+        Ok(())
+    }
+
+    pub(crate) fn schedule_layer_adoption0(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        adopted: Layer,
+        owned: Layer,
+    ) {
+        let metadata = owned.metadata();
+
+        upload_queue
+            .latest_files
+            .insert(owned.layer_desc().filename(), metadata.clone());
+        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+
+        info!(
+            gen=?metadata.generation,
+            shard=?metadata.shard,
+            "scheduled layer file copy {adopted}",
+        );
+
+        let op = UploadOp::AdoptLayer { adopted, owned };
+        self.metric_begin(&op);
+        upload_queue.queued_operations.push_back(op);
+    }
+
     ///
     /// Launch an upload operation in the background.
     ///
@@ -1256,7 +1313,7 @@ impl RemoteTimelineClient {
         while let Some(next_op) = upload_queue.queued_operations.front() {
             // Can we run this task now?
             let can_run_now = match next_op {
-                UploadOp::UploadLayer(_, _) => {
+                UploadOp::UploadLayer(..) | UploadOp::AdoptLayer { .. } => {
                     // Can always be scheduled.
                     true
                 }
@@ -1302,6 +1359,7 @@ impl RemoteTimelineClient {
                 UploadOp::UploadLayer(_, _) => {
                     upload_queue.num_inprogress_layer_uploads += 1;
                 }
+                UploadOp::AdoptLayer { .. } => upload_queue.num_inprogress_layer_copies += 1,
                 UploadOp::UploadMetadata(_, _) => {
                     upload_queue.num_inprogress_metadata_uploads += 1;
                 }
@@ -1395,6 +1453,28 @@ impl RemoteTimelineClient {
                     .measure_remote_op(
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
+                        Arc::clone(&self.metrics),
+                    )
+                    .await
+                }
+                UploadOp::AdoptLayer {
+                    ref adopted,
+                    ref owned,
+                } => {
+                    let source = adopted.local_path();
+                    let target = owned.local_path();
+                    upload::copy_timeline_layer(
+                        self.conf,
+                        &self.storage_impl,
+                        source,
+                        &adopted.metadata(),
+                        target,
+                        &owned.metadata(),
+                        &self.cancel,
+                    )
+                    .measure_remote_op(
+                        RemoteOpFileKind::Layer,
+                        RemoteOpKind::Copy,
                         Arc::clone(&self.metrics),
                     )
                     .await
@@ -1528,6 +1608,10 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_layer_uploads -= 1;
                     None
                 }
+                UploadOp::AdoptLayer { .. } => {
+                    upload_queue.num_inprogress_layer_copies -= 1;
+                    None
+                }
                 UploadOp::UploadMetadata(_, lsn) => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     // XXX monotonicity check?
@@ -1585,6 +1669,13 @@ impl RemoteTimelineClient {
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Upload,
                 RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size()),
+            ),
+            UploadOp::AdoptLayer { .. } => (
+                RemoteOpFileKind::Layer,
+                RemoteOpKind::Copy,
+                DontTrackSize {
+                    reason: "remote is doing the copying, not us",
+                },
             ),
             UploadOp::UploadMetadata(_, _) => (
                 RemoteOpFileKind::Index,
@@ -1670,6 +1761,7 @@ impl RemoteTimelineClient {
                             .visible_remote_consistent_lsn
                             .clone(),
                         num_inprogress_layer_uploads: 0,
+                        num_inprogress_layer_copies: 0,
                         num_inprogress_metadata_uploads: 0,
                         num_inprogress_deletions: 0,
                         inprogress_tasks: HashMap::default(),
