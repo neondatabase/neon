@@ -138,7 +138,6 @@ pub(super) async fn connection_manager_loop_step(
                             Ok(()) => debug!("WAL receiving task finished"),
                             Err(e) => error!("wal receiver task finished with an error: {e:?}"),
                         }
-                        // TODO: can this use the `cancel` token?
                         connection_manager_state.drop_old_connection(false).await;
                     },
                 }
@@ -281,7 +280,7 @@ pub(super) struct ConnectionManagerState {
     id: TenantTimelineId,
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
     timeline: Arc<Timeline>,
-    /// Child token of [`WalReceiver::cancel`], inherited to all tasks we spawn.
+    /// Child token of [`super::WalReceiver::cancel`], inherited to all tasks we spawn.
     cancel: CancellationToken,
     conf: WalReceiverConf,
     /// Current connection to safekeeper for WAL streaming.

@@ -1833,7 +1833,6 @@ impl Tenant {
                 let span =
                     tracing::info_span!("timeline_shutdown", %timeline_id, ?freeze_and_flush);
                 js.spawn(async move {
-                    // TODO: directly use shutdown_impl / make pub with right argument?
                     if freeze_and_flush {
                         timeline.flush_and_shutdown().instrument(span).await
                     } else {
