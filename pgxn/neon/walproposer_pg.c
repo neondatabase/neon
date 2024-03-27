@@ -85,7 +85,6 @@ static void walprop_pg_init_standalone_sync_safekeepers(void);
 static void walprop_pg_init_walsender(void);
 static void walprop_pg_init_bgworker(void);
 static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
-static TimeLineID walprop_pg_get_timeline_id(void);
 static void walprop_pg_load_libpqwalreceiver(void);
 
 static process_interrupts_callback_t PrevProcessInterruptsCallback;
@@ -94,6 +93,8 @@ static shmem_startup_hook_type prev_shmem_startup_hook_type;
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void walproposer_shmem_request(void);
 #endif
+static void WalproposerShmemInit_SyncSafekeeper(void);
+
 
 static void StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd);
 static void WalSndLoop(WalProposer *wp);
@@ -136,6 +137,7 @@ WalProposerSync(int argc, char *argv[])
 	WalProposer *wp;
 
 	init_walprop_config(true);
+	WalproposerShmemInit_SyncSafekeeper();
 	walprop_pg_init_standalone_sync_safekeepers();
 	walprop_pg_load_libpqwalreceiver();
 
@@ -289,6 +291,15 @@ WalproposerShmemInit(void)
 	return found;
 }
 
+static void
+WalproposerShmemInit_SyncSafekeeper(void)
+{
+	walprop_shared = palloc(WalproposerShmemSize());
+	memset(walprop_shared, 0, WalproposerShmemSize());
+	SpinLockInit(&walprop_shared->mutex);
+	pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
+}
+
 #define BACK_PRESSURE_DELAY 10000L // 0.01 sec
 
 static bool
@@ -397,6 +408,13 @@ nwp_shmem_startup_hook(void)
 		prev_shmem_startup_hook_type();
 
 	WalproposerShmemInit();
+}
+
+WalproposerShmemState *
+GetWalpropShmemState()
+{
+	Assert(walprop_shared != NULL);
+	return walprop_shared;
 }
 
 static WalproposerShmemState *
@@ -598,7 +616,7 @@ walprop_pg_get_current_timestamp(WalProposer *wp)
 	return GetCurrentTimestamp();
 }
 
-static TimeLineID
+TimeLineID
 walprop_pg_get_timeline_id(void)
 {
 #if PG_VERSION_NUM >= 150000
@@ -716,8 +734,7 @@ static void
 walprop_connect_start(Safekeeper *sk)
 {
 	Assert(sk->conn == NULL);
-	sk->conn = libpqwp_connect_start(sk->conninfo);
-
+	sk->conn = libpqwp_connect_start(sk->shared->conninfo);
 }
 
 static WalProposerConnectPollStatusType
@@ -1316,13 +1333,13 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 
 	if (!neon_auth_token)
 	{
-		memcpy(conninfo, sk->conninfo, MAXCONNINFO);
+		memcpy(conninfo, sk->shared->conninfo, MAXCONNINFO);
 	}
 	else
 	{
 		int			written = 0;
 
-		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, sk->conninfo);
+		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, sk->shared->conninfo);
 		if (written > MAXCONNINFO || written < 0)
 			wpg_log(FATAL, "could not append password to the safekeeper connection string");
 	}
@@ -1337,14 +1354,14 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 	{
 		ereport(WARNING,
 				(errmsg("could not connect to WAL acceptor %s:%s: %s",
-						sk->host, sk->port,
+						sk->shared->host, sk->shared->port,
 						err)));
 		return false;
 	}
 	wpg_log(LOG,
 			"start recovery for logical replication from %s:%s starting from %X/%08X till %X/%08X timeline "
 			"%d",
-			sk->host, sk->port, (uint32) (startpos >> 32),
+			sk->shared->host, sk->shared->port, (uint32) (startpos >> 32),
 			(uint32) startpos, (uint32) (endpos >> 32), (uint32) endpos, timeline);
 
 	options.logical = false;
@@ -1543,9 +1560,9 @@ walprop_pg_wal_reader_allocate(Safekeeper *sk)
 {
 	char		log_prefix[64];
 
-	snprintf(log_prefix, sizeof(log_prefix), WP_LOG_PREFIX "sk %s:%s nwr: ", sk->host, sk->port);
+	snprintf(log_prefix, sizeof(log_prefix), WP_LOG_PREFIX "sk %s:%s nwr: ", sk->shared->host, sk->shared->port);
 	Assert(!sk->xlogreader);
-	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn, sk->wp, log_prefix);
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn, log_prefix);
 	if (sk->xlogreader == NULL)
 		wpg_log(FATAL, "failed to allocate xlog reader");
 }
@@ -1643,7 +1660,7 @@ add_nwr_event_set(Safekeeper *sk, uint32 events)
 	Assert(sk->nwrEventPos == -1);
 	sk->nwrEventPos = AddWaitEventToSet(waitEvents, events, NeonWALReaderSocket(sk->xlogreader), NULL, sk);
 	sk->nwrConnEstablished = NeonWALReaderIsRemConnEstablished(sk->xlogreader);
-	wpg_log(DEBUG5, "sk %s:%s: added nwr socket events %d", sk->host, sk->port, events);
+	wpg_log(DEBUG5, "sk %s:%s: added nwr socket events %d", sk->shared->host, sk->shared->port, events);
 }
 
 static void
@@ -1674,7 +1691,7 @@ walprop_pg_active_state_update_event_set(Safekeeper *sk)
 	uint32		sk_events;
 	uint32		nwr_events;
 
-	Assert(sk->state == SS_ACTIVE);
+	Assert(sk->shared->state == SS_ACTIVE);
 	SafekeeperStateDesiredEvents(sk, &sk_events, &nwr_events);
 
 	/*
@@ -1743,7 +1760,7 @@ rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk)
 	WalProposer *wp = to_remove->wp;
 
 	wpg_log(DEBUG5, "sk %s:%s: removing event, is_sk %d",
-			to_remove->host, to_remove->port, is_sk);
+			to_remove->shared->host, to_remove->shared->port, is_sk);
 
 	/*
 	 * Shortpath for exiting if have nothing to do. We never call this
@@ -1775,7 +1792,7 @@ rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk)
 		 * If this safekeeper isn't offline, add events for it, except for the
 		 * event requested to remove.
 		 */
-		if (sk->state != SS_OFFLINE)
+		if (sk->shared->state != SS_OFFLINE)
 		{
 			uint32		sk_events;
 			uint32		nwr_events;
