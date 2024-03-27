@@ -161,6 +161,32 @@ impl LayerManager {
         updates.flush();
     }
 
+    /// Add the given delta layers which have been constructed by rewriting the LSN prefix of
+    /// ancestors layers as a layer of this Timeline.
+    pub(crate) fn track_adopted_delta_layers(
+        &mut self,
+        layers: &[ResidentLayer],
+        metrics: &TimelineMetrics,
+    ) {
+        let mut updates = self.layer_map.batch_update();
+        for layer in layers {
+            Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+
+            metrics.record_new_file_metrics(layer.layer_desc().file_size);
+        }
+        updates.flush();
+    }
+
+    /// This method does not accept `metrics`, because all of these layers are created as evicted,
+    /// and currently there is no optimization to even hard-link them from our historical ancestor.
+    pub(crate) fn track_adopted_historic_layers(&mut self, layers: &[Layer]) {
+        let mut updates = self.layer_map.batch_update();
+        for layer in layers {
+            Self::insert_historic_layer(layer.clone(), &mut updates, &mut self.layer_fmgr);
+        }
+        updates.flush();
+    }
+
     /// Flush a frozen layer and add the written delta layer to the layer map.
     pub(crate) fn finish_flush_l0_layer(
         &mut self,
