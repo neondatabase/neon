@@ -1293,82 +1293,94 @@ impl Timeline {
     ///
     /// While we are flushing, we continue to accept read I/O.
     pub(crate) async fn flush_and_shutdown(&self) {
-        debug_assert_current_span_has_tenant_and_timeline_id();
-
-        // Stop ingesting data. Walreceiver only provides cancellation but no
-        // "wait until gone", because it uses the Timeline::gate.  So, only
-        // after the self.gate.close() in self.shutdown() below will we know for
-        // sure that no walreceiver tasks are left.
-        // This means that we might still be ingesting data during the call to
-        // `self.freeze_and_flush()` below.  That's not ideal, but, we don't have
-        // the concept of a ChildGuard, which is what we'd need to properly model
-        // early shutdown of the walreceiver task sub-tree before the other
-        // Timeline task sub-trees.
-        if let Some(walreceiver) = self.walreceiver.lock().unwrap().take() {
-            walreceiver.cancel();
-        }
-
-        // Since we have shut down WAL ingest, we should not let anyone start waiting for the LSN to advance
-        self.last_record_lsn.shutdown();
-
-        // now all writers to InMemory layer are gone, do the final flush if requested
-        match self.freeze_and_flush().await {
-            Ok(_) => {
-                // drain the upload queue
-                if let Some(client) = self.remote_client.as_ref() {
-                    // if we did not wait for completion here, it might be our shutdown process
-                    // didn't wait for remote uploads to complete at all, as new tasks can forever
-                    // be spawned.
-                    //
-                    // what is problematic is the shutting down of RemoteTimelineClient, because
-                    // obviously it does not make sense to stop while we wait for it, but what
-                    // about corner cases like s3 suddenly hanging up?
-                    client.shutdown().await;
-                }
-            }
-            Err(e) => {
-                // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
-                // we have some extra WAL replay to do next time the timeline starts.
-                warn!("failed to freeze and flush: {e:#}");
-            }
-        }
-
-        self.shutdown().await;
+        self.shutdown_impl(true).await
     }
 
-    /// Shut down immediately, without waiting for any open layers to flush to disk.  This is a subset of
-    /// the graceful [`Timeline::flush_and_shutdown`] function.
+    /// Shut down immediately, without waiting for any open layers to flush.
     pub(crate) async fn shutdown(&self) {
+        self.shutdown_impl(false).await
+    }
+
+    async fn shutdown_impl(&self, try_freeze_and_flush: bool) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        // Signal any subscribers to our cancellation token to drop out
+        // Regardless of whether we're going to try_freeze_and_flush
+        // or not, stop ingesting any more data. Walreceiver only provides
+        // cancellation but no "wait until gone", because it uses the Timeline::gate.
+        // So, only after the self.gate.close() below will we know for sure that
+        // no walreceiver tasks are left.
+        // For `freeze_and_flush=true`, this means that we might still be ingesting
+        // data during the call to `self.freeze_and_flush()` below.
+        // That's not ideal, but, we don't have the concept of a ChildGuard, which
+        // is what we'd need to properly model early shutdown of walreceiver.
+        let walreceiver = self.walreceiver.lock().unwrap().take();
+        tracing::debug!(
+            is_some = walreceiver.is_some(),
+            "Waiting for WalReceiverManager..."
+        );
+        if let Some(walreceiver) = walreceiver {
+            walreceiver.cancel().await;
+        }
+        // ... and inform any waiters for newer LSNs that there won't be any.
+        self.last_record_lsn.shutdown();
+
+        if try_freeze_and_flush {
+            // we shut down walreceiver above, so, we won't add anything more
+            // to the InMemoryLayer; freeze it and wait for all frozen layers
+            // to reach the disk & upload queue, then shut the upload queue and
+            // wait for it to drain.
+            match self.freeze_and_flush().await {
+                Ok(_) => {
+                    // drain the upload queue
+                    if let Some(client) = self.remote_client.as_ref() {
+                        // if we did not wait for completion here, it might be our shutdown process
+                        // didn't wait for remote uploads to complete at all, as new tasks can forever
+                        // be spawned.
+                        //
+                        // what is problematic is the shutting down of RemoteTimelineClient, because
+                        // obviously it does not make sense to stop while we wait for it, but what
+                        // about corner cases like s3 suddenly hanging up?
+                        client.shutdown().await;
+                    }
+                }
+                Err(e) => {
+                    // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
+                    // we have some extra WAL replay to do next time the timeline starts.
+                    warn!("failed to freeze and flush: {e:#}");
+                }
+            }
+        }
+
+        // All tasks expect remote_client are sensitve to Timeline::cancel.
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
-        // Page request handlers might be waiting for LSN to advance: they do not respect Timeline::cancel
-        // while doing so.
-        self.last_record_lsn.shutdown();
-
-        // Shut down the layer flush task before the remote client, as one depends on the other
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::LayerFlushTask),
-            Some(self.tenant_shard_id),
-            Some(self.timeline_id),
-        )
-        .await;
-
-        // Shut down remote timeline client: this gracefully moves its metadata into its Stopping state in
-        // case our caller wants to use that for a deletion
+        // Transition the remote_client into a state where it's only useful for timeline deletion.
+        // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         if let Some(remote_client) = self.remote_client.as_ref() {
             remote_client.stop();
+            // As documented in remote_client.stop()'s doc comment, it's our responsibility
+            // to shut down the upload queue tasks.
+            // TODO: fix that, task management should be encapsulated inside remote_client.
+            task_mgr::shutdown_tasks(
+                Some(TaskKind::RemoteUploadTask),
+                Some(self.tenant_shard_id),
+                Some(self.timeline_id),
+            )
+            .await;
         }
-
-        tracing::debug!("Waiting for tasks...");
-
-        task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
+
+        // NB: we cannot assert that this is a no-op because actually, tasks outlive
+        // `Self::gate`-guards if they acquire the guard within the task.
+        // Then again, all tasks should really be sensitive to Self::cancel, not the
+        // task_mgr::shutdown_token() / task_mgr::shutdown_watcher().
+        // => TODO: eliminate the shutdown functionality of task_mgr and turn this here
+        // into a mere "wait until tasks are gone", not "signal cancel and wait until tasks are gone".
+        tracing::debug!("Waiting for tasks...");
+        task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         self.metrics.shutdown();
     }
@@ -2437,10 +2449,6 @@ impl Timeline {
                 debug!("cancelling logical size calculation for timeline shutdown");
                 calculation.await
             }
-            _ = task_mgr::shutdown_watcher() => {
-                debug!("cancelling logical size calculation for task shutdown");
-                calculation.await
-            }
         }
     }
 
@@ -3119,16 +3127,11 @@ impl Timeline {
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
-                    info!("shutting down layer flush task");
-                    break;
-                },
-                _ = task_mgr::shutdown_watcher() => {
-                    info!("shutting down layer flush task");
+                    info!("shutting down layer flush task due to Timeline::cancel");
                     break;
                 },
                 _ = layer_flush_start_rx.changed() => {}
             }
-
             trace!("waking up");
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {

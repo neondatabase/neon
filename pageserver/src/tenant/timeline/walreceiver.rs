@@ -122,7 +122,7 @@ impl WalReceiver {
     }
 
     #[instrument(skip_all, level = tracing::Level::DEBUG)]
-    pub fn cancel(&self) {
+    pub async fn cancel(&self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         debug!("cancelling walreceiver tasks");
         self.cancel.cancel();
