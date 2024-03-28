@@ -332,6 +332,31 @@ def test_sharding_split_smoke(
     assert sum(total.values()) == split_shard_count * 2
     check_effective_tenant_config()
 
+    # More specific check: that we are fully balanced.  This is deterministic because
+    # the order in which we consider shards for optimization is deterministic, and the
+    # order of preference of nodes is also deterministic (lower node IDs win).
+    log.info(f"total: {total}")
+    assert total == {
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 1,
+        5: 1,
+        6: 1,
+        7: 1,
+        8: 1,
+        9: 1,
+        10: 1,
+        11: 1,
+        12: 1,
+        13: 1,
+        14: 1,
+        15: 1,
+        16: 1,
+    }
+    log.info(f"attached: {attached}")
+    assert attached == {1: 1, 2: 1, 3: 1, 5: 1, 6: 1, 7: 1, 9: 1, 11: 1}
+
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
     # to /re-attach)
