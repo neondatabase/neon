@@ -110,6 +110,20 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
 static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
+#define MAX_LSN ((XLogRecPtr)~0)
+
+/*
+ * There are three kinds of get_page :
+ * 1. Master compute: get the latest page not older than specified LSN (horizon=Lsn::MAX)
+ * 2. RO replica: get the latest page not newer than current WAL position replica already applied (horizon=GetXLogReplayRecPtr(NULL))
+ * 3. Snapshot: get latest page not new than specified LSN (horizon=request_lsn)
+ */
+static XLogRecPtr
+neon_get_horizon(bool latest)
+{
+	return latest ? MAX_LSN : RecoveryInProgress() ? GetXLogReplayRecPtr(NULL) : InvalidXLogRecPtr; /* horizon=InvalidXlogRecPtr is replaced with request_lsn at PS */
+}
+
 /*
  * Prefetch implementation:
  *
@@ -688,9 +702,10 @@ static void
 prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force_lsn)
 {
 	bool		found;
+	bool        latest;
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
-		.req.latest = false,
+		.req.horizon = 0,
 		.req.lsn = 0,
 		.rinfo = BufTagGetNRelFileInfo(slot->buftag),
 		.forknum = slot->buftag.forkNum,
@@ -700,13 +715,13 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	if (force_lsn && force_latest)
 	{
 		request.req.lsn = *force_lsn;
-		request.req.latest = *force_latest;
+		latest = *force_latest;
 		slot->actual_request_lsn = slot->effective_request_lsn = *force_lsn;
 	}
 	else
 	{
 		XLogRecPtr	lsn = neon_get_request_lsn(
-											   &request.req.latest,
+											   &latest,
 											   BufTagGetNRelFileInfo(slot->buftag),
 											   slot->buftag.forkNum,
 											   slot->buftag.blockNum
@@ -734,6 +749,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		prefetch_lsn = Max(prefetch_lsn, lsn);
 		slot->effective_request_lsn = prefetch_lsn;
 	}
+	request.req.horizon = neon_get_horizon(latest);
 
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
@@ -995,7 +1011,19 @@ nm_pack_request(NeonRequest *msg)
 	StringInfoData s;
 
 	initStringInfo(&s);
-	pq_sendbyte(&s, msg->tag);
+
+	if (neon_protocol_version >= 2)
+	{
+		pq_sendbyte(&s, msg->tag);
+		pq_sendint64(&s, msg->horizon);
+	}
+	else
+	{
+		/* Old protocol with latest flag */
+		pq_sendbyte(&s, msg->tag - T_NeonExistsRequest); /* old protocol command tags start from zero */
+		pq_sendbyte(&s, msg->horizon == MAX_LSN);
+	}
+	pq_sendint64(&s, msg->lsn);
 
 	switch (messageTag(msg))
 	{
@@ -1004,8 +1032,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonExistsRequest *msg_req = (NeonExistsRequest *) msg;
 
-				pq_sendbyte(&s, msg_req->req.latest);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, NInfoGetSpcOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetDbOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetRelNumber(msg_req->rinfo));
@@ -1017,8 +1043,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonNblocksRequest *msg_req = (NeonNblocksRequest *) msg;
 
-				pq_sendbyte(&s, msg_req->req.latest);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, NInfoGetSpcOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetDbOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetRelNumber(msg_req->rinfo));
@@ -1030,8 +1054,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonDbSizeRequest *msg_req = (NeonDbSizeRequest *) msg;
 
-				pq_sendbyte(&s, msg_req->req.latest);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, msg_req->dbNode);
 
 				break;
@@ -1040,8 +1062,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonGetPageRequest *msg_req = (NeonGetPageRequest *) msg;
 
-				pq_sendbyte(&s, msg_req->req.latest);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendint32(&s, NInfoGetSpcOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetDbOid(msg_req->rinfo));
 				pq_sendint32(&s, NInfoGetRelNumber(msg_req->rinfo));
@@ -1055,8 +1075,6 @@ nm_pack_request(NeonRequest *msg)
 			{
 				NeonGetSlruSegmentRequest *msg_req = (NeonGetSlruSegmentRequest *) msg;
 
-				pq_sendbyte(&s, msg_req->req.latest);
-				pq_sendint64(&s, msg_req->req.lsn);
 				pq_sendbyte(&s, msg_req->kind);
 				pq_sendint32(&s, msg_req->segno);
 
@@ -1207,7 +1225,7 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfo(&s, ", \"rinfo\": \"%u/%u/%u\"", RelFileInfoFmt(msg_req->rinfo));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfo(&s, ", \"horizon\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.horizon));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1220,7 +1238,7 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfo(&s, ", \"rinfo\": \"%u/%u/%u\"", RelFileInfoFmt(msg_req->rinfo));
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfo(&s, ", \"horizon\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.horizon));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1234,7 +1252,7 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfo(&s, ", \"forknum\": %d", msg_req->forknum);
 				appendStringInfo(&s, ", \"blkno\": %u", msg_req->blkno);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfo(&s, ", \"horizon\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.horizon));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1245,7 +1263,7 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeRequest\"");
 				appendStringInfo(&s, ", \"dbnode\": \"%u\"", msg_req->dbNode);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfo(&s, ", \"horizon\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.horizon));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1257,7 +1275,7 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfo(&s, ", \"kind\": %u", msg_req->kind);
 				appendStringInfo(&s, ", \"segno\": %u", msg_req->segno);
 				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
-				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfo(&s, ", \"horizon\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.horizon));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1662,7 +1680,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
-			.req.latest = latest,
+			.req.horizon = neon_get_horizon(latest),
 			.req.lsn = request_lsn,
 			.rinfo = InfoFromSMgrRel(reln),
 		.forknum = forkNum};
@@ -2470,7 +2488,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	{
 		NeonNblocksRequest request = {
 			.req.tag = T_NeonNblocksRequest,
-			.req.latest = latest,
+			.req.horizon = neon_get_horizon(latest),
 			.req.lsn = request_lsn,
 			.rinfo = InfoFromSMgrRel(reln),
 			.forknum = forknum,
@@ -2527,7 +2545,7 @@ neon_dbsize(Oid dbNode)
 	{
 		NeonDbSizeRequest request = {
 			.req.tag = T_NeonDbSizeRequest,
-			.req.latest = latest,
+			.req.horizon = neon_get_horizon(latest),
 			.req.lsn = request_lsn,
 			.dbNode = dbNode,
 		};
@@ -2823,7 +2841,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	NeonResponse *resp;
 	NeonGetSlruSegmentRequest request = {
 		.req.tag = T_NeonGetSlruSegmentRequest,
-		.req.latest = false,
+		.req.horizon =  InvalidXLogRecPtr,
 		.req.lsn = request_lsn,
 
 		.kind = kind,
@@ -2976,7 +2994,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		NeonNblocksRequest request = {
 			.req = (NeonRequest) {
 				.lsn = end_recptr,
-				.latest = false,
+				.horizon = neon_get_horizon(false),
 				.tag = T_NeonNblocksRequest,
 			},
 			.rinfo = rinfo,
