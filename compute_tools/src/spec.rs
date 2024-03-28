@@ -746,7 +746,10 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
     let query = "ALTER EXTENSION neon UPDATE";
     info!("update neon extension version with query: {}", query);
     if let Err(e) = client.simple_query(query) {
-        error!("failed to upgrade neon extension during `handle_extension_neon`: {}", e);
+        error!(
+            "failed to upgrade neon extension during `handle_extension_neon`: {}",
+            e
+        );
     }
 
     Ok(())
