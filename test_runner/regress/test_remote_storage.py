@@ -245,6 +245,7 @@ def test_remote_storage_upload_queue_retries(
             "compaction_period": "0s",
             # create image layers eagerly, so that GC can remove some layers
             "image_creation_threshold": "1",
+            "image_layer_creation_check_threshold": "0",
         }
     )
 
