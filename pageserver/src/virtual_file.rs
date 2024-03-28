@@ -36,7 +36,8 @@ pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+use self::owned_buffers_io::write::OwnedAsyncWriter;
+
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
     //!
@@ -1080,6 +1081,23 @@ impl Drop for VirtualFile {
                 clean_slot(slot, slot_guard, tag);
             });
         };
+    }
+}
+
+impl OwnedAsyncWriter for VirtualFile {
+    #[inline(always)]
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        buf: B,
+    ) -> std::io::Result<(usize, B::Buf)> {
+        let (buf, res) = VirtualFile::write_all(self, buf).await;
+        res.map(move |v| (v, buf))
+    }
+
+    #[inline(always)]
+    async fn write_all_borrowed(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        // TODO: ensure this through the type system
+        panic!("this should not happen");
     }
 }
 
