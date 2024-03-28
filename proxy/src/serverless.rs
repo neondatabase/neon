@@ -35,6 +35,7 @@ use hyper::{
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::Duration;
 use tls_listener::TlsListener;
 use tokio::net::TcpListener;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -181,7 +182,10 @@ pub async fn task_main(
 
     hyper::Server::builder(tls_listener)
         .serve(make_svc)
-        .with_graceful_shutdown(cancellation_token.cancelled())
+        .with_graceful_shutdown(async {
+            cancellation_token.cancelled().await;
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        })
         .await?;
 
     // await websocket connections
