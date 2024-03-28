@@ -880,6 +880,7 @@ def test_sharding_split_failures(
         # Having failed+rolled back, we should be able to split again
         # No failures this time; it will succeed
         env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
+        env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
         workload.churn_rows(10)
         workload.validate()
