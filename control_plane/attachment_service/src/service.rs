@@ -11,6 +11,7 @@ use crate::{
     id_lock_map::IdLockMap,
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::ReconcileError,
+    scheduler::ScheduleContext,
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -345,9 +346,15 @@ impl Service {
             }
 
             // Populate each tenant's intent state
+            let mut schedule_context = ScheduleContext::default();
             for (tenant_shard_id, tenant_state) in tenants.iter_mut() {
+                if tenant_shard_id.shard_number == ShardNumber(0) {
+                    // Reset scheduling context each time we advance to the next Tenant
+                    schedule_context = ScheduleContext::default();
+                }
+
                 tenant_state.intent_from_observed(scheduler);
-                if let Err(e) = tenant_state.schedule(scheduler) {
+                if let Err(e) = tenant_state.schedule(scheduler, &mut schedule_context) {
                     // Non-fatal error: we are unable to properly schedule the tenant, perhaps because
                     // not enough pageservers are available.  The tenant may well still be available
                     // to clients.
@@ -671,7 +678,13 @@ impl Service {
         let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
         while !self.cancel.is_cancelled() {
             tokio::select! {
-              _ = interval.tick() => { self.reconcile_all(); }
+              _ = interval.tick() => {
+                let reconciles_spawned = self.reconcile_all();
+                if reconciles_spawned == 0 {
+                    // Run optimizer only when we didn't find any other work to do
+                    self.optimize_all();
+                }
+            }
               _ = self.cancel.cancelled() => return
             }
         }
@@ -1627,6 +1640,8 @@ impl Service {
             Err(e) => return Err(ApiError::InternalServerError(anyhow::anyhow!(e))),
         };
 
+        let mut schedule_context = ScheduleContext::default();
+
         let (waiters, response_shards) = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
@@ -1648,11 +1663,14 @@ impl Service {
                         // attached and secondary locations (independently) away frorm those
                         // pageservers also holding a shard for this tenant.
 
-                        entry.get_mut().schedule(scheduler).map_err(|e| {
-                            ApiError::Conflict(format!(
-                                "Failed to schedule shard {tenant_shard_id}: {e}"
-                            ))
-                        })?;
+                        entry
+                            .get_mut()
+                            .schedule(scheduler, &mut schedule_context)
+                            .map_err(|e| {
+                                ApiError::Conflict(format!(
+                                    "Failed to schedule shard {tenant_shard_id}: {e}"
+                                ))
+                            })?;
 
                         if let Some(node_id) = entry.get().intent.get_attached() {
                             let generation = entry
@@ -1680,7 +1698,7 @@ impl Service {
 
                         state.generation = initial_generation;
                         state.config = create_req.config.clone();
-                        if let Err(e) = state.schedule(scheduler) {
+                        if let Err(e) = state.schedule(scheduler, &mut schedule_context) {
                             schcedule_error = Some(e);
                         }
 
@@ -1888,6 +1906,7 @@ impl Service {
                 // Persist updates
                 // Ordering: write to the database before applying changes in-memory, so that
                 // we will not appear time-travel backwards on a restart.
+                let mut schedule_context = ScheduleContext::default();
                 for ShardUpdate {
                     tenant_shard_id,
                     placement_policy,
@@ -1935,7 +1954,7 @@ impl Service {
                             shard.generation = Some(generation);
                         }
 
-                        shard.schedule(scheduler)?;
+                        shard.schedule(scheduler, &mut schedule_context)?;
 
                         let maybe_waiter = self.maybe_reconcile_shard(shard, nodes);
                         if let Some(waiter) = maybe_waiter {
@@ -2095,7 +2114,7 @@ impl Service {
             let scheduler = &locked.scheduler;
             // Right now we only perform the operation on a single node without parallelization
             // TODO fan out the operation to multiple nodes for better performance
-            let node_id = scheduler.schedule_shard(&[])?;
+            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
             let node = locked
                 .nodes
                 .get(&node_id)
@@ -2364,6 +2383,7 @@ impl Service {
             )
             .await?;
 
+        let mut schedule_context = ScheduleContext::default();
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, scheduler) = locked.parts_mut();
         for (shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
@@ -2382,7 +2402,7 @@ impl Service {
             }
 
             // In case scheduling is being switched back on, try it now.
-            shard.schedule(scheduler).ok();
+            shard.schedule(scheduler, &mut schedule_context).ok();
             self.maybe_reconcile_shard(shard, nodes);
         }
 
@@ -2846,7 +2866,7 @@ impl Service {
 
                 tracing::info!("Restoring parent shard {tenant_shard_id}");
                 shard.splitting = SplitState::Idle;
-                if let Err(e) = shard.schedule(scheduler) {
+                if let Err(e) = shard.schedule(scheduler, &mut ScheduleContext::default()) {
                     // If this shard can't be scheduled now (perhaps due to offline nodes or
                     // capacity issues), that must not prevent us rolling back a split.  In this
                     // case it should be eventually scheduled in the background.
@@ -2970,6 +2990,7 @@ impl Service {
                     )
                 };
 
+                let mut schedule_context = ScheduleContext::default();
                 for child in child_ids {
                     let mut child_shard = parent_ident;
                     child_shard.number = child.shard_number;
@@ -3005,7 +3026,7 @@ impl Service {
 
                     child_locations.push((child, pageserver, child_shard.stripe_size));
 
-                    if let Err(e) = child_state.schedule(scheduler) {
+                    if let Err(e) = child_state.schedule(scheduler, &mut schedule_context) {
                         // This is not fatal, because we've implicitly already got an attached
                         // location for the child shard.  Failure here just means we couldn't
                         // find a secondary (e.g. because cluster is overloaded).
@@ -3869,6 +3890,7 @@ impl Service {
             AvailabilityTransition::ToOffline => {
                 tracing::info!("Node {} transition to offline", node_id);
                 let mut tenants_affected: usize = 0;
+
                 for (tenant_shard_id, tenant_state) in tenants {
                     if let Some(observed_loc) = tenant_state.observed.locations.get_mut(&node_id) {
                         // When a node goes offline, we set its observed configuration to None, indicating unknown: we will
@@ -3885,7 +3907,13 @@ impl Service {
 
                     if tenant_state.intent.demote_attached(node_id) {
                         tenant_state.sequence = tenant_state.sequence.next();
-                        match tenant_state.schedule(scheduler) {
+
+                        // TODO: populate a ScheduleContext including all shards in the same tenant_id (only matters
+                        // for tenants without secondary locations: if they have a secondary location, then this
+                        // schedule() call is just promoting an existing secondary)
+                        let mut schedule_context = ScheduleContext::default();
+
+                        match tenant_state.schedule(scheduler, &mut schedule_context) {
                             Err(e) => {
                                 // It is possible that some tenants will become unschedulable when too many pageservers
                                 // go offline: in this case there isn't much we can do other than make the issue observable.
@@ -3944,8 +3972,9 @@ impl Service {
         let mut waiters = Vec::new();
         let (nodes, tenants, scheduler) = locked.parts_mut();
 
+        let mut schedule_context = ScheduleContext::default();
         for (tenant_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
-            shard.schedule(scheduler)?;
+            shard.schedule(scheduler, &mut schedule_context)?;
 
             // The shard's policies may not result in an attached location being scheduled: this
             // is an error because our caller needs it attached somewhere.
@@ -4025,8 +4054,144 @@ impl Service {
         let (nodes, tenants, _scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
 
+        let mut schedule_context = ScheduleContext::default();
+
         let mut reconciles_spawned = 0;
-        for (_tenant_shard_id, shard) in tenants.iter_mut() {
+        for (tenant_shard_id, shard) in tenants.iter_mut() {
+            if tenant_shard_id.is_zero() {
+                schedule_context = ScheduleContext::default();
+            }
+
+            // Eventual consistency: if an earlier reconcile job failed, and the shard is still
+            // dirty, spawn another rone
+            if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
+                reconciles_spawned += 1;
+            }
+
+            schedule_context.avoid(&shard.intent.all_pageservers());
+        }
+
+        reconciles_spawned
+    }
+
+    /// `optimize` in this context means identifying shards which have valid scheduled locations, but
+    /// could be scheduled somewhere better:
+    /// - Cutting over to a secondary if the node with the secondary is more lightly loaded
+    ///    * e.g. after a node fails then recovers, to move some work back to it
+    /// - Cutting over to a secondary if it improves the spread of shard attachments within a tenant
+    ///    * e.g. after a shard split, the initial attached locations will all be on the node where
+    ///      we did the split, but are probably better placed elsewhere.
+    /// - Creating new secondary locations if it improves the spreading of a sharded tenant
+    ///    * e.g. after a shard split, some locations will be on the same node (where the split
+    ///     happened), and will probably be better placed elsewhere.
+    ///
+    /// To put it more briefly: whereas the scheduler respects soft constraints in a ScheduleContext at
+    /// the time of scheduling, this function looks for cases where a better-scoring location is available
+    /// according to those same soft constraints.
+    fn optimize_all(&self) -> usize {
+        let mut locked = self.inner.write().unwrap();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let pageservers = nodes.clone();
+
+        let mut schedule_context = ScheduleContext::default();
+
+        let mut reconciles_spawned = 0;
+
+        let mut tenant_shards: Vec<&TenantState> = Vec::new();
+
+        // Limit on how many shards' optmizations each call to this function will execute.  Combined
+        // with the frequency of background calls, this acts as an implicit rate limit that runs a small
+        // trickle of optimizations in the background, rather than executing a large number in parallel
+        // when a change occurs.
+        const MAX_OPTIMIZATIONS_PER_PASS: usize = 2;
+
+        let mut work = Vec::new();
+
+        for (tenant_shard_id, shard) in tenants.iter() {
+            if tenant_shard_id.is_zero() {
+                // Reset accumulators on the first shard in a tenant
+                schedule_context = ScheduleContext::default();
+                tenant_shards.clear();
+            }
+
+            if work.len() >= MAX_OPTIMIZATIONS_PER_PASS {
+                break;
+            }
+
+            match shard.get_scheduling_policy() {
+                ShardSchedulingPolicy::Active => {
+                    // Ok to do optimization
+                }
+                ShardSchedulingPolicy::Essential
+                | ShardSchedulingPolicy::Pause
+                | ShardSchedulingPolicy::Stop => {
+                    // Policy prevents optimizing this shard.
+                    continue;
+                }
+            }
+
+            // Accumulate the schedule context for all the shards in a tenant: we must have
+            // the total view of all shards before we can try to optimize any of them.
+            schedule_context.avoid(&shard.intent.all_pageservers());
+            if let Some(attached) = shard.intent.get_attached() {
+                schedule_context.push_attached(*attached);
+            }
+            tenant_shards.push(shard);
+
+            // Once we have seen the last shard in the tenant, proceed to search across all shards
+            // in the tenant for optimizations
+            if shard.shard.number.0 == shard.shard.count.count() - 1 {
+                if tenant_shards.iter().any(|s| s.reconciler.is_some()) {
+                    // Do not start any optimizations while another change to the tenant is ongoing: this
+                    // is not necessary for correctness, but simplifies operations and implicitly throttles
+                    // optimization changes to happen in a "trickle" over time.
+                    continue;
+                }
+
+                if tenant_shards.iter().any(|s| {
+                    !matches!(s.splitting, SplitState::Idle)
+                        || matches!(s.policy, PlacementPolicy::Detached)
+                }) {
+                    // Never attempt to optimize a tenant that is currently being split, or
+                    // a tenant that is meant to be detached
+                    continue;
+                }
+
+                // TODO: optimization calculations are relatively expensive: create some fast-path for
+                // the common idle case (avoiding the search on tenants that we have recently checked)
+
+                for shard in &tenant_shards {
+                    if let Some(optimization) =
+                        // If idle, maybe ptimize attachments: if a shard has a secondary location that is preferable to
+                        // its primary location based on soft constraints, cut it over.
+                        shard.optimize_attachment(nodes, &schedule_context)
+                    {
+                        work.push((shard.tenant_shard_id, optimization));
+                        break;
+                    } else if let Some(optimization) =
+                        // If idle, maybe optimize secondary locations: if a shard has a secondary location that would be
+                        // better placed on another node, based on ScheduleContext, then adjust it.  This
+                        // covers cases like after a shard split, where we might have too many shards
+                        // in the same tenant with secondary locations on the node where they originally split.
+                        shard.optimize_secondary(scheduler, &schedule_context)
+                    {
+                        work.push((shard.tenant_shard_id, optimization));
+                        break;
+                    }
+
+                    // TODO: extend this mechanism to prefer attaching on nodes with fewer attached
+                    // tenants (i.e. extend schedule state to distinguish attached from secondary counts),
+                    // for the total number of attachments on a node (not just within a tenant.)
+                }
+            }
+        }
+
+        for (tenant_shard_id, optimization) in work {
+            let shard = tenants
+                .get_mut(&tenant_shard_id)
+                .expect("We held lock from place we got this ID");
+            shard.apply_optimization(scheduler, optimization);
+
             if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
                 reconciles_spawned += 1;
             }
@@ -4039,7 +4204,11 @@ impl Service {
     /// also wait for any generated Reconcilers to complete.  Calling this until it returns zero should
     /// put the system into a quiescent state where future background reconciliations won't do anything.
     pub(crate) async fn reconcile_all_now(&self) -> Result<usize, ReconcileWaitError> {
-        self.reconcile_all();
+        let reconciles_spawned = self.reconcile_all();
+        if reconciles_spawned == 0 {
+            // Only optimize when we are otherwise idle
+            self.optimize_all();
+        }
 
         let waiters = {
             let mut waiters = Vec::new();

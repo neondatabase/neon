@@ -146,7 +146,7 @@ def test_sharding_split_smoke(
     # 8 shards onto separate pageservers
     shard_count = 4
     split_shard_count = 8
-    neon_env_builder.num_pageservers = split_shard_count
+    neon_env_builder.num_pageservers = split_shard_count * 2
 
     # 1MiB stripes: enable getting some meaningful data distribution without
     # writing large quantities of data in this test.  The stripe size is given
@@ -174,6 +174,7 @@ def test_sharding_split_smoke(
         placement_policy='{"Attached": 1}',
         conf=non_default_tenant_config,
     )
+
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
 
@@ -252,6 +253,10 @@ def test_sharding_split_smoke(
     # The old parent shards should no longer exist on disk
     assert not shards_on_disk(old_shard_ids)
 
+    # Enough background reconciliations should result in the shards being properly distributed.
+    # Run this before the workload, because its LSN-waiting code presumes stable locations.
+    env.storage_controller.reconcile_until_idle()
+
     workload.validate()
 
     workload.churn_rows(256)
@@ -265,27 +270,6 @@ def test_sharding_split_smoke(
         pageserver.http_client().timeline_gc(tenant_shard_id, timeline_id, None)
     workload.validate()
 
-    migrate_to_pageserver_ids = list(
-        set(p.id for p in env.pageservers) - set(pre_split_pageserver_ids)
-    )
-    assert len(migrate_to_pageserver_ids) == split_shard_count - shard_count
-
-    # Migrate shards away from the node where the split happened
-    for ps_id in pre_split_pageserver_ids:
-        shards_here = [
-            tenant_shard_id
-            for (tenant_shard_id, pageserver) in all_shards
-            if pageserver.id == ps_id
-        ]
-        assert len(shards_here) == 2
-        migrate_shard = shards_here[0]
-        destination = migrate_to_pageserver_ids.pop()
-
-        log.info(f"Migrating shard {migrate_shard} from {ps_id} to {destination}")
-        env.storage_controller.tenant_shard_migrate(migrate_shard, destination)
-
-    workload.validate()
-
     # Assert on how many reconciles happened during the process.  This is something of an
     # implementation detail, but it is useful to detect any bugs that might generate spurious
     # extra reconcile iterations.
@@ -294,8 +278,9 @@ def test_sharding_split_smoke(
     # - shard_count reconciles for the original setup of the tenant
     # - shard_count reconciles for detaching the original secondary locations during split
     # - split_shard_count reconciles during shard splitting, for setting up secondaries.
-    # - shard_count reconciles for the migrations we did to move child shards away from their split location
-    expect_reconciles = shard_count * 2 + split_shard_count + shard_count
+    # - shard_count of the child shards will need to fail over to their secondaries
+    # - shard_count of the child shard secondary locations will get moved to emptier nodes
+    expect_reconciles = shard_count * 2 + split_shard_count + shard_count * 2
     reconcile_ok = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
@@ -342,6 +327,31 @@ def test_sharding_split_smoke(
     assert sum(attached.values()) == split_shard_count
     assert sum(total.values()) == split_shard_count * 2
     check_effective_tenant_config()
+
+    # More specific check: that we are fully balanced.  This is deterministic because
+    # the order in which we consider shards for optimization is deterministic, and the
+    # order of preference of nodes is also deterministic (lower node IDs win).
+    log.info(f"total: {total}")
+    assert total == {
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 1,
+        5: 1,
+        6: 1,
+        7: 1,
+        8: 1,
+        9: 1,
+        10: 1,
+        11: 1,
+        12: 1,
+        13: 1,
+        14: 1,
+        15: 1,
+        16: 1,
+    }
+    log.info(f"attached: {attached}")
+    assert attached == {1: 1, 2: 1, 3: 1, 5: 1, 6: 1, 7: 1, 9: 1, 11: 1}
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
@@ -401,6 +411,7 @@ def test_sharding_split_stripe_size(
     env.storage_controller.tenant_shard_split(
         tenant_id, shard_count=2, shard_stripe_size=new_stripe_size
     )
+    env.storage_controller.reconcile_until_idle()
 
     # Check that we ended up with the stripe size that we expected, both on the pageserver
     # and in the notifications to compute
@@ -869,6 +880,7 @@ def test_sharding_split_failures(
         # Having failed+rolled back, we should be able to split again
         # No failures this time; it will succeed
         env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
+        env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
         workload.churn_rows(10)
         workload.validate()
@@ -921,6 +933,10 @@ def test_sharding_split_failures(
         # Splitting again should work, since we cleared the failure
         finish_split()
         assert_split_done()
+
+    # Having completed the split, pump the background reconciles to ensure that
+    # the scheduler reaches an idle state
+    env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
     env.storage_controller.consistency_check()
 
