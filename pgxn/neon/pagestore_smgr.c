@@ -613,6 +613,14 @@ prefetch_on_ps_disconnect(void)
 		Assert(slot->status == PRFS_REQUESTED);
 		Assert(slot->my_ring_index == ring_index);
 
+		/*
+		 * Drop connection to all shards which have prefetch requests.
+		 * It is not a problem to call disconnect multiple times on the same connection
+		 * because disconnect implementation in libpagestore.c will check if connection
+		 * is alive and do nothing of connection was already dropped.
+		 */
+		page_server->disconnect(slot->shard_no);
+
 		/* clean up the request */
 		slot->status = PRFS_TAG_REMAINS;
 		MyPState->n_requests_inflight -= 1;
