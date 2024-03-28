@@ -342,18 +342,19 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
 
     def tenant_status(
-        self, tenant_id: Union[TenantId, TenantShardId], no_activate: bool = True
+        self, tenant_id: Union[TenantId, TenantShardId], activate: bool = False
     ) -> Dict[Any, Any]:
         """
-        :no_activate: hint the server not to accelerate activation of this tenant in response
-        to this query.  True by default for tests, because they generally want to observed the
-        system rather than interfering with it.  This is false  by default on the server side,
+        :activate: hint the server not to accelerate activation of this tenant in response
+        to this query.  False by default for tests, because they generally want to observed the
+        system rather than interfering with it.  This is true  by default on the server side,
         because in the field if the control plane is GET'ing a tenant it's a sign that it wants
         to do something with it.
         """
         params = {}
-        if no_activate:
-            params["no_activate"] = "true"
+        if not activate:
+            params["activate"] = "false"
+
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}", params=params)
         self.verbose_error(res)
         res_json = res.json()
