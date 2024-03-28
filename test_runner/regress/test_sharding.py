@@ -253,6 +253,10 @@ def test_sharding_split_smoke(
     # The old parent shards should no longer exist on disk
     assert not shards_on_disk(old_shard_ids)
 
+    # Enough background reconciliations should result in the shards being properly distributed.
+    # Run this before the workload, because its LSN-waiting code presumes stable locations.
+    env.storage_controller.reconcile_until_idle()
+
     workload.validate()
 
     workload.churn_rows(256)
@@ -265,14 +269,6 @@ def test_sharding_split_smoke(
     for tenant_shard_id, pageserver in all_shards:
         pageserver.http_client().timeline_gc(tenant_shard_id, timeline_id, None)
     workload.validate()
-
-    # Enough background reconciliations should result in the shards being properly distributed
-    env.storage_controller.reconcile_until_idle()
-
-    # We have 8 shards and 16 nodes
-    # Initially I expect 4 nodes to have 2 attached locations each, and another 8 nodes to have
-    # 1 secondary location each
-    # 2 2 2 2 1 1 1 1 1 1 1 1 0 0 0 0
 
     # Assert on how many reconciles happened during the process.  This is something of an
     # implementation detail, but it is useful to detect any bugs that might generate spurious
@@ -415,6 +411,7 @@ def test_sharding_split_stripe_size(
     env.storage_controller.tenant_shard_split(
         tenant_id, shard_count=2, shard_stripe_size=new_stripe_size
     )
+    env.storage_controller.reconcile_until_idle()
 
     # Check that we ended up with the stripe size that we expected, both on the pageserver
     # and in the notifications to compute
@@ -935,6 +932,10 @@ def test_sharding_split_failures(
         # Splitting again should work, since we cleared the failure
         finish_split()
         assert_split_done()
+
+    # Having completed the split, pump the background reconciles to ensure that
+    # the scheduler reaches an idle state
+    env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
     env.storage_controller.consistency_check()
 
