@@ -8,7 +8,9 @@ use std::{
 };
 
 use crate::{
-    id_lock_map::IdLockMap, persistence::AbortShardSplitStatus, reconciler::ReconcileError,
+    id_lock_map::IdLockMap,
+    persistence::{AbortShardSplitStatus, TenantFilter},
+    reconciler::ReconcileError,
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -20,9 +22,10 @@ use hyper::StatusCode;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
-        TenantDescribeResponseShard, TenantLocateResponse, TenantShardMigrateRequest,
-        TenantShardMigrateResponse, UtilizationScore,
+        ShardSchedulingPolicy, TenantCreateResponse, TenantCreateResponseShard,
+        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
+        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
+        UtilizationScore,
     },
     models::{SecondaryProgress, TenantConfigRequest},
 };
@@ -51,7 +54,6 @@ use utils::{
     generation::Generation,
     http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
-    seqwait::SeqWait,
     sync::gate::Gate,
 };
 
@@ -66,7 +68,6 @@ use crate::{
         IntentState, ObservedState, ObservedStateLocation, ReconcileResult, ReconcileWaitError,
         ReconcilerWaiter, TenantState,
     },
-    Sequence,
 };
 
 // For operations that should be quick, like attaching a new tenant
@@ -957,30 +958,14 @@ impl Service {
         }
         for tsp in tenant_shard_persistence {
             let tenant_shard_id = tsp.get_tenant_shard_id()?;
-            let shard_identity = tsp.get_shard_identity()?;
+
             // We will populate intent properly later in [`Self::startup_reconcile`], initially populate
             // it with what we can infer: the node for which a generation was most recently issued.
             let mut intent = IntentState::new();
             if let Some(generation_pageserver) = tsp.generation_pageserver {
                 intent.set_attached(&mut scheduler, Some(NodeId(generation_pageserver as u64)));
             }
-
-            let new_tenant = TenantState {
-                tenant_shard_id,
-                shard: shard_identity,
-                sequence: Sequence::initial(),
-                generation: tsp.generation.map(|g| Generation::new(g as u32)),
-                policy: serde_json::from_str(&tsp.placement_policy).unwrap(),
-                intent,
-                observed: ObservedState::new(),
-                config: serde_json::from_str(&tsp.config).unwrap(),
-                reconciler: None,
-                splitting: tsp.splitting,
-                waiter: Arc::new(SeqWait::new(Sequence::initial())),
-                error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
-                last_error: Arc::default(),
-                pending_compute_notification: false,
-            };
+            let new_tenant = TenantState::from_persistent(tsp, intent)?;
 
             tenants.insert(tenant_shard_id, new_tenant);
         }
@@ -1104,6 +1089,8 @@ impl Service {
                 placement_policy: serde_json::to_string(&PlacementPolicy::Attached(0)).unwrap(),
                 config: serde_json::to_string(&TenantConfig::default()).unwrap(),
                 splitting: SplitState::default(),
+                scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
+                    .unwrap(),
             };
 
             match self.persistence.insert_tenant_shards(vec![tsp]).await {
@@ -1156,9 +1143,10 @@ impl Service {
                     // when we reattaching a detached tenant.
                     self.persistence
                         .update_tenant_shard(
-                            attach_req.tenant_shard_id,
-                            PlacementPolicy::Attached(0),
-                            conf,
+                            TenantFilter::Shard(attach_req.tenant_shard_id),
+                            Some(PlacementPolicy::Attached(0)),
+                            Some(conf),
+                            None,
                             None,
                         )
                         .await?;
@@ -1615,6 +1603,8 @@ impl Service {
                 placement_policy: serde_json::to_string(&placement_policy).unwrap(),
                 config: serde_json::to_string(&create_req.config).unwrap(),
                 splitting: SplitState::default(),
+                scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
+                    .unwrap(),
             })
             .collect();
 
@@ -1907,10 +1897,11 @@ impl Service {
                 {
                     self.persistence
                         .update_tenant_shard(
-                            *tenant_shard_id,
-                            placement_policy.clone(),
-                            tenant_config.clone(),
+                            TenantFilter::Shard(*tenant_shard_id),
+                            Some(placement_policy.clone()),
+                            Some(tenant_config.clone()),
                             *generation,
+                            None,
                         )
                         .await?;
                 }
@@ -1988,7 +1979,13 @@ impl Service {
         let config = req.config;
 
         self.persistence
-            .update_tenant_config(req.tenant_id, config.clone())
+            .update_tenant_shard(
+                TenantFilter::Tenant(req.tenant_id),
+                None,
+                Some(config.clone()),
+                None,
+                None,
+            )
             .await?;
 
         let waiters = {
@@ -2339,6 +2336,57 @@ impl Service {
 
         // Success is represented as 404, to imitate the existing pageserver deletion API
         Ok(StatusCode::NOT_FOUND)
+    }
+
+    /// Naming: this configures the storage controller's policies for a tenant, whereas [`Self::tenant_config_set`] is "set the TenantConfig"
+    /// for a tenant.  The TenantConfig is passed through to pageservers, whereas this function modifies
+    /// the tenant's policies (configuration) within the storage controller
+    pub(crate) async fn tenant_update_policy(
+        &self,
+        tenant_id: TenantId,
+        req: TenantPolicyRequest,
+    ) -> Result<(), ApiError> {
+        // We require an exclusive lock, because we are updating persistent and in-memory state
+        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+
+        let TenantPolicyRequest {
+            placement,
+            scheduling,
+        } = req;
+
+        self.persistence
+            .update_tenant_shard(
+                TenantFilter::Tenant(tenant_id),
+                placement.clone(),
+                None,
+                None,
+                scheduling,
+            )
+            .await?;
+
+        let mut locked = self.inner.write().unwrap();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
+        for (shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
+            if let Some(placement) = &placement {
+                shard.policy = placement.clone();
+
+                tracing::info!(tenant_id=%shard_id.tenant_id, shard_id=%shard_id.shard_slug(),
+                               "Updated placement policy to {placement:?}");
+            }
+
+            if let Some(scheduling) = &scheduling {
+                shard.set_scheduling_policy(*scheduling);
+
+                tracing::info!(tenant_id=%shard_id.tenant_id, shard_id=%shard_id.shard_slug(),
+                               "Updated scheduling policy to {scheduling:?}");
+            }
+
+            // In case scheduling is being switched back on, try it now.
+            shard.schedule(scheduler).ok();
+            self.maybe_reconcile_shard(shard, nodes);
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn tenant_timeline_create(
@@ -3250,6 +3298,10 @@ impl Service {
                     placement_policy: serde_json::to_string(&policy).unwrap(),
                     config: serde_json::to_string(&config).unwrap(),
                     splitting: SplitState::Splitting,
+
+                    // Scheduling policies do not carry through to children
+                    scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
+                        .unwrap(),
                 });
             }
 
@@ -3968,6 +4020,28 @@ impl Service {
         }
 
         reconciles_spawned
+    }
+
+    /// Useful for tests: run whatever work a background [`Self::reconcile_all`] would have done, but
+    /// also wait for any generated Reconcilers to complete.  Calling this until it returns zero should
+    /// put the system into a quiescent state where future background reconciliations won't do anything.
+    pub(crate) async fn reconcile_all_now(&self) -> Result<usize, ReconcileWaitError> {
+        self.reconcile_all();
+
+        let waiters = {
+            let mut waiters = Vec::new();
+            let locked = self.inner.read().unwrap();
+            for (_tenant_shard_id, shard) in locked.tenants.iter() {
+                if let Some(waiter) = shard.get_waiter() {
+                    waiters.push(waiter);
+                }
+            }
+            waiters
+        };
+
+        let waiter_count = waiters.len();
+        self.await_waiters(waiters, RECONCILE_TIMEOUT).await?;
+        Ok(waiter_count)
     }
 
     pub async fn shutdown(&self) {

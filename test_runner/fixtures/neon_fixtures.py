@@ -2116,6 +2116,7 @@ class NeonStorageController(MetricsGetter):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[Dict[Any, Any]] = None,
+        placement_policy: Optional[str] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
@@ -2134,6 +2135,8 @@ class NeonStorageController(MetricsGetter):
         if tenant_config is not None:
             for k, v in tenant_config.items():
                 body[k] = v
+
+        body["placement_policy"] = placement_policy
 
         response = self.request(
             "POST",
@@ -2192,6 +2195,34 @@ class NeonStorageController(MetricsGetter):
         )
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
+
+    def tenant_policy_update(self, tenant_id: TenantId, body: dict[str, Any]):
+        log.info(f"tenant_policy_update({tenant_id}, {body})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/policy",
+            json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def reconcile_all(self):
+        r = self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/debug/v1/reconcile_all",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        r.raise_for_status()
+        n = r.json()
+        log.info(f"reconcile_all waited for {n} shards")
+        return n
+
+    def reconcile_until_idle(self, timeout_secs=30):
+        start_at = time.time()
+        n = 1
+        while n > 0:
+            n = self.reconcile_all()
+            if time.time() - start_at > timeout_secs:
+                raise RuntimeError("Timeout in reconcile_until_idle")
 
     def consistency_check(self):
         """

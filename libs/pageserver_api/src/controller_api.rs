@@ -42,6 +42,12 @@ pub struct NodeConfigureRequest {
     pub scheduling: Option<NodeSchedulingPolicy>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct TenantPolicyRequest {
+    pub placement: Option<PlacementPolicy>,
+    pub scheduling: Option<ShardSchedulingPolicy>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantLocateResponseShard {
     pub shard_id: TenantShardId,
@@ -167,6 +173,32 @@ impl FromStr for NodeAvailability {
             "offline" => Ok(Self::Offline),
             _ => Err(anyhow::anyhow!("Unknown availability state '{s}'")),
         }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum ShardSchedulingPolicy {
+    // Normal mode: the tenant's scheduled locations may be updated at will, including
+    // for non-essential optimization.
+    Active,
+
+    // Disable optimizations, but permit scheduling when necessary to fulfil the PlacementPolicy.
+    // For example, this still permits a node's attachment location to change to a secondary in
+    // response to a node failure, or to assign a new secondary if a node was removed.
+    Essential,
+
+    // No scheduling: leave the shard running wherever it currently is.  Even if the shard is
+    // unavailable, it will not be rescheduled to another node.
+    Pause,
+
+    // No reconciling: we will make no location_conf API calls to pageservers at all.  If the
+    // shard is unavailable, it stays that way.  If a node fails, this shard doesn't get failed over.
+    Stop,
+}
+
+impl Default for ShardSchedulingPolicy {
+    fn default() -> Self {
+        Self::Active
     }
 }
 
