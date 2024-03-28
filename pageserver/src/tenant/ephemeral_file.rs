@@ -72,6 +72,10 @@ impl EphemeralFile {
         self.len
     }
 
+    pub(crate) fn id(&self) -> page_cache::FileId {
+        self.page_cache_file_id
+    }
+
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,
