@@ -1688,7 +1688,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_exists", resp->tag);
 	}
 	pfree(resp);
 	return exists;
@@ -2224,7 +2224,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_read_at_lsn", resp->tag);
 	}
 
 	/* buffer was used, clean up for later reuse */
@@ -2497,7 +2497,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_nblocks", resp->tag);
 	}
 	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
 
@@ -2552,7 +2552,7 @@ neon_dbsize(Oid dbNode)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_dbsize", resp->tag);
 	}
 
 	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
@@ -2857,7 +2857,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_read_slru_segment", resp->tag);
 	}
 	pfree(resp);
 
