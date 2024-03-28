@@ -1,2 +1,2 @@
-select sum(abalance) pgbench_accounts;
+select sum(abalance) from pgbench_accounts;
  
