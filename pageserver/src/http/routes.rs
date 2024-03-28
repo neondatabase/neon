@@ -1772,6 +1772,32 @@ async fn timeline_download_remote_layers_handler_get(
     json_response(StatusCode::OK, info)
 }
 
+async fn timeline_detach_ancestor_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let state = get_state(&request);
+
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id, false)?;
+
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(|e| ApiError::NotFound(e.into()))?;
+
+    match timeline.detach_from_ancestor(&tenant).await {
+        Ok(()) => json_response(StatusCode::OK, ()),
+        Err(e) => Err(ApiError::InternalServerError(e.into())),
+    }
+}
+
 async fn deletion_queue_flush(
     r: Request<Body>,
     cancel: CancellationToken,
@@ -2363,6 +2389,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_remote_layers",
             |r| api_handler(r, timeline_download_remote_layers_handler_get),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/detach_ancestor",
+            |r| api_handler(r, timeline_detach_ancestor_handler),
         )
         .delete("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_delete_handler)

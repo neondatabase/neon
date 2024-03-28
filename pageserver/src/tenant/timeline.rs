@@ -3898,13 +3898,20 @@ impl Timeline {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum DetachFromAncestorError {
+    #[error("no ancestors")]
     NoAncestor,
+    #[error("too many ancestors")]
     TooManyAncestors,
+    #[error("shutting down, please retry later")]
     ShuttingDown,
-    FlushAncestor(anyhow::Error),
-    RewrittenDeltaDownloadFailed(anyhow::Error),
-    CopyDeltaPrefix(anyhow::Error),
+    #[error("flushing failed")]
+    FlushAncestor(#[source] anyhow::Error),
+    #[error("layer download failed")]
+    RewrittenDeltaDownloadFailed(#[source] anyhow::Error),
+    #[error("copying LSN prefix locally failed")]
+    CopyDeltaPrefix(#[source] anyhow::Error),
 }
 
 /// Top-level failure to compact.
