@@ -1127,12 +1127,9 @@ class NeonEnv:
         # bounce through retries on startup
         self.storage_controller.start()
 
-        def storage_controller_ready():
-            assert self.storage_controller.ready() is True
-
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
-        wait_until(30, 1, storage_controller_ready)
+        self.storage_controller.wait_until_ready()
 
         # Start up broker, pageserver and all safekeepers
         futs = []
@@ -2036,6 +2033,15 @@ class NeonStorageController(MetricsGetter):
         else:
             raise RuntimeError(f"Unexpected status {status} from readiness endpoint")
 
+    def wait_until_ready(self):
+        t1 = time.time()
+
+        def storage_controller_ready():
+            assert self.ready() is True
+
+        wait_until(30, 1, storage_controller_ready)
+        return time.time() - t1
+
     def attach_hook_issue(
         self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
     ) -> int:
@@ -2123,7 +2129,7 @@ class NeonStorageController(MetricsGetter):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[Dict[Any, Any]] = None,
-        placement_policy: Optional[str] = None,
+        placement_policy: Optional[Union[Dict[Any, Any] | str]] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
