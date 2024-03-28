@@ -951,11 +951,8 @@ impl DeltaLayerInner {
         planned_reads: &[VectoredRead],
         read_size_soft_max: usize,
     ) -> usize {
-        let largest_read = match planned_reads.iter().max_by_key(|read| read.size()) {
-            Some(largest_read) => largest_read,
-            None => {
-                return read_size_soft_max;
-            }
+        let Some(largest_read) = planned_reads.iter().max_by_key(|read| read.size()) else {
+            return read_size_soft_max;
         };
 
         let largest_read_size = largest_read.size();
