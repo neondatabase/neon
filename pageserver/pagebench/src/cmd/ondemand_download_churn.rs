@@ -2,9 +2,11 @@ use pageserver_api::{models::HistoricLayerInfo, shard::TenantShardId};
 
 use pageserver_client::mgmt_api;
 use rand::seq::SliceRandom;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use utils::id::{TenantTimelineId, TimelineId};
 
+use std::sync::{Arc, Mutex};
 use tokio::{
     sync::{mpsc, OwnedSemaphorePermit},
     task::JoinSet,
@@ -12,12 +14,19 @@ use tokio::{
 
 use std::{
     num::NonZeroUsize,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
+
+use crate::util::{
+    request_stats,
+    tokio_thread_local_stats::{self, AllThreadLocalStats},
+};
+
+#[derive(serde::Serialize)]
+struct Output {
+    total: request_stats::Output,
+}
 
 /// Evict & on-demand download random layers.
 #[derive(clap::Parser)]
@@ -42,13 +51,12 @@ pub(crate) struct Args {
     targets: Option<Vec<TenantTimelineId>>,
 }
 
+tokio_thread_local_stats::declare!(STATS: request_stats::Stats);
+
 pub(crate) fn main(args: Args) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let task = rt.spawn(main_impl(args));
-    rt.block_on(task).unwrap().unwrap();
-    Ok(())
+    tokio_thread_local_stats::main!(STATS, move |thread_local_stats| {
+        main_impl(args, thread_local_stats)
+    })
 }
 
 #[derive(Debug, Default)]
@@ -70,7 +78,10 @@ impl LiveStats {
     }
 }
 
-async fn main_impl(args: Args) -> anyhow::Result<()> {
+async fn main_impl(
+    args: Args,
+    all_thread_local_stats: AllThreadLocalStats<request_stats::Stats>,
+) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
@@ -92,14 +103,19 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
+    let token = CancellationToken::new();
     let mut tasks = JoinSet::new();
 
     let live_stats = Arc::new(LiveStats::default());
     tasks.spawn({
         let live_stats = Arc::clone(&live_stats);
+        let cloned_token = token.clone();
         async move {
             let mut last_at = Instant::now();
             loop {
+                if cloned_token.is_cancelled() {
+                    return;
+                }
                 tokio::time::sleep_until((last_at + Duration::from_secs(1)).into()).await;
                 let now = Instant::now();
                 let delta: Duration = now - last_at;
@@ -125,13 +141,35 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 Arc::clone(&mgmt_api_client),
                 tl,
                 Arc::clone(&live_stats),
+                token.clone(),
             ));
         }
+    }
+    if let Some(runtime) = args.runtime {
+        tokio::spawn(async move {
+            tokio::time::sleep(runtime.into()).await;
+            token.cancel();
+        });
     }
 
     while let Some(res) = tasks.join_next().await {
         res.unwrap();
     }
+
+    let output = Output {
+        total: {
+            let mut agg_stats = request_stats::Stats::new();
+            for stats in all_thread_local_stats.lock().unwrap().iter() {
+                let stats = stats.lock().unwrap();
+                agg_stats.add(&stats);
+            }
+            agg_stats.output()
+        },
+    };
+
+    let output = serde_json::to_string_pretty(&output).unwrap();
+    println!("{output}");
+
     Ok(())
 }
 
@@ -140,6 +178,7 @@ async fn timeline_actor(
     mgmt_api_client: Arc<pageserver_client::mgmt_api::Client>,
     timeline: TenantTimelineId,
     live_stats: Arc<LiveStats>,
+    token: CancellationToken,
 ) {
     // TODO: support sharding
     let tenant_shard_id = TenantShardId::unsharded(timeline.tenant_id);
@@ -186,6 +225,11 @@ async fn timeline_actor(
         live_stats.timeline_restart_done();
 
         loop {
+            if token.is_cancelled() {
+                return;
+            }
+
+            let start = std::time::Instant::now();
             assert!(!timeline.joinset.is_empty());
             if let Some(res) = timeline.joinset.try_join_next() {
                 debug!(?res, "a layer actor exited, should not happen");
@@ -216,6 +260,15 @@ async fn timeline_actor(
                     },
                 }
             }
+            let end = Instant::now();
+            STATS.with(|stats| {
+                stats
+                    .borrow()
+                    .lock()
+                    .unwrap()
+                    .observe(end.duration_since(start))
+                    .unwrap();
+            });
         }
     }
 }
