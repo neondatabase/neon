@@ -1156,6 +1156,8 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
+            rel: req.rel,
+            blkno: req.blkno,
             page,
         }))
     }
