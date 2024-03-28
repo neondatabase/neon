@@ -433,10 +433,13 @@ def test_sharding_service_compute_hook(
     # Set up fake HTTP notify endpoint
     notifications = []
 
+    handle_params = {"status": 200}
+
     def handler(request: Request):
-        log.info(f"Notify request: {request}")
+        status = handle_params["status"]
+        log.info(f"Notify request[{status}]: {request}")
         notifications.append(request.json)
-        return Response(status=200)
+        return Response(status=status)
 
     httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
@@ -503,6 +506,24 @@ def test_sharding_service_compute_hook(
         assert notifications[3] == expect
 
     wait_until(10, 1, received_split_notification)
+
+    # If the compute hook is unavailable, that should not block creating a tenant and
+    # creating a timeline.  This simulates a control plane refusing to accept notifications
+    handle_params["status"] = 423
+    degraded_tenant_id = TenantId.generate()
+    degraded_timeline_id = TimelineId.generate()
+    env.storage_controller.tenant_create(degraded_tenant_id)
+    env.storage_controller.pageserver_api().timeline_create(
+        PgVersion.NOT_SET, degraded_tenant_id, degraded_timeline_id
+    )
+
+    # Ensure we hit the handler error path
+    env.storage_controller.allowed_errors.append(
+        ".*Failed to notify compute of attached pageserver.*tenant busy.*"
+    )
+    env.storage_controller.allowed_errors.append(".*Reconcile error.*tenant busy.*")
+    assert notifications[-1] is not None
+    assert notifications[-1]["tenant_id"] == str(degraded_tenant_id)
 
     env.storage_controller.consistency_check()
 
