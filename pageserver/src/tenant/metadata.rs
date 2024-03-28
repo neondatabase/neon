@@ -207,6 +207,24 @@ impl TimelineMetadata {
         self.body.ancestor_lsn
     }
 
+    /// When reparenting, the `ancestor_lsn` does not change.
+    pub fn reparent(&mut self, timeline: &TimelineId) {
+        assert!(self.body.ancestor_timeline.is_some());
+        // no assertion for redoing this: it's fine, we may have to repeat this multiple times over
+        self.body.ancestor_timeline = Some(*timeline);
+    }
+
+    pub fn detach_from_ancestor(&mut self, timeline: &TimelineId, ancestor_lsn: &Lsn) {
+        if let Some(ancestor) = self.body.ancestor_timeline {
+            assert_eq!(ancestor, *timeline);
+        }
+        if self.body.ancestor_lsn != Lsn(0) {
+            assert_eq!(self.body.ancestor_lsn, *ancestor_lsn);
+        }
+        self.body.ancestor_timeline = None;
+        self.body.ancestor_lsn = Lsn(0);
+    }
+
     pub fn latest_gc_cutoff_lsn(&self) -> Lsn {
         self.body.latest_gc_cutoff_lsn
     }

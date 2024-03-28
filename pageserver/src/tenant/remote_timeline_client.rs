@@ -613,6 +613,27 @@ impl RemoteTimelineClient {
         self.launch_queued_tasks(upload_queue);
     }
 
+    pub(crate) fn schedule_reparenting_and_wait(
+        self: &Arc<Self>,
+        new_parent: &TimelineId,
+    ) -> anyhow::Result<impl std::future::Future<Output = anyhow::Result<()>> + 'static> {
+        // FIXME: because of how Timeline::schedule_uploads works when called from layer flushing
+        // and reads the in-memory part we cannot do the detaching like this
+
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        upload_queue.latest_metadata.reparent(new_parent);
+
+        self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+
+        let receiver = self.schedule_barrier0(upload_queue);
+
+        drop(guard);
+
+        Ok(Self::wait_completion0(receiver))
+    }
+
     /// Schedule an index part update as the last step of timeline detach.
     ///
     /// Metadata of adoption is added to the next index part recording the path for WAL based
@@ -627,10 +648,24 @@ impl RemoteTimelineClient {
     pub(crate) fn schedule_detaching_from_ancestor_and_wait(
         self: &Arc<Self>,
         _adopted: (TimelineId, Lsn),
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + 'static {
-        async move {
-            todo!();
-        }
+    ) -> anyhow::Result<impl std::future::Future<Output = anyhow::Result<()>> + 'static> {
+        // FIXME: because of how Timeline::schedule_uploads works when called from layer flushing
+        // and reads the in-memory part we cannot do the detaching like this
+
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        upload_queue
+            .latest_metadata
+            .detach_from_ancestor(&_adopted.0, &_adopted.1);
+
+        self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+
+        let receiver = self.schedule_barrier0(upload_queue);
+
+        drop(guard);
+
+        Ok(Self::wait_completion0(receiver))
     }
 
     /// Schedules a remote copy of the given Layer file from another timeline of the same tenant.
