@@ -4123,11 +4123,12 @@ impl Service {
                     continue;
                 }
 
-                if tenant_shards
-                    .iter()
-                    .any(|s| !matches!(s.splitting, SplitState::Idle))
-                {
-                    // Never attempt to optimize a tenant that is currently being split
+                if tenant_shards.iter().any(|s| {
+                    !matches!(s.splitting, SplitState::Idle)
+                        || matches!(s.policy, PlacementPolicy::Detached)
+                }) {
+                    // Never attempt to optimize a tenant that is currently being split, or
+                    // a tenant that is meant to be detached
                     continue;
                 }
 
