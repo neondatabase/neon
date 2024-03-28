@@ -55,7 +55,7 @@ pub trait MetricCounterRecorder {
 }
 
 trait MetricCounterReporter {
-    fn get_metrics(&self) -> (u64, usize);
+    fn get_metrics(&mut self) -> (u64, usize);
     fn move_metrics(&self) -> (u64, usize);
 }
 
@@ -76,10 +76,10 @@ impl MetricCounterRecorder for MetricBackupCounter {
 }
 
 impl MetricCounterReporter for MetricBackupCounter {
-    fn get_metrics(&self) -> (u64, usize) {
+    fn get_metrics(&mut self) -> (u64, usize) {
         (
-            self.transmitted.load(Ordering::Acquire),
-            self.opened_connections.load(Ordering::Acquire),
+            *self.transmitted.get_mut(),
+            *self.opened_connections.get_mut(),
         )
     }
     fn move_metrics(&self) -> (u64, usize) {
@@ -112,10 +112,10 @@ impl MetricCounterRecorder for MetricCounter {
 }
 
 impl MetricCounterReporter for MetricCounter {
-    fn get_metrics(&self) -> (u64, usize) {
+    fn get_metrics(&mut self) -> (u64, usize) {
         (
-            self.transmitted.load(Ordering::Acquire),
-            self.opened_connections.load(Ordering::Acquire),
+            *self.transmitted.get_mut(),
+            *self.opened_connections.get_mut(),
         )
     }
     fn move_metrics(&self) -> (u64, usize) {
