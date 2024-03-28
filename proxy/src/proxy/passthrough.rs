@@ -4,7 +4,7 @@ use crate::{
     console::messages::MetricsAuxInfo,
     metrics::NUM_BYTES_PROXIED_COUNTER,
     stream::Stream,
-    usage_metrics::{Ids, USAGE_METRICS},
+    usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS},
 };
 use metrics::IntCounterPairGuard;
 use tokio::io::{AsyncRead, AsyncWrite};
