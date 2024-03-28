@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
-use tracing::{debug, error, info, instrument, Instrument};
+use tracing::{error, info, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId};
 
 use crate::{
@@ -29,22 +29,6 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
     // Notify any timeline work to drop out of loops/requests
     tracing::debug!("Cancelling CancellationToken");
     timeline.cancel.cancel();
-
-    // Stop the walreceiver first.
-    debug!("waiting for wal receiver to shutdown");
-    let maybe_started_walreceiver = { timeline.walreceiver.lock().unwrap().take() };
-    if let Some(walreceiver) = maybe_started_walreceiver {
-        walreceiver.stop().await;
-    }
-    debug!("wal receiver shutdown confirmed");
-
-    // Shut down the layer flush task before the remote client, as one depends on the other
-    task_mgr::shutdown_tasks(
-        Some(TaskKind::LayerFlushTask),
-        Some(timeline.tenant_shard_id),
-        Some(timeline.timeline_id),
-    )
-    .await;
 
     // Prevent new uploads from starting.
     if let Some(remote_client) = timeline.remote_client.as_ref() {

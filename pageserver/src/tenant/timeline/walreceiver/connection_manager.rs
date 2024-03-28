@@ -280,6 +280,8 @@ pub(super) struct ConnectionManagerState {
     id: TenantTimelineId,
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
     timeline: Arc<Timeline>,
+    /// Child token of [`super::WalReceiver::cancel`], inherited to all tasks we spawn.
+    cancel: CancellationToken,
     conf: WalReceiverConf,
     /// Current connection to safekeeper for WAL streaming.
     wal_connection: Option<WalConnection>,
@@ -402,7 +404,11 @@ struct BrokerSkTimeline {
 }
 
 impl ConnectionManagerState {
-    pub(super) fn new(timeline: Arc<Timeline>, conf: WalReceiverConf) -> Self {
+    pub(super) fn new(
+        timeline: Arc<Timeline>,
+        conf: WalReceiverConf,
+        cancel: CancellationToken,
+    ) -> Self {
         let id = TenantTimelineId {
             tenant_id: timeline.tenant_shard_id.tenant_id,
             timeline_id: timeline.timeline_id,
@@ -410,11 +416,28 @@ impl ConnectionManagerState {
         Self {
             id,
             timeline,
+            cancel,
             conf,
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),
             wal_connection_retries: HashMap::new(),
         }
+    }
+
+    fn spawn<Fut>(
+        &self,
+        task: impl FnOnce(
+                tokio::sync::watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
+                CancellationToken,
+            ) -> Fut
+            + Send
+            + 'static,
+    ) -> TaskHandle<WalConnectionStatus>
+    where
+        Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
+    {
+        // TODO: get rid of TaskHandle
+        super::TaskHandle::spawn(&self.cancel, task)
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
@@ -435,7 +458,7 @@ impl ConnectionManagerState {
         );
 
         let span = info_span!("connection", %node_id);
-        let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
+        let connection_handle = self.spawn(move |events_sender, cancellation| {
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -461,6 +484,12 @@ impl ConnectionManagerState {
                             }
                             WalReceiverError::ExpectedSafekeeperError(e) => {
                                 info!("walreceiver connection handling ended: {e}");
+                                Ok(())
+                            }
+                            WalReceiverError::ClosedGate => {
+                                info!(
+                                    "walreceiver connection handling ended because of closed gate"
+                                );
                                 Ok(())
                             }
                             WalReceiverError::Other(e) => {
@@ -1016,7 +1045,7 @@ mod tests {
             sk_id: connected_sk_id,
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
+            connection_task: state.spawn(move |sender, _| async move {
                 sender
                     .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
@@ -1184,7 +1213,7 @@ mod tests {
             sk_id: connected_sk_id,
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
+            connection_task: state.spawn(move |sender, _| async move {
                 sender
                     .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
@@ -1251,7 +1280,7 @@ mod tests {
             sk_id: NodeId(1),
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
+            connection_task: state.spawn(move |sender, _| async move {
                 sender
                     .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
@@ -1315,7 +1344,7 @@ mod tests {
             sk_id: NodeId(1),
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |_, _| async move { Ok(()) }),
+            connection_task: state.spawn(move |_, _| async move { Ok(()) }),
             discovered_new_wal: Some(NewCommittedWAL {
                 discovered_at: time_over_threshold,
                 lsn: new_lsn,
@@ -1371,6 +1400,7 @@ mod tests {
                 timeline_id: TIMELINE_ID,
             },
             timeline,
+            cancel: CancellationToken::new(),
             conf: WalReceiverConf {
                 wal_connect_timeout: Duration::from_secs(1),
                 lagging_wal_timeout: Duration::from_secs(1),
@@ -1414,7 +1444,7 @@ mod tests {
             sk_id: connected_sk_id,
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
+            connection_task: state.spawn(move |sender, _| async move {
                 sender
                     .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
