@@ -10,6 +10,7 @@ import pytest
 import toml
 from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, Safekeeper
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId, TimelineId
 
 log = getLogger("root.safekeeper_async")
@@ -199,7 +200,9 @@ async def run_restarts_under_load(
         # assert that at least one transaction has completed in every worker
         stats.check_progress()
 
-        victim.start()
+        # testing #6530, temporary here
+        # TODO: remove afer partial backup is enabled by default
+        victim.start(extra_opts=["--partial-backup-enabled", "--partial-backup-timeout=2s"])
 
     log.info("Iterations are finished, exiting coroutines...")
     stats.running = False
@@ -213,6 +216,7 @@ async def run_restarts_under_load(
 # Restart acceptors one by one, while executing and validating bank transactions
 def test_restarts_under_load(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_safekeepers_restarts_under_load")

@@ -38,7 +38,7 @@ use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::FullTimelineInfo;
 use crate::wal_storage::Storage as wal_storage_iface;
-use crate::{debug_dump, wal_storage};
+use crate::{debug_dump, wal_backup_partial, wal_storage};
 use crate::{GlobalTimelines, SafeKeeperConf};
 
 /// Things safekeeper should know about timeline state on peers.
@@ -503,6 +503,9 @@ impl Timeline {
         if conf.peer_recovery_enabled {
             tokio::spawn(recovery_main(self.clone(), conf.clone()));
         }
+        if conf.is_wal_backup_enabled() && conf.partial_backup_enabled {
+            tokio::spawn(wal_backup_partial::main_task(self.clone(), conf.clone()));
+        }
     }
 
     /// Delete timeline from disk completely, by removing timeline directory.
@@ -667,8 +670,8 @@ impl Timeline {
             term_flush_lsn =
                 TermLsn::from((shared_state.sk.get_term(), shared_state.sk.flush_lsn()));
         }
-        self.commit_lsn_watch_tx.send(commit_lsn)?;
         self.term_flush_lsn_watch_tx.send(term_flush_lsn)?;
+        self.commit_lsn_watch_tx.send(commit_lsn)?;
         Ok(rmsg)
     }
 

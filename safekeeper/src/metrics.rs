@@ -147,6 +147,21 @@ pub static RECEIVED_PS_FEEDBACKS: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_received_ps_feedbacks_total counter")
 });
+pub static PARTIAL_BACKUP_UPLOADS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_partial_backup_uploads_total",
+        "Number of partial backup uploads to the S3",
+        &["result"]
+    )
+    .expect("Failed to register safekeeper_partial_backup_uploads_total counter")
+});
+pub static PARTIAL_BACKUP_UPLOADED_BYTES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_partial_backup_uploaded_bytes_total",
+        "Number of bytes uploaded to the S3 during partial backup"
+    )
+    .expect("Failed to register safekeeper_partial_backup_uploaded_bytes_total counter")
+});
 
 pub const LABEL_UNKNOWN: &str = "unknown";
 

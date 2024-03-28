@@ -565,6 +565,16 @@ impl GenericRemoteStorage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageMetadata(HashMap<String, String>);
 
+impl<const N: usize> From<[(&str, &str); N]> for StorageMetadata {
+    fn from(arr: [(&str, &str); N]) -> Self {
+        let map: HashMap<String, String> = arr
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Self(map)
+    }
+}
+
 /// External backup storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteStorageConfig {
