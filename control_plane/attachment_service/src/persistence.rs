@@ -282,6 +282,11 @@ impl Persistence {
                 // Backward compat for test data after PR https://github.com/neondatabase/neon/pull/7165
                 shard.placement_policy = "{\"Attached\":0}".to_string();
             }
+
+            if shard.scheduling_policy.is_empty() {
+                shard.scheduling_policy =
+                    serde_json::to_string(&ShardSchedulingPolicy::default()).unwrap();
+            }
         }
 
         let tenants: Vec<TenantShardPersistence> = decoded.tenants.into_values().collect();
