@@ -288,8 +288,15 @@ impl Scheduler {
         node.and_then(|(node_id, may_schedule)| if may_schedule { Some(node_id) } else { None })
     }
 
-    /// Hard Exclude: only consider nodes not in this list.
-    /// Soft exclude: only use nodes in this list if no others are available.
+    /// hard_exclude: it is forbidden to use nodes in this list, typically becacuse they
+    /// are already in use by this shard -- we use this to avoid picking the same node
+    /// as both attached and secondary location.  This is a hard constraint: if we cannot
+    /// find any nodes that aren't in this list, then we will return a [`ScheduleError::ImpossibleConstraint`].
+    ///
+    /// context: we prefer to avoid using nodes identified in the context, according
+    /// to their anti-affinity score.  We use this to prefeer to avoid placing shards in
+    /// the same tenant on the same node.  This is a soft constraint: the context will never
+    /// cause us to fail to schedule a shard.
     pub(crate) fn schedule_shard(
         &self,
         hard_exclude: &[NodeId],
