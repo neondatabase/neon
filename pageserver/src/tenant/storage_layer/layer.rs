@@ -1759,6 +1759,18 @@ impl ResidentLayer {
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.owner.metadata()
     }
+
+    #[cfg(test)]
+    pub(crate) async fn get_inner_delta<'a>(
+        &'a self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<&'a delta_layer::DeltaLayerInner> {
+        let owner = &self.owner.0;
+        match self.downloaded.get(owner, ctx).await? {
+            LayerKind::Delta(d) => Ok(d),
+            LayerKind::Image(_) => Err(anyhow::anyhow!("Expected a delta layer")),
+        }
+    }
 }
 
 impl AsLayerDesc for ResidentLayer {
