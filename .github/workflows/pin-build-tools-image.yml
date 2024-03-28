@@ -20,6 +20,7 @@ defaults:
 
 concurrency:
   group: pin-build-tools-image-${{ inputs.from-tag }}
+  cancel-in-progress: false
 
 permissions: {}
 
