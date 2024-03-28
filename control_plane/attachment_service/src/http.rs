@@ -797,7 +797,7 @@ pub fn make_router(
             named_request_span(
                 r,
                 handle_tenant_update_policy,
-                RequestName("control_v1_tenant_config"),
+                RequestName("control_v1_tenant_policy"),
             )
         })
         // Tenant operations

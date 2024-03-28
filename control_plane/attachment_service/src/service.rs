@@ -2366,13 +2366,19 @@ impl Service {
 
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, scheduler) = locked.parts_mut();
-        for (_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
+        for (shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
             if let Some(placement) = &placement {
                 shard.policy = placement.clone();
+
+                tracing::info!(tenant_id=%shard_id.tenant_id, shard_id=%shard_id.shard_slug(),
+                               "Updated placement policy to {placement:?}");
             }
 
             if let Some(scheduling) = &scheduling {
                 shard.set_scheduling_policy(*scheduling);
+
+                tracing::info!(tenant_id=%shard_id.tenant_id, shard_id=%shard_id.shard_slug(),
+                               "Updated scheduling policy to {scheduling:?}");
             }
 
             // In case scheduling is being switched back on, try it now.
