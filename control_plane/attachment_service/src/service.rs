@@ -4105,6 +4105,18 @@ impl Service {
                 break;
             }
 
+            match shard.get_scheduling_policy() {
+                ShardSchedulingPolicy::Active => {
+                    // Ok to do optimization
+                }
+                ShardSchedulingPolicy::Essential
+                | ShardSchedulingPolicy::Pause
+                | ShardSchedulingPolicy::Stop => {
+                    // Policy prevents optimizing this shard.
+                    continue;
+                }
+            }
+
             // Accumulate the schedule context for all the shards in a tenant: we must have
             // the total view of all shards before we can try to optimize any of them.
             schedule_context.avoid(&shard.intent.all_pageservers());

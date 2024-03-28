@@ -1085,6 +1085,10 @@ impl TenantState {
         self.scheduling_policy = p;
     }
 
+    pub(crate) fn get_scheduling_policy(&self) -> &ShardSchedulingPolicy {
+        &self.scheduling_policy
+    }
+
     pub(crate) fn from_persistent(
         tsp: TenantShardPersistence,
         intent: IntentState,
