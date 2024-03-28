@@ -69,7 +69,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
             FROM generate_series(1, 200000) g
     """
     )
-    lsn_c = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
+    Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
 
     log.info(f"LSN after 400100 rows: {lsn_c}")
 

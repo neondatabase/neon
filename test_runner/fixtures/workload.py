@@ -74,7 +74,7 @@ class Workload:
             else:
                 self._endpoint.reconfigure(pageserver_id=pageserver_id)
 
-        connstring = self._endpoint.safe_psql(
+        self._endpoint.safe_psql(
             "SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'"
         )
         log.info(f"Workload.endpoint: connstr={connstring}")

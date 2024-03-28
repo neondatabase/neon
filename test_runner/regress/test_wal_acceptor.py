@@ -103,9 +103,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
 
     n_timelines = 3
 
-    branch_names = [
-        "test_safekeepers_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
-    ]
+    branch_names = [f"test_safekeepers_many_timelines_{tlin}" for tlin in range(n_timelines)]
     # pageserver, safekeeper operate timelines via their ids (can be represented in hex as 'ad50847381e248feaac9876cc71ae418')
     # that's not really human readable, so the branch names are introduced in Neon CLI.
     # Neon CLI stores its branch <-> timeline mapping in its internals,
@@ -446,7 +444,7 @@ def is_flush_lsn_caught_up(sk: Safekeeper, tenant_id: TenantId, timeline_id: Tim
 
 def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, target_size_mb):
     http_cli = sk.http_client()
-    tli_status = http_cli.timeline_status(tenant_id, timeline_id)
+    http_cli.timeline_status(tenant_id, timeline_id)
     sk_wal_size = get_dir_size(os.path.join(sk.data_dir(), str(tenant_id), str(timeline_id)))
     sk_wal_size_mb = sk_wal_size / 1024 / 1024
     log.info(f"Safekeeper id={sk.id} wal_size={sk_wal_size_mb:.2f}MB status={tli_status}")
@@ -1136,19 +1134,19 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
         for f in mismatch:
             f1 = os.path.join(sk0.timeline_dir(tenant_id, timeline_id), f)
             f2 = os.path.join(sk.timeline_dir(tenant_id, timeline_id), f)
-            stdout_filename = "{}.filediff".format(f2)
+            stdout_filename = f"{f2}.filediff"
 
             with open(stdout_filename, "w") as stdout_f:
-                subprocess.run("xxd {} > {}.hex ".format(f1, f1), shell=True)
-                subprocess.run("xxd {} > {}.hex ".format(f2, f2), shell=True)
+                subprocess.run(f"xxd {f1} > {f1}.hex ", shell=True)
+                subprocess.run(f"xxd {f2} > {f2}.hex ", shell=True)
 
-                cmd = "diff {}.hex {}.hex".format(f1, f2)
+                cmd = f"diff {f1}.hex {f2}.hex"
                 subprocess.run([cmd], stdout=stdout_f, shell=True)
 
             assert (mismatch, not_regular) == (
                 [],
                 [],
-            ), f"WAL segs {f1} and {f2} on sks {sks[0].id} and {sk.id} are not identic"
+            ), f"WAL segs {f1} and {f2} on sks {sks[0].id} and {sk.id} are not identical"
 
 
 # Wait until flush_lsn on given sks becomes equal, assuming endpoint ep is

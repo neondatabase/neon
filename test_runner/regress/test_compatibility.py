@@ -292,7 +292,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
 
     try:
         pageserver_http.timeline_preserve_initdb_archive(tenant_id, timeline_id)
-    except PageserverApiException as e:
+    except PageserverApiException:
         # Allow the error as we might be running the old pageserver binary
         log.info(f"Got allowed error: '{e}'")
 

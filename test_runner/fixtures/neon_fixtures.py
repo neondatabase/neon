@@ -2135,7 +2135,7 @@ class NeonStorageController(MetricsGetter):
             for k, v in tenant_config.items():
                 body[k] = v
 
-        response = self.request(
+        self.request(
             "POST",
             f"{self.env.storage_controller_api}/v1/tenant",
             json=body,
@@ -3396,7 +3396,7 @@ class Endpoint(PgProtocol):
         Returns self.
         """
 
-        started_at = time.time()
+        time.time()
 
         self.create(
             branch_name=branch_name,
@@ -3574,7 +3574,7 @@ class Safekeeper:
         return self
 
     def stop(self, immediate: bool = False) -> "Safekeeper":
-        log.info("Stopping safekeeper {}".format(self.id))
+        log.info(f"Stopping safekeeper {self.id}")
         self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
@@ -4006,13 +4006,13 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     for f in mismatch:
         f1 = os.path.join(endpoint.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
-        stdout_filename = "{}.filediff".format(f2)
+        stdout_filename = f"{f2}.filediff"
 
         with open(stdout_filename, "w") as stdout_f:
-            subprocess.run("xxd -b {} > {}.hex ".format(f1, f1), shell=True)
-            subprocess.run("xxd -b {} > {}.hex ".format(f2, f2), shell=True)
+            subprocess.run(f"xxd -b {f1} > {f1}.hex ", shell=True)
+            subprocess.run(f"xxd -b {f2} > {f2}.hex ", shell=True)
 
-            cmd = "diff {}.hex {}.hex".format(f1, f2)
+            cmd = f"diff {f1}.hex {f2}.hex"
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])

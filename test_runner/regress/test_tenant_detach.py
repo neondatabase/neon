@@ -206,7 +206,7 @@ def test_tenant_reattach_while_busy(
                     if updates_finished % 1000 == 0:
                         log.info(f"update {updates_finished} / {updates_to_perform}")
                     break
-                except asyncpg.PostgresError as e:
+                except asyncpg.PostgresError:
                     # Received error from Postgres. Log it, sleep a little, and continue
                     log.info(f"UPDATE error: {e}")
                     await asyncio.sleep(0.1)

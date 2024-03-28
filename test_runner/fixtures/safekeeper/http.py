@@ -221,7 +221,7 @@ class SafekeeperHttpClient(requests.Session):
             all_metrics_text,
             re.MULTILINE,
         ):
-            metrics.commit_lsn_inexact[
-                (TenantId(match.group(1)), TimelineId(match.group(2)))
-            ] = int(match.group(3))
+            metrics.commit_lsn_inexact[(TenantId(match.group(1)), TimelineId(match.group(2)))] = (
+                int(match.group(3))
+            )
         return metrics

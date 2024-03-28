@@ -674,7 +674,7 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, False)
 
     # cut 10 percent
-    response = env.pageserver.http_client().disk_usage_eviction_run(
+    env.pageserver.http_client().disk_usage_eviction_run(
         {"evict_bytes": total_on_disk // 10, "eviction_order": order.config()}
     )
     log.info(f"{response}")
@@ -682,7 +682,7 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     after_tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
 
     ratios = []
-    for i, ((tenant_id, _timeline_id), _scale) in enumerate(timelines):
+    for _i, ((tenant_id, _timeline_id), _scale) in enumerate(timelines):
         # we expect the oldest to suffer most
         originally, after = tenant_layers[tenant_id], after_tenant_layers[tenant_id]
         log.info(f"{i + 1}th tenant went from {originally} -> {after}")

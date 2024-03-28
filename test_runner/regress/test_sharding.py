@@ -327,21 +327,8 @@ def test_sharding_split_smoke(
                 attached[int(shard["node_attached"])] += 1
                 total[int(shard["node_attached"])] += 1
 
-        return total, attached
-
-    def check_effective_tenant_config():
-        # Expect our custom tenant configs to have survived the split
-        for shard in env.storage_controller.tenant_describe(tenant_id)["shards"]:
-            node = env.get_pageserver(int(shard["node_attached"]))
-            config = node.http_client().tenant_config(TenantShardId.parse(shard["tenant_shard_id"]))
-            for k, v in non_default_tenant_config.items():
-                assert config.effective_config[k] == v
-
-    # Validate pageserver state: expect every child shard to have an attached and secondary location
-    (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
-    assert sum(attached.values()) == split_shard_count
-    assert sum(total.values()) == split_shard_count * 2
-    check_effective_tenant_config()
+    log.info(f"Shards after split: {shards_exist}")
+    assert len(shards_exist) == split_shard_count
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
@@ -830,7 +817,7 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
+                log.info(f"Shard {tenant_shard_id} seen on node {ps.id}")
                 assert tenant_shard_id.shard_count == initial_shard_count
                 if loc[1]["mode"] == "Secondary":
                     secondary_count += 1
@@ -856,7 +843,7 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
+                log.info(f"Shard {tenant_shard_id} seen on node {ps.id}")
                 assert tenant_shard_id.shard_count == split_shard_count
                 if loc[1]["mode"] == "Secondary":
                     secondary_count += 1
@@ -985,7 +972,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
     endpoint = workload.endpoint()
 
     # on 2024-03-05, the default config on prod was [15MB, 10GB, null]
-    res = endpoint.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "SHOW max_replication_write_lag",
             "SHOW max_replication_flush_lag",

@@ -97,7 +97,7 @@ def test_wal_restore_initdb(
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
-    original_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     env.pageserver.stop()
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"

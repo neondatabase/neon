@@ -62,6 +62,8 @@ def test_metric_collection(
         synthetic_size_calculation_interval="3s"
         """
 
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
     log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")
 
     # mock http server that returns OK for the metrics
