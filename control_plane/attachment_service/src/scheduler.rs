@@ -58,6 +58,70 @@ pub(crate) struct Scheduler {
     nodes: HashMap<NodeId, SchedulerNode>,
 }
 
+/// Score for soft constraint scheduling: lower scores are preferred to higher scores.
+///
+/// For example, we may set an affinity score based on the number of shards from the same
+/// tenant already on a node, to implicitly prefer to balance out shards.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub(crate) struct AffinityScore(pub(crate) usize);
+
+impl AffinityScore {
+    /// If we have no anti-affinity at all toward a node, this is its score.  It means
+    /// the scheduler has a free choice amongst nodes with this score, and may pick a node
+    /// based on other information such as total utilization.
+    pub(crate) const FREE: Self = Self(0);
+
+    pub(crate) fn inc(&mut self) {
+        self.0 += 1;
+    }
+}
+
+impl std::ops::Add for AffinityScore {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+
+// For carrying state between multiple calls to [`TenantState::schedule`], e.g. when calling
+// it for many shards in the same tenant.
+#[derive(Debug, Default)]
+pub(crate) struct ScheduleContext {
+    /// Sparse map of nodes: omitting a node implicitly makes its affinity [`AffinityScore::FREE`]
+    pub(crate) nodes: HashMap<NodeId, AffinityScore>,
+
+    /// Specifically how many _attached_ locations are on each node
+    pub(crate) attached_nodes: HashMap<NodeId, usize>,
+}
+
+impl ScheduleContext {
+    /// Input is a list of nodes we would like to avoid using again within this context.  The more
+    /// times a node is passed into this call, the less inclined we are to use it.
+    pub(crate) fn avoid(&mut self, nodes: &[NodeId]) {
+        for node_id in nodes {
+            let entry = self.nodes.entry(*node_id).or_insert(AffinityScore::FREE);
+            entry.inc()
+        }
+    }
+
+    pub(crate) fn push_attached(&mut self, node_id: NodeId) {
+        let entry = self.attached_nodes.entry(node_id).or_default();
+        *entry += 1;
+    }
+
+    pub(crate) fn get_node_affinity(&self, node_id: NodeId) -> AffinityScore {
+        self.nodes
+            .get(&node_id)
+            .copied()
+            .unwrap_or(AffinityScore::FREE)
+    }
+
+    pub(crate) fn get_node_attachments(&self, node_id: NodeId) -> usize {
+        self.attached_nodes.get(&node_id).copied().unwrap_or(0)
+    }
+}
+
 impl Scheduler {
     pub(crate) fn new<'a>(nodes: impl Iterator<Item = &'a Node>) -> Self {
         let mut scheduler_nodes = HashMap::new();
@@ -224,27 +288,47 @@ impl Scheduler {
         node.and_then(|(node_id, may_schedule)| if may_schedule { Some(node_id) } else { None })
     }
 
-    pub(crate) fn schedule_shard(&self, hard_exclude: &[NodeId]) -> Result<NodeId, ScheduleError> {
+    /// hard_exclude: it is forbidden to use nodes in this list, typically becacuse they
+    /// are already in use by this shard -- we use this to avoid picking the same node
+    /// as both attached and secondary location.  This is a hard constraint: if we cannot
+    /// find any nodes that aren't in this list, then we will return a [`ScheduleError::ImpossibleConstraint`].
+    ///
+    /// context: we prefer to avoid using nodes identified in the context, according
+    /// to their anti-affinity score.  We use this to prefeer to avoid placing shards in
+    /// the same tenant on the same node.  This is a soft constraint: the context will never
+    /// cause us to fail to schedule a shard.
+    pub(crate) fn schedule_shard(
+        &self,
+        hard_exclude: &[NodeId],
+        context: &ScheduleContext,
+    ) -> Result<NodeId, ScheduleError> {
         if self.nodes.is_empty() {
             return Err(ScheduleError::NoPageservers);
         }
 
-        let mut tenant_counts: Vec<(NodeId, usize)> = self
+        let mut scores: Vec<(NodeId, AffinityScore, usize)> = self
             .nodes
             .iter()
             .filter_map(|(k, v)| {
                 if hard_exclude.contains(k) || v.may_schedule == MaySchedule::No {
                     None
                 } else {
-                    Some((*k, v.shard_count))
+                    Some((
+                        *k,
+                        context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
+                        v.shard_count,
+                    ))
                 }
             })
             .collect();
 
-        // Sort by tenant count.  Nodes with the same tenant count are sorted by ID.
-        tenant_counts.sort_by_key(|i| (i.1, i.0));
+        // Sort by, in order of precedence:
+        //  1st: Affinity score.  We should never pick a higher-score node if a lower-score node is available
+        //  2nd: Utilization.  Within nodes with the same affinity, use the least loaded nodes.
+        //  3rd: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
+        scores.sort_by_key(|i| (i.1, i.2, i.0));
 
-        if tenant_counts.is_empty() {
+        if scores.is_empty() {
             // After applying constraints, no pageservers were left.  We log some detail about
             // the state of nodes to help understand why this happened.  This is not logged as an error because
             // it is legitimately possible for enough nodes to be Offline to prevent scheduling a shard.
@@ -260,16 +344,23 @@ impl Scheduler {
             return Err(ScheduleError::ImpossibleConstraint);
         }
 
-        let node_id = tenant_counts.first().unwrap().0;
+        // Lowest score wins
+        let node_id = scores.first().unwrap().0;
         tracing::info!(
-            "scheduler selected node {node_id} (elegible nodes {:?}, exclude: {hard_exclude:?})",
-            tenant_counts.iter().map(|i| i.0 .0).collect::<Vec<_>>()
+            "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?})",
+            scores.iter().map(|i| i.0 .0).collect::<Vec<_>>()
         );
 
         // Note that we do not update shard count here to reflect the scheduling: that
         // is IntentState's job when the scheduled location is used.
 
         Ok(node_id)
+    }
+
+    /// Unit test access to internal state
+    #[cfg(test)]
+    pub(crate) fn get_node_shard_count(&self, node_id: NodeId) -> usize {
+        self.nodes.get(&node_id).unwrap().shard_count
     }
 }
 
@@ -316,15 +407,17 @@ mod tests {
         let mut t1_intent = IntentState::new();
         let mut t2_intent = IntentState::new();
 
-        let scheduled = scheduler.schedule_shard(&[])?;
+        let context = ScheduleContext::default();
+
+        let scheduled = scheduler.schedule_shard(&[], &context)?;
         t1_intent.set_attached(&mut scheduler, Some(scheduled));
-        let scheduled = scheduler.schedule_shard(&[])?;
+        let scheduled = scheduler.schedule_shard(&[], &context)?;
         t2_intent.set_attached(&mut scheduler, Some(scheduled));
 
         assert_eq!(scheduler.nodes.get(&NodeId(1)).unwrap().shard_count, 1);
         assert_eq!(scheduler.nodes.get(&NodeId(2)).unwrap().shard_count, 1);
 
-        let scheduled = scheduler.schedule_shard(&t1_intent.all_pageservers())?;
+        let scheduled = scheduler.schedule_shard(&t1_intent.all_pageservers(), &context)?;
         t1_intent.push_secondary(&mut scheduler, scheduled);
 
         assert_eq!(scheduler.nodes.get(&NodeId(1)).unwrap().shard_count, 1);
