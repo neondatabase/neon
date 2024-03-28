@@ -3626,21 +3626,41 @@ impl Timeline {
     /// from our ancestor to be branches from this timeline.
     pub(crate) async fn detach_from_ancestor(
         self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
     ) -> Result<(), DetachFromAncestorError> {
         use DetachFromAncestorError::*;
 
         let ctx = RequestContext::todo_child(TaskKind::Eviction, DownloadBehavior::Download);
         let ctx = &ctx;
 
+        let Some(rtc) = self.remote_client.as_ref() else {
+            unimplemented!("no new code for running without remote storage");
+        };
+
+        // FIXME: check here if we are continuing a remote storage marked detaching. remote storage
+        // marking is needed for to inhibit gc across restarts.
+        //
+        // if we are, then we will need to redo the reparenting, and finally mark the operation as
+        // completed.
+
         let Some(ancestor) = self.ancestor_timeline.clone() else {
-            // FIXME: it would be great to check here if we've previously been detached, and now
-            // just report "OK"
             return Err(NoAncestor);
         };
 
         if !self.ancestor_lsn.is_valid() {
             return Err(NoAncestor);
         }
+
+        // TODO: we need to inhibit gc between runs or do we?
+        //
+        // because on the first attempt we are holding all Layer instances, they will not be
+        // removed from remote. if a restart happens and parent runs gc before we resume this
+        // operation, we could had copied more layers than is needed now.
+        //
+        // is that a problem? wouldn't the same layers get removed after reparenting is done and we
+        // release the gc lock on the `self`?
+        //
+        // TODO: gc lock taking for `self`
 
         let ancestor_lsn = self.ancestor_lsn;
 
@@ -3705,10 +3725,6 @@ impl Timeline {
 
             tracing::debug!(%later_by_lsn, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
         }
-
-        let Some(rtc) = self.remote_client.as_ref() else {
-            unimplemented!("no new code for running without remote storage");
-        };
 
         let layers = tokio::select! {
             guard = self.layers.read() => guard,
@@ -3812,8 +3828,10 @@ impl Timeline {
                     // FIXME: fsync + fsync directory here or amortize?
                     // adding the layers one by one is probably fine
 
+                    // publish the layers right away so that they are evictable
                     let mut layers = self.layers.write().await;
                     layers.track_adopted_delta_layers(std::array::from_ref(&copied), &self.metrics);
+
                     rtc.schedule_layer_file_upload(copied)
                         .map_err(|_| ShuttingDown)?;
 
@@ -3849,7 +3867,8 @@ impl Timeline {
                     self.conf,
                     &self,
                     adopted.layer_desc().filename(),
-                    adopted.metadata().with_generation(self.generation),
+                    // generation is per tenant, we don't have any values to change here
+                    adopted.metadata(),
                 );
                 rtc.schedule_layer_adoption(adopted.clone(), owned.clone())
                     .map_err(|_| ShuttingDown)?;
@@ -3870,19 +3889,81 @@ impl Timeline {
             }
         }
 
+        // we must detach ourselves first because otherwise due to shutdown, the reparented
+        // timelines would otherwise be branching off before our own ancestor_lsn, and that is not
+        // supported.
+        //
+        // on retry after shutdown, we must repeat the reparenting before returning Ok.
         rtc.schedule_detaching_from_ancestor_and_wait((ancestor.timeline_id, ancestor_lsn))
+            .map_err(|_| ShuttingDown)?
             .await
             .map_err(|_| ShuttingDown)?;
 
-        // we must not let gc observe our layers here before reparenting is done... is that
-        // correct? gc could had already ran after restart before this operation was retried
+        // we need to reparent the other timelines here in remote storage
         //
-        // maybe we should instead mark the timeline as being detaching (also to remote storage) in
-        // the beginning, that way, gc is inhibited; we will just need to release it in the end.
-        // alternatively we don't want the parent to be gc'd either, nor do we want multiple
-        // concurrent timeline detaches racing each other, so perhaps the flag could be there, and
-        // then gc would be inhibited for the two timelines (our ancestor and self).
-        let _gc_guard = self.gc_lock.lock().await;
+        // if we get a restarted between here to the completion of all remote storage reparentings:
+        // some of the timelines would be reparented and some not, we need to retry after restart
+        // to reparent all suitable.
+        let reparented = tenant
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|tl| {
+                if Arc::ptr_eq(&tl, self) {
+                    return None;
+                }
+
+                let Some(tl_ancestor) = tl.ancestor_timeline.as_ref() else {
+                    return None;
+                };
+
+                if Arc::ptr_eq(&tl_ancestor, &ancestor) && tl.ancestor_lsn < ancestor_lsn {
+                    Some(tl.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut tasks = tokio::task::JoinSet::new();
+
+        for timeline in &reparented {
+            let fut = timeline
+                .remote_client
+                .as_ref()
+                .expect("sibling has to have remote client because we have one")
+                .schedule_reparenting_and_wait(&self.timeline_id)
+                .map_err(|_| ShuttingDown)?;
+
+            tasks.spawn(async move { fut.await });
+        }
+
+        while let Some(res) = tasks.join_next().await {
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(_rtc_shutdown)) => {
+                    // lets just ignore this for now. one or all reparented timelines could had
+                    // started deletion, and that is fine.
+                }
+                Err(je) if je.is_cancelled() => unreachable!("not used"),
+                Err(je) if je.is_panic() => {
+                    // ignore; it's better to continue with a single reparenting failing (or even
+                    // all of them) in order to get to the goal state... though, this would be
+                    // exceptional, and we have already done N non-cancellable actions. hard to say
+                    // which requires less manual repair.
+                }
+                Err(je) => tracing::error!("unexpected join error: {je:?}"),
+            }
+        }
+
+        if self.cancel.is_cancelled() {
+            // FIXME: this does not work if we do linear shutdown of timelines, but it might still
+            // be good enough
+            return Err(ShuttingDown);
+        }
+
+        // FIXME: gc should already be inhibited across restarts
 
         {
             // TODO: optimization: hardlink any ancestor downloaded historic layer?
@@ -3893,8 +3974,18 @@ impl Timeline {
         // now we only need to switch our ancestor timeline to be none
         //
         // and reparent all ancestor's timelines which had ancestor_lsn <= our(ancestor_lsn)
+        //
+        // TODO: switch our in-memory to have no parent
+        // TODO: switch the in-memory reparented to have us as the parent
+        //
+        // FIXME: is there some situation in which we need to move gc_cutoff backwards...? probably
+        // not, if we mark the timeline via remote storage for as being detached.
 
-        todo!();
+        // FIXME: unmark the timeline as being detached
+        //
+        // FIXME: unmark the parent timeline as being detached (in-memory only)
+
+        Ok(())
     }
 }
 
