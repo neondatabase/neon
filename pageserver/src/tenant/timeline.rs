@@ -610,6 +610,12 @@ pub enum GetVectoredImpl {
     Vectored,
 }
 
+pub(crate) enum WaitLsnWaiter<'a> {
+    Timeline(&'a Timeline),
+    Tenant,
+    PageService,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -1058,6 +1064,7 @@ impl Timeline {
     pub(crate) async fn wait_lsn(
         &self,
         lsn: Lsn,
+        who_is_waiting: WaitLsnWaiter<'_>,
         ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
         if self.cancel.is_cancelled() {
@@ -1071,10 +1078,18 @@ impl Timeline {
                 TaskKind::WalReceiverManager
                 | TaskKind::WalReceiverConnectionHandler
                 | TaskKind::WalReceiverConnectionPoller => {
-                    // This should never be called from the WAL receiver, because that could lead
-                    // to a deadlock.
-                    if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
-                        panic!("walingest task is calling wait_lsn {lsn} but current is only {current}, would deadlock");
+                    let is_myself = match who_is_waiting {
+                        WaitLsnWaiter::Timeline(waiter) => Weak::ptr_eq(&waiter.myself, &self.myself),
+                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
+                    };
+                    if is_myself {
+                        if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
+                            // walingest is the only one that can advance last_record_lsn; it should make sure to never reach here
+                            panic!("this timeline's walingest task is calling wait_lsn({lsn}) but we only have last_record_lsn={current}; would deadlock");
+                        }
+                    } else {
+                        // if another  timeline's  is waiting for us, there's no deadlock risk because
+                        // our walreceiver task can make progress independent of theirs
                     }
                 }
                 _ => {}
@@ -3039,7 +3054,7 @@ impl Timeline {
             }
         }
         ancestor
-            .wait_lsn(self.ancestor_lsn, ctx)
+            .wait_lsn(self.ancestor_lsn, WaitLsnWaiter::Timeline(self), ctx)
             .await
             .map_err(|e| match e {
                 e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),

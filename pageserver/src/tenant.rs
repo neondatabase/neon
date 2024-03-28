@@ -1515,7 +1515,7 @@ impl Tenant {
                     // sizes etc. and that would get confused if the previous page versions
                     // are not in the repository yet.
                     ancestor_timeline
-                        .wait_lsn(*lsn, ctx)
+                        .wait_lsn(*lsn, timeline::WaitLsnWaiter::Tenant, ctx)
                         .await
                         .map_err(|e| match e {
                             e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState) => {
