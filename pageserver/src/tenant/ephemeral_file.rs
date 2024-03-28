@@ -31,13 +31,7 @@ pub struct EphemeralFile {
     file: owned_buffers_io::util::size_tracking_writer::Writer<
         owned_buffers_io::write::BufferedWriter<
             { Self::TAIL_SZ },
-            owned_buffers_io::util::size_tracking_writer::Writer<
-                owned_buffers_io::util::page_cache_priming_writer::Writer<
-                    PAGE_SZ,
-                    owned_buffers_io::util::page_cache_priming_writer::VirtualFileAdaptor,
-                    &'static crate::page_cache::PageCache,
-                >,
-            >,
+            owned_buffers_io::util::size_tracking_writer::Writer<VirtualFile>,
         >,
     >,
 }
@@ -68,20 +62,12 @@ impl EphemeralFile {
                 .create(true),
         )
         .await?;
-
-        let page_cache_file_id = page_cache::next_file_id();
-        let file = owned_buffers_io::util::page_cache_priming_writer::VirtualFileAdaptor::new(
-            file,
-            page_cache_file_id,
-        );
-        let file =
-            owned_buffers_io::util::page_cache_priming_writer::Writer::new(file, page_cache::get());
         let file = owned_buffers_io::util::size_tracking_writer::Writer::new(file);
         let file = owned_buffers_io::write::BufferedWriter::new(file);
         let file = owned_buffers_io::util::size_tracking_writer::Writer::new(file);
 
         Ok(EphemeralFile {
-            page_cache_file_id,
+            page_cache_file_id: page_cache::next_file_id(),
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
             file,
@@ -124,13 +110,7 @@ impl EphemeralFile {
                         format!(
                             "ephemeral file: read immutable page #{}: {}: {:#}",
                             blknum,
-                            self.file
-                                .as_inner()
-                                .as_inner()
-                                .as_inner()
-                                .as_inner()
-                                .as_inner()
-                                .path,
+                            self.file.as_inner().as_inner().as_inner().path,
                             e,
                         ),
                     )
@@ -141,8 +121,6 @@ impl EphemeralFile {
                 page_cache::ReadBufResult::NotFound(write_guard) => {
                     let write_guard = self
                         .file
-                        .as_inner()
-                        .as_inner()
                         .as_inner()
                         .as_inner()
                         .as_inner()
@@ -185,7 +163,7 @@ impl EphemeralFile {
     pub(crate) async fn write_blob(
         &mut self,
         srcbuf: &[u8],
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> Result<u64, io::Error> {
         let pos = self.file.bytes_written();
 
@@ -194,15 +172,17 @@ impl EphemeralFile {
             // short one-byte length header
             let len_buf = [srcbuf.len() as u8];
 
-            self.file.write_all_borrowed(&len_buf, ctx).await?;
+            self.file.write_all_borrowed(&len_buf).await?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
-            self.file.write_all_borrowed(&len_buf, ctx).await?;
+            self.file.write_all_borrowed(&len_buf).await?;
         }
 
         // Write the payload
-        self.file.write_all_borrowed(srcbuf, ctx).await?;
+        self.file.write_all_borrowed(&srcbuf).await?;
+
+        // TODO: bring back pre-warming of page cache, using another sandwich layer
 
         Ok(pos)
     }
@@ -223,16 +203,7 @@ impl Drop for EphemeralFile {
         // We leave them there, [`crate::page_cache::PageCache::find_victim`] will evict them when needed.
 
         // unlink the file
-        let res = std::fs::remove_file(
-            &self
-                .file
-                .as_inner()
-                .as_inner()
-                .as_inner()
-                .as_inner()
-                .as_inner()
-                .path,
-        );
+        let res = std::fs::remove_file(&self.file.as_inner().as_inner().as_inner().path);
         if let Err(e) = res {
             if e.kind() != std::io::ErrorKind::NotFound {
                 // just never log the not found errors, we cannot do anything for them; on detach
@@ -241,13 +212,7 @@ impl Drop for EphemeralFile {
                 // not found files might also be related to https://github.com/neondatabase/neon/issues/2442
                 error!(
                     "could not remove ephemeral file '{}': {}",
-                    self.file
-                        .as_inner()
-                        .as_inner()
-                        .as_inner()
-                        .as_inner()
-                        .as_inner()
-                        .path,
+                    self.file.as_inner().as_inner().as_inner().path,
                     e
                 );
             }

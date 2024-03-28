@@ -1,25 +1,13 @@
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
-use crate::context::RequestContext;
-
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 pub trait OwnedAsyncWriter {
-    async fn write_all<
-        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
-        Buf: IoBuf + Send,
-        Bounds: std::ops::RangeBounds<usize>,
-    >(
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)>;
-    async fn write_all_borrowed(
-        &mut self,
-        buf: &[u8],
-
-        ctx: &RequestContext,
-    ) -> std::io::Result<usize>;
+    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize>;
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that batches smaller writers
@@ -73,26 +61,21 @@ where
             .as_zero_padded_slice()
     }
 
-    #[allow(dead_code)]
-    pub async fn flush_and_into_inner(mut self, ctx: &RequestContext) -> std::io::Result<W> {
-        self.flush(ctx).await?;
+    pub async fn flush_and_into_inner(mut self) -> std::io::Result<W> {
+        self.flush().await?;
         let Self { buf, writer } = self;
         assert!(buf.is_some());
         Ok(writer)
     }
 
-    pub async fn write_buffered<B: IoBuf>(
-        &mut self,
-        chunk: Slice<B>,
-        ctx: &RequestContext,
-    ) -> std::io::Result<(usize, B)>
+    pub async fn write_buffered<B: IoBuf>(&mut self, chunk: Slice<B>) -> std::io::Result<(usize, B)>
     where
         B: IoBuf + Send,
     {
         let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
         if chunk.len() >= BUFFER_SIZE {
-            self.flush(ctx).await?;
+            self.flush().await?;
             // do a big write, bypassing `buf`
             assert_eq!(
                 self.buf
@@ -101,7 +84,7 @@ where
                     .len(),
                 0
             );
-            let (nwritten, chunk) = self.writer.write_all(chunk, ctx).await?;
+            let (nwritten, chunk) = self.writer.write_all(chunk).await?;
             assert_eq!(nwritten, chunk_len);
             return Ok((nwritten, chunk));
         }
@@ -117,7 +100,7 @@ where
             slice = &slice[n..];
             if buf.len() >= BUFFER_SIZE {
                 assert_eq!(buf.len(), BUFFER_SIZE);
-                self.flush(ctx).await?;
+                self.flush().await?;
             }
         }
         assert!(slice.is_empty(), "by now we should have drained the chunk");
@@ -126,11 +109,7 @@ where
 
     /// Always goes through the internal buffer.
     /// Guaranteed to never invoke [`OwnedAsyncWrite::write_all_borrowed`] on the underlying.
-    pub async fn write_all_borrowed(
-        &mut self,
-        mut chunk: &[u8],
-        ctx: &RequestContext,
-    ) -> std::io::Result<usize> {
+    pub async fn write_all_borrowed(&mut self, mut chunk: &[u8]) -> std::io::Result<usize> {
         let chunk_len = chunk.len();
         while !chunk.is_empty() {
             let buf = self.buf.as_mut().expect("must not use after an error");
@@ -141,20 +120,20 @@ where
             chunk = &chunk[n..];
             if buf.len() >= BUFFER_SIZE {
                 assert_eq!(buf.len(), BUFFER_SIZE);
-                self.flush(ctx).await?;
+                self.flush().await?;
             }
         }
         Ok(chunk_len)
     }
 
-    async fn flush(&mut self, ctx: &RequestContext) -> std::io::Result<()> {
+    async fn flush(&mut self) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
         if buf.is_empty() {
             self.buf = Some(buf);
             return std::io::Result::Ok(());
         }
         let buf_len = buf.len();
-        let (nwritten, mut buf) = self.writer.write_all(buf, ctx).await?;
+        let (nwritten, mut buf) = self.writer.write_all(buf).await?;
         assert_eq!(nwritten, buf_len);
         buf.clear();
         self.buf = Some(buf);
@@ -166,41 +145,27 @@ impl<const BUFFER_SIZE: usize, W: OwnedAsyncWriter> OwnedAsyncWriter
     for BufferedWriter<BUFFER_SIZE, W>
 {
     #[inline(always)]
-    async fn write_all<
-        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
-        Buf: IoBuf + Send,
-        Bounds: std::ops::RangeBounds<usize>,
-    >(
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
             return Ok((0, Slice::into_inner(buf.slice_full())));
         }
         let slice = buf.slice(0..nbytes);
-        BufferedWriter::write_buffered(self, slice, ctx).await
+        BufferedWriter::write_buffered(self, slice).await
     }
     #[inline(always)]
-    async fn write_all_borrowed(
-        &mut self,
-        buf: &[u8],
-        ctx: &RequestContext,
-    ) -> std::io::Result<usize> {
-        BufferedWriter::write_all_borrowed(self, buf, ctx).await
+    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        BufferedWriter::write_all_borrowed(self, buf).await
     }
 }
 
 impl OwnedAsyncWriter for Vec<u8> {
-    async fn write_all<
-        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
-        Buf: IoBuf + Send,
-        Bounds: std::ops::RangeBounds<usize>,
-    >(
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        _: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
@@ -211,12 +176,8 @@ impl OwnedAsyncWriter for Vec<u8> {
         Ok((buf.len(), Slice::into_inner(buf)))
     }
 
-    async fn write_all_borrowed(
-        &mut self,
-        buf: &[u8],
-        _ctx: &RequestContext,
-    ) -> std::io::Result<usize> {
-        self.extend_from_slice(buf);
+    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.extend_from_slice(&buf[..]);
         Ok(buf.len())
     }
 }
@@ -224,22 +185,15 @@ impl OwnedAsyncWriter for Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{DownloadBehavior, RequestContext};
-    use crate::task_mgr::TaskKind;
 
     #[derive(Default)]
     struct RecorderWriter {
         writes: Vec<Vec<u8>>,
     }
     impl OwnedAsyncWriter for RecorderWriter {
-        async fn write_all<
-            B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
-            Buf: IoBuf + Send,
-            Bounds: std::ops::RangeBounds<usize>,
-        >(
+        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
             &mut self,
             buf: B,
-            _: &RequestContext,
         ) -> std::io::Result<(usize, B::Buf)> {
             let nbytes = buf.bytes_init();
             if nbytes == 0 {
@@ -251,24 +205,16 @@ mod tests {
             Ok((buf.len(), Slice::into_inner(buf)))
         }
 
-        async fn write_all_borrowed(
-            &mut self,
-            buf: &[u8],
-            _: &RequestContext,
-        ) -> std::io::Result<usize> {
+        async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.writes.push(Vec::from(buf));
             Ok(buf.len())
         }
     }
 
-    fn test_ctx() -> RequestContext {
-        RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
-    }
-
     macro_rules! write {
         ($writer:ident, $data:literal) => {{
             $writer
-                .write_buffered(::bytes::Bytes::from_static($data).slice_full(), &test_ctx())
+                .write_buffered(::bytes::Bytes::from_static($data).slice_full())
                 .await?;
         }};
     }
@@ -282,7 +228,7 @@ mod tests {
         write!(writer, b"c");
         write!(writer, b"d");
         write!(writer, b"e");
-        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
+        let recorder = writer.flush_and_into_inner().await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"ab"), Vec::from(b"cd"), Vec::from(b"e")]
@@ -298,7 +244,7 @@ mod tests {
         write!(writer, b"de");
         write!(writer, b"");
         write!(writer, b"fghijk");
-        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
+        let recorder = writer.flush_and_into_inner().await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"abc"), Vec::from(b"de"), Vec::from(b"fghijk")]
@@ -314,7 +260,7 @@ mod tests {
         write!(writer, b"bc");
         write!(writer, b"d");
         write!(writer, b"e");
-        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
+        let recorder = writer.flush_and_into_inner().await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"a"), Vec::from(b"bc"), Vec::from(b"de")]
@@ -326,23 +272,23 @@ mod tests {
     async fn test_write_all_borrowed_always_goes_through_buffer() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
         let mut writer = BufferedWriter::<2, _>::new(recorder);
-        let ctx = test_ctx();
-        writer.write_all_borrowed(b"abc", &ctx).await?;
-        writer.write_all_borrowed(b"d", &ctx).await?;
-        writer.write_all_borrowed(b"e", &ctx).await?;
-        writer.write_all_borrowed(b"fg", &ctx).await?;
-        writer.write_all_borrowed(b"hi", &ctx).await?;
-        writer.write_all_borrowed(b"j", &ctx).await?;
-        writer.write_all_borrowed(b"klmno", &ctx).await?;
 
-        let recorder = writer.flush_and_into_inner(&ctx).await?;
+        writer.write_all_borrowed(b"abc").await?;
+        writer.write_all_borrowed(b"d").await?;
+        writer.write_all_borrowed(b"e").await?;
+        writer.write_all_borrowed(b"fg").await?;
+        writer.write_all_borrowed(b"hi").await?;
+        writer.write_all_borrowed(b"j").await?;
+        writer.write_all_borrowed(b"klmno").await?;
+
+        let recorder = writer.flush_and_into_inner().await?;
         assert_eq!(
             recorder.writes,
             {
                 let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o"];
                 expect
             }
-            .iter()
+            .into_iter()
             .map(|v| v[..].to_vec())
             .collect::<Vec<_>>()
         );

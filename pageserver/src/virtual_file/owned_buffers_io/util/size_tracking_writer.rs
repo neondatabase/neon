@@ -1,4 +1,4 @@
-use crate::{context::RequestContext, virtual_file::owned_buffers_io::write::OwnedAsyncWriter};
+use crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter;
 use tokio_epoll_uring::{BoundedBuf, IoBuf};
 
 pub struct Writer<W> {
@@ -21,7 +21,6 @@ impl<W> Writer<W> {
     }
     /// Returns the wrapped `VirtualFile` object as well as the number
     /// of bytes that were written to it through this object.
-    #[allow(dead_code)]
     pub fn into_inner(self) -> (u64, W) {
         (self.bytes_amount, self.dst)
     }
@@ -32,27 +31,18 @@ where
     W: OwnedAsyncWriter,
 {
     #[inline(always)]
-    async fn write_all<
-        B: BoundedBuf<Buf = Buf, Bounds = Bounds>,
-        Buf: IoBuf + Send,
-        Bounds: std::ops::RangeBounds<usize>,
-    >(
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
-        let (nwritten, buf) = self.dst.write_all(buf, ctx).await?;
+        let (nwritten, buf) = self.dst.write_all(buf).await?;
         self.bytes_amount += u64::try_from(nwritten).unwrap();
         Ok((nwritten, buf))
     }
 
     #[inline(always)]
-    async fn write_all_borrowed(
-        &mut self,
-        buf: &[u8],
-        ctx: &RequestContext,
-    ) -> std::io::Result<usize> {
-        let nwritten = self.dst.write_all_borrowed(buf, ctx).await?;
+    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let nwritten = self.dst.write_all_borrowed(buf).await?;
         self.bytes_amount += u64::try_from(nwritten).unwrap();
         Ok(nwritten)
     }
