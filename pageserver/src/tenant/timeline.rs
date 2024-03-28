@@ -78,7 +78,7 @@ use crate::{
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 use crate::{
-    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
+    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind, ReplOrigins},
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 
@@ -367,6 +367,8 @@ pub struct Timeline {
 
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
+
+    pub(crate) repl_origins: tokio::sync::Mutex<Option<ReplOrigins>>,
 }
 
 pub struct WalReceiverInfo {
@@ -1794,6 +1796,8 @@ impl Timeline {
                     dir: None,
                     n_deltas: 0,
                 }),
+
+                repl_origins: tokio::sync::Mutex::new(None),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;

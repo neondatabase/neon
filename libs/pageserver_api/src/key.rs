@@ -227,6 +227,9 @@ impl Key {
 // AuxFiles:
 // 03 00000000 00000000 00000000 00   00000002
 //
+// ReplOrigin:
+// 03 00000000 00000000 00000000 00   00000003
+//
 
 //-- Section 01: relation data and metadata
 
@@ -470,6 +473,15 @@ pub const AUX_FILES_KEY: Key = Key {
     field4: 0,
     field5: 0,
     field6: 2,
+};
+
+pub const REPL_ORIGIN_KEY: Key = Key {
+    field1: 0x03,
+    field2: 0,
+    field3: 0,
+    field4: 0,
+    field5: 0,
+    field6: 3,
 };
 
 // Reverse mappings for a few Keys.

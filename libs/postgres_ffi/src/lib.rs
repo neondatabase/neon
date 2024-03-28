@@ -110,6 +110,7 @@ pub mod pg_constants;
 pub mod relfile_utils;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
+pub use v14::bindings::RepOriginId;
 pub use v14::bindings::{uint32, uint64, Oid};
 pub use v14::bindings::{BlockNumber, OffsetNumber};
 pub use v14::bindings::{MultiXactId, TransactionId};
