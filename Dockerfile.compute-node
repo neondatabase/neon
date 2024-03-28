@@ -804,6 +804,28 @@ RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.0.1.tar.gz
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_partman.control
 
 #########################################################################################
+# Layer "pg_tracing"
+# compile pg_tracing extension
+#
+#########################################################################################
+FROM build-deps AS pg-tracing-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ARG PG_VERSION
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        echo "pg_tracing not supported on this PostgreSQL version." && exit 0;; \
+      *) \
+      ;; \
+    esac && \
+    wget https://github.com/DataDog/pg_tracing/archive/89a8192825e1522a7314a407f34e9d1ce9bec276.tar.gz -O pg_tracing.tar.gz && \
+    echo "319685a1d829fb5d7e3015e84996bbf38b502559b82ceebba01c42810342e253 pg_tracing.tar.gz" | sha256sum --check && \
+    mkdir pg_tracing-src && cd pg_tracing-src && tar xvzf ../pg_tracing.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install
+
+#########################################################################################
 #
 # Layer "neon-pg-ext-build"
 # compile neon extensions
@@ -846,6 +868,7 @@ COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
 COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-tracing-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
