@@ -4268,6 +4268,8 @@ impl Timeline {
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
     ) -> anyhow::Result<GcResult> {
+        // FIXME: if there is an ongoing timeline_detach, we should just skip gc
+
         let now = SystemTime::now();
         let mut result: GcResult = GcResult::default();
 
