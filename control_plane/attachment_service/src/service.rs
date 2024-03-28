@@ -3409,6 +3409,14 @@ impl Service {
                     .join(",")
             );
 
+            // Optimization: publish heatmaps immediately, so that secondary locations can start warming up.
+            for child in child_ids {
+                if let Err(e) = client.tenant_heatmap_upload(*child).await {
+                    // Non-fatal, this is just an optimization
+                    tracing::warn!("Failed to upload child {child} heatmap: {e}");
+                }
+            }
+
             if &response.new_shards != child_ids {
                 // This should never happen: the pageserver should agree with us on how shard splits work.
                 return Err(ApiError::InternalServerError(anyhow::anyhow!(
