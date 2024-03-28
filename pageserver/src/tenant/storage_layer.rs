@@ -3,7 +3,7 @@
 pub mod delta_layer;
 mod filename;
 pub mod image_layer;
-mod inmemory_layer;
+pub(crate) mod inmemory_layer;
 pub(crate) mod layer;
 mod layer_desc;
 
@@ -20,6 +20,7 @@ use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::models::{
     LayerAccessKind, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use std::borrow::Cow;
 use std::cmp::{Ordering, Reverse};
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
@@ -427,7 +428,7 @@ impl LayerAccessStatFullDetails {
         } = self;
         pageserver_api::models::LayerAccessStatFullDetails {
             when_millis_since_epoch: system_time_to_millis_since_epoch(when),
-            task_kind: task_kind.into(), // into static str, powered by strum_macros
+            task_kind: Cow::Borrowed(task_kind.into()), // into static str, powered by strum_macros
             access_kind: *access_kind,
         }
     }
@@ -525,7 +526,7 @@ impl LayerAccessStats {
                 .collect(),
             task_kind_access_flag: task_kind_flag
                 .iter()
-                .map(|task_kind| task_kind.into()) // into static str, powered by strum_macros
+                .map(|task_kind| Cow::Borrowed(task_kind.into())) // into static str, powered by strum_macros
                 .collect(),
             first: first_access.as_ref().map(|a| a.as_api_model()),
             accesses_history: last_accesses.map(|m| m.as_api_model()),

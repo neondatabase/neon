@@ -302,9 +302,9 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             RoleAction::Create => {
                 // This branch only runs when roles are created through the console, so it is
                 // safe to add more permissions here. BYPASSRLS and REPLICATION are inherited
-                // from neon_superuser. (NOTE: REPLICATION has been removed from here for now).
+                // from neon_superuser.
                 let mut query: String = format!(
-                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS IN ROLE neon_superuser",
+                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("running role create query: '{}'", &query);
@@ -743,19 +743,21 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
     // which may happen in two cases:
     // - extension was just installed
     // - extension was already installed and is up to date
-    let query = "ALTER EXTENSION neon UPDATE";
-    info!("update neon extension version with query: {}", query);
-    client.simple_query(query)?;
+    // DISABLED due to compute node unpinning epic
+    // let query = "ALTER EXTENSION neon UPDATE";
+    // info!("update neon extension version with query: {}", query);
+    // client.simple_query(query)?;
 
     Ok(())
 }
 
 #[instrument(skip_all)]
-pub fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
-    info!("handle neon extension upgrade");
-    let query = "ALTER EXTENSION neon UPDATE";
-    info!("update neon extension version with query: {}", query);
-    client.simple_query(query)?;
+pub fn handle_neon_extension_upgrade(_client: &mut Client) -> Result<()> {
+    info!("handle neon extension upgrade (not really)");
+    // DISABLED due to compute node unpinning epic
+    // let query = "ALTER EXTENSION neon UPDATE";
+    // info!("update neon extension version with query: {}", query);
+    // client.simple_query(query)?;
 
     Ok(())
 }
@@ -804,19 +806,8 @@ $$;"#,
         "",
         "",
         "",
+        "",
         // Add new migrations below.
-        r#"
-DO $$
-DECLARE
-    role_name TEXT;
-BEGIN
-    FOR role_name IN SELECT rolname FROM pg_roles WHERE rolreplication IS TRUE
-    LOOP
-        RAISE NOTICE 'EXECUTING ALTER ROLE % NOREPLICATION', quote_ident(role_name);
-        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOREPLICATION';
-    END LOOP;
-END
-$$;"#,
     ];
 
     let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";

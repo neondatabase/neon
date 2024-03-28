@@ -11,6 +11,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Iterable,
     List,
     Optional,
     Tuple,
@@ -447,3 +448,39 @@ def humantime_to_ms(humantime: str) -> float:
             )
 
     return round(total_ms, 3)
+
+
+def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List[Tuple[int, str]]:
+    error_or_warn = re.compile(r"\s(ERROR|WARN)")
+    errors = []
+    for lineno, line in enumerate(input, start=1):
+        if len(line) == 0:
+            continue
+
+        if error_or_warn.search(line):
+            # Is this a torn log line?  This happens when force-killing a process and restarting
+            # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
+            if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
+                continue
+
+            # It's an ERROR or WARN. Is it in the allow-list?
+            for a in allowed_errors:
+                if re.match(a, line):
+                    break
+            else:
+                errors.append((lineno, line))
+    return errors
+
+
+def assert_no_errors(log_file, service, allowed_errors):
+    if not log_file.exists():
+        log.warning(f"Skipping {service} log check: {log_file} does not exist")
+        return
+
+    with log_file.open("r") as f:
+        errors = scan_log_for_errors(f, allowed_errors)
+
+    for _lineno, error in errors:
+        log.info(f"not allowed {service} error: {error.strip()}")
+
+    assert not errors, f"Log errors on {service}: {errors[0]}"

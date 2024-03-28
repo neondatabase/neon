@@ -324,11 +324,11 @@ extern "C" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) {
     }
 }
 
-extern "C" fn process_safekeeper_feedback(wp: *mut WalProposer) {
+extern "C" fn process_safekeeper_feedback(wp: *mut WalProposer, sk: *mut Safekeeper) {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).process_safekeeper_feedback(&mut (*wp))
+        (*api).process_safekeeper_feedback(&mut (*wp), &mut (*sk));
     }
 }
 

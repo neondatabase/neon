@@ -23,7 +23,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
-from fixtures.types import TenantId, TimelineId
+from fixtures.types import TenantId, TenantShardId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
@@ -88,6 +88,11 @@ def test_sharding_service_smoke(
     # Creating several tenants should spread out across the pageservers
     for tid in tenant_ids:
         env.neon_cli.create_tenant(tid, shard_count=shards_per_tenant)
+
+    # Repeating a creation should be idempotent (we are just testing it doesn't return an error)
+    env.storage_controller.tenant_create(
+        tenant_id=next(iter(tenant_ids)), shard_count=shards_per_tenant
+    )
 
     for node_id, count in get_node_shard_counts(env, tenant_ids).items():
         # we used a multiple of pagservers for the total shard count,
@@ -177,6 +182,7 @@ def test_node_status_after_restart(
     assert len(nodes) == 2
 
     env.pageservers[1].stop()
+    env.storage_controller.allowed_errors.extend([".*Could not scan node"])
 
     env.storage_controller.stop()
     env.storage_controller.start()
@@ -681,6 +687,9 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
     tenant_id = TenantId.generate()
     body: Dict[str, Any] = {"new_tenant_id": str(tenant_id)}
 
+    env.storage_controller.allowed_errors.append(".*Unauthorized.*")
+    env.storage_controller.allowed_errors.append(".*Forbidden.*")
+
     # No token
     with pytest.raises(
         StorageControllerApiException,
@@ -769,3 +778,240 @@ def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
     assert "pitr_interval" not in readback_ps.tenant_specific_overrides
 
     env.storage_controller.consistency_check()
+
+
+class Failure:
+    pageserver_id: int
+
+    def apply(self, env: NeonEnv):
+        raise NotImplementedError()
+
+    def clear(self, env: NeonEnv):
+        raise NotImplementedError()
+
+
+class NodeStop(Failure):
+    def __init__(self, pageserver_id, immediate):
+        self.pageserver_id = pageserver_id
+        self.immediate = immediate
+
+    def apply(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.stop(immediate=self.immediate)
+
+    def clear(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.start()
+
+
+class PageserverFailpoint(Failure):
+    def __init__(self, failpoint, pageserver_id):
+        self.failpoint = failpoint
+        self.pageserver_id = pageserver_id
+
+    def apply(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.http_client().configure_failpoints((self.failpoint, "return(1)"))
+
+    def clear(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.http_client().configure_failpoints((self.failpoint, "off"))
+
+
+def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
+    tenants = env.storage_controller.tenant_list()
+
+    node_to_tenants: dict[int, list[TenantId]] = {}
+    for t in tenants:
+        for node_id, loc_state in t["observed"]["locations"].items():
+            if (
+                loc_state is not None
+                and "conf" in loc_state
+                and loc_state["conf"] is not None
+                and loc_state["conf"]["mode"] == "AttachedSingle"
+            ):
+                crnt = node_to_tenants.get(int(node_id), [])
+                crnt.append(TenantId(t["tenant_shard_id"]))
+                node_to_tenants[int(node_id)] = crnt
+
+    return node_to_tenants
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        NodeStop(pageserver_id=1, immediate=False),
+        NodeStop(pageserver_id=1, immediate=True),
+        PageserverFailpoint(pageserver_id=1, failpoint="get-utilization-http-handler"),
+    ],
+)
+def test_sharding_service_heartbeats(
+    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, failure: Failure
+):
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # Default log allow list permits connection errors, but this test will use error responses on
+    # the utilization endpoint.
+    env.storage_controller.allowed_errors.append(
+        ".*Call to node.*management API.*failed.*failpoint.*"
+    )
+
+    # Initially we have two online pageservers
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 2
+    assert all([n["availability"] == "Active" for n in nodes])
+
+    # ... then we create two tenants and write some data into them
+    def create_tenant(tid: TenantId):
+        env.storage_controller.tenant_create(tid)
+
+        branch_name = "main"
+        env.neon_cli.create_timeline(
+            branch_name,
+            tenant_id=tid,
+        )
+
+        with env.endpoints.create_start("main", tenant_id=tid) as endpoint:
+            run_pg_bench_small(pg_bin, endpoint.connstr())
+            endpoint.safe_psql("CREATE TABLE created_foo(id integer);")
+
+    tenant_ids = [TenantId.generate(), TenantId.generate()]
+    for tid in tenant_ids:
+        create_tenant(tid)
+
+    # ... expecting that each tenant will be placed on a different node
+    def tenants_placed():
+        node_to_tenants = build_node_to_tenants_map(env)
+        log.info(f"{node_to_tenants=}")
+
+        # Check that all the tenants have been attached
+        assert sum((len(ts) for ts in node_to_tenants.values())) == len(tenant_ids)
+        # Check that each node got one tenant
+        assert all((len(ts) == 1 for ts in node_to_tenants.values()))
+
+    wait_until(10, 1, tenants_placed)
+
+    # ... then we apply the failure
+    offline_node_id = failure.pageserver_id
+    online_node_id = (set(range(1, len(env.pageservers) + 1)) - {offline_node_id}).pop()
+    env.get_pageserver(offline_node_id).allowed_errors.append(
+        # In the case of the failpoint failure, the impacted pageserver
+        # still believes it has the tenant attached since location
+        # config calls into it will fail due to being marked offline.
+        ".*Dropped remote consistent LSN updates.*",
+    )
+
+    failure.apply(env)
+
+    # ... expecting the heartbeats to mark it offline
+    def node_offline():
+        nodes = env.storage_controller.node_list()
+        log.info(f"{nodes=}")
+        target = next(n for n in nodes if n["id"] == offline_node_id)
+        assert target["availability"] == "Offline"
+
+    # A node is considered offline if the last successful heartbeat
+    # was more than 10 seconds ago (hardcoded in the storage controller).
+    wait_until(20, 1, node_offline)
+
+    # .. expecting the tenant on the offline node to be migrated
+    def tenant_migrated():
+        node_to_tenants = build_node_to_tenants_map(env)
+        log.info(f"{node_to_tenants=}")
+        assert set(node_to_tenants[online_node_id]) == set(tenant_ids)
+
+    wait_until(10, 1, tenant_migrated)
+
+    # ... then we clear the failure
+    failure.clear(env)
+
+    # ... expecting the offline node to become active again
+    def node_online():
+        nodes = env.storage_controller.node_list()
+        target = next(n for n in nodes if n["id"] == offline_node_id)
+        assert target["availability"] == "Active"
+
+    wait_until(10, 1, node_online)
+
+    time.sleep(5)
+
+    # ... then we create a new tenant
+    tid = TenantId.generate()
+    env.storage_controller.tenant_create(tid)
+
+    # ... expecting it to be placed on the node that just came back online
+    tenants = env.storage_controller.tenant_list()
+    newest_tenant = next(t for t in tenants if t["tenant_shard_id"] == str(tid))
+    locations = list(newest_tenant["observed"]["locations"].keys())
+    locations = [int(node_id) for node_id in locations]
+    assert locations == [offline_node_id]
+
+    # ... expecting the storage controller to reach a consistent state
+    def storage_controller_consistent():
+        env.storage_controller.consistency_check()
+
+    wait_until(10, 1, storage_controller_consistent)
+
+
+def test_sharding_service_re_attach(neon_env_builder: NeonEnvBuilder):
+    """
+    Exercise the behavior of the /re-attach endpoint on pageserver startup when
+    pageservers have a mixture of attached and secondary locations
+    """
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # We'll have two tenants.
+    tenant_a = TenantId.generate()
+    env.neon_cli.create_tenant(tenant_a, placement_policy='{"Attached":1}')
+    tenant_b = TenantId.generate()
+    env.neon_cli.create_tenant(tenant_b, placement_policy='{"Attached":1}')
+
+    # Each pageserver will have one attached and one secondary location
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(tenant_a, 0, 0), env.pageservers[0].id
+    )
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(tenant_b, 0, 0), env.pageservers[1].id
+    )
+
+    # Hard-fail a pageserver
+    victim_ps = env.pageservers[1]
+    survivor_ps = env.pageservers[0]
+    victim_ps.stop(immediate=True)
+
+    # Heatbeater will notice it's offline, and consequently attachments move to the other pageserver
+    def failed_over():
+        locations = survivor_ps.http_client().tenant_list_locations()["tenant_shards"]
+        log.info(f"locations: {locations}")
+        assert len(locations) == 2
+        assert all(loc[1]["mode"] == "AttachedSingle" for loc in locations)
+
+    # We could pre-empty this by configuring the node to Offline, but it's preferable to test
+    # the realistic path we would take when a node restarts uncleanly.
+    # The delay here will be ~NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL in neon_local
+    wait_until(30, 1, failed_over)
+
+    reconciles_before_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+
+    # Restart the failed pageserver
+    victim_ps.start()
+
+    # We expect that the re-attach call correctly tipped off the pageserver that its locations
+    # are all secondaries now.
+    locations = victim_ps.http_client().tenant_list_locations()["tenant_shards"]
+    assert len(locations) == 2
+    assert all(loc[1]["mode"] == "Secondary" for loc in locations)
+
+    # We expect that this situation resulted from the re_attach call, and not any explicit
+    # Reconciler runs: assert that the reconciliation count has not gone up since we restarted.
+    reconciles_after_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+    assert reconciles_after_restart == reconciles_before_restart

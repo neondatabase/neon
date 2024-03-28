@@ -51,6 +51,7 @@ pub struct EvictionTaskTenantState {
 impl Timeline {
     pub(super) fn launch_eviction_task(
         self: &Arc<Self>,
+        parent: Arc<Tenant>,
         background_tasks_can_start: Option<&completion::Barrier>,
     ) {
         let self_clone = Arc::clone(self);
@@ -72,14 +73,14 @@ impl Timeline {
                     _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
                 };
 
-                self_clone.eviction_task(cancel).await;
+                self_clone.eviction_task(parent, cancel).await;
                 Ok(())
             },
         );
     }
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
-    async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
+    async fn eviction_task(self: Arc<Self>, tenant: Arc<Tenant>, cancel: CancellationToken) {
         use crate::tenant::tasks::random_init_delay;
 
         // acquire the gate guard only once within a useful span
@@ -103,7 +104,7 @@ impl Timeline {
         loop {
             let policy = self.get_eviction_policy();
             let cf = self
-                .eviction_iteration(&policy, &cancel, &guard, &ctx)
+                .eviction_iteration(&tenant, &policy, &cancel, &guard, &ctx)
                 .await;
 
             match cf {
@@ -123,6 +124,7 @@ impl Timeline {
     #[instrument(skip_all, fields(policy_kind = policy.discriminant_str()))]
     async fn eviction_iteration(
         self: &Arc<Self>,
+        tenant: &Tenant,
         policy: &EvictionPolicy,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -137,7 +139,7 @@ impl Timeline {
             }
             EvictionPolicy::LayerAccessThreshold(p) => {
                 match self
-                    .eviction_iteration_threshold(p, cancel, gate, ctx)
+                    .eviction_iteration_threshold(tenant, p, cancel, gate, ctx)
                     .await
                 {
                     ControlFlow::Break(()) => return ControlFlow::Break(()),
@@ -146,7 +148,11 @@ impl Timeline {
                 (p.period, p.threshold)
             }
             EvictionPolicy::OnlyImitiate(p) => {
-                if self.imitiate_only(p, cancel, gate, ctx).await.is_break() {
+                if self
+                    .imitiate_only(tenant, p, cancel, gate, ctx)
+                    .await
+                    .is_break()
+                {
                     return ControlFlow::Break(());
                 }
                 (p.period, p.threshold)
@@ -175,6 +181,7 @@ impl Timeline {
 
     async fn eviction_iteration_threshold(
         self: &Arc<Self>,
+        tenant: &Tenant,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -193,7 +200,10 @@ impl Timeline {
             _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
-        match self.imitate_layer_accesses(p, cancel, gate, ctx).await {
+        match self
+            .imitate_layer_accesses(tenant, p, cancel, gate, ctx)
+            .await
+        {
             ControlFlow::Break(()) => return ControlFlow::Break(()),
             ControlFlow::Continue(()) => (),
         }
@@ -225,24 +235,18 @@ impl Timeline {
         {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
-            for hist_layer in layers.iter_historic_layers() {
-                let hist_layer = guard.get_from_desc(&hist_layer);
+            for layer in layers.iter_historic_layers() {
+                let layer = guard.get_from_desc(&layer);
 
                 // guard against eviction while we inspect it; it might be that eviction_task and
                 // disk_usage_eviction_task both select the same layers to be evicted, and
                 // seemingly free up double the space. both succeeding is of no consequence.
-                let guard = match hist_layer.keep_resident().await {
-                    Ok(Some(l)) => l,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        // these should not happen, but we cannot make them statically impossible right
-                        // now.
-                        tracing::warn!(layer=%hist_layer, "failed to keep the layer resident: {e:#}");
-                        continue;
-                    }
-                };
 
-                let last_activity_ts = hist_layer.access_stats().latest_activity_or_now();
+                if !layer.is_likely_resident() {
+                    continue;
+                }
+
+                let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
@@ -265,9 +269,8 @@ impl Timeline {
                         continue;
                     }
                 };
-                let layer = guard.drop_eviction_guard();
+
                 if no_activity_for > p.threshold {
-                    // this could cause a lot of allocations in some cases
                     js.spawn(async move {
                         layer
                             .evict_and_wait(std::time::Duration::from_secs(5))
@@ -322,6 +325,7 @@ impl Timeline {
     /// disk usage based eviction task.
     async fn imitiate_only(
         self: &Arc<Self>,
+        tenant: &Tenant,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -338,7 +342,8 @@ impl Timeline {
             _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
-        self.imitate_layer_accesses(p, cancel, gate, ctx).await
+        self.imitate_layer_accesses(tenant, p, cancel, gate, ctx)
+            .await
     }
 
     /// If we evict layers but keep cached values derived from those layers, then
@@ -368,6 +373,7 @@ impl Timeline {
     #[instrument(skip_all)]
     async fn imitate_layer_accesses(
         &self,
+        tenant: &Tenant,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -403,17 +409,11 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_shard_id, true) {
-            Ok(t) => t,
-            Err(_) => {
-                return ControlFlow::Break(());
-            }
-        };
         let mut state = tenant.eviction_task_tenant_state.lock().await;
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_synthetic_size_calculation_worker(&tenant, cancel, ctx)
+                self.imitate_synthetic_size_calculation_worker(tenant, cancel, ctx)
                     .await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now());
             }
@@ -487,7 +487,7 @@ impl Timeline {
     #[instrument(skip_all)]
     async fn imitate_synthetic_size_calculation_worker(
         &self,
-        tenant: &Arc<Tenant>,
+        tenant: &Tenant,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) {

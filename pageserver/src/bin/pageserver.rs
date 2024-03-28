@@ -1,3 +1,5 @@
+#![recursion_limit = "300"]
+
 //! Main entry point for the Page Server executable.
 
 use std::env::{var, VarError};
@@ -117,6 +119,9 @@ fn main() -> anyhow::Result<()> {
         Some(GIT_VERSION.into()),
         &[("node_id", &conf.id.to_string())],
     );
+
+    // after setting up logging, log the effective IO engine choice
+    info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
@@ -312,6 +317,7 @@ fn start_pageserver(
     let http_listener = tcp_listener::bind(http_addr)?;
 
     let pg_addr = &conf.listen_pg_addr;
+
     info!("Starting pageserver pg protocol handler on {pg_addr}");
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
@@ -544,7 +550,7 @@ fn start_pageserver(
         let router_state = Arc::new(
             http::routes::State::new(
                 conf,
-                tenant_manager,
+                tenant_manager.clone(),
                 http_auth.clone(),
                 remote_storage.clone(),
                 broker_client.clone(),
@@ -594,32 +600,37 @@ fn start_pageserver(
             None,
             "consumption metrics collection",
             true,
-            async move {
-                // first wait until background jobs are cleared to launch.
-                //
-                // this is because we only process active tenants and timelines, and the
-                // Timeline::get_current_logical_size will spawn the logical size calculation,
-                // which will not be rate-limited.
-                let cancel = task_mgr::shutdown_token();
+            {
+                let tenant_manager = tenant_manager.clone();
+                async move {
+                    // first wait until background jobs are cleared to launch.
+                    //
+                    // this is because we only process active tenants and timelines, and the
+                    // Timeline::get_current_logical_size will spawn the logical size calculation,
+                    // which will not be rate-limited.
+                    let cancel = task_mgr::shutdown_token();
 
-                tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); },
-                    _ = background_jobs_barrier.wait() => {}
-                };
+                    tokio::select! {
+                        _ = cancel.cancelled() => { return Ok(()); },
+                        _ = background_jobs_barrier.wait() => {}
+                    };
 
-                pageserver::consumption_metrics::collect_metrics(
-                    metric_collection_endpoint,
-                    conf.metric_collection_interval,
-                    conf.cached_metric_collection_interval,
-                    conf.synthetic_size_calculation_interval,
-                    conf.id,
-                    local_disk_storage,
-                    cancel,
-                    metrics_ctx,
-                )
-                .instrument(info_span!("metrics_collection"))
-                .await?;
-                Ok(())
+                    pageserver::consumption_metrics::collect_metrics(
+                        tenant_manager,
+                        metric_collection_endpoint,
+                        &conf.metric_collection_bucket,
+                        conf.metric_collection_interval,
+                        conf.cached_metric_collection_interval,
+                        conf.synthetic_size_calculation_interval,
+                        conf.id,
+                        local_disk_storage,
+                        cancel,
+                        metrics_ctx,
+                    )
+                    .instrument(info_span!("metrics_collection"))
+                    .await?;
+                    Ok(())
+                }
             },
         );
     }
@@ -688,6 +699,7 @@ fn start_pageserver(
                 let bg_remote_storage = remote_storage.clone();
                 let bg_deletion_queue = deletion_queue.clone();
                 BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
+                    &tenant_manager,
                     bg_remote_storage.map(|_| bg_deletion_queue),
                     0,
                 ));

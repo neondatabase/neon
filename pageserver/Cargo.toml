@@ -59,6 +59,7 @@ signal-hook.workspace = true
 smallvec = { workspace = true, features = ["write"] }
 svg_fmt.workspace = true
 sync_wrapper.workspace = true
+sysinfo.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
@@ -88,6 +89,9 @@ enum-map.workspace = true
 enumset = { workspace = true, features = ["serde"]}
 strum.workspace = true
 strum_macros.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

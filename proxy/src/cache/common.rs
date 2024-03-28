@@ -43,6 +43,16 @@ impl<C: Cache, V> Cached<C, V> {
         Self { token: None, value }
     }
 
+    pub fn take_value(self) -> (Cached<C, ()>, V) {
+        (
+            Cached {
+                token: self.token,
+                value: (),
+            },
+            self.value,
+        )
+    }
+
     /// Drop this entry from a cache if it's still there.
     pub fn invalidate(self) -> V {
         if let Some((cache, info)) = &self.token {

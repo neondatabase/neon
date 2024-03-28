@@ -167,7 +167,7 @@ impl GetVectoredLatency {
 pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_get_vectored_seconds",
-        "Time spent in get_vectored",
+        "Time spent in get_vectored, excluding time spent in timeline_get_throttle.",
         &["task_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
@@ -435,7 +435,7 @@ pub(crate) static RESIDENT_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| 
 static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_remote_physical_size",
-        "The size of the layer files present in the remote storage that are listed in the the remote index_part.json.",
+        "The size of the layer files present in the remote storage that are listed in the remote index_part.json.",
         // Corollary: If any files are missing from the index part, they won't be included here.
         &["tenant_id", "shard_id", "timeline_id"]
     )
@@ -697,6 +697,14 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
         "1 while in initial startup load of tenants, 0 at other times"
     )
     .expect("Failed to register pageserver_startup_is_loading")
+});
+
+pub(crate) static TIMELINE_EPHEMERAL_BYTES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_timeline_ephemeral_bytes",
+        "Total number of bytes in ephemeral layers, summed for all timelines.  Approximate, lazily updated."
+    )
+    .expect("Failed to register metric")
 });
 
 /// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
@@ -2465,7 +2473,8 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
 }
 
 pub mod tokio_epoll_uring {
-    use metrics::UIntGauge;
+    use metrics::{register_int_counter, UIntGauge};
+    use once_cell::sync::Lazy;
 
     pub struct Collector {
         descs: Vec<metrics::core::Desc>,
@@ -2473,15 +2482,13 @@ pub mod tokio_epoll_uring {
         systems_destroyed: UIntGauge,
     }
 
-    const NMETRICS: usize = 2;
-
     impl metrics::core::Collector for Collector {
         fn desc(&self) -> Vec<&metrics::core::Desc> {
             self.descs.iter().collect()
         }
 
         fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
-            let mut mfs = Vec::with_capacity(NMETRICS);
+            let mut mfs = Vec::with_capacity(Self::NMETRICS);
             let tokio_epoll_uring::metrics::Metrics {
                 systems_created,
                 systems_destroyed,
@@ -2495,6 +2502,8 @@ pub mod tokio_epoll_uring {
     }
 
     impl Collector {
+        const NMETRICS: usize = 2;
+
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             let mut descs = Vec::new();
@@ -2528,6 +2537,22 @@ pub mod tokio_epoll_uring {
             }
         }
     }
+
+    pub(crate) static THREAD_LOCAL_LAUNCH_SUCCESSES: Lazy<metrics::IntCounter> = Lazy::new(|| {
+        register_int_counter!(
+            "pageserver_tokio_epoll_uring_pageserver_thread_local_launch_success_count",
+            "Number of times where thread_local_system creation spanned multiple executor threads",
+        )
+        .unwrap()
+    });
+
+    pub(crate) static THREAD_LOCAL_LAUNCH_FAILURES: Lazy<metrics::IntCounter> = Lazy::new(|| {
+        register_int_counter!(
+            "pageserver_tokio_epoll_uring_pageserver_thread_local_launch_failures_count",
+            "Number of times thread_local_system creation failed and was retried after back-off.",
+        )
+        .unwrap()
+    });
 }
 
 pub(crate) mod tenant_throttling {
@@ -2656,6 +2681,8 @@ pub fn preinitialize_metrics() {
         &WALRECEIVER_BROKER_UPDATES,
         &WALRECEIVER_CANDIDATES_ADDED,
         &WALRECEIVER_CANDIDATES_REMOVED,
+        &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_FAILURES,
+        &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_SUCCESSES,
     ]
     .into_iter()
     .for_each(|c| {

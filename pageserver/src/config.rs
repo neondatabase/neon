@@ -30,18 +30,17 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
-use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::timeline::GetVectoredImpl;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
-use crate::virtual_file;
+use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
+use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{
     IGNORED_TENANT_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
-    TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
+    TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
 };
 
 use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
@@ -95,6 +94,8 @@ pub mod defaults {
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
+
+    pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     ///
     /// Default built-in configuration file.
@@ -156,6 +157,8 @@ pub mod defaults {
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
 #secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
+
+#ephemeral_bytes_per_memory_kb = {DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB}
 
 [remote_storage]
 
@@ -235,6 +238,7 @@ pub struct PageServerConf {
     // How often to send unchanged cached metrics to the metrics endpoint.
     pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
+    pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
 
     pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
@@ -279,6 +283,13 @@ pub struct PageServerConf {
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
     pub validate_vectored_get: bool,
+
+    /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
+    /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
+    /// of ephemeral data.
+    ///
+    /// Setting this to zero disables limits on total ephemeral layer size.
+    pub ephemeral_bytes_per_memory_kb: usize,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -291,16 +302,23 @@ pub static SAFEKEEPER_AUTH_TOKEN: OnceCell<Arc<String>> = OnceCell::new();
 
 // use dedicated enum for builder to better indicate the intention
 // and avoid possible confusion with nested options
+#[derive(Clone, Default)]
 pub enum BuilderValue<T> {
     Set(T),
+    #[default]
     NotSet,
 }
 
-impl<T> BuilderValue<T> {
-    pub fn ok_or<E>(self, err: E) -> Result<T, E> {
+impl<T: Clone> BuilderValue<T> {
+    pub fn ok_or(&self, field_name: &'static str, default: BuilderValue<T>) -> anyhow::Result<T> {
         match self {
-            Self::Set(v) => Ok(v),
-            Self::NotSet => Err(err),
+            Self::Set(v) => Ok(v.clone()),
+            Self::NotSet => match default {
+                BuilderValue::Set(v) => Ok(v.clone()),
+                BuilderValue::NotSet => {
+                    anyhow::bail!("missing config value {field_name:?}")
+                }
+            },
         }
     }
 }
@@ -326,6 +344,7 @@ pub(crate) struct NodeMetadata {
 }
 
 // needed to simplify config construction
+#[derive(Default)]
 struct PageServerConfigBuilder {
     listen_pg_addr: BuilderValue<String>,
 
@@ -366,6 +385,7 @@ struct PageServerConfigBuilder {
     cached_metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
+    metric_collection_bucket: BuilderValue<Option<RemoteStorageConfig>>,
 
     disk_usage_based_eviction: BuilderValue<Option<DiskUsageEvictionTaskConfig>>,
 
@@ -391,10 +411,13 @@ struct PageServerConfigBuilder {
     max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
 
     validate_vectored_get: BuilderValue<bool>,
+
+    ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
 }
 
-impl Default for PageServerConfigBuilder {
-    fn default() -> Self {
+impl PageServerConfigBuilder {
+    #[inline(always)]
+    fn default_values() -> Self {
         use self::BuilderValue::*;
         use defaults::*;
         Self {
@@ -447,6 +470,8 @@ impl Default for PageServerConfigBuilder {
             .expect("cannot parse default synthetic size calculation interval")),
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
 
+            metric_collection_bucket: Set(None),
+
             disk_usage_based_eviction: Set(None),
 
             test_remote_failures: Set(0),
@@ -474,6 +499,7 @@ impl Default for PageServerConfigBuilder {
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
+            ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
         }
     }
 }
@@ -578,6 +604,13 @@ impl PageServerConfigBuilder {
         self.metric_collection_endpoint = BuilderValue::Set(metric_collection_endpoint)
     }
 
+    pub fn metric_collection_bucket(
+        &mut self,
+        metric_collection_bucket: Option<RemoteStorageConfig>,
+    ) {
+        self.metric_collection_bucket = BuilderValue::Set(metric_collection_bucket)
+    }
+
     pub fn synthetic_size_calculation_interval(
         &mut self,
         synthetic_size_calculation_interval: Duration,
@@ -646,126 +679,103 @@ impl PageServerConfigBuilder {
         self.validate_vectored_get = BuilderValue::Set(value);
     }
 
+    pub fn get_ephemeral_bytes_per_memory_kb(&mut self, value: usize) {
+        self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
-        let concurrent_tenant_warmup = self
-            .concurrent_tenant_warmup
-            .ok_or(anyhow!("missing concurrent_tenant_warmup"))?;
-        let concurrent_tenant_size_logical_size_queries = self
-            .concurrent_tenant_size_logical_size_queries
-            .ok_or(anyhow!(
-                "missing concurrent_tenant_size_logical_size_queries"
-            ))?;
-        Ok(PageServerConf {
-            listen_pg_addr: self
-                .listen_pg_addr
-                .ok_or(anyhow!("missing listen_pg_addr"))?,
-            listen_http_addr: self
-                .listen_http_addr
-                .ok_or(anyhow!("missing listen_http_addr"))?,
-            availability_zone: self
-                .availability_zone
-                .ok_or(anyhow!("missing availability_zone"))?,
-            wait_lsn_timeout: self
-                .wait_lsn_timeout
-                .ok_or(anyhow!("missing wait_lsn_timeout"))?,
-            wal_redo_timeout: self
-                .wal_redo_timeout
-                .ok_or(anyhow!("missing wal_redo_timeout"))?,
-            superuser: self.superuser.ok_or(anyhow!("missing superuser"))?,
-            page_cache_size: self
-                .page_cache_size
-                .ok_or(anyhow!("missing page_cache_size"))?,
-            max_file_descriptors: self
-                .max_file_descriptors
-                .ok_or(anyhow!("missing max_file_descriptors"))?,
-            workdir: self.workdir.ok_or(anyhow!("missing workdir"))?,
-            pg_distrib_dir: self
-                .pg_distrib_dir
-                .ok_or(anyhow!("missing pg_distrib_dir"))?,
-            http_auth_type: self
-                .http_auth_type
-                .ok_or(anyhow!("missing http_auth_type"))?,
-            pg_auth_type: self.pg_auth_type.ok_or(anyhow!("missing pg_auth_type"))?,
-            auth_validation_public_key_path: self
-                .auth_validation_public_key_path
-                .ok_or(anyhow!("missing auth_validation_public_key_path"))?,
-            remote_storage_config: self
-                .remote_storage_config
-                .ok_or(anyhow!("missing remote_storage_config"))?,
-            id: self.id.ok_or(anyhow!("missing id"))?,
-            // TenantConf is handled separately
-            default_tenant_conf: TenantConf::default(),
-            broker_endpoint: self
-                .broker_endpoint
-                .ok_or(anyhow!("No broker endpoints provided"))?,
-            broker_keepalive_interval: self
-                .broker_keepalive_interval
-                .ok_or(anyhow!("No broker keepalive interval provided"))?,
-            log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
-            concurrent_tenant_warmup: ConfigurableSemaphore::new(concurrent_tenant_warmup),
-            concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
-                concurrent_tenant_size_logical_size_queries,
-            ),
-            eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
-                concurrent_tenant_size_logical_size_queries,
-            ),
-            metric_collection_interval: self
-                .metric_collection_interval
-                .ok_or(anyhow!("missing metric_collection_interval"))?,
-            cached_metric_collection_interval: self
-                .cached_metric_collection_interval
-                .ok_or(anyhow!("missing cached_metric_collection_interval"))?,
-            metric_collection_endpoint: self
-                .metric_collection_endpoint
-                .ok_or(anyhow!("missing metric_collection_endpoint"))?,
-            synthetic_size_calculation_interval: self
-                .synthetic_size_calculation_interval
-                .ok_or(anyhow!("missing synthetic_size_calculation_interval"))?,
-            disk_usage_based_eviction: self
-                .disk_usage_based_eviction
-                .ok_or(anyhow!("missing disk_usage_based_eviction"))?,
-            test_remote_failures: self
-                .test_remote_failures
-                .ok_or(anyhow!("missing test_remote_failuers"))?,
-            ondemand_download_behavior_treat_error_as_warn: self
-                .ondemand_download_behavior_treat_error_as_warn
-                .ok_or(anyhow!(
-                    "missing ondemand_download_behavior_treat_error_as_warn"
-                ))?,
-            background_task_maximum_delay: self
-                .background_task_maximum_delay
-                .ok_or(anyhow!("missing background_task_maximum_delay"))?,
-            control_plane_api: self
-                .control_plane_api
-                .ok_or(anyhow!("missing control_plane_api"))?,
-            control_plane_api_token: self
-                .control_plane_api_token
-                .ok_or(anyhow!("missing control_plane_api_token"))?,
-            control_plane_emergency_mode: self
-                .control_plane_emergency_mode
-                .ok_or(anyhow!("missing control_plane_emergency_mode"))?,
-            heatmap_upload_concurrency: self
-                .heatmap_upload_concurrency
-                .ok_or(anyhow!("missing heatmap_upload_concurrency"))?,
-            secondary_download_concurrency: self
-                .secondary_download_concurrency
-                .ok_or(anyhow!("missing secondary_download_concurrency"))?,
-            ingest_batch_size: self
-                .ingest_batch_size
-                .ok_or(anyhow!("missing ingest_batch_size"))?,
-            virtual_file_io_engine: self
-                .virtual_file_io_engine
-                .ok_or(anyhow!("missing virtual_file_io_engine"))?,
-            get_vectored_impl: self
-                .get_vectored_impl
-                .ok_or(anyhow!("missing get_vectored_impl"))?,
-            max_vectored_read_bytes: self
-                .max_vectored_read_bytes
-                .ok_or(anyhow!("missing max_vectored_read_bytes"))?,
-            validate_vectored_get: self
-                .validate_vectored_get
-                .ok_or(anyhow!("missing validate_vectored_get"))?,
-        })
+        let default = Self::default_values();
+
+        macro_rules! conf {
+            (USING DEFAULT { $($field:ident,)* } CUSTOM LOGIC { $($custom_field:ident : $custom_value:expr,)* } ) => {
+                PageServerConf {
+                    $(
+                        $field: self.$field.ok_or(stringify!($field), default.$field)?,
+                    )*
+                    $(
+                        $custom_field: $custom_value,
+                    )*
+                }
+            };
+        }
+
+        Ok(conf!(
+            USING DEFAULT
+            {
+                listen_pg_addr,
+                listen_http_addr,
+                availability_zone,
+                wait_lsn_timeout,
+                wal_redo_timeout,
+                superuser,
+                page_cache_size,
+                max_file_descriptors,
+                workdir,
+                pg_distrib_dir,
+                http_auth_type,
+                pg_auth_type,
+                auth_validation_public_key_path,
+                remote_storage_config,
+                id,
+                broker_endpoint,
+                broker_keepalive_interval,
+                log_format,
+                metric_collection_interval,
+                cached_metric_collection_interval,
+                metric_collection_endpoint,
+                metric_collection_bucket,
+                synthetic_size_calculation_interval,
+                disk_usage_based_eviction,
+                test_remote_failures,
+                ondemand_download_behavior_treat_error_as_warn,
+                background_task_maximum_delay,
+                control_plane_api,
+                control_plane_api_token,
+                control_plane_emergency_mode,
+                heatmap_upload_concurrency,
+                secondary_download_concurrency,
+                ingest_batch_size,
+                get_vectored_impl,
+                max_vectored_read_bytes,
+                validate_vectored_get,
+                ephemeral_bytes_per_memory_kb,
+            }
+            CUSTOM LOGIC
+            {
+                // TenantConf is handled separately
+                default_tenant_conf: TenantConf::default(),
+                concurrent_tenant_warmup: ConfigurableSemaphore::new({
+                    self
+                        .concurrent_tenant_warmup
+                        .ok_or("concurrent_tenant_warmpup",
+                               default.concurrent_tenant_warmup)?
+                }),
+                concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
+                    self
+                        .concurrent_tenant_size_logical_size_queries
+                        .ok_or("concurrent_tenant_size_logical_size_queries",
+                               default.concurrent_tenant_size_logical_size_queries.clone())?
+                ),
+                eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
+                    // re-use `concurrent_tenant_size_logical_size_queries`
+                    self
+                        .concurrent_tenant_size_logical_size_queries
+                        .ok_or("eviction_task_immitated_concurrent_logical_size_queries",
+                               default.concurrent_tenant_size_logical_size_queries.clone())?,
+                ),
+                virtual_file_io_engine: match self.virtual_file_io_engine {
+                    BuilderValue::Set(v) => v,
+                    BuilderValue::NotSet => match crate::virtual_file::io_engine_feature_test().context("auto-detect virtual_file_io_engine")? {
+                        io_engine::FeatureTestResult::PlatformPreferred(v) => v, // make no noise
+                        io_engine::FeatureTestResult::Worse { engine, remark } => {
+                            // TODO: bubble this up to the caller so we can tracing::warn! it.
+                            eprintln!("auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}");
+                            engine
+                        }
+                    },
+                },
+            }
+        ))
     }
 }
 
@@ -845,18 +855,7 @@ impl PageServerConf {
             .join(timeline_id.to_string())
     }
 
-    pub fn timeline_uninit_mark_file_path(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-    ) -> Utf8PathBuf {
-        path_with_suffix_extension(
-            self.timeline_path(&tenant_shard_id, &timeline_id),
-            TIMELINE_UNINIT_MARK_SUFFIX,
-        )
-    }
-
-    pub fn timeline_delete_mark_file_path(
+    pub(crate) fn timeline_delete_mark_file_path(
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
@@ -867,7 +866,10 @@ impl PageServerConf {
         )
     }
 
-    pub fn tenant_deleted_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+    pub(crate) fn tenant_deleted_mark_file_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> Utf8PathBuf {
         self.tenant_path(tenant_shard_id)
             .join(TENANT_DELETED_MARKER_FILE_NAME)
     }
@@ -971,6 +973,9 @@ impl PageServerConf {
                     let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
                     builder.metric_collection_endpoint(Some(endpoint));
                 },
+                "metric_collection_bucket" => {
+                    builder.metric_collection_bucket(RemoteStorageConfig::from_toml(item)?)
+                }
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
@@ -1023,6 +1028,9 @@ impl PageServerConf {
                 }
                 "validate_vectored_get" => {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
+                }
+                "ephemeral_bytes_per_memory_kb" => {
+                    builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
                 }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
@@ -1086,6 +1094,7 @@ impl PageServerConf {
             metric_collection_interval: Duration::from_secs(60),
             cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+            metric_collection_bucket: None,
             synthetic_size_calculation_interval: Duration::from_secs(60),
             disk_usage_based_eviction: None,
             test_remote_failures: 0,
@@ -1104,6 +1113,7 @@ impl PageServerConf {
                     .expect("Invalid default constant"),
             ),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+            ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
         }
     }
 }
@@ -1318,6 +1328,7 @@ background_task_maximum_delay = '334 s'
                     defaults::DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL
                 )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+                metric_collection_bucket: None,
                 synthetic_size_calculation_interval: humantime::parse_duration(
                     defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
                 )?,
@@ -1340,6 +1351,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1392,6 +1404,7 @@ background_task_maximum_delay = '334 s'
                 metric_collection_interval: Duration::from_secs(222),
                 cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
+                metric_collection_bucket: None,
                 synthetic_size_calculation_interval: Duration::from_secs(333),
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,
@@ -1410,6 +1423,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB
             },
             "Should be able to parse all basic config values correctly"
         );

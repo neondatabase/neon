@@ -16,9 +16,7 @@ use crate::{
     tenant::{
         debug_assert_current_span_has_tenant_and_timeline_id,
         metadata::TimelineMetadata,
-        remote_timeline_client::{
-            self, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
-        },
+        remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, Tenant,
     },
 };
@@ -50,19 +48,7 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
 
     // Prevent new uploads from starting.
     if let Some(remote_client) = timeline.remote_client.as_ref() {
-        let res = remote_client.stop();
-        match res {
-            Ok(()) => {}
-            Err(e) => match e {
-                remote_timeline_client::StopError::QueueUninitialized => {
-                    // This case shouldn't happen currently because the
-                    // load and attach code bails out if _any_ of the timeline fails to fetch its IndexPart.
-                    // That is, before we declare the Tenant as Active.
-                    // But we only allow calls to delete_timeline on Active tenants.
-                    return Err(DeleteTimelineError::Other(anyhow::anyhow!("upload queue is uninitialized, likely the timeline was in Broken state prior to this call because it failed to fetch IndexPart during load or attach, check the logs")));
-                }
-            },
-        }
+        remote_client.stop();
     }
 
     // Stop & wait for the remaining timeline tasks, including upload tasks.

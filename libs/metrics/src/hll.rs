@@ -40,7 +40,7 @@ macro_rules! register_hll {
     }};
 
     ($N:literal, $NAME:expr, $HELP:expr $(,)?) => {{
-        $crate::register_hll!($N, $crate::opts!($NAME, $HELP), $LABELS_NAMES)
+        $crate::register_hll!($N, $crate::opts!($NAME, $HELP))
     }};
 }
 

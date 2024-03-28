@@ -2,13 +2,16 @@
 
 use std::convert::Infallible;
 
-use postgres_protocol::authentication::sasl::ScramSha256;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use tokio::task::yield_now;
 
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
 };
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
+use super::ScramKey;
 use crate::config;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
@@ -71,40 +74,62 @@ impl<'a> Exchange<'a> {
     }
 }
 
-pub fn exchange(
+// copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
+async fn pbkdf2(str: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let hmac = Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
+    let mut prev = hmac
+        .clone()
+        .chain_update(salt)
+        .chain_update(1u32.to_be_bytes())
+        .finalize()
+        .into_bytes();
+
+    let mut hi = prev;
+
+    for i in 1..iterations {
+        prev = hmac.clone().chain_update(prev).finalize().into_bytes();
+
+        for (hi, prev) in hi.iter_mut().zip(prev) {
+            *hi ^= prev;
+        }
+        // yield every ~250us
+        // hopefully reduces tail latencies
+        if i % 1024 == 0 {
+            yield_now().await
+        }
+    }
+
+    hi.into()
+}
+
+// copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L236-L248>
+async fn derive_client_key(password: &[u8], salt: &[u8], iterations: u32) -> ScramKey {
+    let salted_password = pbkdf2(password, salt, iterations).await;
+
+    let make_key = |name| {
+        let key = Hmac::<Sha256>::new_from_slice(&salted_password)
+            .expect("HMAC is able to accept all key sizes")
+            .chain_update(name)
+            .finalize();
+
+        <[u8; 32]>::from(key.into_bytes())
+    };
+
+    make_key(b"Client Key").into()
+}
+
+pub async fn exchange(
     secret: &ServerSecret,
-    mut client: ScramSha256,
-    tls_server_end_point: config::TlsServerEndPoint,
+    password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
-    use sasl::Step::*;
+    let salt = base64::decode(&secret.salt_base64)?;
+    let client_key = derive_client_key(password, &salt, secret.iterations).await;
 
-    let init = SaslInitial {
-        nonce: rand::random,
-    };
-
-    let client_first = std::str::from_utf8(client.message())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let sent = match init.transition(secret, &tls_server_end_point, client_first)? {
-        Continue(sent, server_first) => {
-            client.update(server_first.as_bytes())?;
-            sent
-        }
-        Success(x, _) => match x {},
-        Failure(msg) => return Ok(sasl::Outcome::Failure(msg)),
-    };
-
-    let client_final = std::str::from_utf8(client.message())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let keys = match sent.transition(secret, &tls_server_end_point, client_final)? {
-        Success(keys, server_final) => {
-            client.finish(server_final.as_bytes())?;
-            keys
-        }
-        Continue(x, _) => match x {},
-        Failure(msg) => return Ok(sasl::Outcome::Failure(msg)),
-    };
-
-    Ok(sasl::Outcome::Success(keys))
+    if secret.is_password_invalid(&client_key).into() {
+        Ok(sasl::Outcome::Failure("password doesn't match"))
+    } else {
+        Ok(sasl::Outcome::Success(client_key))
+    }
 }
 
 impl SaslInitial {
@@ -185,7 +210,7 @@ impl SaslSentInner {
             .derive_client_key(&client_final_message.proof);
 
         // Auth fails either if keys don't match or it's pre-determined to fail.
-        if client_key.sha256() != secret.stored_key || secret.doomed {
+        if secret.is_password_invalid(&client_key).into() {
             return Ok(sasl::Step::Failure("password doesn't match"));
         }
 

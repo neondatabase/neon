@@ -225,6 +225,7 @@ async fn write_segment(
     assert!(from <= to);
     assert!(to <= wal_seg_size);
 
+    #[allow(clippy::suspicious_open_options)]
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)

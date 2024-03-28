@@ -6,13 +6,14 @@ use super::{
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
     NodeInfo,
 };
-use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
+use crate::{
+    auth::backend::ComputeUserInfo, compute, console::messages::ColdStartInfo, http, scram,
+};
 use crate::{
     cache::Cached,
     context::RequestMonitoring,
     metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
 };
-use async_trait::async_trait;
 use futures::TryFutureExt;
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -54,7 +55,7 @@ impl Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = ctx.session_id.to_string();
         let application_name = ctx.console_application_name();
         async {
             let request = self
@@ -72,7 +73,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetRoleSecret>(response).await {
                 Ok(body) => body,
@@ -109,7 +112,7 @@ impl Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = ctx.session_id.to_string();
         let application_name = ctx.console_application_name();
         async {
             let mut request_builder = self
@@ -132,7 +135,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response).await?;
 
@@ -162,7 +167,6 @@ impl Api {
     }
 }
 
-#[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
@@ -244,6 +248,8 @@ impl super::Api for Api {
         // which means that we might cache it to reduce the load and latency.
         if let Some(cached) = self.caches.node_info.get(&key) {
             info!(key = &*key, "found cached compute node info");
+            info!("cold_start_info=warm");
+            ctx.set_cold_start_info(ColdStartInfo::Warm);
             return Ok(cached);
         }
 
@@ -254,6 +260,8 @@ impl super::Api for Api {
         if permit.should_check_cache() {
             if let Some(cached) = self.caches.node_info.get(&key) {
                 info!(key = &*key, "found cached compute node info");
+                info!("cold_start_info=warm");
+                ctx.set_cold_start_info(ColdStartInfo::Warm);
                 return Ok(cached);
             }
         }

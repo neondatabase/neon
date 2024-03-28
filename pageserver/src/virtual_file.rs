@@ -29,6 +29,8 @@ use tokio::time::Instant;
 
 pub use pageserver_api::models::virtual_file as api;
 pub(crate) mod io_engine;
+pub use io_engine::feature_test as io_engine_feature_test;
+pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
 pub(crate) use io_engine::IoEngineKind;
@@ -783,7 +785,7 @@ where
         }
     }
     // NB: don't use `buf.is_empty()` here; it is from the
-    // `impl Deref for Slice { Target = [u8] }`; the the &[u8]
+    // `impl Deref for Slice { Target = [u8] }`; the &[u8]
     // returned by it only covers the initialized portion of `buf`.
     // Whereas we're interested in ensuring that we filled the entire
     // buffer that the user passed in.

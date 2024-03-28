@@ -238,6 +238,10 @@ def test_forward_compatibility(
             pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
 
+        # TODO: remove this workaround after release-5090 is no longer the most recent release.
+        # There was a bug in that code that generates a warning in the storage controller log.
+        env.storage_controller.allowed_errors.append(".*no tenant_shard_id specified.*")
+
         # Use current neon_local even though we're using old binaries for
         # everything else: our test code is written for latest CLI args.
         env.neon_local_binpath = neon_local_binpath
@@ -263,9 +267,10 @@ def test_forward_compatibility(
 
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
     ep = env.endpoints.create_start("main")
+    connstr = ep.connstr()
+
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
 
-    connstr = ep.connstr()
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"]
     )
@@ -281,6 +286,9 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     pg_version = env.pg_version
+
+    # Stop endpoint while we recreate timeline
+    ep.stop()
 
     try:
         pageserver_http.timeline_preserve_initdb_archive(tenant_id, timeline_id)
@@ -305,6 +313,9 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
         new_timeline_id=timeline_id,
         existing_initdb_timeline_id=timeline_id,
     )
+
+    # Timeline exists again: restart the endpoint
+    ep.start()
 
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
