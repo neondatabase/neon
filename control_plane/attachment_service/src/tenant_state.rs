@@ -723,6 +723,11 @@ impl TenantState {
         scheduler: &mut Scheduler,
         optimization: ScheduleOptimization,
     ) {
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_schedule_optimization
+            .inc();
+
         match optimization {
             ScheduleOptimization::MigrateAttachment(MigrateAttachment {
                 old_attached_node_id,
