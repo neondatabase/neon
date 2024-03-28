@@ -3884,9 +3884,6 @@ impl Service {
     /// Helper for methods that will try and call pageserver APIs for
     /// a tenant, such as timeline CRUD: they cannot proceed unless the tenant
     /// is attached somewhere.
-    ///
-    /// TODO: this doesn't actually ensure attached unless the PlacementPolicy is
-    /// an attached policy.  We should error out if it isn't.
     fn ensure_attached_schedule(
         &self,
         mut locked: std::sync::RwLockWriteGuard<'_, ServiceState>,
@@ -3895,10 +3892,26 @@ impl Service {
         let mut waiters = Vec::new();
         let (nodes, tenants, scheduler) = locked.parts_mut();
 
-        for (_tenant_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
+        for (tenant_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
             shard.schedule(scheduler)?;
 
+            // The shard's policies may not result in an attached location being scheduled: this
+            // is an error because our caller needs it attached somewhere.
+            if shard.intent.get_attached().is_none() {
+                return Err(anyhow::anyhow!(
+                    "Tenant {tenant_id} not scheduled to be attached"
+                ));
+            };
+
+            if shard.stably_attached().is_some() {
+                // We do not require the shard to be totally up to date on reconciliation: we just require
+                // that it has been attached on the intended node.   Other dirty state such as unattached secondary
+                // locations, or compute hook notifications can be ignored.
+                continue;
+            }
+
             if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                tracing::info!("Waiting for shard {tenant_shard_id} to reconcile, in order to ensure it is attached");
                 waiters.push(waiter);
             }
         }
