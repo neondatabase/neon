@@ -1,5 +1,11 @@
+use crate::metrics::{
+    HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, PageserverRequestLabelGroup,
+    METRICS_REGISTRY,
+};
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use futures::Future;
+use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{
@@ -28,11 +34,14 @@ use utils::{
 };
 
 use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantShardMigrateRequest,
+    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantPolicyRequest,
+    TenantShardMigrateRequest,
 };
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
 
 use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
+
+use routerify::Middleware;
 
 /// State available to HTTP request handlers
 #[derive(Clone)]
@@ -313,7 +322,7 @@ async fn handle_tenant_timeline_passthrough(
     tracing::info!("Proxying request for tenant {} ({})", tenant_id, path);
 
     // Find the node that holds shard zero
-    let (base_url, tenant_shard_id) = service.tenant_shard0_baseurl(tenant_id)?;
+    let (node, tenant_shard_id) = service.tenant_shard0_node(tenant_id)?;
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
     // rewrite this to a shard-aware shard zero ID.
@@ -322,11 +331,38 @@ async fn handle_tenant_timeline_passthrough(
     let tenant_shard_str = format!("{}", tenant_shard_id);
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
-    let client = mgmt_api::Client::new(base_url, service.get_config().jwt_token.as_deref());
+    let latency = &METRICS_REGISTRY
+        .metrics_group
+        .storage_controller_passthrough_request_latency;
+
+    // This is a bit awkward. We remove the param from the request
+    // and join the words by '_' to get a label for the request.
+    let just_path = path.replace(&tenant_shard_str, "");
+    let path_label = just_path
+        .split('/')
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    let labels = PageserverRequestLabelGroup {
+        pageserver_id: &node.get_id().to_string(),
+        path: &path_label,
+        method: crate::metrics::Method::Get,
+    };
+
+    let _timer = latency.start_timer(labels.clone());
+
+    let client = mgmt_api::Client::new(node.base_url(), service.get_config().jwt_token.as_deref());
     let resp = client.get_raw(path).await.map_err(|_e|
         // FIXME: give APiError a proper Unavailable variant.  We return 503 here because
         // if we can't successfully send a request to the pageserver, we aren't available.
         ApiError::ShuttingDown)?;
+
+    if !resp.status().is_success() {
+        let error_counter = &METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_passthrough_request_error;
+        error_counter.inc(labels);
+    }
 
     // We have a reqest::Response, would like a http::Response
     let mut builder = hyper::Response::builder()
@@ -443,6 +479,22 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
+async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let update_req = json_request::<TenantPolicyRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state
+            .service
+            .tenant_update_policy(tenant_id, update_req)
+            .await?,
+    )
+}
+
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
@@ -474,6 +526,14 @@ async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, 
     json_response(StatusCode::OK, state.service.consistency_check().await?)
 }
 
+async fn handle_reconcile_all(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+
+    json_response(StatusCode::OK, state.service.reconcile_all_now().await?)
+}
+
 /// Status endpoint is just used for checking that our HTTP listener is up
 async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, ())
@@ -498,7 +558,11 @@ impl From<ReconcileError> for ApiError {
 
 /// Common wrapper for request handlers that call into Service and will operate on tenants: they must only
 /// be allowed to run if Service has finished its initial reconciliation.
-async fn tenant_service_handler<R, H>(request: Request<Body>, handler: H) -> R::Output
+async fn tenant_service_handler<R, H>(
+    request: Request<Body>,
+    handler: H,
+    request_name: RequestName,
+) -> R::Output
 where
     R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
     H: FnOnce(Arc<Service>, Request<Body>) -> R + Send + Sync + 'static,
@@ -518,9 +582,10 @@ where
         ));
     }
 
-    request_span(
+    named_request_span(
         request,
         |request| async move { handler(service, request).await },
+        request_name,
     )
     .await
 }
@@ -531,11 +596,98 @@ fn check_permissions(request: &Request<Body>, required_scope: Scope) -> Result<(
     })
 }
 
+#[derive(Clone, Debug)]
+struct RequestMeta {
+    method: hyper::http::Method,
+    at: Instant,
+}
+
+fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
+) -> Middleware<B, ApiError> {
+    Middleware::pre(move |req| async move {
+        let meta = RequestMeta {
+            method: req.method().clone(),
+            at: Instant::now(),
+        };
+
+        req.set_context(meta);
+
+        Ok(req)
+    })
+}
+
+fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
+) -> Middleware<B, ApiError> {
+    Middleware::post_with_info(move |resp, req_info| async move {
+        let request_name = match req_info.context::<RequestName>() {
+            Some(name) => name,
+            None => {
+                return Ok(resp);
+            }
+        };
+
+        if let Some(meta) = req_info.context::<RequestMeta>() {
+            let status = &crate::metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_http_request_status;
+            let latency = &crate::metrics::METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_http_request_latency;
+
+            status.inc(HttpRequestStatusLabelGroup {
+                path: request_name.0,
+                method: meta.method.clone().into(),
+                status: crate::metrics::StatusCode(resp.status()),
+            });
+
+            latency.observe(
+                HttpRequestLatencyLabelGroup {
+                    path: request_name.0,
+                    method: meta.method.into(),
+                },
+                meta.at.elapsed().as_secs_f64(),
+            );
+        }
+        Ok(resp)
+    })
+}
+
+pub async fn measured_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    pub const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
+
+    let payload = crate::metrics::METRICS_REGISTRY.encode();
+    let response = Response::builder()
+        .status(200)
+        .header(CONTENT_TYPE, TEXT_FORMAT)
+        .body(payload.into())
+        .unwrap();
+
+    Ok(response)
+}
+
+#[derive(Clone)]
+struct RequestName(&'static str);
+
+async fn named_request_span<R, H>(
+    request: Request<Body>,
+    handler: H,
+    name: RequestName,
+) -> R::Output
+where
+    R: Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
+    H: FnOnce(Request<Body>) -> R + Send + Sync + 'static,
+{
+    request.set_context(name);
+    request_span(request, handler).await
+}
+
 pub fn make_router(
     service: Arc<Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
 ) -> RouterBuilder<hyper::Body, ApiError> {
-    let mut router = endpoint::make_router();
+    let mut router = endpoint::make_router()
+        .middleware(prologue_metrics_middleware())
+        .middleware(epilogue_metrics_middleware());
     if auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             let state = get_state(request);
@@ -544,99 +696,176 @@ pub fn make_router(
             } else {
                 state.auth.as_deref()
             }
-        }))
+        }));
     }
 
     router
         .data(Arc::new(HttpState::new(service, auth)))
+        .get("/metrics", |r| {
+            named_request_span(r, measured_metrics_handler, RequestName("metrics"))
+        })
         // Non-prefixed generic endpoints (status, metrics)
-        .get("/status", |r| request_span(r, handle_status))
-        .get("/ready", |r| request_span(r, handle_ready))
+        .get("/status", |r| {
+            named_request_span(r, handle_status, RequestName("status"))
+        })
+        .get("/ready", |r| {
+            named_request_span(r, handle_ready, RequestName("ready"))
+        })
         // Upcalls for the pageserver: point the pageserver's `control_plane_api` config to this prefix
         .post("/upcall/v1/re-attach", |r| {
-            request_span(r, handle_re_attach)
+            named_request_span(r, handle_re_attach, RequestName("upcall_v1_reattach"))
         })
-        .post("/upcall/v1/validate", |r| request_span(r, handle_validate))
+        .post("/upcall/v1/validate", |r| {
+            named_request_span(r, handle_validate, RequestName("upcall_v1_validate"))
+        })
         // Test/dev/debug endpoints
         .post("/debug/v1/attach-hook", |r| {
-            request_span(r, handle_attach_hook)
+            named_request_span(r, handle_attach_hook, RequestName("debug_v1_attach_hook"))
         })
-        .post("/debug/v1/inspect", |r| request_span(r, handle_inspect))
+        .post("/debug/v1/inspect", |r| {
+            named_request_span(r, handle_inspect, RequestName("debug_v1_inspect"))
+        })
         .post("/debug/v1/tenant/:tenant_id/drop", |r| {
-            request_span(r, handle_tenant_drop)
+            named_request_span(r, handle_tenant_drop, RequestName("debug_v1_tenant_drop"))
         })
         .post("/debug/v1/node/:node_id/drop", |r| {
-            request_span(r, handle_node_drop)
+            named_request_span(r, handle_node_drop, RequestName("debug_v1_node_drop"))
         })
-        .get("/debug/v1/tenant", |r| request_span(r, handle_tenants_dump))
+        .get("/debug/v1/tenant", |r| {
+            named_request_span(r, handle_tenants_dump, RequestName("debug_v1_tenant"))
+        })
         .get("/debug/v1/tenant/:tenant_id/locate", |r| {
-            tenant_service_handler(r, handle_tenant_locate)
+            tenant_service_handler(
+                r,
+                handle_tenant_locate,
+                RequestName("debug_v1_tenant_locate"),
+            )
         })
         .get("/debug/v1/scheduler", |r| {
-            request_span(r, handle_scheduler_dump)
+            named_request_span(r, handle_scheduler_dump, RequestName("debug_v1_scheduler"))
         })
         .post("/debug/v1/consistency_check", |r| {
-            request_span(r, handle_consistency_check)
+            named_request_span(
+                r,
+                handle_consistency_check,
+                RequestName("debug_v1_consistency_check"),
+            )
+        })
+        .post("/debug/v1/reconcile_all", |r| {
+            request_span(r, handle_reconcile_all)
         })
         .put("/debug/v1/failpoints", |r| {
             request_span(r, |r| failpoints_handler(r, CancellationToken::new()))
         })
         // Node operations
         .post("/control/v1/node", |r| {
-            request_span(r, handle_node_register)
+            named_request_span(r, handle_node_register, RequestName("control_v1_node"))
         })
-        .get("/control/v1/node", |r| request_span(r, handle_node_list))
+        .get("/control/v1/node", |r| {
+            named_request_span(r, handle_node_list, RequestName("control_v1_node"))
+        })
         .put("/control/v1/node/:node_id/config", |r| {
-            request_span(r, handle_node_configure)
+            named_request_span(
+                r,
+                handle_node_configure,
+                RequestName("control_v1_node_config"),
+            )
         })
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
-            tenant_service_handler(r, handle_tenant_shard_migrate)
+            tenant_service_handler(
+                r,
+                handle_tenant_shard_migrate,
+                RequestName("control_v1_tenant_migrate"),
+            )
         })
         .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
-            tenant_service_handler(r, handle_tenant_shard_split)
+            tenant_service_handler(
+                r,
+                handle_tenant_shard_split,
+                RequestName("control_v1_tenant_shard_split"),
+            )
         })
         .get("/control/v1/tenant/:tenant_id", |r| {
-            tenant_service_handler(r, handle_tenant_describe)
+            tenant_service_handler(
+                r,
+                handle_tenant_describe,
+                RequestName("control_v1_tenant_describe"),
+            )
+        })
+        .put("/control/v1/tenant/:tenant_id/policy", |r| {
+            named_request_span(
+                r,
+                handle_tenant_update_policy,
+                RequestName("control_v1_tenant_policy"),
+            )
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into
         // this service to manage tenants that actually consist of many tenant shards, as if they are a single entity.
         .post("/v1/tenant", |r| {
-            tenant_service_handler(r, handle_tenant_create)
+            tenant_service_handler(r, handle_tenant_create, RequestName("v1_tenant"))
         })
         .delete("/v1/tenant/:tenant_id", |r| {
-            tenant_service_handler(r, handle_tenant_delete)
+            tenant_service_handler(r, handle_tenant_delete, RequestName("v1_tenant"))
         })
         .put("/v1/tenant/config", |r| {
-            tenant_service_handler(r, handle_tenant_config_set)
+            tenant_service_handler(r, handle_tenant_config_set, RequestName("v1_tenant_config"))
         })
         .get("/v1/tenant/:tenant_id/config", |r| {
-            tenant_service_handler(r, handle_tenant_config_get)
+            tenant_service_handler(r, handle_tenant_config_get, RequestName("v1_tenant_config"))
         })
         .put("/v1/tenant/:tenant_shard_id/location_config", |r| {
-            tenant_service_handler(r, handle_tenant_location_config)
+            tenant_service_handler(
+                r,
+                handle_tenant_location_config,
+                RequestName("v1_tenant_location_config"),
+            )
         })
         .put("/v1/tenant/:tenant_id/time_travel_remote_storage", |r| {
-            tenant_service_handler(r, handle_tenant_time_travel_remote_storage)
+            tenant_service_handler(
+                r,
+                handle_tenant_time_travel_remote_storage,
+                RequestName("v1_tenant_time_travel_remote_storage"),
+            )
         })
         .post("/v1/tenant/:tenant_id/secondary/download", |r| {
-            tenant_service_handler(r, handle_tenant_secondary_download)
+            tenant_service_handler(
+                r,
+                handle_tenant_secondary_download,
+                RequestName("v1_tenant_secondary_download"),
+            )
         })
         // Timeline operations
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
-            tenant_service_handler(r, handle_tenant_timeline_delete)
+            tenant_service_handler(
+                r,
+                handle_tenant_timeline_delete,
+                RequestName("v1_tenant_timeline"),
+            )
         })
         .post("/v1/tenant/:tenant_id/timeline", |r| {
-            tenant_service_handler(r, handle_tenant_timeline_create)
+            tenant_service_handler(
+                r,
+                handle_tenant_timeline_create,
+                RequestName("v1_tenant_timeline"),
+            )
         })
         // Tenant detail GET passthrough to shard zero
         .get("/v1/tenant/:tenant_id", |r| {
-            tenant_service_handler(r, handle_tenant_timeline_passthrough)
+            tenant_service_handler(
+                r,
+                handle_tenant_timeline_passthrough,
+                RequestName("v1_tenant_passthrough"),
+            )
         })
         // Timeline GET passthrough to shard zero.  Note that the `*` in the URL is a wildcard: any future
         // timeline GET APIs will be implicitly included.
         .get("/v1/tenant/:tenant_id/timeline*", |r| {
-            tenant_service_handler(r, handle_tenant_timeline_passthrough)
+            tenant_service_handler(
+                r,
+                handle_tenant_timeline_passthrough,
+                RequestName("v1_tenant_timeline_passthrough"),
+            )
         })
 }

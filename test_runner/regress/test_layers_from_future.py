@@ -53,6 +53,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         "checkpoint_timeout": "24h",  # something we won't reach
         "checkpoint_distance": f"{50 * (1024**2)}",  # something we won't reach, we checkpoint manually
         "image_creation_threshold": "100",  # we want to control when image is created
+        "image_layer_creation_check_threshold": "0",
         "compaction_threshold": f"{l0_l1_threshold}",
         "compaction_target_size": f"{128 * (1024**3)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
     }

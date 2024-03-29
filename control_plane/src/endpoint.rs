@@ -12,7 +12,7 @@
 //!
 //! The endpoint is managed by the `compute_ctl` binary. When an endpoint is
 //! started, we launch `compute_ctl` It synchronizes the safekeepers, downloads
-//! the basebackup from the pageserver to initialize the the data directory, and
+//! the basebackup from the pageserver to initialize the data directory, and
 //! finally launches the PostgreSQL process. It watches the PostgreSQL process
 //! until it exits.
 //!

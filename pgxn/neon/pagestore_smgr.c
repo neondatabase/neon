@@ -613,6 +613,14 @@ prefetch_on_ps_disconnect(void)
 		Assert(slot->status == PRFS_REQUESTED);
 		Assert(slot->my_ring_index == ring_index);
 
+		/*
+		 * Drop connection to all shards which have prefetch requests.
+		 * It is not a problem to call disconnect multiple times on the same connection
+		 * because disconnect implementation in libpagestore.c will check if connection
+		 * is alive and do nothing of connection was already dropped.
+		 */
+		page_server->disconnect(slot->shard_no);
+
 		/* clean up the request */
 		slot->status = PRFS_TAG_REMAINS;
 		MyPState->n_requests_inflight -= 1;
@@ -1680,7 +1688,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_exists", resp->tag);
 	}
 	pfree(resp);
 	return exists;
@@ -1831,7 +1839,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
 		!IsAutoVacuumWorkerProcess())
 	{
-		uint64		current_size = GetZenithCurrentClusterSize();
+		uint64		current_size = GetNeonCurrentClusterSize();
 
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,
@@ -1912,7 +1920,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
 		!IsAutoVacuumWorkerProcess())
 	{
-		uint64		current_size = GetZenithCurrentClusterSize();
+		uint64		current_size = GetNeonCurrentClusterSize();
 
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,
@@ -2216,7 +2224,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_read_at_lsn", resp->tag);
 	}
 
 	/* buffer was used, clean up for later reuse */
@@ -2489,7 +2497,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_nblocks", resp->tag);
 	}
 	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
 
@@ -2544,7 +2552,7 @@ neon_dbsize(Oid dbNode)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_dbsize", resp->tag);
 	}
 
 	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
@@ -2849,7 +2857,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_read_slru_segment", resp->tag);
 	}
 	pfree(resp);
 

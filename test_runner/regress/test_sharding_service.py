@@ -23,7 +23,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
-from fixtures.types import TenantId, TimelineId
+from fixtures.types import TenantId, TenantShardId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
@@ -88,6 +88,11 @@ def test_sharding_service_smoke(
     # Creating several tenants should spread out across the pageservers
     for tid in tenant_ids:
         env.neon_cli.create_tenant(tid, shard_count=shards_per_tenant)
+
+    # Repeating a creation should be idempotent (we are just testing it doesn't return an error)
+    env.storage_controller.tenant_create(
+        tenant_id=next(iter(tenant_ids)), shard_count=shards_per_tenant
+    )
 
     for node_id, count in get_node_shard_counts(env, tenant_ids).items():
         # we used a multiple of pagservers for the total shard count,
@@ -428,10 +433,13 @@ def test_sharding_service_compute_hook(
     # Set up fake HTTP notify endpoint
     notifications = []
 
+    handle_params = {"status": 200}
+
     def handler(request: Request):
-        log.info(f"Notify request: {request}")
+        status = handle_params["status"]
+        log.info(f"Notify request[{status}]: {request}")
         notifications.append(request.json)
-        return Response(status=200)
+        return Response(status=status)
 
     httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
@@ -498,6 +506,24 @@ def test_sharding_service_compute_hook(
         assert notifications[3] == expect
 
     wait_until(10, 1, received_split_notification)
+
+    # If the compute hook is unavailable, that should not block creating a tenant and
+    # creating a timeline.  This simulates a control plane refusing to accept notifications
+    handle_params["status"] = 423
+    degraded_tenant_id = TenantId.generate()
+    degraded_timeline_id = TimelineId.generate()
+    env.storage_controller.tenant_create(degraded_tenant_id)
+    env.storage_controller.pageserver_api().timeline_create(
+        PgVersion.NOT_SET, degraded_tenant_id, degraded_timeline_id
+    )
+
+    # Ensure we hit the handler error path
+    env.storage_controller.allowed_errors.append(
+        ".*Failed to notify compute of attached pageserver.*tenant busy.*"
+    )
+    env.storage_controller.allowed_errors.append(".*Reconcile error.*tenant busy.*")
+    assert notifications[-1] is not None
+    assert notifications[-1]["tenant_id"] == str(degraded_tenant_id)
 
     env.storage_controller.consistency_check()
 
@@ -948,3 +974,160 @@ def test_sharding_service_heartbeats(
         env.storage_controller.consistency_check()
 
     wait_until(10, 1, storage_controller_consistent)
+
+
+def test_sharding_service_re_attach(neon_env_builder: NeonEnvBuilder):
+    """
+    Exercise the behavior of the /re-attach endpoint on pageserver startup when
+    pageservers have a mixture of attached and secondary locations
+    """
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # We'll have two tenants.
+    tenant_a = TenantId.generate()
+    env.neon_cli.create_tenant(tenant_a, placement_policy='{"Attached":1}')
+    tenant_b = TenantId.generate()
+    env.neon_cli.create_tenant(tenant_b, placement_policy='{"Attached":1}')
+
+    # Each pageserver will have one attached and one secondary location
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(tenant_a, 0, 0), env.pageservers[0].id
+    )
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(tenant_b, 0, 0), env.pageservers[1].id
+    )
+
+    # Hard-fail a pageserver
+    victim_ps = env.pageservers[1]
+    survivor_ps = env.pageservers[0]
+    victim_ps.stop(immediate=True)
+
+    # Heatbeater will notice it's offline, and consequently attachments move to the other pageserver
+    def failed_over():
+        locations = survivor_ps.http_client().tenant_list_locations()["tenant_shards"]
+        log.info(f"locations: {locations}")
+        assert len(locations) == 2
+        assert all(loc[1]["mode"] == "AttachedSingle" for loc in locations)
+
+    # We could pre-empty this by configuring the node to Offline, but it's preferable to test
+    # the realistic path we would take when a node restarts uncleanly.
+    # The delay here will be ~NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL in neon_local
+    wait_until(30, 1, failed_over)
+
+    reconciles_before_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+
+    # Restart the failed pageserver
+    victim_ps.start()
+
+    # We expect that the re-attach call correctly tipped off the pageserver that its locations
+    # are all secondaries now.
+    locations = victim_ps.http_client().tenant_list_locations()["tenant_shards"]
+    assert len(locations) == 2
+    assert all(loc[1]["mode"] == "Secondary" for loc in locations)
+
+    # We expect that this situation resulted from the re_attach call, and not any explicit
+    # Reconciler runs: assert that the reconciliation count has not gone up since we restarted.
+    reconciles_after_restart = env.storage_controller.get_metric_value(
+        "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+    )
+    assert reconciles_after_restart == reconciles_before_restart
+
+
+def test_storage_controller_shard_scheduling_policy(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that emergency hooks for disabling rogue tenants' reconcilers work as expected.
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            # We will intentionally cause reconcile errors
+            ".*Reconcile error.*",
+            # Message from using a scheduling policy
+            ".*Scheduling is disabled by policy.*",
+            ".*Skipping reconcile for policy.*",
+            # Message from a node being offline
+            ".*Call to node .* management API .* failed",
+        ]
+    )
+
+    # Stop pageserver so that reconcile cannot complete
+    env.pageserver.stop()
+
+    env.storage_controller.tenant_create(tenant_id, placement_policy="Detached")
+
+    # Try attaching it: we should see reconciles failing
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "placement": {"Attached": 0},
+        },
+    )
+
+    def reconcile_errors() -> int:
+        return int(
+            env.storage_controller.get_metric_value(
+                "storage_controller_reconcile_complete_total", filter={"status": "error"}
+            )
+            or 0
+        )
+
+    def reconcile_ok() -> int:
+        return int(
+            env.storage_controller.get_metric_value(
+                "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+            )
+            or 0
+        )
+
+    def assert_errors_gt(n) -> int:
+        e = reconcile_errors()
+        assert e > n
+        return e
+
+    errs = wait_until(10, 1, lambda: assert_errors_gt(0))
+
+    # Try reconciling again, it should fail again
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.reconcile_all()
+    errs = wait_until(10, 1, lambda: assert_errors_gt(errs))
+
+    # Configure the tenant to disable reconciles
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "scheduling": "Stop",
+        },
+    )
+
+    # Try reconciling again, it should not cause an error (silently skip)
+    env.storage_controller.reconcile_all()
+    assert reconcile_errors() == errs
+
+    # Start the pageserver and re-enable reconciles
+    env.pageserver.start()
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "scheduling": "Active",
+        },
+    )
+
+    def assert_ok_gt(n) -> int:
+        o = reconcile_ok()
+        assert o > n
+        return o
+
+    # We should see a successful reconciliation
+    wait_until(10, 1, lambda: assert_ok_gt(0))
+
+    # And indeed the tenant should be attached
+    assert len(env.pageserver.http_client().tenant_list_locations()["tenant_shards"]) == 1

@@ -14,7 +14,6 @@ use crate::{
     context::RequestMonitoring,
     metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
 };
-use async_trait::async_trait;
 use futures::TryFutureExt;
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -56,7 +55,7 @@ impl Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = ctx.session_id.to_string();
         let application_name = ctx.console_application_name();
         async {
             let request = self
@@ -113,7 +112,7 @@ impl Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = ctx.session_id.to_string();
         let application_name = ctx.console_application_name();
         async {
             let mut request_builder = self
@@ -168,7 +167,6 @@ impl Api {
     }
 }
 
-#[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(

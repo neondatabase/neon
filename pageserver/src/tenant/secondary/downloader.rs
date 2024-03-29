@@ -15,6 +15,7 @@ use crate::{
     tenant::{
         config::SecondaryLocationConfig,
         debug_assert_current_span_has_tenant_and_timeline_id,
+        ephemeral_file::is_ephemeral_file,
         remote_timeline_client::{
             index::LayerFileMetadata, is_temp_download_file, FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
@@ -961,7 +962,10 @@ async fn init_timeline_state(
             // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
             warn!(path=?dentry.path(), "found legacy metadata file, these should have been removed in load_tenant_config");
             continue;
-        } else if crate::is_temporary(&file_path) || is_temp_download_file(&file_path) {
+        } else if crate::is_temporary(&file_path)
+            || is_temp_download_file(&file_path)
+            || is_ephemeral_file(file_name)
+        {
             // Temporary files are frequently left behind from restarting during downloads
             tracing::info!("Cleaning up temporary file {file_path}");
             if let Err(e) = tokio::fs::remove_file(&file_path)

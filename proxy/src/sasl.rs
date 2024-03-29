@@ -33,6 +33,9 @@ pub enum Error {
     #[error("Internal error: missing digest")]
     MissingBinding,
 
+    #[error("could not decode salt: {0}")]
+    Base64(#[from] base64::DecodeError),
+
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -55,6 +58,7 @@ impl ReportableError for Error {
             Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
             Error::BadClientMessage(_) => crate::error::ErrorKind::User,
             Error::MissingBinding => crate::error::ErrorKind::Service,
+            Error::Base64(_) => crate::error::ErrorKind::ControlPlane,
             Error::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }

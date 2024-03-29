@@ -435,7 +435,7 @@ pub(crate) static RESIDENT_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| 
 static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_remote_physical_size",
-        "The size of the layer files present in the remote storage that are listed in the the remote index_part.json.",
+        "The size of the layer files present in the remote storage that are listed in the remote index_part.json.",
         // Corollary: If any files are missing from the index part, they won't be included here.
         &["tenant_id", "shard_id", "timeline_id"]
     )
@@ -697,6 +697,14 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
         "1 while in initial startup load of tenants, 0 at other times"
     )
     .expect("Failed to register pageserver_startup_is_loading")
+});
+
+pub(crate) static TIMELINE_EPHEMERAL_BYTES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_timeline_ephemeral_bytes",
+        "Total number of bytes in ephemeral layers, summed for all timelines.  Approximate, lazily updated."
+    )
+    .expect("Failed to register metric")
 });
 
 /// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things

@@ -1155,13 +1155,17 @@ class NeonEnv:
         After this method returns, there should be no child processes running.
         """
         self.endpoints.stop_all()
+
+        # Stop storage controller before pageservers: we don't want it to spuriously
+        # detect a pageserver "failure" during test teardown
+        self.storage_controller.stop(immediate=immediate)
+
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
         for pageserver in self.pageservers:
             if ps_assert_metric_no_errors:
                 pageserver.assert_no_metric_errors()
             pageserver.stop(immediate=immediate)
-        self.storage_controller.stop(immediate=immediate)
         self.broker.stop(immediate=immediate)
 
     @property
@@ -2112,6 +2116,7 @@ class NeonStorageController(MetricsGetter):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[Dict[Any, Any]] = None,
+        placement_policy: Optional[str] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
@@ -2122,6 +2127,8 @@ class NeonStorageController(MetricsGetter):
             shard_params = {"count": shard_count}
             if shard_stripe_size is not None:
                 shard_params["stripe_size"] = shard_stripe_size
+            else:
+                shard_params["stripe_size"] = 32768
 
             body["shard_parameters"] = shard_params
 
@@ -2129,12 +2136,15 @@ class NeonStorageController(MetricsGetter):
             for k, v in tenant_config.items():
                 body[k] = v
 
+        body["placement_policy"] = placement_policy
+
         response = self.request(
             "POST",
             f"{self.env.storage_controller_api}/v1/tenant",
             json=body,
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
+        response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
@@ -2149,6 +2159,18 @@ class NeonStorageController(MetricsGetter):
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
         return shards
+
+    def tenant_describe(self, tenant_id: TenantId):
+        """
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        """
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
 
     def tenant_shard_split(
         self, tenant_id: TenantId, shard_count: int, shard_stripe_size: Optional[int] = None
@@ -2173,6 +2195,34 @@ class NeonStorageController(MetricsGetter):
         )
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
+
+    def tenant_policy_update(self, tenant_id: TenantId, body: dict[str, Any]):
+        log.info(f"tenant_policy_update({tenant_id}, {body})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/policy",
+            json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def reconcile_all(self):
+        r = self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/debug/v1/reconcile_all",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        r.raise_for_status()
+        n = r.json()
+        log.info(f"reconcile_all waited for {n} shards")
+        return n
+
+    def reconcile_until_idle(self, timeout_secs=30):
+        start_at = time.time()
+        n = 1
+        while n > 0:
+            n = self.reconcile_all()
+            if time.time() - start_at > timeout_secs:
+                raise RuntimeError("Timeout in reconcile_until_idle")
 
     def consistency_check(self):
         """
