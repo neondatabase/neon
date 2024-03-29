@@ -1262,10 +1262,12 @@ LIMIT 100",
         .await
         .map_err(DownloadError::Other);
 
-        self.ext_download_progress
-            .write()
-            .expect("bad lock")
-            .insert(ext_archive_name.to_string(), (download_start, true));
+        if download_size.is_ok() {
+            self.ext_download_progress
+                .write()
+                .expect("bad lock")
+                .insert(ext_archive_name.to_string(), (download_start, true));
+        }
 
         download_size
     }
