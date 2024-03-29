@@ -641,13 +641,12 @@ prefetch_on_ps_disconnect(void)
 static inline void
 prefetch_set_unused(uint64 ring_index)
 {
-	PrefetchRequest *slot = GetPrfSlot(ring_index);
+	PrefetchRequest *slot;
 
 	if (ring_index < MyPState->ring_last)
 		return;					/* Should already be unused */
 
-	Assert(MyPState->ring_unused > ring_index);
-
+	slot = GetPrfSlot(ring_index);
 	if (slot->status == PRFS_UNUSED)
 		return;
 
