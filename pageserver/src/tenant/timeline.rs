@@ -3842,6 +3842,24 @@ impl Timeline {
         Ok(())
     }
 
+    /// Schedules the uploads of the given image layers
+    fn upload_new_image_layers(
+        self: &Arc<Self>,
+        new_images: impl IntoIterator<Item = ResidentLayer>,
+    ) -> anyhow::Result<()> {
+        let Some(remote_client) = &self.remote_client else {
+            return Ok(());
+        };
+        for layer in new_images {
+            remote_client.schedule_layer_file_upload(layer)?;
+        }
+        // should any new image layer been created, not uploading index_part will
+        // result in a mismatch between remote_physical_size and layermap calculated
+        // size, which will fail some tests, but should not be an issue otherwise.
+        remote_client.schedule_index_upload_for_file_changes()?;
+        Ok(())
+    }
+
     /// Update information about which layer files need to be retained on
     /// garbage collection. This is separate from actually performing the GC,
     /// and is updated more frequently, so that compaction can remove obsolete
