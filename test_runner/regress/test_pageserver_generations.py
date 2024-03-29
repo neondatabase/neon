@@ -9,7 +9,6 @@ of the pageserver are:
 - Updates to remote_consistent_lsn may only be made visible after validating generation
 """
 
-
 import enum
 import re
 import time

@@ -159,14 +159,14 @@ def run_benchmark(env: NeonEnv, pg_bin: PgBin, record, duration_secs: int):
         # don't specify the targets explicitly, let pagebench auto-discover them
     ]
 
-    log.info("%s", "command: {' '.join(cmd)}")
+    log.info(f"command: {' '.join(cmd)}")
     basepath = pg_bin.run_capture(cmd, with_command_header=False)
     results_path = Path(basepath + ".stdout")
-    log.info("%s", "Benchmark results at: {results_path}")
+    log.info(f"Benchmark results at: {results_path}")
 
     with open(results_path, "r") as f:
         results = json.load(f)
-    log.info("%s", "Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
+    log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
     total = results["total"]
     metric = "request_count"

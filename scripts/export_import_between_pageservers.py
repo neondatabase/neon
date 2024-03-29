@@ -84,9 +84,7 @@ class PgBin:
         self.log_dir = log_dir
         self.pg_bin_path = os.path.join(str(pg_distrib_dir), f"v{pg_version}", "bin")
         self.env = os.environ.copy()
-        self.env["LD_LIBRARY_PATH"] = os.path.join(
-            str(pg_distrib_dir), f"v{pg_version}", "lib"
-        )
+        self.env["LD_LIBRARY_PATH"] = os.path.join(str(pg_distrib_dir), f"v{pg_version}", "lib")
 
     def _fixpath(self, command: List[str]):
         if "/" not in command[0]:

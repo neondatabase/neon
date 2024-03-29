@@ -482,9 +482,7 @@ def pytest_terminal_summary(
                 terminalreporter.section("Benchmark results", "-")
                 is_header_printed = True
 
-            terminalreporter.write(
-                f"{test_report.head_line}.{recorded_property['name']}: "
-            )
+            terminalreporter.write(f"{test_report.head_line}.{recorded_property['name']}: ")
             unit = recorded_property["unit"]
             value = recorded_property["value"]
             if unit == "MB":

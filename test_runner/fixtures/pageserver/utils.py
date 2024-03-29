@@ -62,9 +62,7 @@ def wait_for_upload(
         )
         time.sleep(1)
     raise Exception(
-        "timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
-            lsn, current_lsn
-        )
+        f"timed out while waiting for remote_consistent_lsn to reach {lsn}, was {current_lsn}"
     )
 
 
@@ -206,13 +204,11 @@ def wait_for_last_record_lsn(
             return current_lsn
         if i % 10 == 0:
             log.info(
-                "{}/{} waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                    tenant, timeline, lsn, current_lsn, i + 1
-                )
+                f"{tenant}/{timeline} waiting for last_record_lsn to reach {lsn}, now {current_lsn}, iteration {i + 1}"
             )
         time.sleep(0.1)
     raise Exception(
-        "timed out while waiting for last_record_lsn to reach {}, was {}".format(lsn, current_lsn)
+        f"timed out while waiting for last_record_lsn to reach {lsn}, was {current_lsn}"
     )
 
 
