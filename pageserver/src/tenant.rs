@@ -2828,17 +2828,13 @@ impl Tenant {
                 timelines
                     .iter()
                     .inspect(|(_, timeline)| {
-                        let (ancestor_timeline_id, ancestor_lsn) = {
-                            let bp = timeline.ancestor_branchpoint.read().unwrap();
-
-                            let Some((ancestor, ancestor_lsn)) = bp.as_ref() else {
-                                return;
-                            };
-
-                            (ancestor.timeline_id, *ancestor_lsn)
+                        let Some((ancestor_id, ancestor_lsn)) =
+                            timeline.ancestor_branchpoint.as_id_lsn()
+                        else {
+                            return;
                         };
 
-                        all_branchpoints.insert((ancestor_timeline_id, ancestor_lsn));
+                        all_branchpoints.insert((ancestor_id, ancestor_lsn));
                     })
                     .map(|(timeline_id, _)| *timeline_id)
                     .collect::<Vec<_>>()
