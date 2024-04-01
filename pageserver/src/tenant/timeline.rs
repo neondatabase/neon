@@ -259,7 +259,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_branchpoint: Option<(Arc<Timeline>, Lsn)>,
+    pub(super) ancestor_branchpoint: RwLock<Option<(Arc<Timeline>, Lsn)>>,
 
     pub(super) metrics: TimelineMetrics,
 
@@ -616,6 +616,8 @@ impl Timeline {
     /// Get the LSN where this branch was created
     pub(crate) fn get_ancestor_lsn(&self) -> Lsn {
         self.ancestor_branchpoint
+            .read()
+            .unwrap()
             .as_ref()
             .map(|x| x.1)
             .unwrap_or(Lsn::INVALID)
@@ -624,6 +626,8 @@ impl Timeline {
     /// Get the ancestor's timeline id
     pub(crate) fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
         self.ancestor_branchpoint
+            .read()
+            .unwrap()
             .as_ref()
             .map(|(ancestor, _)| ancestor.timeline_id)
     }
@@ -1736,7 +1740,7 @@ impl Timeline {
 
                 loaded_at: (disk_consistent_lsn, SystemTime::now()),
 
-                ancestor_branchpoint: ancestor.map(|a| (a, metadata.ancestor_lsn())),
+                ancestor_branchpoint: RwLock::new(ancestor.map(|a| (a, metadata.ancestor_lsn()))),
 
                 metrics: TimelineMetrics::new(
                     &tenant_shard_id,
@@ -2630,7 +2634,7 @@ impl Timeline {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
-        let mut ancestor_branchpoint = self.ancestor_branchpoint.clone();
+        let mut ancestor_branchpoint = self.ancestor_branchpoint.read().unwrap().clone();
 
         let mut read_count = scopeguard::guard(0, |cnt| {
             crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
@@ -2716,7 +2720,7 @@ impl Timeline {
                     ancestor.ready_ancestor_for_lsn(*ancestor_lsn, ctx).await?;
                     timeline_owned = ancestor.clone();
                     timeline = &*timeline_owned;
-                    ancestor_branchpoint = timeline.ancestor_branchpoint.clone();
+                    ancestor_branchpoint = timeline.ancestor_branchpoint.read().unwrap().clone();
                     prev_lsn = None;
                     continue 'outer;
                 }
@@ -2849,7 +2853,7 @@ impl Timeline {
     ) -> Result<(), GetVectoredError> {
         let mut timeline_owned: Arc<Timeline>;
         let mut timeline = self;
-        let mut ancestor_branchpoint = timeline.ancestor_branchpoint.clone();
+        let mut ancestor_branchpoint = timeline.ancestor_branchpoint.read().unwrap().clone();
 
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
@@ -2885,7 +2889,7 @@ impl Timeline {
                 .map_err(GetVectoredError::GetReadyAncestorError)?;
             timeline_owned = ancestor;
             timeline = &*timeline_owned;
-            ancestor_branchpoint = timeline.ancestor_branchpoint.clone();
+            ancestor_branchpoint = timeline.ancestor_branchpoint.read().unwrap().clone();
         }
 
         if keyspace.total_size() != 0 {
@@ -3376,8 +3380,10 @@ impl Timeline {
 
         let ancestor_branchpoint = self
             .ancestor_branchpoint
-            .clone()
-            .map(|(a, lsn)| (a.timeline_id, lsn));
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|(a, lsn)| (a.timeline_id, *lsn));
 
         let metadata = TimelineMetadata::new(
             disk_consistent_lsn,
