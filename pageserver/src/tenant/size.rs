@@ -144,16 +144,16 @@ pub(super) async fn gather_inputs(
     // Build a map of branch points.
     let mut branchpoints: HashMap<TimelineId, HashSet<Lsn>> = HashMap::new();
     for timeline in timelines.iter() {
-        let ancestor_branchpoint = timeline.ancestor_branchpoint.read().unwrap();
+        let ancestor_branchpoint = timeline.ancestor_branchpoint.as_id_lsn();
 
-        let Some((ancestor, ancestor_lsn)) = ancestor_branchpoint.as_ref() else {
+        let Some((ancestor_id, ancestor_lsn)) = ancestor_branchpoint else {
             continue;
         };
 
         branchpoints
-            .entry(ancestor.timeline_id)
+            .entry(ancestor_id)
             .or_default()
-            .insert(*ancestor_lsn);
+            .insert(ancestor_lsn);
     }
 
     // These become the final result.
@@ -178,14 +178,8 @@ pub(super) async fn gather_inputs(
         let timeline_id = timeline.timeline_id;
         let last_record_lsn = timeline.get_last_record_lsn();
 
-        let (ancestor_id, ancestor_lsn) = {
-            let bp = timeline.ancestor_branchpoint.read().unwrap();
-            let bp = bp.as_ref();
-            (
-                bp.map(|(tl, _)| tl.timeline_id),
-                bp.map(|(_, lsn)| *lsn).unwrap_or(Lsn::INVALID),
-            )
-        };
+        let (ancestor_id, ancestor_lsn) = timeline.ancestor_branchpoint.as_id_lsn_pair();
+        let ancestor_lsn = ancestor_lsn.unwrap_or(Lsn::INVALID);
 
         // there's a race between the update (holding tenant.gc_lock) and this read but it
         // might not be an issue, because it's not for Timeline::gc
