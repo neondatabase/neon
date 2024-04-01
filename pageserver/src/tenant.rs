@@ -1452,11 +1452,8 @@ impl Tenant {
                 debug!("timeline {new_timeline_id} already exists");
 
                 {
-                    let branchpoint = existing.ancestor_branchpoint.read().unwrap();
-                    let branchpoint = branchpoint.as_ref();
-
-                    let ancestor_id = branchpoint.map(|(tl, _)| tl.timeline_id);
-                    let ancestor_lsn = branchpoint.map(|(_, lsn)| *lsn);
+                    let (ancestor_id, ancestor_lsn) =
+                        existing.ancestor_branchpoint.as_id_lsn_pair();
 
                     // Idempotency: creating the same timeline twice is not an error, unless
                     // the second creation has different parameters.
