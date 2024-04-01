@@ -181,6 +181,61 @@ pub(crate) struct AuxFilesState {
     pub(crate) n_deltas: usize,
 }
 
+pub(crate) struct Branchpoint(RwLock<Option<(Arc<Timeline>, Lsn)>>);
+
+impl Branchpoint {
+    pub(super) fn as_id_lsn(&self) -> Option<(TimelineId, Lsn)> {
+        Option::from(self)
+    }
+
+    pub(super) fn as_id_lsn_pair(&self) -> (Option<TimelineId>, Option<Lsn>) {
+        let Some((id, lsn)): Option<(TimelineId, Lsn)> = Option::from(self) else {
+            return (None, None);
+        };
+        (Some(id), Some(lsn))
+    }
+
+    fn snapshot(&self) -> Option<(Arc<Timeline>, Lsn)> {
+        self.0.read().unwrap().clone()
+    }
+}
+
+impl<'a> From<&'a Branchpoint> for Lsn {
+    fn from(value: &'a Branchpoint) -> Self {
+        // special conversion exists to avoid the pointer walk with Self::as_id_lsn
+        value
+            .0
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|x| x.1)
+            .unwrap_or(Lsn::INVALID)
+    }
+}
+
+impl<'a> From<&'a Branchpoint> for Option<Arc<Timeline>> {
+    fn from(value: &'a Branchpoint) -> Self {
+        value.0.read().unwrap().as_ref().map(|x| x.0.clone())
+    }
+}
+
+impl<'a> From<&'a Branchpoint> for Option<(TimelineId, Lsn)> {
+    fn from(value: &'a Branchpoint) -> Self {
+        value
+            .0
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|(tl, lsn)| (tl.timeline_id, *lsn))
+    }
+}
+
+impl From<Option<(Arc<Timeline>, Lsn)>> for Branchpoint {
+    fn from(value: Option<(Arc<Timeline>, Lsn)>) -> Self {
+        Branchpoint(RwLock::new(value))
+    }
+}
+
 pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<RwLock<AttachedTenantConf>>,
@@ -259,7 +314,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    pub(super) ancestor_branchpoint: RwLock<Option<(Arc<Timeline>, Lsn)>>,
+    pub(super) ancestor_branchpoint: Branchpoint,
 
     pub(super) metrics: TimelineMetrics,
 
@@ -614,22 +669,19 @@ pub enum GetVectoredImpl {
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
+    ///
+    /// Do not use this and [`Self::get_ancestor_timeline_id`] if you need both, use methods on
+    /// [`Self::ancestor_branchpoint`] directly.
     pub(crate) fn get_ancestor_lsn(&self) -> Lsn {
-        self.ancestor_branchpoint
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(|x| x.1)
-            .unwrap_or(Lsn::INVALID)
+        Lsn::from(&self.ancestor_branchpoint)
     }
 
     /// Get the ancestor's timeline id
+    ///
+    /// Do not use this and [`Self::get_ancestor_lsn`] if you need both, use methods on
+    /// [`Self::ancestor_branchpoint`] directly.
     pub(crate) fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
-        self.ancestor_branchpoint
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(|(ancestor, _)| ancestor.timeline_id)
+        self.ancestor_branchpoint.as_id_lsn().map(|(id, _)| id)
     }
 
     /// Lock and get timeline's GC cutoff
@@ -1740,7 +1792,9 @@ impl Timeline {
 
                 loaded_at: (disk_consistent_lsn, SystemTime::now()),
 
-                ancestor_branchpoint: RwLock::new(ancestor.map(|a| (a, metadata.ancestor_lsn()))),
+                ancestor_branchpoint: Branchpoint::from(
+                    ancestor.map(|a| (a, metadata.ancestor_lsn())),
+                ),
 
                 metrics: TimelineMetrics::new(
                     &tenant_shard_id,
