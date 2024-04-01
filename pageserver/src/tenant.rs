@@ -2824,27 +2824,20 @@ impl Tenant {
                         if let Some(ancestor_timeline_id) =
                             &timeline_entry.get_ancestor_timeline_id()
                         {
-                            // If target_timeline is specified, we only need to know branchpoints of its children
-                            if let Some(timeline_id) = target_timeline_id {
-                                if ancestor_timeline_id == &timeline_id {
-                                    all_branchpoints.insert((
-                                        *ancestor_timeline_id,
-                                        timeline_entry.get_ancestor_lsn(),
-                                    ));
-                                }
-                            }
-                            // Collect branchpoints for all timelines
-                            else {
-                                all_branchpoints.insert((
-                                    *ancestor_timeline_id,
-                                    timeline_entry.get_ancestor_lsn(),
-                                ));
-                            }
+                            all_branchpoints
+                                .insert((*ancestor_timeline_id, timeline_entry.get_ancestor_lsn()));
                         }
                     })
                     .map(|(timeline_id, _)| *timeline_id)
                     .collect::<Vec<_>>()
             };
+
+            if let Some(timeline_id) = target_timeline_id.as_ref() {
+                // if we only want to gc a single timeline, we need to know the branchpoints
+                // we've recorded through it's children
+                all_branchpoints.retain(|(id, _lsn)| id == timeline_id);
+            }
+
             (all_branchpoints, timeline_ids)
         };
 
