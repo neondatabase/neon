@@ -1451,14 +1451,21 @@ impl Tenant {
             Err(TimelineExclusionError::AlreadyExists(existing)) => {
                 debug!("timeline {new_timeline_id} already exists");
 
-                // Idempotency: creating the same timeline twice is not an error, unless
-                // the second creation has different parameters.
-                if existing.get_ancestor_timeline_id() != ancestor_timeline_id
-                    || existing.pg_version != pg_version
-                    || (ancestor_start_lsn.is_some()
-                        && ancestor_start_lsn != Some(existing.get_ancestor_lsn()))
                 {
-                    return Err(CreateTimelineError::Conflict);
+                    let branchpoint = existing.ancestor_branchpoint.read().unwrap();
+                    let branchpoint = branchpoint.as_ref();
+
+                    let ancestor_id = branchpoint.map(|(tl, _)| tl.timeline_id);
+                    let ancestor_lsn = branchpoint.map(|(_, lsn)| *lsn);
+
+                    // Idempotency: creating the same timeline twice is not an error, unless
+                    // the second creation has different parameters.
+                    if ancestor_id != ancestor_timeline_id
+                        || existing.pg_version != pg_version
+                        || (ancestor_start_lsn.is_some() && ancestor_start_lsn != ancestor_lsn)
+                    {
+                        return Err(CreateTimelineError::Conflict);
+                    }
                 }
 
                 if let Some(remote_client) = existing.remote_client.as_ref() {
