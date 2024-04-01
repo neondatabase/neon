@@ -259,8 +259,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<Arc<Timeline>>,
-    ancestor_lsn: Lsn,
+    ancestor_branchpoint: Option<(Arc<Timeline>, Lsn)>,
 
     pub(super) metrics: TimelineMetrics,
 
@@ -616,14 +615,17 @@ pub enum GetVectoredImpl {
 impl Timeline {
     /// Get the LSN where this branch was created
     pub(crate) fn get_ancestor_lsn(&self) -> Lsn {
-        self.ancestor_lsn
+        self.ancestor_branchpoint
+            .as_ref()
+            .map(|x| x.1)
+            .unwrap_or(Lsn::INVALID)
     }
 
     /// Get the ancestor's timeline id
     pub(crate) fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
-        self.ancestor_timeline
+        self.ancestor_branchpoint
             .as_ref()
-            .map(|ancestor| ancestor.timeline_id)
+            .map(|(ancestor, _)| ancestor.timeline_id)
     }
 
     /// Lock and get timeline's GC cutoff
@@ -1734,8 +1736,7 @@ impl Timeline {
 
                 loaded_at: (disk_consistent_lsn, SystemTime::now()),
 
-                ancestor_timeline: ancestor,
-                ancestor_lsn: metadata.ancestor_lsn(),
+                ancestor_branchpoint: ancestor.map(|a| (a, metadata.ancestor_lsn())),
 
                 metrics: TimelineMetrics::new(
                     &tenant_shard_id,
@@ -2629,6 +2630,7 @@ impl Timeline {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
+        let mut ancestor_branchpoint = self.ancestor_branchpoint.clone();
 
         let mut read_count = scopeguard::guard(0, |cnt| {
             crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
@@ -2676,7 +2678,7 @@ impl Timeline {
                                 key,
                                 Lsn(cont_lsn.0 - 1),
                                 request_lsn,
-                                timeline.ancestor_lsn
+                                ancestor_branchpoint.map(|x| x.1).unwrap_or(Lsn::INVALID)
                             ), traversal_path));
                         }
                     }
@@ -2701,17 +2703,23 @@ impl Timeline {
             }
 
             // Recurse into ancestor if needed
-            if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
-                trace!(
-                    "going into ancestor {}, cont_lsn is {}",
-                    timeline.ancestor_lsn,
-                    cont_lsn
-                );
+            if let Some((ancestor, ancestor_lsn)) = ancestor_branchpoint.as_ref() {
+                let lsn_at_ancestor = Lsn(cont_lsn.0 - 1) <= *ancestor_lsn;
 
-                timeline_owned = timeline.get_ready_ancestor_timeline(ctx).await?;
-                timeline = &*timeline_owned;
-                prev_lsn = None;
-                continue 'outer;
+                if is_inherited_key(key) && lsn_at_ancestor {
+                    trace!(
+                        "going into ancestor {}, cont_lsn is {}",
+                        ancestor_lsn,
+                        cont_lsn
+                    );
+
+                    ancestor.ready_ancestor_for_lsn(*ancestor_lsn, ctx).await?;
+                    timeline_owned = ancestor.clone();
+                    timeline = &*timeline_owned;
+                    ancestor_branchpoint = timeline.ancestor_branchpoint.clone();
+                    prev_lsn = None;
+                    continue 'outer;
+                }
             }
 
             let guard = timeline.layers.read().await;
@@ -2809,10 +2817,10 @@ impl Timeline {
                     }),
                 ));
                 continue 'outer;
-            } else if timeline.ancestor_timeline.is_some() {
+            } else if let Some(lsn) = ancestor_branchpoint.as_ref().map(|x| x.1) {
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
-                cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
+                cont_lsn = Lsn(lsn.0 + 1);
                 continue 'outer;
             } else {
                 // Nothing found
@@ -2841,6 +2849,7 @@ impl Timeline {
     ) -> Result<(), GetVectoredError> {
         let mut timeline_owned: Arc<Timeline>;
         let mut timeline = self;
+        let mut ancestor_branchpoint = timeline.ancestor_branchpoint.clone();
 
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
@@ -2860,16 +2869,23 @@ impl Timeline {
             .await?;
 
             keyspace.remove_overlapping_with(&completed);
-            if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
+
+            if keyspace.total_size() == 0 {
                 break;
             }
 
-            cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
-            timeline_owned = timeline
-                .get_ready_ancestor_timeline(ctx)
+            let Some((ancestor, ancestor_lsn)) = ancestor_branchpoint else {
+                break;
+            };
+
+            cont_lsn = Lsn(ancestor_lsn.0 + 1);
+            ancestor
+                .ready_ancestor_for_lsn(ancestor_lsn, ctx)
                 .await
                 .map_err(GetVectoredError::GetReadyAncestorError)?;
+            timeline_owned = ancestor;
             timeline = &*timeline_owned;
+            ancestor_branchpoint = timeline.ancestor_branchpoint.clone();
         }
 
         if keyspace.total_size() != 0 {
@@ -3000,15 +3016,11 @@ impl Timeline {
         Some((lsn, img))
     }
 
-    async fn get_ready_ancestor_timeline(
+    async fn ready_ancestor_for_lsn(
         &self,
+        lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<Arc<Timeline>, GetReadyAncestorError> {
-        let ancestor = match self.get_ancestor_timeline() {
-            Ok(timeline) => timeline,
-            Err(e) => return Err(GetReadyAncestorError::from(e)),
-        };
-
+    ) -> Result<(), GetReadyAncestorError> {
         // It's possible that the ancestor timeline isn't active yet, or
         // is active but hasn't yet caught up to the branch point. Wait
         // for it.
@@ -3033,42 +3045,26 @@ impl Timeline {
         // NB: this could be avoided by requiring
         //   branch_lsn >= remote_consistent_lsn
         // during branch creation.
-        match ancestor.wait_to_become_active(ctx).await {
+        match self.wait_to_become_active(ctx).await {
             Ok(()) => {}
             Err(TimelineState::Stopping) => {
-                return Err(GetReadyAncestorError::AncestorStopping(
-                    ancestor.timeline_id,
-                ));
+                return Err(GetReadyAncestorError::AncestorStopping(self.timeline_id));
             }
             Err(state) => {
                 return Err(GetReadyAncestorError::Other(anyhow::anyhow!(
                     "Timeline {} will not become active. Current state: {:?}",
-                    ancestor.timeline_id,
+                    self.timeline_id,
                     &state,
                 )));
             }
         }
-        ancestor
-            .wait_lsn(self.ancestor_lsn, ctx)
-            .await
-            .map_err(|e| match e {
-                e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
-                WaitLsnError::Shutdown => GetReadyAncestorError::Cancelled,
-                e @ WaitLsnError::BadState => GetReadyAncestorError::Other(anyhow::anyhow!(e)),
-            })?;
-
-        Ok(ancestor)
-    }
-
-    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
-        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
-            format!(
-                "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
-                self.timeline_id,
-                self.get_ancestor_timeline_id(),
-            )
+        self.wait_lsn(lsn, ctx).await.map_err(|e| match e {
+            e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
+            WaitLsnError::Shutdown => GetReadyAncestorError::Cancelled,
+            e @ WaitLsnError::BadState => GetReadyAncestorError::Other(anyhow::anyhow!(e)),
         })?;
-        Ok(Arc::clone(ancestor))
+
+        Ok(())
     }
 
     pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
@@ -3378,16 +3374,16 @@ impl Timeline {
             None
         };
 
-        let ancestor_timeline_id = self
-            .ancestor_timeline
-            .as_ref()
-            .map(|ancestor| ancestor.timeline_id);
+        let ancestor_branchpoint = self
+            .ancestor_branchpoint
+            .clone()
+            .map(|(a, lsn)| (a.timeline_id, lsn));
 
         let metadata = TimelineMetadata::new(
             disk_consistent_lsn,
             ondisk_prev_record_lsn,
-            ancestor_timeline_id,
-            self.ancestor_lsn,
+            ancestor_branchpoint.map(|x| x.0),
+            ancestor_branchpoint.map(|x| x.1).unwrap_or(Lsn::INVALID),
             *self.latest_gc_cutoff_lsn.read(),
             self.initdb_lsn,
             self.pg_version,
