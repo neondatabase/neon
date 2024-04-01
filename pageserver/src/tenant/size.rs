@@ -144,12 +144,16 @@ pub(super) async fn gather_inputs(
     // Build a map of branch points.
     let mut branchpoints: HashMap<TimelineId, HashSet<Lsn>> = HashMap::new();
     for timeline in timelines.iter() {
-        if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
-            branchpoints
-                .entry(ancestor_id)
-                .or_default()
-                .insert(timeline.get_ancestor_lsn());
-        }
+        let ancestor_branchpoint = timeline.ancestor_branchpoint.read().unwrap();
+
+        let Some((ancestor, ancestor_lsn)) = ancestor_branchpoint.as_ref() else {
+            continue;
+        };
+
+        branchpoints
+            .entry(ancestor.timeline_id)
+            .or_default()
+            .insert(*ancestor_lsn);
     }
 
     // These become the final result.
@@ -173,7 +177,15 @@ pub(super) async fn gather_inputs(
     for timeline in timelines.iter() {
         let timeline_id = timeline.timeline_id;
         let last_record_lsn = timeline.get_last_record_lsn();
-        let ancestor_lsn = timeline.get_ancestor_lsn();
+
+        let (ancestor_id, ancestor_lsn) = {
+            let bp = timeline.ancestor_branchpoint.read().unwrap();
+            let bp = bp.as_ref();
+            (
+                bp.map(|(tl, _)| tl.timeline_id),
+                bp.map(|(_, lsn)| *lsn).unwrap_or(Lsn::INVALID),
+            )
+        };
 
         // there's a race between the update (holding tenant.gc_lock) and this read but it
         // might not be an issue, because it's not for Timeline::gc
@@ -245,9 +257,7 @@ pub(super) async fn gather_inputs(
         //
 
         // Timeline start point
-        let ancestor = timeline
-            .get_ancestor_timeline_id()
-            .map(|ancestor_id| (ancestor_id, ancestor_lsn));
+        let ancestor = ancestor_id.map(|id| (id, ancestor_lsn));
         branchstart_segments.push((timeline_id, segments.len(), ancestor));
         segments.push(SegmentMeta {
             segment: Segment {
@@ -294,7 +304,7 @@ pub(super) async fn gather_inputs(
 
         timeline_inputs.push(TimelineInputs {
             timeline_id: timeline.timeline_id,
-            ancestor_id: timeline.get_ancestor_timeline_id(),
+            ancestor_id,
             ancestor_lsn,
             last_record: last_record_lsn,
             // this is not used above, because it might not have updated recently enough
