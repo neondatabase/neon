@@ -9,6 +9,7 @@ pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
@@ -183,7 +184,7 @@ pub(crate) struct AuxFilesState {
 
 pub struct Timeline {
     conf: &'static PageServerConf,
-    tenant_conf: Arc<RwLock<AttachedTenantConf>>,
+    tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
 
     myself: Weak<Self>,
 
@@ -1570,57 +1571,65 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 // Private functions
 impl Timeline {
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .lazy_slru_download
             .unwrap_or(self.conf.default_tenant_conf.lazy_slru_download)
     }
 
     fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     fn get_compaction_algorithm(&self) -> CompactionAlgorithm {
-        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = &self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .compaction_algorithm
             .unwrap_or(self.conf.default_tenant_conf.compaction_algorithm)
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .eviction_policy
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
@@ -1635,22 +1644,25 @@ impl Timeline {
     }
 
     fn get_image_layer_creation_check_threshold(&self) -> u8 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
-        tenant_conf.image_layer_creation_check_threshold.unwrap_or(
-            self.conf
-                .default_tenant_conf
-                .image_layer_creation_check_threshold,
-        )
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .image_layer_creation_check_threshold
+            .unwrap_or(
+                self.conf
+                    .default_tenant_conf
+                    .image_layer_creation_check_threshold,
+            )
     }
 
-    pub(super) fn tenant_conf_updated(&self) {
+    pub(super) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
 
         // The threshold is embedded in the metric. So, we need to update it.
         {
             let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                &self.tenant_conf.read().unwrap().tenant_conf,
+                new_conf,
                 &self.conf.default_tenant_conf,
             );
 
@@ -1677,7 +1689,7 @@ impl Timeline {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         conf: &'static PageServerConf,
-        tenant_conf: Arc<RwLock<AttachedTenantConf>>,
+        tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
         metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
@@ -1696,14 +1708,13 @@ impl Timeline {
         let (layer_flush_start_tx, _) = tokio::sync::watch::channel(0);
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
 
-        let tenant_conf_guard = tenant_conf.read().unwrap();
-
-        let evictions_low_residence_duration_metric_threshold =
+        let evictions_low_residence_duration_metric_threshold = {
+            let loaded_tenant_conf = tenant_conf.load();
             Self::get_evictions_low_residence_duration_metric_threshold(
-                &tenant_conf_guard.tenant_conf,
+                &loaded_tenant_conf.tenant_conf,
                 &conf.default_tenant_conf,
-            );
-        drop(tenant_conf_guard);
+            )
+        };
 
         Arc::new_cyclic(|myself| {
             let mut result = Timeline {
@@ -1886,20 +1897,19 @@ impl Timeline {
             self.timeline_id, self.tenant_shard_id
         );
 
-        let tenant_conf_guard = self.tenant_conf.read().unwrap();
-        let wal_connect_timeout = tenant_conf_guard
+        let tenant_conf = self.tenant_conf.load();
+        let wal_connect_timeout = tenant_conf
             .tenant_conf
             .walreceiver_connect_timeout
             .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
-        let lagging_wal_timeout = tenant_conf_guard
+        let lagging_wal_timeout = tenant_conf
             .tenant_conf
             .lagging_wal_timeout
             .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
-        let max_lsn_wal_lag = tenant_conf_guard
+        let max_lsn_wal_lag = tenant_conf
             .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
-        drop(tenant_conf_guard);
 
         let mut guard = self.walreceiver.lock().unwrap();
         assert!(
