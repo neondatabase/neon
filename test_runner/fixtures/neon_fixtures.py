@@ -520,9 +520,9 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self, register_pageservers=False):
+    def start(self):
         assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start(register_pageservers=register_pageservers)
+        self.env.start()
 
     def init_start(
         self,
@@ -1115,8 +1115,8 @@ class NeonEnv:
         log.info(f"Config: {cfg}")
         self.neon_cli.init(cfg, force=config.config_init_force)
 
-    def start(self, register_pageservers=False):
-        # storage controller starts first, so that pageserver /re-attach calls don't
+    def start(self):
+        # Storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.storage_controller.start()
 
@@ -1126,11 +1126,6 @@ class NeonEnv:
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
         wait_until(30, 1, storage_controller_ready)
-
-        if register_pageservers:
-            # Special case for forward compat tests, this can be removed later.
-            for pageserver in self.pageservers:
-                self.storage_controller.node_register(pageserver)
 
         # Start up broker, pageserver and all safekeepers
         futs = []
