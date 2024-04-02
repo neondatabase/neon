@@ -76,20 +76,20 @@ class WorkerStats(object):
         self.counters[worker_id] += 1
 
     def check_progress(self):
-        log.debug("Workers progress: {}".format(self.counters))
+        log.debug(f"Workers progress: {self.counters}")
 
         # every worker should finish at least one tx
         assert all(cnt > 0 for cnt in self.counters)
 
         progress = sum(self.counters)
-        log.info("All workers made {} transactions".format(progress))
+        log.info(f"All workers made {progress} transactions")
 
 
 async def run_random_worker(
     stats: WorkerStats, endpoint: Endpoint, worker_id, n_accounts, max_transfer
 ):
     pg_conn = await endpoint.connect_async()
-    log.debug("Started worker {}".format(worker_id))
+    log.debug(f"Started worker {worker_id}")
 
     while stats.running:
         from_uid = random.randint(0, n_accounts - 1)
@@ -99,9 +99,9 @@ async def run_random_worker(
         await bank_transfer(pg_conn, from_uid, to_uid, amount)
         stats.inc_progress(worker_id)
 
-        log.debug("Executed transfer({}) {} => {}".format(amount, from_uid, to_uid))
+        log.debug(f"Executed transfer({amount}) {from_uid} => {to_uid}")
 
-    log.debug("Finished worker {}".format(worker_id))
+    log.debug(f"Finished worker {worker_id}")
 
     await pg_conn.close()
 
