@@ -15,7 +15,7 @@ use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
 use control_plane::{broker, local_env};
 use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeSchedulingPolicy, PlacementPolicy,
+    NodeAvailabilityWrapper, NodeConfigureRequest, NodeSchedulingPolicy, PlacementPolicy,
 };
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
@@ -1516,7 +1516,7 @@ fn cli() -> Command {
                     .arg(pageserver_config_args.clone())
                 )
                 .subcommand(Command::new("set-state")
-                    .arg(Arg::new("availability").value_parser(value_parser!(NodeAvailability)).long("availability").action(ArgAction::Set).help("Availability state: offline,active"))
+                    .arg(Arg::new("availability").value_parser(value_parser!(NodeAvailabilityWrapper)).long("availability").action(ArgAction::Set).help("Availability state: offline,active"))
                     .arg(Arg::new("scheduling").value_parser(value_parser!(NodeSchedulingPolicy)).long("scheduling").action(ArgAction::Set).help("Scheduling state: draining,pause,filling,active"))
                     .about("Set scheduling or availability state of pageserver node")
                     .arg(pageserver_config_args.clone())
