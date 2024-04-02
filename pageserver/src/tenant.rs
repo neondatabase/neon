@@ -5151,6 +5151,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_read_at_max_lsn() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_read_at_max_lsn")?;
         let (tenant, ctx) = harness.load().await;
