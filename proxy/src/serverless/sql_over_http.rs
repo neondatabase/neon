@@ -232,10 +232,7 @@ pub async fn handle(
             let error_kind = e.get_error_kind();
             ctx.set_error_kind(error_kind);
 
-            let message = format!(
-                "Query cancelled, runtime exceeded. SQL queries over HTTP must not exceed {} seconds of runtime. Please consider using our websocket based connections",
-                config.http_config.request_timeout.as_secs_f64()
-            );
+            let message = "Query cancelled, connection was terminated";
 
             tracing::info!(
                 kind=error_kind.to_metric_label(),
