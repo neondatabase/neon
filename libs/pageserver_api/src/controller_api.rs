@@ -75,6 +75,20 @@ pub struct TenantDescribeResponse {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct NodeDescribeResponse {
+    pub id: NodeId,
+
+    pub availability: NodeAvailabilityWrapper,
+    pub scheduling: NodeSchedulingPolicy,
+
+    pub listen_http_addr: String,
+    pub listen_http_port: u16,
+
+    pub listen_pg_addr: String,
+    pub listen_pg_port: u16,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct TenantDescribeResponseShard {
     pub tenant_shard_id: TenantShardId,
 
