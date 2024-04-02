@@ -25,6 +25,7 @@ git-version.workspace = true
 hex.workspace = true
 hyper.workspace = true
 humantime.workspace = true
+itertools.workspace = true
 lasso.workspace = true
 once_cell.workspace = true
 pageserver_api.workspace = true

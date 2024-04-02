@@ -399,6 +399,15 @@ async fn handle_tenant_describe(
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
 }
 
+async fn handle_tenant_list(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    json_response(StatusCode::OK, service.tenant_list())
+}
+
 async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -795,6 +804,9 @@ pub fn make_router(
                 handle_tenant_describe,
                 RequestName("control_v1_tenant_describe"),
             )
+        })
+        .get("/control/v1/tenant", |r| {
+            tenant_service_handler(r, handle_tenant_list, RequestName("control_v1_tenant_list"))
         })
         .put("/control/v1/tenant/:tenant_id/policy", |r| {
             named_request_span(
