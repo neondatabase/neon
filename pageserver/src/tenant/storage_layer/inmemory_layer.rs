@@ -12,7 +12,7 @@ use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{PageReconstructError, Timeline};
-use crate::walrecord;
+use crate::{page_cache, walrecord};
 use anyhow::{anyhow, ensure, Result};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
@@ -36,10 +36,14 @@ use super::{
     ValuesReconstructState,
 };
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub(crate) struct InMemoryLayerFileId(page_cache::FileId);
+
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
+    file_id: InMemoryLayerFileId,
 
     /// This layer contains all the changes from 'start_lsn'. The
     /// start is inclusive.
@@ -200,6 +204,10 @@ pub(crate) static GLOBAL_RESOURCES: GlobalResources = GlobalResources {
 };
 
 impl InMemoryLayer {
+    pub(crate) fn file_id(&self) -> InMemoryLayerFileId {
+        self.file_id
+    }
+
     pub(crate) fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
@@ -443,8 +451,10 @@ impl InMemoryLayer {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
         let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id).await?;
+        let key = InMemoryLayerFileId(file.id());
 
         Ok(InMemoryLayer {
+            file_id: key,
             conf,
             timeline_id,
             tenant_shard_id,
