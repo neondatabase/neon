@@ -433,10 +433,13 @@ def test_sharding_service_compute_hook(
     # Set up fake HTTP notify endpoint
     notifications = []
 
+    handle_params = {"status": 200}
+
     def handler(request: Request):
-        log.info(f"Notify request: {request}")
+        status = handle_params["status"]
+        log.info(f"Notify request[{status}]: {request}")
         notifications.append(request.json)
-        return Response(status=200)
+        return Response(status=status)
 
     httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
@@ -503,6 +506,24 @@ def test_sharding_service_compute_hook(
         assert notifications[3] == expect
 
     wait_until(10, 1, received_split_notification)
+
+    # If the compute hook is unavailable, that should not block creating a tenant and
+    # creating a timeline.  This simulates a control plane refusing to accept notifications
+    handle_params["status"] = 423
+    degraded_tenant_id = TenantId.generate()
+    degraded_timeline_id = TimelineId.generate()
+    env.storage_controller.tenant_create(degraded_tenant_id)
+    env.storage_controller.pageserver_api().timeline_create(
+        PgVersion.NOT_SET, degraded_tenant_id, degraded_timeline_id
+    )
+
+    # Ensure we hit the handler error path
+    env.storage_controller.allowed_errors.append(
+        ".*Failed to notify compute of attached pageserver.*tenant busy.*"
+    )
+    env.storage_controller.allowed_errors.append(".*Reconcile error.*tenant busy.*")
+    assert notifications[-1] is not None
+    assert notifications[-1]["tenant_id"] == str(degraded_tenant_id)
 
     env.storage_controller.consistency_check()
 
@@ -1015,3 +1036,98 @@ def test_sharding_service_re_attach(neon_env_builder: NeonEnvBuilder):
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
     assert reconciles_after_restart == reconciles_before_restart
+
+
+def test_storage_controller_shard_scheduling_policy(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that emergency hooks for disabling rogue tenants' reconcilers work as expected.
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            # We will intentionally cause reconcile errors
+            ".*Reconcile error.*",
+            # Message from using a scheduling policy
+            ".*Scheduling is disabled by policy.*",
+            ".*Skipping reconcile for policy.*",
+            # Message from a node being offline
+            ".*Call to node .* management API .* failed",
+        ]
+    )
+
+    # Stop pageserver so that reconcile cannot complete
+    env.pageserver.stop()
+
+    env.storage_controller.tenant_create(tenant_id, placement_policy="Detached")
+
+    # Try attaching it: we should see reconciles failing
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "placement": {"Attached": 0},
+        },
+    )
+
+    def reconcile_errors() -> int:
+        return int(
+            env.storage_controller.get_metric_value(
+                "storage_controller_reconcile_complete_total", filter={"status": "error"}
+            )
+            or 0
+        )
+
+    def reconcile_ok() -> int:
+        return int(
+            env.storage_controller.get_metric_value(
+                "storage_controller_reconcile_complete_total", filter={"status": "ok"}
+            )
+            or 0
+        )
+
+    def assert_errors_gt(n) -> int:
+        e = reconcile_errors()
+        assert e > n
+        return e
+
+    errs = wait_until(10, 1, lambda: assert_errors_gt(0))
+
+    # Try reconciling again, it should fail again
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.reconcile_all()
+    errs = wait_until(10, 1, lambda: assert_errors_gt(errs))
+
+    # Configure the tenant to disable reconciles
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "scheduling": "Stop",
+        },
+    )
+
+    # Try reconciling again, it should not cause an error (silently skip)
+    env.storage_controller.reconcile_all()
+    assert reconcile_errors() == errs
+
+    # Start the pageserver and re-enable reconciles
+    env.pageserver.start()
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "scheduling": "Active",
+        },
+    )
+
+    def assert_ok_gt(n) -> int:
+        o = reconcile_ok()
+        assert o > n
+        return o
+
+    # We should see a successful reconciliation
+    wait_until(10, 1, lambda: assert_ok_gt(0))
+
+    # And indeed the tenant should be attached
+    assert len(env.pageserver.http_client().tenant_list_locations()["tenant_shards"]) == 1
