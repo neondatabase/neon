@@ -373,6 +373,7 @@ impl WalIngest {
                 if info == pg_constants::XLOG_RUNNING_XACTS {
                     let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
                     self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+                    self.checkpoint_modified = true;
                 }
             }
             _x => {

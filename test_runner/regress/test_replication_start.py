@@ -1,9 +1,7 @@
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, wait_replica_caughtup
 
 
-@pytest.mark.xfail
 def test_replication_start(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
