@@ -44,6 +44,7 @@ use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
+use crate::usage_metrics::MetricCounterRecorder;
 use crate::DbName;
 use crate::RoleName;
 
