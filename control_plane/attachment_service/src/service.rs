@@ -20,6 +20,7 @@ use control_plane::storage_controller::{
 use diesel::result::DatabaseErrorKind;
 use futures::{stream::FuturesUnordered, StreamExt};
 use hyper::StatusCode;
+use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
@@ -2735,45 +2736,71 @@ impl Service {
         })
     }
 
-    pub(crate) fn tenant_describe(
+    /// Returns None if the input iterator of shards does not include a shard with number=0
+    fn tenant_describe_impl<'a>(
         &self,
-        tenant_id: TenantId,
-    ) -> Result<TenantDescribeResponse, ApiError> {
-        let locked = self.inner.read().unwrap();
-
+        shards: impl Iterator<Item = &'a TenantState>,
+    ) -> Option<TenantDescribeResponse> {
         let mut shard_zero = None;
-        let mut shards = Vec::new();
+        let mut describe_shards = Vec::new();
 
-        for (tenant_shard_id, shard) in locked.tenants.range(TenantShardId::tenant_range(tenant_id))
-        {
-            if tenant_shard_id.is_zero() {
+        for shard in shards {
+            if shard.tenant_shard_id.is_zero() {
                 shard_zero = Some(shard);
             }
 
-            let response_shard = TenantDescribeResponseShard {
-                tenant_shard_id: *tenant_shard_id,
+            describe_shards.push(TenantDescribeResponseShard {
+                tenant_shard_id: shard.tenant_shard_id,
                 node_attached: *shard.intent.get_attached(),
                 node_secondary: shard.intent.get_secondary().to_vec(),
                 last_error: shard.last_error.lock().unwrap().clone(),
                 is_reconciling: shard.reconciler.is_some(),
                 is_pending_compute_notification: shard.pending_compute_notification,
                 is_splitting: matches!(shard.splitting, SplitState::Splitting),
-            };
-            shards.push(response_shard);
+                scheduling_policy: *shard.get_scheduling_policy(),
+            })
         }
 
-        let Some(shard_zero) = shard_zero else {
-            return Err(ApiError::NotFound(
-                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
-            ));
-        };
+        let shard_zero = shard_zero?;
 
-        Ok(TenantDescribeResponse {
-            shards,
+        Some(TenantDescribeResponse {
+            tenant_id: shard_zero.tenant_shard_id.tenant_id,
+            shards: describe_shards,
             stripe_size: shard_zero.shard.stripe_size,
             policy: shard_zero.policy.clone(),
             config: shard_zero.config.clone(),
         })
+    }
+
+    pub(crate) fn tenant_describe(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantDescribeResponse, ApiError> {
+        let locked = self.inner.read().unwrap();
+
+        self.tenant_describe_impl(
+            locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .map(|(_k, v)| v),
+        )
+        .ok_or_else(|| ApiError::NotFound(anyhow::anyhow!("Tenant {tenant_id} not found").into()))
+    }
+
+    pub(crate) fn tenant_list(&self) -> Vec<TenantDescribeResponse> {
+        let locked = self.inner.read().unwrap();
+
+        let mut result = Vec::new();
+        for (_tenant_id, tenant_shards) in
+            &locked.tenants.iter().group_by(|(id, _shard)| id.tenant_id)
+        {
+            result.push(
+                self.tenant_describe_impl(tenant_shards.map(|(_k, v)| v))
+                    .expect("Groups are always non-empty"),
+            );
+        }
+
+        result
     }
 
     #[instrument(skip_all, fields(tenant_id=%op.tenant_id))]

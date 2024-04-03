@@ -288,6 +288,7 @@ dependencies = [
  "hex",
  "humantime",
  "hyper",
+ "itertools",
  "lasso",
  "measured",
  "metrics",
@@ -5617,6 +5618,26 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
+name = "storcon_cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "comfy-table",
+ "hyper",
+ "pageserver_api",
+ "pageserver_client",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
  "tracing",
  "utils",
  "workspace_hack",

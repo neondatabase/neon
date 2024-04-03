@@ -1,3 +1,4 @@
+import json
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.types import TenantId, TenantShardId, TimelineId
-from fixtures.utils import run_pg_bench_small, wait_until
+from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
@@ -1131,3 +1132,89 @@ def test_storage_controller_shard_scheduling_policy(neon_env_builder: NeonEnvBui
 
     # And indeed the tenant should be attached
     assert len(env.pageserver.http_client().tenant_list_locations()["tenant_shards"]) == 1
+
+
+def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
+    """
+    The storage controller command line interface (storcon-cli) is an internal tool.  Most tests
+    just use the APIs directly: this test exercises some basics of the CLI as a regression test
+    that the client remains usable as the server evolves.
+    """
+    output_dir = neon_env_builder.test_output_dir
+    shard_count = 4
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+    base_args = [env.neon_binpath / "storcon_cli", "--api", env.storage_controller_api]
+
+    def storcon_cli(args):
+        """
+        CLI wrapper: returns stdout split into a list of non-empty strings
+        """
+        (output_path, stdout, status_code) = subprocess_capture(
+            output_dir,
+            [str(s) for s in base_args + args],
+            echo_stderr=True,
+            echo_stdout=True,
+            env={},
+            check=False,
+            capture_stdout=True,
+            timeout=10,
+        )
+        if status_code:
+            log.warning(f"Command {args} failed")
+            log.warning(f"Output at: {output_path}")
+
+            raise RuntimeError("CLI failure (check logs for stderr)")
+
+        assert stdout is not None
+        return [line.strip() for line in stdout.split("\n") if line.strip()]
+
+    # List nodes
+    node_lines = storcon_cli(["nodes"])
+    # Table header, footer, and one line of data
+    assert len(node_lines) == 5
+    assert "localhost" in node_lines[3]
+
+    # Pause scheduling onto a node
+    storcon_cli(["node-configure", "--node-id", "1", "--scheduling", "pause"])
+    assert "Pause" in storcon_cli(["nodes"])[3]
+
+    # Make a node offline
+    storcon_cli(["node-configure", "--node-id", "1", "--availability", "offline"])
+    assert "Offline" in storcon_cli(["nodes"])[3]
+
+    # List tenants
+    tenant_lines = storcon_cli(["tenants"])
+    assert len(tenant_lines) == 5
+    assert str(env.initial_tenant) in tenant_lines[3]
+
+    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy.*")
+
+    # Describe a tenant
+    tenant_lines = storcon_cli(["tenant-describe", "--tenant-id", str(env.initial_tenant)])
+    assert len(tenant_lines) == 3 + shard_count * 2
+    assert str(env.initial_tenant) in tenant_lines[3]
+
+    # Pause changes on a tenant
+    storcon_cli(["tenant-policy", "--tenant-id", str(env.initial_tenant), "--scheduling", "stop"])
+    assert "Stop" in storcon_cli(["tenants"])[3]
+
+    # Change a tenant's placement
+    storcon_cli(
+        ["tenant-policy", "--tenant-id", str(env.initial_tenant), "--placement", "secondary"]
+    )
+    assert "Secondary" in storcon_cli(["tenants"])[3]
+
+    # Modify a tenant's config
+    storcon_cli(
+        [
+            "tenant-config",
+            "--tenant-id",
+            str(env.initial_tenant),
+            "--config",
+            json.dumps({"pitr_interval": "1m"}),
+        ]
+    )
+
+    # Quiesce any background reconciliation before doing consistency check
+    env.storage_controller.reconcile_until_idle(timeout_secs=10)
+    env.storage_controller.consistency_check()
