@@ -53,7 +53,7 @@ enum Command {
         availability: Option<NodeAvailabilityArg>,
         /// Scheduling policy controls whether tenant shards may be scheduled onto this node.
         #[arg(long)]
-        scheduling: Option<NodeSchedulingPolicyArg>,
+        scheduling: Option<NodeSchedulingPolicy>,
     },
     /// Modify a tenant's policies in the storage controller
     TenantPolicy {
@@ -206,23 +206,6 @@ impl FromStr for NodeAvailabilityArg {
     }
 }
 
-#[derive(Debug, Clone)]
-struct NodeSchedulingPolicyArg(NodeSchedulingPolicy);
-
-impl FromStr for NodeSchedulingPolicyArg {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "active" => Ok(Self(NodeSchedulingPolicy::Active)),
-            "filling" => Ok(Self(NodeSchedulingPolicy::Filling)),
-            "pause" => Ok(Self(NodeSchedulingPolicy::Pause)),
-            "draining" => Ok(Self(NodeSchedulingPolicy::Draining)),
-            _ => Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
-        }
-    }
-}
-
 struct Client {
     base_url: Url,
     jwt_token: Option<String>,
@@ -358,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
             let req = NodeConfigureRequest {
                 node_id,
                 availability: availability.map(|a| a.0),
-                scheduling: scheduling.map(|s| s.0),
+                scheduling,
             };
             storcon_client
                 .dispatch::<_, ()>(
