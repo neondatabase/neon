@@ -4,7 +4,8 @@ pub mod checks;
 pub mod cloud_admin_api;
 pub mod garbage;
 pub mod metadata_stream;
-pub mod scan_metadata;
+pub mod scan_pageserver_metadata;
+pub mod scan_safekeeper_metadata;
 pub mod tenant_snapshot;
 
 use std::env;
@@ -141,12 +142,17 @@ impl RootTarget {
     pub fn tenants_root(&self) -> S3Target {
         match self {
             Self::Pageserver(root) => root.with_sub_segment(TENANTS_SEGMENT_NAME),
-            Self::Safekeeper(root) => root.with_sub_segment("wal"),
+            Self::Safekeeper(root) => root.clone(),
         }
     }
 
     pub fn tenant_root(&self, tenant_id: &TenantShardId) -> S3Target {
-        self.tenants_root().with_sub_segment(&tenant_id.to_string())
+        match self {
+            Self::Pageserver(_) => self.tenants_root().with_sub_segment(&tenant_id.to_string()),
+            Self::Safekeeper(_) => self
+                .tenants_root()
+                .with_sub_segment(&tenant_id.tenant_id.to_string()),
+        }
     }
 
     pub(crate) fn tenant_shards_prefix(&self, tenant_id: &TenantId) -> S3Target {
@@ -337,9 +343,7 @@ fn init_remote(
         }),
         NodeKind::Safekeeper => RootTarget::Safekeeper(S3Target {
             bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config
-                .prefix_in_bucket
-                .unwrap_or("safekeeper/v1".to_string()),
+            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or("wal".to_string()),
             delimiter,
         }),
     };

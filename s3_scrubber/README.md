@@ -67,10 +67,12 @@ the purge command will log all the keys that it would have deleted.
 
 #### `scan-metadata`
 
-Walk objects in a pageserver S3 bucket, and report statistics on the contents.
+Walk objects in a pageserver or safekeeper S3 bucket, and report statistics on the contents and checking consistency.
+Errors are logged to stderr and summary to stdout.
 
+For pageserver:
 ```
-env SSO_ACCOUNT_ID=123456 REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- scan-metadata
+env SSO_ACCOUNT_ID=123456 REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- scan-metadata --node-kind pageserver
 
 Timelines: 31106
 With errors: 3
@@ -81,6 +83,10 @@ Timeline size bytes: min 22413312, 1% 52133887, 10% 56459263, 50% 101711871, 90%
 Layer size bytes: min 24576, 1% 36879, 10% 36879, 50% 61471, 90% 44695551, 99% 201457663, max 275324928
 Timeline layer count: min 1, 1% 3, 10% 6, 50% 16, 90% 25, 99% 39, max 1053
 ```
+
+For safekeepers, dump_db_connstr and dump_db_table must be
+specified; they should point to table with debug dump which will be used
+to list timelines and find their backup and start LSNs.
 
 ## Cleaning up running pageservers
 

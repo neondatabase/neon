@@ -3734,7 +3734,9 @@ class S3Scrubber:
         return stdout
 
     def scan_metadata(self) -> Any:
-        stdout = self.scrubber_cli(["scan-metadata", "--json"], timeout=30)
+        stdout = self.scrubber_cli(
+            ["scan-metadata", "--node-kind", "pageserver", "--json"], timeout=30
+        )
 
         try:
             return json.loads(stdout)
