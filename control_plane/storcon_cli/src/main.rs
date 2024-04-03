@@ -25,6 +25,8 @@ use pageserver_api::controller_api::{
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Register a pageserver with the storage controller.  This shouldn't usually be necessary,
+    /// since pageservers auto-register when they start up
     NodeRegister {
         #[arg(long)]
         node_id: NodeId,
@@ -39,57 +41,81 @@ enum Command {
         #[arg(long)]
         listen_http_port: u16,
     },
+
+    /// Modify a node's configuration in the storage controller
     NodeConfigure {
         #[arg(long)]
         node_id: NodeId,
 
+        /// Availability is usually auto-detected based on heartbeats.  Set 'offline' here to
+        /// manually mark a node offline
         #[arg(long)]
         availability: Option<NodeAvailabilityArg>,
+        /// Scheduling policy controls whether tenant shards may be scheduled onto this node.
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicyArg>,
     },
+    /// Modify a tenant's policies in the storage controller
     TenantPolicy {
         #[arg(long)]
         tenant_id: TenantId,
+        /// Placement policy controls whether a tenant is `detached`, has only a secondary location (`secondary`),
+        /// or is in the normal attached state with N secondary locations (`attached:N`)
         #[arg(long)]
         placement: Option<PlacementPolicyArg>,
+        /// Scheduling policy enables pausing the controller's scheduling activity involving this tenant.  `active` is normal,
+        /// `essential` disables optimization scheduling changes, `pause` disables all scheduling changes, and `stop` prevents
+        /// all reconciliation activity including for scheduling changes already made.  `pause` and `stop` can make a tenant
+        /// unavailable, and are only for use in emergencies.
         #[arg(long)]
         scheduling: Option<ShardSchedulingPolicyArg>,
     },
+    /// List nodes known to the storage controller
     Nodes {},
+    /// List tenants known to the storage controller
     Tenants {},
+    /// Create a new tenant in the storage controller, and by extension on pageservers.
     TenantCreate {
         #[arg(long)]
         tenant_id: TenantId,
     },
+    /// Delete a tenant in the storage controller, and by extension on pageservers.
     TenantDelete {
         #[arg(long)]
         tenant_id: TenantId,
     },
+    /// Split an existing tenant into a higher number of shards than its current shard count.
     TenantShardSplit {
         #[arg(long)]
         tenant_id: TenantId,
         #[arg(long)]
         shard_count: u8,
+        /// Optional, in 8kiB pages.  e.g. set 2048 for 16MB stripes.
         #[arg(long)]
         stripe_size: Option<u32>,
     },
+    /// Migrate the attached location for a tenant shard to a specific pageserver.
     TenantShardMigrate {
         #[arg(long)]
         tenant_shard_id: TenantShardId,
         #[arg(long)]
         node: NodeId,
     },
+    /// Modify the pageserver tenant configuration of a tenant: this is the configuration structure
+    /// that is passed through to pageservers, and does not affect storage controller behavior.
     TenantConfig {
         #[arg(long)]
         tenant_id: TenantId,
         #[arg(long)]
         config: String,
     },
+    /// Attempt to balance the locations for a tenant across pageservers.  This is a client-side
+    /// alternative to the storage controller's scheduling optimization behavior.
     TenantScatter {
         #[arg(long)]
         tenant_id: TenantId,
     },
+    /// Print details about a particular tenant, including all its shards' states.
     TenantDescribe {
         #[arg(long)]
         tenant_id: TenantId,
@@ -97,13 +123,22 @@ enum Command {
 }
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version,
+    about,
+    long_about = "CLI for Storage Controller Support/Debug"
+)]
 #[command(arg_required_else_help(true))]
 struct Cli {
     #[arg(long)]
+    /// URL to storage controller.  e.g. http://127.0.0.1:1234 when using `neon_local`
     api: Url,
 
     #[arg(long)]
+    /// JWT token for authenticating with storage controller.  Depending on the API used, this
+    /// should have either `pageserverapi` or `admin` scopes: for convenience, you should mint
+    /// a token with both scopes to use with this tool.
     jwt: Option<String>,
 
     #[command(subcommand)]
