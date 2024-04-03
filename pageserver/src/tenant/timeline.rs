@@ -612,6 +612,12 @@ pub enum GetVectoredImpl {
     Vectored,
 }
 
+pub(crate) enum WaitLsnWaiter<'a> {
+    Timeline(&'a Timeline),
+    Tenant,
+    PageService,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -1060,7 +1066,8 @@ impl Timeline {
     pub(crate) async fn wait_lsn(
         &self,
         lsn: Lsn,
-        _ctx: &RequestContext, /* Prepare for use by cancellation */
+        who_is_waiting: WaitLsnWaiter<'_>,
+        ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
         if self.cancel.is_cancelled() {
             return Err(WaitLsnError::Shutdown);
@@ -1068,20 +1075,28 @@ impl Timeline {
             return Err(WaitLsnError::BadState);
         }
 
-        // This should never be called from the WAL receiver, because that could lead
-        // to a deadlock.
-        debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverManager),
-            "wait_lsn cannot be called in WAL receiver"
-        );
-        debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionHandler),
-            "wait_lsn cannot be called in WAL receiver"
-        );
-        debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionPoller),
-            "wait_lsn cannot be called in WAL receiver"
-        );
+        if cfg!(debug_assertions) {
+            match ctx.task_kind() {
+                TaskKind::WalReceiverManager
+                | TaskKind::WalReceiverConnectionHandler
+                | TaskKind::WalReceiverConnectionPoller => {
+                    let is_myself = match who_is_waiting {
+                        WaitLsnWaiter::Timeline(waiter) => Weak::ptr_eq(&waiter.myself, &self.myself),
+                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
+                    };
+                    if is_myself {
+                        if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
+                            // walingest is the only one that can advance last_record_lsn; it should make sure to never reach here
+                            panic!("this timeline's walingest task is calling wait_lsn({lsn}) but we only have last_record_lsn={current}; would deadlock");
+                        }
+                    } else {
+                        // if another  timeline's  is waiting for us, there's no deadlock risk because
+                        // our walreceiver task can make progress independent of theirs
+                    }
+                }
+                _ => {}
+            }
+        }
 
         let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
@@ -1297,15 +1312,18 @@ impl Timeline {
     pub(crate) async fn flush_and_shutdown(&self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        // Stop ingesting data, so that we are not still writing to an InMemoryLayer while
-        // trying to flush
-        tracing::debug!("Waiting for WalReceiverManager...");
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_shard_id),
-            Some(self.timeline_id),
-        )
-        .await;
+        // Stop ingesting data. Walreceiver only provides cancellation but no
+        // "wait until gone", because it uses the Timeline::gate.  So, only
+        // after the self.gate.close() in self.shutdown() below will we know for
+        // sure that no walreceiver tasks are left.
+        // This means that we might still be ingesting data during the call to
+        // `self.freeze_and_flush()` below.  That's not ideal, but, we don't have
+        // the concept of a ChildGuard, which is what we'd need to properly model
+        // early shutdown of the walreceiver task sub-tree before the other
+        // Timeline task sub-trees.
+        if let Some(walreceiver) = self.walreceiver.lock().unwrap().take() {
+            walreceiver.cancel();
+        }
 
         // Since we have shut down WAL ingest, we should not let anyone start waiting for the LSN to advance
         self.last_record_lsn.shutdown();
@@ -3054,7 +3072,7 @@ impl Timeline {
             }
         }
         ancestor
-            .wait_lsn(self.ancestor_lsn, ctx)
+            .wait_lsn(self.ancestor_lsn, WaitLsnWaiter::Timeline(self), ctx)
             .await
             .map_err(|e| match e {
                 e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
