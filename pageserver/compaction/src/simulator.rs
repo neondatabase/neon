@@ -2,7 +2,6 @@ mod draw;
 
 use draw::{LayerTraceEvent, LayerTraceFile, LayerTraceOp};
 
-use async_trait::async_trait;
 use futures::StreamExt;
 use rand::Rng;
 use tracing::info;
@@ -139,7 +138,6 @@ impl interface::CompactionLayer<Key> for Arc<MockDeltaLayer> {
     }
 }
 
-#[async_trait]
 impl interface::CompactionDeltaLayer<MockTimeline> for Arc<MockDeltaLayer> {
     type DeltaEntry<'a> = MockRecord;
 
