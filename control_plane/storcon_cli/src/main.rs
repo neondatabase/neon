@@ -44,17 +44,17 @@ enum Command {
         node_id: NodeId,
 
         #[arg(long)]
-        availability: Option<NodeAvailabilityWrapper>,
+        availability: Option<NodeAvailabilityArg>,
         #[arg(long)]
-        scheduling: Option<NodeSchedulingPolicy>,
+        scheduling: Option<NodeSchedulingPolicyArg>,
     },
     TenantPolicy {
         #[arg(long)]
         tenant_id: TenantId,
         #[arg(long)]
-        placement: Option<PlacementPolicy>,
+        placement: Option<PlacementPolicyArg>,
         #[arg(long)]
-        scheduling: Option<ShardSchedulingPolicy>,
+        scheduling: Option<ShardSchedulingPolicyArg>,
     },
     Nodes {},
     Tenants {},
@@ -108,6 +108,84 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone)]
+struct PlacementPolicyArg(PlacementPolicy);
+
+impl FromStr for PlacementPolicyArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "detached" => Ok(Self(PlacementPolicy::Detached)),
+            "secondary" => Ok(Self(PlacementPolicy::Secondary)),
+            _ if s.starts_with("attached:") => {
+                let mut splitter = s.split(':');
+                let _prefix = splitter.next().unwrap();
+                match splitter.next().and_then(|s| s.parse::<usize>().ok()) {
+                    Some(n) => Ok(Self(PlacementPolicy::Attached(n))),
+                    None => Err(anyhow::anyhow!(
+                        "Invalid format '{s}', a valid example is 'attached:1'"
+                    )),
+                }
+            }
+            _ => Err(anyhow::anyhow!(
+                "Unknown placement policy '{s}', try detached,secondary,attached:<n>"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ShardSchedulingPolicyArg(ShardSchedulingPolicy);
+
+impl FromStr for ShardSchedulingPolicyArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self(ShardSchedulingPolicy::Active)),
+            "essential" => Ok(Self(ShardSchedulingPolicy::Essential)),
+            "pause" => Ok(Self(ShardSchedulingPolicy::Pause)),
+            "stop" => Ok(Self(ShardSchedulingPolicy::Stop)),
+            _ => Err(anyhow::anyhow!(
+                "Unknown scheduling policy '{s}', try active,essential,pause,stop"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NodeAvailabilityArg(NodeAvailabilityWrapper);
+
+impl FromStr for NodeAvailabilityArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self(NodeAvailabilityWrapper::Active)),
+            "offline" => Ok(Self(NodeAvailabilityWrapper::Offline)),
+            _ => Err(anyhow::anyhow!("Unknown availability state '{s}'")),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NodeSchedulingPolicyArg(NodeSchedulingPolicy);
+
+impl FromStr for NodeSchedulingPolicyArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self(NodeSchedulingPolicy::Active)),
+            "filling" => Ok(Self(NodeSchedulingPolicy::Filling)),
+            "pause" => Ok(Self(NodeSchedulingPolicy::Pause)),
+            "draining" => Ok(Self(NodeSchedulingPolicy::Draining)),
+            _ => Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
+        }
+    }
 }
 
 struct Client {
@@ -244,8 +322,8 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let req = NodeConfigureRequest {
                 node_id,
-                availability,
-                scheduling,
+                availability: availability.map(|a| a.0),
+                scheduling: scheduling.map(|s| s.0),
             };
             storcon_client
                 .dispatch::<_, ()>(
@@ -290,8 +368,8 @@ async fn main() -> anyhow::Result<()> {
             scheduling,
         } => {
             let req = TenantPolicyRequest {
-                scheduling,
-                placement,
+                scheduling: scheduling.map(|s| s.0),
+                placement: placement.map(|p| p.0),
             };
             storcon_client
                 .dispatch::<_, ()>(

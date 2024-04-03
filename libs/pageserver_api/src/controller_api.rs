@@ -48,46 +48,6 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
-impl FromStr for PlacementPolicy {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "detached" => Ok(Self::Detached),
-            "secondary" => Ok(Self::Secondary),
-            _ if s.starts_with("attached:") => {
-                let mut splitter = s.split(':');
-                let _prefix = splitter.next().unwrap();
-                match splitter.next().and_then(|s| s.parse::<usize>().ok()) {
-                    Some(n) => Ok(Self::Attached(n)),
-                    None => Err(anyhow::anyhow!(
-                        "Invalid format '{s}', a valid example is 'attached:1'"
-                    )),
-                }
-            }
-            _ => Err(anyhow::anyhow!(
-                "Unknown placement policy '{s}', try detached,secondary,attached:<n>"
-            )),
-        }
-    }
-}
-
-impl FromStr for ShardSchedulingPolicy {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "active" => Ok(Self::Active),
-            "essential" => Ok(Self::Essential),
-            "pause" => Ok(Self::Pause),
-            "stop" => Ok(Self::Stop),
-            _ => Err(anyhow::anyhow!(
-                "Unknown scheduling policy '{s}', try active,essential,pause,stop"
-            )),
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantLocateResponseShard {
     pub shard_id: TenantShardId,
@@ -214,18 +174,6 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
         match val {
             NodeAvailability::Active(_) => NodeAvailabilityWrapper::Active,
             NodeAvailability::Offline => NodeAvailabilityWrapper::Offline,
-        }
-    }
-}
-
-impl FromStr for NodeAvailabilityWrapper {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "active" => Ok(Self::Active),
-            "offline" => Ok(Self::Offline),
-            _ => Err(anyhow::anyhow!("Unknown availability state '{s}'")),
         }
     }
 }
