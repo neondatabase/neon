@@ -6644,6 +6644,8 @@ dependencies = [
  "clap",
  "futures",
  "inotify 0.10.2",
+ "once_cell",
+ "prometheus",
  "serde",
  "serde_json",
  "sysinfo",

@@ -2,14 +2,17 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg(target_os = "linux")]
 
+use ::prometheus::TextEncoder;
 use anyhow::Context;
 use axum::{
     extract::{ws::WebSocket, State, WebSocketUpgrade},
     response::Response,
+    routing::get,
+    Router, Server,
 };
-use axum::{routing::get, Router, Server};
 use clap::Parser;
 use futures::Future;
+use prometheus::Encoder;
 use std::{fmt::Debug, time::Duration};
 use sysinfo::{RefreshKind, System, SystemExt};
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -24,6 +27,7 @@ pub mod protocol;
 
 pub mod cgroup;
 pub mod filecache;
+pub mod metrics;
 pub mod runner;
 
 /// The vm-monitor is an autoscaling component started by compute_ctl.
@@ -126,6 +130,17 @@ pub async fn start(args: &'static Args, token: CancellationToken) -> anyhow::Res
         // one connection at a time, which we enforce by killing old connections
         // when we receive a new one.
         .route("/monitor", get(ws_handler))
+        // Get promethus metrics
+        .route(
+            "/metrics",
+            get(|| async {
+                let mut buffer = vec![];
+                let encoder = TextEncoder::new();
+                let metric_families = prometheus::gather();
+                encoder.encode(&metric_families, &mut buffer).unwrap();
+                buffer
+            }),
+        )
         .with_state(ServerState {
             sender,
             token,

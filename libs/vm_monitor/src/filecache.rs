@@ -54,6 +54,15 @@ pub struct FileCacheConfig {
     spread_factor: f64,
 }
 
+#[derive(Debug)]
+pub struct FileCacheStats {
+    pub lfc_hits: u64,
+    pub lfc_writes: u64,
+    pub lfc_misses: u64,
+    pub lfc_used: u64,
+    pub lfc_working_set_size: u64,
+}
+
 impl Default for FileCacheConfig {
     fn default() -> Self {
         Self {
@@ -220,6 +229,40 @@ impl FileCacheState {
                     .context("failed to execute query a second time")
             }
         }
+    }
+
+    /// Get file cache status
+    #[tracing::instrument(skip_all)]
+    pub async fn get_file_cache_stats(&mut self) -> anyhow::Result<FileCacheStats> {
+        let queries = [
+            "select lfc_value as lfc_hits from neon.neon_lfc_stats where lfc_key='file_cache_hits'",
+            "select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes'",
+            "select lfc_value as lfc_misses from neon.neon_lfc_stats where lfc_key='file_cache_misses'",
+            "select lfc_value as lfc_used from neon.neon_lfc_stats where lfc_key='file_cache_used'",
+            "select neon.approximate_working_set_size(false) as approximate_working_set_size",    
+        ];
+        let mut result = Vec::with_capacity(queries.len());
+        for query in queries {
+            let item = self
+                .query_with_retry(query, &[])
+                .await
+                .context("failed to query pg for file cache size")?
+                .first()
+                .ok_or_else(|| anyhow!("file cache size query returned no rows"))?
+                // the queries will always return a value >= 0
+                .try_get::<_, i64>(0)
+                // Since the size of the table is not negative, the cast is sound.
+                .map(|bytes| bytes as u64)
+                .context("failed to extract file cache stat from query result")?;
+            result.push(item);
+        }
+        Ok(FileCacheStats {
+            lfc_hits: result[0],
+            lfc_writes: result[1],
+            lfc_misses: result[2],
+            lfc_used: result[3],
+            lfc_working_set_size: result[4],
+        })
     }
 
     /// Get the current size of the file cache.

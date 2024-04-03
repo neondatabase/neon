@@ -413,10 +413,23 @@ impl Runner {
         }
     }
 
+    pub async fn update_lfc_stats(&mut self) -> anyhow::Result<()> {
+        if let Some(ref mut filecache) = self.filecache {
+            let stats = filecache.get_file_cache_stats().await?;
+            crate::metrics::METRICS_LFC_HITS.set(stats.lfc_hits as i64);
+            crate::metrics::METRICS_LFC_MISSES.set(stats.lfc_misses as i64);
+            crate::metrics::METRICS_LFC_USED.set(stats.lfc_used as i64);
+            crate::metrics::METRICS_LFC_WRITES.set(stats.lfc_writes as i64);
+            crate::metrics::METRICS_LFC_WORKING_SET_SIZE.set(stats.lfc_working_set_size as i64);
+        }
+        Ok(())
+    }
+
     // TODO: don't propagate errors, probably just warn!?
     #[tracing::instrument(skip_all)]
     pub async fn run(&mut self) -> anyhow::Result<()> {
         info!("starting dispatcher");
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
                 signal = self.kill.recv() => {
@@ -521,6 +534,12 @@ impl Runner {
                         }
                     } else {
                         anyhow::bail!("dispatcher connection closed")
+                    }
+                }
+
+                _ = interval.tick() => {
+                    if let Err(e) = self.update_lfc_stats().await {
+                        warn!("{e}");
                     }
                 }
             }
