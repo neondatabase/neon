@@ -13,11 +13,13 @@ use parquet::{
     },
     record::RecordWriter,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
 use utils::backoff;
+
+use crate::config::{remote_storage_from_toml, OptRemoteStorageConfig};
 
 use super::{RequestMonitoring, LOG_CHAN};
 
@@ -50,21 +52,13 @@ pub struct ParquetUploadArgs {
     parquet_upload_compression: Compression,
 }
 
-/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
-/// runtime type errors from the value parser we use.
-type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
-
-fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
-    RemoteStorageConfig::from_toml(&s.parse()?)
-}
-
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a upload fails, we log it at info-level, and retry.
 // But after FAILED_UPLOAD_WARN_THRESHOLD retries, we start to log it at WARN
 // level instead, as repeated failures can mean a more serious problem. If it
 // fails more than FAILED_UPLOAD_RETRIES times, we give up
-pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
-pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
+pub const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 // the parquet crate leaves a lot to be desired...
 // what follows is an attempt to write parquet files with minimal allocs.

@@ -22,6 +22,7 @@ diesel::table! {
         placement_policy -> Varchar,
         splitting -> Int2,
         config -> Text,
+        scheduling_policy -> Varchar,
     }
 }
 

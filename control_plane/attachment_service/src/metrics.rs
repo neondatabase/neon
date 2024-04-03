@@ -37,6 +37,9 @@ pub(crate) struct StorageControllerMetricGroup {
     pub(crate) storage_controller_reconcile_complete:
         measured::CounterVec<ReconcileCompleteLabelGroupSet>,
 
+    /// Count of how many times we make an optimization change to a tenant's scheduling
+    pub(crate) storage_controller_schedule_optimization: measured::Counter,
+
     /// HTTP request status counters for handled requests
     pub(crate) storage_controller_http_request_status:
         measured::CounterVec<HttpRequestStatusLabelGroupSet>,
@@ -101,6 +104,7 @@ impl StorageControllerMetricGroup {
                     status: StaticLabelSet::new(),
                 },
             ),
+            storage_controller_schedule_optimization: measured::Counter::new(),
             storage_controller_http_request_status: measured::CounterVec::new(
                 HttpRequestStatusLabelGroupSet {
                     path: lasso::ThreadedRodeo::new(),

@@ -4,7 +4,10 @@ use ::metrics::{
     register_int_gauge_vec, Histogram, HistogramVec, HyperLogLogVec, IntCounterPairVec,
     IntCounterVec, IntGauge, IntGaugeVec,
 };
-use metrics::{register_int_counter, register_int_counter_pair, IntCounter, IntCounterPair};
+use metrics::{
+    register_hll, register_int_counter, register_int_counter_pair, HyperLogLog, IntCounter,
+    IntCounterPair,
+};
 
 use once_cell::sync::Lazy;
 use tokio::time::{self, Instant};
@@ -114,12 +117,15 @@ pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static HTTP_CONTENT_LENGTH: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+pub static HTTP_CONTENT_LENGTH: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "proxy_http_conn_content_length_bytes",
-        "Time it took for proxy to establish a connection to the compute endpoint",
-        // largest bucket = 3^16 * 0.05ms = 2.15s
-        exponential_buckets(8.0, 2.0, 20).unwrap()
+        "Number of bytes the HTTP response content consumes",
+        // request/response
+        &["direction"],
+        // smallest bucket = 16 bytes
+        // largest bucket = 4^12 * 16 bytes = 256MB
+        exponential_buckets(16.0, 4.0, 12).unwrap()
     )
     .unwrap()
 });
@@ -160,6 +166,9 @@ pub static NUM_CANCELLATION_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub const NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT: &str = "from_client";
+pub const NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS: &str = "from_redis";
 
 pub enum Waiting {
     Cplane,
@@ -352,6 +361,23 @@ pub static TLS_HANDSHAKE_FAILURES: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "proxy_tls_handshake_failures",
         "Number of TLS handshake failures",
+    )
+    .unwrap()
+});
+
+pub static ENDPOINTS_AUTH_RATE_LIMITED: Lazy<HyperLogLog<32>> = Lazy::new(|| {
+    register_hll!(
+        32,
+        "proxy_endpoints_auth_rate_limits",
+        "Number of endpoints affected by authentication rate limits",
+    )
+    .unwrap()
+});
+
+pub static AUTH_RATE_LIMIT_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "proxy_requests_auth_rate_limits_total",
+        "Number of connection requests affected by authentication rate limits",
     )
     .unwrap()
 });

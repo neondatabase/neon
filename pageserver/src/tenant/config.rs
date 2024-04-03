@@ -57,6 +57,9 @@ pub mod defaults {
     // throughputs up to 1GiB/s per timeline.
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 1024 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
+    // By default ingest enough WAL for two new L0 layers before checking if new image
+    // image layers should be created.
+    pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 }
@@ -362,6 +365,10 @@ pub struct TenantConf {
     pub lazy_slru_download: bool,
 
     pub timeline_get_throttle: pageserver_api::models::ThrottleConfig,
+
+    // How much WAL must be ingested before checking again whether a new image layer is required.
+    // Expresed in multiples of checkpoint distance.
+    pub image_layer_creation_check_threshold: u8,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -454,6 +461,9 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline_get_throttle: Option<pageserver_api::models::ThrottleConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_layer_creation_check_threshold: Option<u8>,
 }
 
 impl TenantConfOpt {
@@ -508,6 +518,9 @@ impl TenantConfOpt {
                 .timeline_get_throttle
                 .clone()
                 .unwrap_or(global_conf.timeline_get_throttle),
+            image_layer_creation_check_threshold: self
+                .image_layer_creation_check_threshold
+                .unwrap_or(global_conf.image_layer_creation_check_threshold),
         }
     }
 }
@@ -548,6 +561,7 @@ impl Default for TenantConf {
             heatmap_period: Duration::ZERO,
             lazy_slru_download: false,
             timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
+            image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
         }
     }
 }
@@ -621,6 +635,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             heatmap_period: value.heatmap_period.map(humantime),
             lazy_slru_download: value.lazy_slru_download,
             timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
+            image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
         }
     }
 }

@@ -14,7 +14,6 @@ use utils::{
 
 use crate::service::Config;
 
-const BUSY_DELAY: Duration = Duration::from_secs(1);
 const SLOWDOWN_DELAY: Duration = Duration::from_secs(5);
 
 pub(crate) const API_CONCURRENCY: usize = 32;
@@ -280,11 +279,10 @@ impl ComputeHook {
                 Err(NotifyError::SlowDown)
             }
             StatusCode::LOCKED => {
-                // Delay our retry if busy: the usual fast exponential backoff in backoff::retry
-                // is not appropriate
-                tokio::time::timeout(BUSY_DELAY, cancel.cancelled())
-                    .await
-                    .ok();
+                // We consider this fatal, because it's possible that the operation blocking the control one is
+                // also the one that is waiting for this reconcile.  We should let the reconciler calling
+                // this hook fail, to give control plane a chance to un-lock.
+                tracing::info!("Control plane reports tenant is locked, dropping out of notify");
                 Err(NotifyError::Busy)
             }
             StatusCode::SERVICE_UNAVAILABLE
@@ -306,7 +304,12 @@ impl ComputeHook {
         let client = reqwest::Client::new();
         backoff::retry(
             || self.do_notify_iteration(&client, url, &reconfigure_request, cancel),
-            |e| matches!(e, NotifyError::Fatal(_) | NotifyError::Unexpected(_)),
+            |e| {
+                matches!(
+                    e,
+                    NotifyError::Fatal(_) | NotifyError::Unexpected(_) | NotifyError::Busy
+                )
+            },
             3,
             10,
             "Send compute notification",

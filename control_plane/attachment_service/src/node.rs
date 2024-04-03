@@ -3,7 +3,8 @@ use std::{str::FromStr, time::Duration};
 use hyper::StatusCode;
 use pageserver_api::{
     controller_api::{
-        NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, TenantLocateResponseShard,
+        NodeAvailability, NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy,
+        TenantLocateResponseShard,
     },
     shard::TenantShardId,
 };
@@ -255,6 +256,19 @@ impl Node {
             cancel,
         )
         .await
+    }
+
+    /// Generate the simplified API-friendly description of a node's state
+    pub(crate) fn describe(&self) -> NodeDescribeResponse {
+        NodeDescribeResponse {
+            id: self.id,
+            availability: self.availability.into(),
+            scheduling: self.scheduling,
+            listen_http_addr: self.listen_http_addr.clone(),
+            listen_http_port: self.listen_http_port,
+            listen_pg_addr: self.listen_pg_addr.clone(),
+            listen_pg_port: self.listen_pg_port,
+        }
     }
 }
 

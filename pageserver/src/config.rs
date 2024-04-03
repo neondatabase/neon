@@ -94,6 +94,8 @@ pub mod defaults {
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
+    pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
+
     pub const DEFAULT_WALREDO_PROCESS_KIND: &str = crate::walredo::ProcessKind::DEFAULT_TOML;
 
     ///
@@ -157,6 +159,8 @@ pub mod defaults {
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
 #secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
+
+#ephemeral_bytes_per_memory_kb = {DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB}
 
 [remote_storage]
 
@@ -234,6 +238,7 @@ pub struct PageServerConf {
     // How often to send unchanged cached metrics to the metrics endpoint.
     pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
+    pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
 
     pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
@@ -278,6 +283,13 @@ pub struct PageServerConf {
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
     pub validate_vectored_get: bool,
+
+    /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
+    /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
+    /// of ephemeral data.
+    ///
+    /// Setting this to zero disables limits on total ephemeral layer size.
+    pub ephemeral_bytes_per_memory_kb: usize,
 
     pub walredo_process_kind: crate::walredo::ProcessKind,
 }
@@ -374,6 +386,7 @@ struct PageServerConfigBuilder {
     cached_metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
+    metric_collection_bucket: BuilderValue<Option<RemoteStorageConfig>>,
 
     disk_usage_based_eviction: BuilderValue<Option<DiskUsageEvictionTaskConfig>>,
 
@@ -399,6 +412,8 @@ struct PageServerConfigBuilder {
     max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
 
     validate_vectored_get: BuilderValue<bool>,
+
+    ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
 
     walredo_process_kind: BuilderValue<crate::walredo::ProcessKind>,
 }
@@ -456,6 +471,8 @@ impl PageServerConfigBuilder {
             .expect("cannot parse default synthetic size calculation interval")),
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
 
+            metric_collection_bucket: Set(None),
+
             disk_usage_based_eviction: Set(None),
 
             test_remote_failures: Set(0),
@@ -483,6 +500,7 @@ impl PageServerConfigBuilder {
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
+            ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
 
             walredo_process_kind: Set(DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap()),
         }
@@ -585,6 +603,13 @@ impl PageServerConfigBuilder {
         self.metric_collection_endpoint = BuilderValue::Set(metric_collection_endpoint)
     }
 
+    pub fn metric_collection_bucket(
+        &mut self,
+        metric_collection_bucket: Option<RemoteStorageConfig>,
+    ) {
+        self.metric_collection_bucket = BuilderValue::Set(metric_collection_bucket)
+    }
+
     pub fn synthetic_size_calculation_interval(
         &mut self,
         synthetic_size_calculation_interval: Duration,
@@ -653,6 +678,10 @@ impl PageServerConfigBuilder {
         self.validate_vectored_get = BuilderValue::Set(value);
     }
 
+    pub fn get_ephemeral_bytes_per_memory_kb(&mut self, value: usize) {
+        self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
+    }
+
     pub fn get_walredo_process_kind(&mut self, value: crate::walredo::ProcessKind) {
         self.walredo_process_kind = BuilderValue::Set(value);
     }
@@ -696,6 +725,7 @@ impl PageServerConfigBuilder {
                 metric_collection_interval,
                 cached_metric_collection_interval,
                 metric_collection_endpoint,
+                metric_collection_bucket,
                 synthetic_size_calculation_interval,
                 disk_usage_based_eviction,
                 test_remote_failures,
@@ -710,6 +740,7 @@ impl PageServerConfigBuilder {
                 get_vectored_impl,
                 max_vectored_read_bytes,
                 validate_vectored_get,
+                ephemeral_bytes_per_memory_kb,
                 walredo_process_kind,
             }
             CUSTOM LOGIC
@@ -944,6 +975,9 @@ impl PageServerConf {
                     let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
                     builder.metric_collection_endpoint(Some(endpoint));
                 },
+                "metric_collection_bucket" => {
+                    builder.metric_collection_bucket(RemoteStorageConfig::from_toml(item)?)
+                }
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
@@ -996,6 +1030,9 @@ impl PageServerConf {
                 }
                 "validate_vectored_get" => {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
+                }
+                "ephemeral_bytes_per_memory_kb" => {
+                    builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
                 }
                 "walredo_process_kind" => {
                     builder.get_walredo_process_kind(parse_toml_from_str("walredo_process_kind", item)?)
@@ -1061,6 +1098,7 @@ impl PageServerConf {
             metric_collection_interval: Duration::from_secs(60),
             cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+            metric_collection_bucket: None,
             synthetic_size_calculation_interval: Duration::from_secs(60),
             disk_usage_based_eviction: None,
             test_remote_failures: 0,
@@ -1079,6 +1117,7 @@ impl PageServerConf {
                     .expect("Invalid default constant"),
             ),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+            ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
         }
     }
@@ -1292,6 +1331,7 @@ background_task_maximum_delay = '334 s'
                     defaults::DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL
                 )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+                metric_collection_bucket: None,
                 synthetic_size_calculation_interval: humantime::parse_duration(
                     defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
                 )?,
@@ -1314,6 +1354,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
             },
             "Correct defaults should be used when no config values are provided"
@@ -1366,6 +1407,7 @@ background_task_maximum_delay = '334 s'
                 metric_collection_interval: Duration::from_secs(222),
                 cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
+                metric_collection_bucket: None,
                 synthetic_size_calculation_interval: Duration::from_secs(333),
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,
@@ -1384,6 +1426,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
             },
             "Should be able to parse all basic config values correctly"

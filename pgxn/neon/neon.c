@@ -312,7 +312,7 @@ pg_cluster_size(PG_FUNCTION_ARGS)
 {
 	int64		size;
 
-	size = GetZenithCurrentClusterSize();
+	size = GetNeonCurrentClusterSize();
 
 	if (size == 0)
 		PG_RETURN_NULL();

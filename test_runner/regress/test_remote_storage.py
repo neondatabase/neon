@@ -245,6 +245,7 @@ def test_remote_storage_upload_queue_retries(
             "compaction_period": "0s",
             # create image layers eagerly, so that GC can remove some layers
             "image_creation_threshold": "1",
+            "image_layer_creation_check_threshold": "0",
         }
     )
 
@@ -838,7 +839,7 @@ def test_compaction_waits_for_upload(
     # upload_stuck_layers and the original initdb L0
     client.timeline_checkpoint(tenant_id, timeline_id)
 
-    # as uploads are paused, the the upload_stuck_layers should still be with us
+    # as uploads are paused, the upload_stuck_layers should still be with us
     for name in upload_stuck_layers:
         path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
         assert path.exists(), "uploads are stuck still over compaction"

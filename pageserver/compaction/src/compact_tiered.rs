@@ -43,7 +43,8 @@ pub async fn compact_tiered<E: CompactionJobExecutor>(
     fanout: u64,
     ctx: &E::RequestContext,
 ) -> anyhow::Result<()> {
-    assert!(fanout >= 2);
+    assert!(fanout >= 1, "fanout needs to be at least 1 but is {fanout}");
+    let exp_base = fanout.max(2);
     // Start at L0
     let mut current_level_no = 0;
     let mut current_level_target_height = target_file_size;
@@ -106,7 +107,7 @@ pub async fn compact_tiered<E: CompactionJobExecutor>(
             break;
         }
         current_level_no += 1;
-        current_level_target_height = current_level_target_height.saturating_mul(fanout);
+        current_level_target_height = current_level_target_height.saturating_mul(exp_base);
     }
     Ok(())
 }
