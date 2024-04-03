@@ -13,6 +13,7 @@ use utils::{
 use crate::{
     control_file,
     safekeeper::{AcceptorState, PersistedPeerInfo, PgUuid, ServerInfo, TermHistory},
+    wal_backup_partial::{self},
 };
 
 /// Persistent information stored on safekeeper node about timeline.
@@ -54,11 +55,14 @@ pub struct TimelinePersistentState {
     /// pushed to s3. We don't remove WAL beyond it. Persisted only for
     /// informational purposes, we receive it from pageserver (or broker).
     pub remote_consistent_lsn: Lsn,
-    // Peers and their state as we remember it. Knowing peers themselves is
-    // fundamental; but state is saved here only for informational purposes and
-    // obviously can be stale. (Currently not saved at all, but let's provision
-    // place to have less file version upgrades).
+    /// Peers and their state as we remember it. Knowing peers themselves is
+    /// fundamental; but state is saved here only for informational purposes and
+    /// obviously can be stale. (Currently not saved at all, but let's provision
+    /// place to have less file version upgrades).
     pub peers: PersistedPeers,
+    /// Holds names of partial segments uploaded to remote storage. Used to
+    /// clean up old objects without leaving garbage in remote storage.
+    pub partial_backup: wal_backup_partial::State,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -93,6 +97,7 @@ impl TimelinePersistentState {
                     .map(|p| (*p, PersistedPeerInfo::new()))
                     .collect(),
             ),
+            partial_backup: wal_backup_partial::State::default(),
         }
     }
 
