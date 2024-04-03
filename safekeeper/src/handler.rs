@@ -95,7 +95,6 @@ fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
     }
 }
 
-#[async_trait::async_trait]
 impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
     for SafekeeperPostgresHandler
 {

@@ -1349,7 +1349,6 @@ impl PageServerHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl<IO> postgres_backend::Handler<IO> for PageServerHandler
 where
     IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
